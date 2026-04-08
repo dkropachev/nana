@@ -601,7 +601,8 @@ fn validate_direct_command(command_name: &str, args: &[String]) -> Result<(), St
             }
             if non_option_operands(args).len() < 2 {
                 return Err(
-                    "grep requires a pattern and at least one file/path in nana explore".to_string(),
+                    "grep requires a pattern and at least one file/path in nana explore"
+                        .to_string(),
                 );
             }
         }
