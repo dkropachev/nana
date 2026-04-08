@@ -1,0 +1,12 @@
+[package]
+name = "nana-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nana-mux = { path = "../nana-mux" }
+nana-runtime-core = { path = "../nana-runtime-core" }
+serde_json = "1"
+
