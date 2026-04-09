@@ -1,6 +1,6 @@
-# Hooks Extension (Custom Plugins)
+# Hooks Extension (Custom Hooks)
 
-NANA supports an additive hooks extension point for user plugins under `.nana/hooks/*.mjs`.
+NANA supports an additive hooks extension point for executable user hooks under `.nana/hooks/`.
 
 > Compatibility guarantee: `nana tmux-hook` remains fully supported and unchanged.
 > The new `nana hooks` command group is additive and does **not** replace tmux-hook workflows.
@@ -14,13 +14,14 @@ nana hooks validate
 nana hooks test
 ```
 
-This creates a scaffold plugin at:
+This creates a scaffold hook at:
 
-- `.nana/hooks/sample-plugin.mjs`
+- `.nana/hooks/sample-hook.sh` on POSIX
+- `.nana/hooks/sample-hook.cmd` on Windows
 
 ## Enablement model
 
-Plugins are **enabled by default**.
+Hooks are **enabled by default**.
 
 Disable plugin dispatch explicitly:
 
@@ -78,41 +79,43 @@ Derived events are labeled with:
 
 ## Team-safety behavior
 
-In team-worker sessions (`NANA_TEAM_WORKER` set), plugin side effects are skipped by default.
+In team-worker sessions (`NANA_TEAM_WORKER` set), hook side effects are skipped by default.
 This keeps the lead session as the canonical side-effect emitter and avoids duplicate sends.
 
-## Plugin contract
+## Hook contract
 
-Each plugin must export:
+Each hook is an executable file. NANA sends one JSON request on `stdin` containing:
 
-```js
-export async function onHookEvent(event, sdk) {
-  // handle event
+- the event envelope
+- the hook id/path
+- the workspace cwd
+- `side_effects_enabled`
+- canonical runtime state file paths
+- plugin-local state/tmux state file paths
+
+The hook returns one JSON object on `stdout`:
+
+```json
+{
+  "ok": true,
+  "reason": "ok",
+  "logs": [{"level": "info", "message": "hook ran"}],
+  "state": {
+    "set": {"last_event": "turn-complete"},
+    "delete": ["old_key"]
+  },
+  "tmux_actions": [
+    {"pane_id": "%1", "text": "continue", "submit": true}
+  ]
 }
 ```
 
-SDK surface includes:
+Go applies logs, plugin-local state writes, and tmux side effects after parsing the response.
 
-- `sdk.tmux.sendKeys(...)`
-- `sdk.log.info|warn|error(...)`
-- `sdk.state.read|write|delete|all(...)` (plugin namespace scoped)
-- `sdk.nana.session.read()`
-- `sdk.nana.hud.read()`
-- `sdk.nana.notifyFallback.read()`
-- `sdk.nana.updateCheck.read()`
-
-`sdk.nana` is intentionally narrow and read-only in pass one. These helpers read the
-repo-root `.nana/state/*.json` runtime files for the current workspace.
-
-Compatibility notes:
-
-- `nana tmux-hook` remains a CLI/runtime workflow, not `sdk.nana.tmuxHook.*`
-- pass one does not add `sdk.nana.tmuxHook.*`; tmux plugin behavior stays on `sdk.tmux.sendKeys(...)`
-- pass one does not add generic `sdk.nana.readJson(...)`, `sdk.nana.list()`, or `sdk.nana.exists()`
-- pass one does not add `sdk.pluginState`; keep using `sdk.state`
+Legacy `.mjs` hooks are reported by `nana hooks status` and rejected by `nana hooks validate`; they are no longer executed.
 
 ## Logs
 
-Plugin dispatch and plugin logs are written to:
+Hook dispatch and hook logs are written to:
 
 - `.nana/logs/hooks-YYYY-MM-DD.jsonl`

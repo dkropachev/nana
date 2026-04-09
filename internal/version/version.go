@@ -6,7 +6,7 @@ import (
 	"runtime"
 )
 
-// Version is injected at build time by scripts/build-go-cli.mjs.
+// Version is injected at build time by Go-native build helpers.
 var Version = "dev"
 
 func Print(w io.Writer) {

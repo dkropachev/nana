@@ -1,10 +1,12 @@
 package gocli
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -449,34 +451,740 @@ func TestResolveGithubRunIDForTargetURL(t *testing.T) {
 	}
 }
 
-func TestGithubIssueSyncNormalizesTargetURLToRunID(t *testing.T) {
+func TestGithubIssueSyncExecutesNativelyFromTargetURL(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GH_TOKEN", "test-token")
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "codex"), []byte("#!/bin/sh\nprintf 'fake-codex:%s\\n' \"$*\"\n"), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 
 	runDir := filepath.Join(home, ".nana", "repos", "acme", "widget", "runs", "gh-run-2")
+	repoCheckoutPath := filepath.Join(home, ".nana", "repos", "acme", "widget", "sandboxes", "issue-42", "repo")
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir run dir: %v", err)
 	}
-	manifest := `{
+	if err := os.MkdirAll(repoCheckoutPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo checkout: %v", err)
+	}
+	manifest := fmt.Sprintf(`{
   "run_id": "gh-run-2",
   "repo_slug": "acme/widget",
+  "repo_owner": "acme",
+  "repo_name": "widget",
+  "sandbox_id": "issue-42",
+  "sandbox_path": %q,
+  "sandbox_repo_path": %q,
+  "target_kind": "issue",
+  "target_number": 42,
   "target_url": "https://github.com/acme/widget/issues/42",
+  "review_reviewer": "reviewer-a",
+  "last_seen_issue_comment_id": 0,
+  "last_seen_review_id": 0,
+  "last_seen_review_comment_id": 0,
   "updated_at": "2026-04-08T12:30:00Z"
-}`
+}`, filepath.Dir(repoCheckoutPath), repoCheckoutPath)
 	if err := os.WriteFile(filepath.Join(runDir, "manifest.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
 
-	result, err := GithubIssue(".", []string{"sync", "https://github.com/acme/widget/issues/42", "--resume-last"})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path + "?" + r.URL.RawQuery {
+		case "/repos/acme/widget/issues/42/comments?per_page=100":
+			_, _ = w.Write([]byte(`[{"id":101,"html_url":"https://example.invalid/comment/101","body":"please update tests","updated_at":"2026-04-09T10:00:00Z","user":{"login":"reviewer-a"}}]`))
+		default:
+			http.Error(w, fmt.Sprintf("unexpected route: %s?%s", r.URL.Path, r.URL.RawQuery), http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("GITHUB_API_URL", server.URL)
+
+	output, err := captureStdout(t, func() error {
+		_, err := GithubIssue(".", []string{"sync", "https://github.com/acme/widget/issues/42", "--resume-last"})
+		return err
+	})
 	if err != nil {
 		t.Fatalf("GithubIssue(sync): %v", err)
 	}
-	if result.Handled {
-		t.Fatal("expected sync alias to require downstream routing")
+	if !strings.Contains(output, "Stored new feedback for run gh-run-2") {
+		t.Fatalf("unexpected sync output: %q", output)
 	}
-	expected := []string{"work-on", "sync", "--run-id", "gh-run-2", "https://github.com/acme/widget/issues/42", "--resume-last"}
-	if strings.Join(result.LegacyArgs, "\n") != strings.Join(expected, "\n") {
-		t.Fatalf("unexpected normalized args:\nwant %#v\ngot  %#v", expected, result.LegacyArgs)
+	if !strings.Contains(output, "fake-codex:exec -C "+repoCheckoutPath) {
+		t.Fatalf("expected fake codex execution output, got %q", output)
+	}
+}
+
+func TestGithubWorkOnCommandHandlesDefaultsLocally(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	result, err := GithubWorkOnCommand(".", []string{"defaults", "set", "acme/widget", "--considerations", "qa"})
+	if err != nil {
+		t.Fatalf("GithubWorkOnCommand(defaults): %v", err)
+	}
+	if !result.Handled {
+		t.Fatal("expected defaults command to be handled in Go")
+	}
+}
+
+func TestGithubWorkOnCommandStartExecutesNatively(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GH_TOKEN", "test-token")
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "codex"), []byte("#!/bin/sh\nprintf 'fake-codex:%s\\n' \"$*\"\n"), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	originRepo := filepath.Join(home, "origin")
+	if err := os.MkdirAll(originRepo, 0o755); err != nil {
+		t.Fatalf("mkdir origin repo: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(originRepo, "README.md"), []byte("# widget\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(originRepo, "package.json"), []byte(`{"name":"widget","scripts":{"lint":"eslint .","build":"tsc","test":"vitest"}}`), 0o644); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = originRepo
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=Test",
+			"GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=Test",
+			"GIT_COMMITTER_EMAIL=test@example.com",
+		)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, output)
+		}
+	}
+	runGit("init", "-b", "main")
+	runGit("add", ".")
+	runGit("commit", "-m", "init")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/acme/widget":
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"name":"widget","full_name":"acme/widget","clone_url":%q,"default_branch":"main","html_url":"https://github.com/acme/widget"}`, originRepo)))
+		case "/repos/acme/widget/issues/42":
+			_, _ = w.Write([]byte(`{"title":"Start me","state":"open"}`))
+		default:
+			http.Error(w, fmt.Sprintf("unexpected route: %s", r.URL.Path), http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("GITHUB_API_URL", server.URL)
+
+	output, err := captureStdout(t, func() error {
+		_, err := GithubWorkOnCommand(".", []string{
+			"start",
+			"https://github.com/acme/widget/issues/42",
+			"--reviewer",
+			"@me",
+			"--considerations",
+			"qa,style",
+			"--",
+			"--model",
+			"gpt-5.4",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("GithubWorkOnCommand(start): %v", err)
+	}
+	if !strings.Contains(output, "Starting run gh-") {
+		t.Fatalf("missing start output: %q", output)
+	}
+	if !strings.Contains(output, "fake-codex:exec -C") {
+		t.Fatalf("expected fake codex execution output, got %q", output)
+	}
+}
+
+func TestGithubWorkOnCommandRejectsConflictingSyncSelectors(t *testing.T) {
+	_, err := GithubWorkOnCommand(".", []string{"sync", "--run-id", "gh-1", "--last"})
+	if err == nil {
+		t.Fatal("expected sync selector conflict error")
+	}
+	if !strings.Contains(err.Error(), "Use either --run-id <id> or --last, not both.") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestGithubWorkOnCommandValidatesLaneExecShape(t *testing.T) {
+	_, err := GithubWorkOnCommand(".", []string{"lane-exec", "--last", "--task", "verify"})
+	if err == nil {
+		t.Fatal("expected lane-exec validation error")
+	}
+	if !strings.Contains(err.Error(), "Usage: nana work-on lane-exec") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestGithubWorkOnVerifyRefreshExecutesNatively(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	managedRepoRoot := filepath.Join(home, ".nana", "repos", "acme", "widget")
+	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42")
+	repoCheckoutPath := filepath.Join(sandboxPath, "repo")
+	runID := "gh-run-refresh-1"
+	if err := os.MkdirAll(filepath.Join(managedRepoRoot, "runs", runID), 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	if err := os.MkdirAll(repoCheckoutPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo checkout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoCheckoutPath, "package.json"), []byte(`{"name":"widget","scripts":{"lint":"eslint .","build":"tsc","test":"vitest"}}`), 0o644); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+	manifest := fmt.Sprintf(`{
+  "run_id": %q,
+  "repo_slug": "acme/widget",
+  "repo_owner": "acme",
+  "repo_name": "widget",
+  "sandbox_id": "issue-42",
+  "sandbox_path": %q,
+  "sandbox_repo_path": %q
+}`, runID, sandboxPath, repoCheckoutPath)
+	if err := os.WriteFile(filepath.Join(managedRepoRoot, "runs", runID, "manifest.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error {
+		_, err := GithubWorkOnCommand(".", []string{"verify-refresh", "--run-id", runID})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("GithubWorkOnCommand(verify-refresh): %v", err)
+	}
+	if !strings.Contains(output, "Verification artifacts for run gh-run-refresh-1 refreshed.") {
+		t.Fatalf("unexpected verify-refresh output: %q", output)
+	}
+
+	manifestPath := filepath.Join(managedRepoRoot, "runs", runID, "manifest.json")
+	var updated githubWorkonManifest
+	if err := readGithubJSON(manifestPath, &updated); err != nil {
+		t.Fatalf("read updated manifest: %v", err)
+	}
+	if updated.VerificationPlan == nil || updated.VerificationPlan.PlanFingerprint == "" {
+		t.Fatalf("expected verification plan in manifest, got %+v", updated)
+	}
+	if updated.VerificationScriptsDir == "" {
+		t.Fatalf("expected verification scripts dir in manifest, got %+v", updated)
+	}
+	for _, script := range []string{"refresh.sh", "all.sh", "worker-done.sh", "lint.sh", "compile.sh", "unit-tests.sh", "integration-tests.sh"} {
+		if _, err := os.Stat(filepath.Join(updated.VerificationScriptsDir, script)); err != nil {
+			t.Fatalf("expected verification script %s: %v", script, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(managedRepoRoot, "verification-plan.json")); err != nil {
+		t.Fatalf("expected repo verification plan: %v", err)
+	}
+}
+
+func TestGithubWorkOnLaneExecExecutesNativelyForNonPublisherLane(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "codex"), []byte("#!/bin/sh\nprintf 'fake-codex:%s\\n' \"$*\"\n"), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	managedRepoRoot := filepath.Join(home, ".nana", "repos", "acme", "widget")
+	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42")
+	repoCheckoutPath := filepath.Join(sandboxPath, "repo")
+	runID := "gh-run-lane-1"
+	if err := os.MkdirAll(filepath.Join(managedRepoRoot, "runs", runID), 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	if err := os.MkdirAll(repoCheckoutPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo checkout: %v", err)
+	}
+	manifest := fmt.Sprintf(`{
+  "run_id": %q,
+  "repo_slug": "acme/widget",
+  "repo_owner": "acme",
+  "repo_name": "widget",
+  "sandbox_id": "issue-42",
+  "sandbox_path": %q,
+  "sandbox_repo_path": %q,
+  "target_kind": "issue",
+  "target_number": 42,
+  "consideration_pipeline": [
+    {
+      "alias": "coder",
+      "role": "executor",
+      "prompt_roles": ["executor"],
+      "activation": "bootstrap",
+      "phase": "impl",
+      "mode": "execute",
+      "owner": "self",
+      "blocking": true,
+      "purpose": "Implement the requested change."
+    }
+  ]
+}`, runID, sandboxPath, repoCheckoutPath)
+	if err := os.WriteFile(filepath.Join(managedRepoRoot, "runs", runID, "manifest.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error {
+		_, err := GithubWorkOnCommand(".", []string{"lane-exec", "--run-id", runID, "--lane", "coder", "--task", "implement", "--", "--model", "gpt-5.4"})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("GithubWorkOnCommand(lane-exec): %v", err)
+	}
+	if !strings.Contains(output, "Lane coder completed via isolated CODEX_HOME") {
+		t.Fatalf("unexpected lane-exec output: %q", output)
+	}
+	if !strings.Contains(output, "fake-codex:exec -C "+repoCheckoutPath) {
+		t.Fatalf("expected fake codex execution output, got %q", output)
+	}
+	runtimeDir := filepath.Join(managedRepoRoot, "runs", runID, "lane-runtime")
+	if _, err := os.Stat(filepath.Join(runtimeDir, "coder-instructions.md")); err != nil {
+		t.Fatalf("expected instructions file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(runtimeDir, "coder-result.md")); err != nil {
+		t.Fatalf("expected result file: %v", err)
+	}
+}
+
+func TestGithubWorkOnSyncExecutesNatively(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GH_TOKEN", "test-token")
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "codex"), []byte("#!/bin/sh\nprintf 'fake-codex:%s\\n' \"$*\"\n"), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	managedRepoRoot := filepath.Join(home, ".nana", "repos", "acme", "widget")
+	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42")
+	repoCheckoutPath := filepath.Join(sandboxPath, "repo")
+	runID := "gh-run-sync-1"
+	if err := os.MkdirAll(filepath.Join(managedRepoRoot, "runs", runID), 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	if err := os.MkdirAll(repoCheckoutPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo checkout: %v", err)
+	}
+	manifest := fmt.Sprintf(`{
+  "run_id": %q,
+  "repo_slug": "acme/widget",
+  "repo_owner": "acme",
+  "repo_name": "widget",
+  "sandbox_id": "issue-42",
+  "sandbox_path": %q,
+  "sandbox_repo_path": %q,
+  "target_kind": "issue",
+  "target_number": 42,
+  "target_url": "https://github.com/acme/widget/issues/42",
+  "review_reviewer": "reviewer-a",
+  "last_seen_issue_comment_id": 0,
+  "last_seen_review_id": 0,
+  "last_seen_review_comment_id": 0
+}`, runID, sandboxPath, repoCheckoutPath)
+	manifestPath := filepath.Join(managedRepoRoot, "runs", runID, "manifest.json")
+	if err := os.WriteFile(manifestPath, []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path + "?" + r.URL.RawQuery {
+		case "/repos/acme/widget/issues/42/comments?per_page=100":
+			_, _ = w.Write([]byte(`[{"id":101,"html_url":"https://example.invalid/comment/101","body":"please update tests","updated_at":"2026-04-09T10:00:00Z","user":{"login":"reviewer-a"}}]`))
+		default:
+			http.Error(w, fmt.Sprintf("unexpected route: %s?%s", r.URL.Path, r.URL.RawQuery), http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("GITHUB_API_URL", server.URL)
+
+	output, err := captureStdout(t, func() error {
+		_, err := GithubWorkOnCommand(".", []string{"sync", "--run-id", runID, "--", "--model", "gpt-5.4"})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("GithubWorkOnCommand(sync): %v", err)
+	}
+	if !strings.Contains(output, "Stored new feedback for run "+runID) {
+		t.Fatalf("unexpected sync output: %q", output)
+	}
+	if !strings.Contains(output, "fake-codex:exec -C "+repoCheckoutPath) {
+		t.Fatalf("expected fake codex execution output, got %q", output)
+	}
+	updatedManifest, readErr := readGithubWorkonManifest(manifestPath)
+	if readErr != nil {
+		t.Fatalf("read manifest: %v", readErr)
+	}
+	if updatedManifest.LastSeenIssueCommentID != 101 {
+		t.Fatalf("expected feedback cursor update, got %+v", updatedManifest)
+	}
+	if _, err := os.Stat(filepath.Join(managedRepoRoot, "runs", runID, "feedback-instructions.md")); err != nil {
+		t.Fatalf("expected feedback instructions: %v", err)
+	}
+}
+
+func TestGithubWorkOnPublisherLaneExecutesNatively(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GH_TOKEN", "test-token")
+
+	originBare := filepath.Join(home, "origin.git")
+	seedRepo := filepath.Join(home, "seed")
+	if err := os.MkdirAll(seedRepo, 0o755); err != nil {
+		t.Fatalf("mkdir seed repo: %v", err)
+	}
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=Test",
+			"GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=Test",
+			"GIT_COMMITTER_EMAIL=test@example.com",
+		)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, output)
+		}
+	}
+	runGit(home, "init", "--bare", originBare)
+	if err := os.WriteFile(filepath.Join(seedRepo, "README.md"), []byte("# widget\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	runGit(seedRepo, "init", "-b", "main")
+	runGit(seedRepo, "add", ".")
+	runGit(seedRepo, "commit", "-m", "init")
+	runGit(seedRepo, "remote", "add", "origin", originBare)
+	runGit(seedRepo, "push", "-u", "origin", "main")
+
+	managedRepoRoot := filepath.Join(home, ".nana", "repos", "acme", "widget")
+	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42")
+	repoCheckoutPath := filepath.Join(sandboxPath, "repo")
+	runID := "gh-run-publisher-1"
+	if err := os.MkdirAll(filepath.Join(managedRepoRoot, "runs", runID), 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	runGit(home, "clone", originBare, repoCheckoutPath)
+	if err := os.WriteFile(filepath.Join(repoCheckoutPath, "CHANGELOG.md"), []byte("updated\n"), 0o644); err != nil {
+		t.Fatalf("write sandbox file: %v", err)
+	}
+	manifest := fmt.Sprintf(`{
+  "run_id": %q,
+  "repo_slug": "acme/widget",
+  "repo_owner": "acme",
+  "repo_name": "widget",
+  "sandbox_id": "issue-42",
+  "sandbox_path": %q,
+  "sandbox_repo_path": %q,
+  "target_kind": "issue",
+  "target_number": 42,
+  "target_title": "Publish me",
+  "target_url": "https://github.com/acme/widget/issues/42",
+  "considerations_active": ["qa"],
+  "role_layout": "split",
+  "default_branch": "main",
+  "create_pr_on_complete": true
+}`, runID, sandboxPath, repoCheckoutPath)
+	manifestPath := filepath.Join(managedRepoRoot, "runs", runID, "manifest.json")
+	if err := os.WriteFile(manifestPath, []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path + "?" + r.URL.RawQuery {
+		case "/repos/acme/widget/pulls?state=open&head=acme%3Anana%2Fissue-42%2Fissue-42&base=main":
+			_, _ = w.Write([]byte(`[]`))
+		case "/repos/acme/widget/commits/main/check-runs?per_page=100":
+			_, _ = w.Write([]byte(`{"check_runs":[]}`))
+		case "/repos/acme/widget/actions/runs?head_sha=main&per_page=100":
+			_, _ = w.Write([]byte(`{"workflow_runs":[]}`))
+		case "/repos/acme/widget/commits/HEAD/check-runs?per_page=100":
+			_, _ = w.Write([]byte(`{"check_runs":[]}`))
+		default:
+			if r.Method == http.MethodPost && r.URL.Path == "/repos/acme/widget/pulls" {
+				_, _ = w.Write([]byte(`{"number":77,"html_url":"https://example.invalid/pr/77","head":{"sha":"head-sha"}}`))
+				return
+			}
+			if strings.HasPrefix(r.URL.Path, "/repos/acme/widget/commits/") && strings.HasSuffix(r.URL.Path, "/check-runs") {
+				_, _ = w.Write([]byte(`{"check_runs":[]}`))
+				return
+			}
+			if r.URL.Path == "/repos/acme/widget/actions/runs" {
+				_, _ = w.Write([]byte(`{"workflow_runs":[]}`))
+				return
+			}
+			http.Error(w, fmt.Sprintf("unexpected route: %s?%s", r.URL.Path, r.URL.RawQuery), http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("GITHUB_API_URL", server.URL)
+
+	output, err := captureStdout(t, func() error {
+		_, err := GithubWorkOnCommand(".", []string{"lane-exec", "--run-id", runID, "--lane", "publisher"})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("GithubWorkOnCommand(publisher): %v", err)
+	}
+	if !strings.Contains(output, "Created draft PR #77") {
+		t.Fatalf("unexpected publisher output: %q", output)
+	}
+	if !strings.Contains(output, "Lane publisher completed via native publication flow.") {
+		t.Fatalf("missing publisher completion output: %q", output)
+	}
+	updatedManifest, readErr := readGithubWorkonManifest(manifestPath)
+	if readErr != nil {
+		t.Fatalf("read manifest: %v", readErr)
+	}
+	if updatedManifest.PublishedPRNumber != 77 {
+		t.Fatalf("expected PR number update, got %+v", updatedManifest)
+	}
+	if updatedManifest.PublicationState != "ci_waiting" {
+		t.Fatalf("expected ci_waiting publication state, got %+v", updatedManifest)
+	}
+}
+
+func TestGithubIssueRejectsPRForImplementAndInvestigate(t *testing.T) {
+	for _, args := range [][]string{
+		{"implement", "https://github.com/acme/widget/pull/7"},
+		{"investigate", "https://github.com/acme/widget/pull/7"},
+	} {
+		_, err := GithubIssue(".", args)
+		if err == nil {
+			t.Fatalf("expected error for %v", args)
+		}
+		if !strings.Contains(err.Error(), "expects a GitHub issue URL") {
+			t.Fatalf("unexpected error for %v: %v", args, err)
+		}
+	}
+}
+
+func TestGithubIssueInvestigateExecutesNatively(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GH_TOKEN", "test-token")
+
+	originRepo := filepath.Join(home, "origin")
+	if err := os.MkdirAll(originRepo, 0o755); err != nil {
+		t.Fatalf("mkdir origin repo: %v", err)
+	}
+	writeFile := func(path string, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	writeFile(filepath.Join(originRepo, "README.md"), "# widget\n")
+	writeFile(filepath.Join(originRepo, "package.json"), `{"name":"widget","scripts":{"lint":"eslint .","build":"tsc","test":"vitest"}}`)
+	writeFile(filepath.Join(originRepo, "openapi.yaml"), "openapi: 3.0.0\n")
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=Test",
+			"GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=Test",
+			"GIT_COMMITTER_EMAIL=test@example.com",
+		)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, output)
+		}
+	}
+	run(originRepo, "init", "-b", "main")
+	run(originRepo, "add", ".")
+	run(originRepo, "commit", "-m", "init")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/acme/widget":
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"name":"widget","full_name":"acme/widget","clone_url":%q,"default_branch":"main","html_url":"https://github.com/acme/widget"}`, originRepo)))
+		case "/repos/acme/widget/issues/42":
+			_, _ = w.Write([]byte(`{"title":"Investigate me","state":"open"}`))
+		default:
+			http.Error(w, fmt.Sprintf("unexpected route: %s", r.URL.Path), http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("GITHUB_API_URL", server.URL)
+
+	output, err := captureStdout(t, func() error {
+		_, err := GithubIssue(".", []string{"investigate", "https://github.com/acme/widget/issues/42"})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("GithubIssue(investigate): %v", err)
+	}
+	if !strings.Contains(output, "Investigated acme/widget issue #42") {
+		t.Fatalf("missing investigate header: %q", output)
+	}
+	if !strings.Contains(output, "Suggested considerations: api, dependency, qa, style") {
+		t.Fatalf("missing inferred considerations: %q", output)
+	}
+	if !strings.Contains(output, "Verification plan: lint=1 compile=1 unit=1 integration=1") {
+		t.Fatalf("missing verification plan summary: %q", output)
+	}
+
+	repoRoot := filepath.Join(home, ".nana", "repos", "acme", "widget")
+	if _, err := os.Stat(filepath.Join(repoRoot, "repo.json")); err != nil {
+		t.Fatalf("expected repo metadata: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, "settings.json")); err != nil {
+		t.Fatalf("expected repo settings: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, "verification-plan.json")); err != nil {
+		t.Fatalf("expected verification plan: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, "source", "README.md")); err != nil {
+		t.Fatalf("expected source clone: %v", err)
+	}
+}
+
+func TestGithubReviewCommandValidatesReviewArgsBeforeBridge(t *testing.T) {
+	if _, err := parseGithubReviewExecutionArgs([]string{
+		"https://github.com/acme/widget/pull/7",
+		"--mode",
+		"manual",
+		"--reviewer",
+		"@me",
+		"--per-item-context",
+		"isolated",
+	}); err != nil {
+		t.Fatalf("parseGithubReviewExecutionArgs: %v", err)
+	}
+}
+
+func TestGithubReviewCommandRejectsInvalidExecutionArgs(t *testing.T) {
+	_, err := parseGithubReviewExecutionArgs([]string{
+		"https://github.com/acme/widget/pull/7",
+		"--mode",
+		"broken",
+	})
+	if err == nil {
+		t.Fatal("expected invalid mode error")
+	}
+	if !strings.Contains(err.Error(), "Invalid --mode value") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestGithubReviewExecutesNatively(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GH_TOKEN", "test-token")
+
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "codex"), []byte("#!/bin/sh\nprintf '{\"findings\":[{\"title\":\"Broken check\",\"severity\":\"medium\",\"path\":\"CHANGELOG.md\",\"line\":1,\"summary\":\"summary\",\"detail\":\"detail\",\"fix\":\"fix\",\"rationale\":\"why\"}]}'\n"), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	originBare := filepath.Join(home, "origin.git")
+	seedRepo := filepath.Join(home, "seed")
+	if err := os.MkdirAll(seedRepo, 0o755); err != nil {
+		t.Fatalf("mkdir seed repo: %v", err)
+	}
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=Test",
+			"GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=Test",
+			"GIT_COMMITTER_EMAIL=test@example.com",
+		)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, output)
+		}
+	}
+	runGit(home, "init", "--bare", originBare)
+	if err := os.WriteFile(filepath.Join(seedRepo, "CHANGELOG.md"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	runGit(seedRepo, "init", "-b", "main")
+	runGit(seedRepo, "add", ".")
+	runGit(seedRepo, "commit", "-m", "init")
+	runGit(seedRepo, "remote", "add", "origin", originBare)
+	runGit(seedRepo, "push", "-u", "origin", "main")
+	runGit(seedRepo, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(seedRepo, "CHANGELOG.md"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	runGit(seedRepo, "add", ".")
+	runGit(seedRepo, "commit", "-m", "feature")
+	headSHABytes, _ := exec.Command("git", "-C", seedRepo, "rev-parse", "HEAD").Output()
+	headSHA := strings.TrimSpace(string(headSHABytes))
+	baseSHABytes, _ := exec.Command("git", "-C", seedRepo, "rev-parse", "main").Output()
+	baseSHA := strings.TrimSpace(string(baseSHABytes))
+	runGit(seedRepo, "push", "-u", "origin", "feature")
+
+	var postedReviewBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/user":
+			_, _ = w.Write([]byte(`{"login":"reviewer-a"}`))
+		case r.URL.Path == "/repos/acme/widget":
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"name":"widget","full_name":"acme/widget","clone_url":%q,"default_branch":"main","html_url":"https://github.com/acme/widget"}`, originBare)))
+		case r.URL.Path == "/repos/acme/widget/issues/7":
+			_, _ = w.Write([]byte(`{"title":"Review me","state":"open","pull_request":{"url":"https://api.github.com/repos/acme/widget/pulls/7"}}`))
+		case r.URL.Path == "/repos/acme/widget/pulls/7":
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"number":7,"html_url":"https://example.invalid/pr/7","head":{"ref":"feature","sha":%q,"repo":{"full_name":"acme/widget"}},"base":{"ref":"main","sha":%q,"repo":{"full_name":"acme/widget"}}}`, headSHA, baseSHA)))
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/widget/pulls/7/reviews":
+			var raw map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&raw)
+			payload, _ := json.Marshal(raw)
+			postedReviewBody = string(payload)
+			_, _ = w.Write([]byte(`{"id":91,"html_url":"https://example.invalid/review/91"}`))
+		default:
+			http.Error(w, fmt.Sprintf("unexpected route: %s", r.URL.Path), http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("GITHUB_API_URL", server.URL)
+
+	output, err := captureStdout(t, func() error {
+		_, err := GithubReview(".", []string{"https://github.com/acme/widget/pull/7"})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("GithubReview(review): %v", err)
+	}
+	if !strings.Contains(output, "Completed review for https://github.com/acme/widget/pull/7") {
+		t.Fatalf("unexpected review output: %q", output)
+	}
+	if !strings.Contains(postedReviewBody, `"event":"REQUEST_CHANGES"`) {
+		t.Fatalf("expected review submission payload, got %s", postedReviewBody)
 	}
 }
 

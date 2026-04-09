@@ -184,52 +184,22 @@ func main() {
 		}
 		return
 	case "work-on":
-		if len(args) > 1 && (args[1] == "defaults" || args[1] == "stats" || args[1] == "retrospective") {
-			if err := gocli.GithubWorkOn(mustGetwd(), args[1:]); err != nil {
-				exitWithError(err)
-			}
-			return
-		}
-		repoRoot := legacyshim.ResolveRepoRoot(os.Getenv(legacyshim.RepoRootEnv), os.Args[0])
-		if err := runLegacyJSBridge(repoRoot, args); err != nil {
+		if _, err := gocli.GithubWorkOnCommand(mustGetwd(), args[1:]); err != nil {
 			exitWithError(err)
 		}
 		return
 	case "review-rules":
-		if len(args) > 1 && (args[1] == "config" || args[1] == "scan" || args[1] == "list" || args[1] == "approve" || args[1] == "disable" || args[1] == "enable" || args[1] == "archive" || args[1] == "explain") {
-			if err := gocli.GithubReviewRules(mustGetwd(), args[1:]); err != nil {
-				exitWithError(err)
-			}
-			return
-		}
-		repoRoot := legacyshim.ResolveRepoRoot(os.Getenv(legacyshim.RepoRootEnv), os.Args[0])
-		if err := runLegacyJSBridge(repoRoot, args); err != nil {
+		if err := gocli.GithubReviewRules(mustGetwd(), args[1:]); err != nil {
 			exitWithError(err)
 		}
 		return
 	case "implement", "investigate", "sync", "issue":
-		repoRoot := legacyshim.ResolveRepoRoot(os.Getenv(legacyshim.RepoRootEnv), os.Args[0])
-		result, err := gocli.GithubIssue(mustGetwd(), args)
-		if err != nil {
-			exitWithError(err)
-		}
-		if result.Handled {
-			return
-		}
-		if err := runLegacyJSBridge(repoRoot, result.LegacyArgs); err != nil {
+		if _, err := gocli.GithubIssue(mustGetwd(), args); err != nil {
 			exitWithError(err)
 		}
 		return
 	case "review":
-		repoRoot := legacyshim.ResolveRepoRoot(os.Getenv(legacyshim.RepoRootEnv), os.Args[0])
-		result, err := gocli.GithubReview(mustGetwd(), args[1:])
-		if err != nil {
-			exitWithError(err)
-		}
-		if result.Handled {
-			return
-		}
-		if err := runLegacyJSBridge(repoRoot, result.LegacyArgs); err != nil {
+		if _, err := gocli.GithubReview(mustGetwd(), args[1:]); err != nil {
 			exitWithError(err)
 		}
 		return
@@ -258,19 +228,4 @@ func exitWithError(err error) {
 	}
 	fmt.Fprintf(os.Stderr, "nana: %v\n", err)
 	os.Exit(1)
-}
-
-func runLegacyJSBridge(repoRoot string, args []string) error {
-	if repoRoot == "" {
-		return fmt.Errorf("GitHub/work-on commands are not yet available in standalone Go binaries; use a checkout with built dist assets or the npm wrapper")
-	}
-	if err := legacyshim.Run(repoRoot, args); err == nil {
-		return nil
-	} else if exitErr := (*exec.ExitError)(nil); errors.As(err, &exitErr) {
-		return exitErr
-	} else if errors.Is(err, legacyshim.ErrLegacyEntrypointUnavailable) {
-		return fmt.Errorf("GitHub/work-on commands still require the legacy JS entrypoint. Run \"npm run build\" in this checkout or use the npm wrapper")
-	} else {
-		return err
-	}
 }

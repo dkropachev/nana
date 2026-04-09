@@ -31,8 +31,6 @@ claude -p "{{ARGUMENTS}}"
 
 If needed, adapt to the user's installed Claude CLI variant while keeping local execution as the default path.
 
-Legacy compatibility entrypoints (`./scripts/ask-claude.sh`, `npm run ask:claude -- ...`) are transitional wrappers.
-
 ### Missing binary behavior
 If `claude` is not found, do **not** switch to MCP.
 Instead:

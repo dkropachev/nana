@@ -2,22 +2,20 @@
 
 ## Prerequisites
 
-- Node.js >= 20
+- Go 1.24+
 - [Codex CLI](https://github.com/openai/codex) installed (`npm install -g @openai/codex`)
 - OpenAI API key configured
 
 ## Setup (< 2 minutes)
 
 ```bash
-# Clone and install
+# Clone and build
 git clone https://github.com/Yeachan-Heo/nana.git
 cd nana
-npm install
-npm run build
-npm link
+go run ./cmd/nana-build build-go-cli
 
 # Run setup (installs prompts, skills, configures Codex CLI)
-nana setup
+./bin/nana setup
 ```
 
 **Expected output:**
@@ -57,7 +55,7 @@ Setup complete! Run "nana doctor" to verify installation.
 ## Verify Installation
 
 ```bash
-nana doctor
+./bin/nana doctor
 ```
 
 **Expected output:**
@@ -66,7 +64,6 @@ nana doctor
 ==================
 
   [OK] Codex CLI: installed
-  [OK] Node.js: v20+
   [OK] Codex home: ~/.codex
   [OK] Config: config.toml has NANA entries
   [OK] Prompts: 30 agent prompts installed
@@ -83,7 +80,7 @@ Results: 9 passed, 0 warnings, 0 failed
 Start Codex CLI in any project directory:
 
 ```bash
-nana
+./bin/nana
 ```
 
 Then use role and workflow keywords:

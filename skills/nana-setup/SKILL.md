@@ -76,17 +76,17 @@ From `nana doctor`, expect:
 
 ## Troubleshooting
 
-- If using local source changes, run build first:
+- If using local source changes, run the Go build first:
 
 ```bash
-npm run build
+go run ./cmd/nana-build build-go-cli
 ```
 
-- If your global `nana` points to another install, run local entrypoint:
+- If your global `nana` points to another install, run the local native binary:
 
 ```bash
-node bin/nana.js setup --force --verbose
-node bin/nana.js doctor
+./bin/nana setup --force --verbose
+./bin/nana doctor
 ```
 
 - If AGENTS.md was not overwritten during `--force`, stop active NANA session and rerun setup.

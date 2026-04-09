@@ -188,6 +188,10 @@ func runCodexLaunch(cwd string, commandPrefix []string, rawArgs []string) error 
 	codexHome := ResolveCodexHomeForLaunch(launchCwd)
 	normalized := NormalizeCodexLaunchArgs(parsedNotify.PassthroughArgs)
 	codexArgs := append(append([]string{}, commandPrefix...), normalized...)
+	repoRoot := resolvePackageRoot()
+	if err := MaybeCheckAndPromptUpdate(repoRoot, launchCwd); err != nil {
+		fmt.Fprintf(os.Stderr, "[nana-go] update warning: %v\n", err)
+	}
 	return runCodexSession(launchCwd, codexArgs, parsedNotify.Contract, codexHome)
 }
 

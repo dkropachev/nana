@@ -31,6 +31,7 @@ type ParsedAskArgs struct {
 }
 
 func Ask(repoRoot string, cwd string, args []string) error {
+	_ = repoRoot
 	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h") {
 		fmt.Fprintln(os.Stdout, AskUsage)
 		return nil
@@ -48,26 +49,6 @@ func Ask(repoRoot string, cwd string, args []string) error {
 			return err
 		}
 		finalPrompt = promptContent + "\n\n" + parsed.Prompt
-	}
-
-	if strings.TrimSpace(os.Getenv("NANA_ASK_ADVISOR_SCRIPT")) != "" {
-		advisorScriptPath := resolveAskAdvisorScriptPath(repoRoot)
-		if _, err := os.Stat(advisorScriptPath); err != nil {
-			return fmt.Errorf("[ask] advisor script not found: %s", advisorScriptPath)
-		}
-
-		cmd := exec.Command(os.Getenv("NODE_BINARY"))
-		if cmd.Path == "" {
-			cmd = exec.Command("node", advisorScriptPath, parsed.Provider, finalPrompt)
-		} else {
-			cmd = exec.Command(cmd.Path, advisorScriptPath, parsed.Provider, finalPrompt)
-		}
-		cmd.Dir = cwd
-		cmd.Env = append(os.Environ(), "NANA_ASK_ORIGINAL_TASK="+parsed.Prompt)
-		cmd.Stdin = nil
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		return cmd.Run()
 	}
 
 	return runAskProvider(cwd, parsed.Provider, parsed.Prompt, finalPrompt)
@@ -162,20 +143,6 @@ func ParseAskArgs(args []string) (ParsedAskArgs, error) {
 		return ParsedAskArgs{}, fmt.Errorf("missing prompt text\n%s", AskUsage)
 	}
 	return parsed, nil
-}
-
-func resolveAskAdvisorScriptPath(repoRoot string) string {
-	override := strings.TrimSpace(os.Getenv("NANA_ASK_ADVISOR_SCRIPT"))
-	if override != "" {
-		if filepath.IsAbs(override) {
-			return override
-		}
-		if repoRoot == "" {
-			return filepath.Clean(override)
-		}
-		return filepath.Join(repoRoot, override)
-	}
-	return filepath.Join(repoRoot, "dist", "scripts", "run-provider-advisor.js")
 }
 
 func resolveAskPromptsDir(cwd string) string {

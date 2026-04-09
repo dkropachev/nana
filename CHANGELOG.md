@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- migrate NANA itself to a Go-only product surface and distribution path
+- replace `.mjs` hooks with executable hook JSON I/O handled by Go
+- move version/update/release ownership to `VERSION` plus Go-native tooling
+
+### Removed
+- remove the TypeScript/JavaScript product tree and root npm metadata from the live repository
+
 ## [0.11.12] - 2026-04-02
 
 Patch release for Windows flicker reductions, team/runtime seam cleanup, safer auto-nudge hygiene, cross-platform Node test execution, and workflow-doc alignment after `0.11.11`.

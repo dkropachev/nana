@@ -31,9 +31,9 @@ This document defines the mux boundary owned by NANA core semantics.
 - Adapter results may include tmux identifiers for debugging, but those identifiers are not semantic truth.
 - Retry, confirmation, and delivery decisions belong to the runtime contract, not the adapter implementation.
 
-## TmuxAdapter implementation
+## Current implementation
 
-`TmuxAdapter` is fully implemented in `crates/nana-mux/src/tmux.rs`. All six canonical operations are supported. All `MuxOperation`, `MuxOutcome`, `MuxTarget`, and related types derive `Serialize`/`Deserialize`.
+The current tmux-facing canonical behavior is implemented on the Go-owned sidecar/runtime boundary. All six canonical operations remain supported, and the contract above remains the source of truth even though the earlier Rust `nana-mux` crate has been retired.
 
 Exact tmux CLI invocations per operation:
 

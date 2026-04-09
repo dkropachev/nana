@@ -24,13 +24,16 @@
 
       <h2>Prerequisites</h2>
       <ul>
-        <li>Node.js 20+ and npm.</li>
         <li>OpenAI Codex CLI installed and authenticated.</li>
         <li>Git (recommended) for project workflows.</li>
       </ul>
 
       <h2>Installation</h2>
-      <pre><code>npm install -g @openai/codex nana
+      <pre><code>curl -L -o nana &lt;release-binary-url&gt;
+chmod +x nana
+sudo mv nana /usr/local/bin/nana
+
+npm install -g @openai/codex
 nana setup
 nana doctor</code></pre>
 
@@ -59,7 +62,7 @@ NANA_MODEL_INSTRUCTIONS_FILE=/path/to/instructions.md nana</code></pre>
       <table>
         <thead><tr><th>Issue</th><th>What to check</th></tr></thead>
         <tbody>
-          <tr><td><code>nana</code> command not found</td><td>Re-run global install and ensure npm global bin is in PATH.</td></tr>
+          <tr><td><code>nana</code> command not found</td><td>Reinstall the release binary and ensure its install location is in PATH.</td></tr>
           <tr><td>Prompts not available</td><td>Confirm files exist in <code>~/.codex/prompts/</code> and re-run <code>nana setup</code>.</td></tr>
           <tr><td>Skills not loading</td><td>Verify <code>~/.codex/skills/*/SKILL.md</code> files were installed.</td></tr>
           <tr><td>Doctor reports config issues</td><td>Run <code>nana doctor</code> and apply the suggested fixes.</td></tr>

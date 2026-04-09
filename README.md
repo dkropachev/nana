@@ -6,9 +6,8 @@
   <em>Start Codex stronger, then let NANA add better prompts, workflows, and runtime help when the work grows.</em>
 </p>
 
-[![npm version](https://img.shields.io/npm/v/nana)](https://www.npmjs.com/package/nana)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
+[![Go](https://img.shields.io/badge/go-1.24%2B-00ADD8)](https://go.dev)
 [![Discord](https://img.shields.io/discord/1452487457085063218?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/PUwSMR9XNk)
 
 **Website:** https://yeachan-heo.github.io/nana-website/  
@@ -53,12 +52,8 @@ If you want the default NANA experience, start here:
 curl -L -o nana <release-binary-url>
 chmod +x nana
 sudo mv nana /usr/local/bin/nana
-```
-
-Or use the npm wrapper:
-
 ```bash
-npm install -g @openai/codex nana
+npm install -g @openai/codex
 nana setup
 nana --madmax --high
 ```
@@ -91,8 +86,7 @@ If you want plain Codex with no extra workflow layer, you probably do not need N
 
 - Codex CLI installed: `npm install -g @openai/codex`
 - Codex auth configured
-- For native Go binary releases: no Node.js runtime required for core CLI usage
-- For the npm wrapper / legacy JS paths: Node.js 20+
+- NANA installed from the native release binary
 
 ### A good first session
 

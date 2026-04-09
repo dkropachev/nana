@@ -4,42 +4,30 @@ Thanks for contributing.
 
 ## Development setup
 
-- Node.js >= 20
-- npm
+- Go 1.24+
 
 ```bash
-npm install
-npm run lint
-npm run build
-npm test
+go test ./...
+go vet ./...
+go run ./cmd/nana-build build-go-cli
 ```
 
 For local CLI testing:
 
 ```bash
-npm link
+./bin/nana setup
 nana setup
 nana doctor
 ```
 
-### Team/state coverage gate (issue #454)
-
-CI enforces minimum coverage for critical team orchestration modules:
-
-```bash
-npm run coverage:team-critical
-```
-
-This command checks coverage for `dist/team/**` and `dist/state/**` and writes reports to `coverage/team/`.
-
 ### Release-readiness local verification
 
-When validating team/state changes, run this sequence locally:
+Run this sequence locally:
 
 ```bash
-npm run build
-node --test dist/team/__tests__/state.test.js dist/hooks/__tests__/notify-hook-cross-worktree-heartbeat.test.js
-npm test
+gofmt -w $(find cmd internal -type f -name '*.go')
+go vet ./...
+go test ./...
 ```
 
 If you were recently in a team worker session, clear team env vars first so tests do not inherit worker-specific state roots:
@@ -50,7 +38,8 @@ unset NANA_TEAM_WORKER NANA_TEAM_STATE_ROOT NANA_TEAM_LEADER_CWD NANA_TEAM_WORKE
 
 ## Project structure
 
-- `src/` -- TypeScript source (CLI, config, agents, MCP servers, hooks, modes, team, verification)
+- `cmd/` -- Go command entrypoints
+- `internal/` -- Go implementation packages
 - `prompts/` -- 30 agent prompt markdown files (installed to `~/.codex/prompts/`)
 - `skills/` -- 39 skill directories with `SKILL.md` (installed to `~/.codex/skills/`)
 - `templates/` -- `AGENTS.md` orchestration brain template
@@ -63,7 +52,7 @@ unset NANA_TEAM_WORKER NANA_TEAM_STATE_ROOT NANA_TEAM_LEADER_CWD NANA_TEAM_WORKE
 
 ### Prompt guidance contract
 
-Before changing `AGENTS.md`, `templates/AGENTS.md`, `prompts/*.md`, or the generated `developer_instructions` text in `src/config/generator.ts`, read [`docs/prompt-guidance-contract.md`](./docs/prompt-guidance-contract.md).
+Before changing `AGENTS.md`, `templates/AGENTS.md`, or `prompts/*.md`, read [`docs/prompt-guidance-contract.md`](./docs/prompt-guidance-contract.md).
 
 That document defines the GPT-5.4 behavior contract contributors should preserve across prompt surfaces and explains how it differs from posture-aware routing metadata.
 
@@ -98,9 +87,9 @@ docs: clarify setup steps for Codex CLI users
 ## Pull request checklist
 
 - [ ] Scope is focused and clearly described
-- [ ] `npm run build` passes
-- [ ] `npm test` passes
-- [ ] `npm run lint` passes
+- [ ] `go vet ./...` passes
+- [ ] `go test ./...` passes
+- [ ] `go run ./cmd/nana-build build-go-cli` passes
 - [ ] Documentation updated when behavior changed
 - [ ] No unrelated formatting/refactor churn
 

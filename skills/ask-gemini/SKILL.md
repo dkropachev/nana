@@ -31,8 +31,6 @@ gemini -p "{{ARGUMENTS}}"
 
 If needed, adapt to the user's installed Gemini CLI variant while keeping local execution as the default path.
 
-Legacy compatibility entrypoints (`./scripts/ask-gemini.sh`, `npm run ask:gemini -- ...`) are transitional wrappers.
-
 ### Missing binary behavior
 If `gemini` is not found, do **not** switch to MCP.
 Instead:

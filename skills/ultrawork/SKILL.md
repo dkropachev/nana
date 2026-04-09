@@ -83,10 +83,10 @@ Why good: Independent tasks at appropriate tiers, all fired at once.
 <Good>
 Correct use of background execution:
 ```
-delegate(role="executor", tier="STANDARD", task="npm install && npm run build", run_in_background=true)
+delegate(role="executor", tier="STANDARD", task="go test ./...", run_in_background=true)
 delegate(role="writer", tier="LOW", task="Update the README with new API endpoints")
 ```
-Why good: Long build runs in background while short task runs in foreground.
+Why good: Long verification runs in background while short task runs in foreground.
 </Good>
 
 <Bad>

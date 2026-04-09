@@ -213,10 +213,10 @@ func checkExploreHarness(repoRoot string) doctorCheck {
 		}
 	}
 
-	if _, err := exec.LookPath("cargo"); err == nil {
-		return doctorCheck{Name: "Explore Harness", Status: "pass", Message: "ready (cargo available)"}
+	if _, err := exec.LookPath("go"); err == nil {
+		return doctorCheck{Name: "Explore Harness", Status: "pass", Message: "ready (go available)"}
 	}
-	return doctorCheck{Name: "Explore Harness", Status: "warn", Message: "Rust harness sources are packaged, but no compatible packaged prebuilt or cargo was found (install Rust or set NANA_EXPLORE_BIN for nana explore)"}
+	return doctorCheck{Name: "Explore Harness", Status: "warn", Message: "Go harness sources are packaged, but no compatible packaged prebuilt or go toolchain was found (install Go or set NANA_EXPLORE_BIN for nana explore)"}
 }
 
 func checkDirectory(name string, path string) doctorCheck {

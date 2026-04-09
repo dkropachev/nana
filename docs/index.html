@@ -23,7 +23,9 @@
         <span class="badge">GitHub Pages</span>
         <h1>nana</h1>
         <p>Multi-agent orchestration for OpenAI Codex CLI.</p>
-        <pre><code>npm install -g nana</code></pre>
+        <pre><code>curl -L -o nana &lt;release-binary-url&gt;
+chmod +x nana
+sudo mv nana /usr/local/bin/nana</code></pre>
       </section>
 
       <section aria-labelledby="whats-new-060">
@@ -67,7 +69,8 @@
 
       <h2>Quick Start</h2>
       <ol>
-        <li><code>npm install -g nana</code></li>
+        <li><code>curl -L -o nana &lt;release-binary-url&gt;</code></li>
+        <li><code>chmod +x nana &amp;&amp; sudo mv nana /usr/local/bin/nana</code></li>
         <li><code>nana setup</code></li>
         <li><code>nana doctor</code></li>
         <li><code>nana --xhigh --madmax</code> (trusted environments) or <code>nana</code></li>

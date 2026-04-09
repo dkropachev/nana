@@ -269,7 +269,7 @@ jq '.notifications.enabled = false' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$
 After writing config, run a smoke check:
 
 ```bash
-npm run build
+nana doctor
 ```
 
 For OpenClaw-like HTTP integrations, verify both:

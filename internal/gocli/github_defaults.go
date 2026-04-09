@@ -36,7 +36,17 @@ type githubRepoSettings struct {
 	DefaultRoleLayout         string                `json:"default_role_layout,omitempty"`
 	ReviewRulesMode           string                `json:"review_rules_mode,omitempty"`
 	ReviewRulesReviewerPolicy *githubReviewerPolicy `json:"review_rules_reviewer_policy,omitempty"`
+	HotPathAPIProfile         *githubHotPathProfile `json:"hot_path_api_profile,omitempty"`
 	UpdatedAt                 string                `json:"updated_at"`
+}
+
+type githubHotPathProfile struct {
+	Version             int      `json:"version"`
+	AnalyzedAt          string   `json:"analyzed_at"`
+	APISurfaceFiles     []string `json:"api_surface_files,omitempty"`
+	HotPathAPIFiles     []string `json:"hot_path_api_files,omitempty"`
+	APIIdentifierTokens []string `json:"api_identifier_tokens,omitempty"`
+	Evidence            []string `json:"evidence,omitempty"`
 }
 
 type githubIssueTokenStats struct {
@@ -160,10 +170,22 @@ type githubReviewRulesLastScan struct {
 }
 
 type githubPullRequestPayload struct {
-	Number int `json:"number"`
-	Head   struct {
-		SHA string `json:"sha"`
+	Number  int    `json:"number"`
+	HTMLURL string `json:"html_url"`
+	Head    struct {
+		Ref  string `json:"ref"`
+		SHA  string `json:"sha"`
+		Repo struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
 	} `json:"head"`
+	Base struct {
+		Ref  string `json:"ref"`
+		SHA  string `json:"sha"`
+		Repo struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
+	} `json:"base"`
 }
 
 type githubPullReviewPayload struct {
@@ -232,7 +254,7 @@ func GithubWorkOn(cwd string, args []string) error {
 		if args[0] == "retrospective" {
 			return githubWorkOnRetrospective(args[1:])
 		}
-		return fmt.Errorf("GitHub/work-on execution commands are not yet available in standalone Go binaries; use a checkout with built dist assets or the npm wrapper")
+		return fmt.Errorf("Unknown work-on subcommand: %s\n\n%s", args[0], GithubWorkOnHelp)
 	}
 
 	switch args[1] {
@@ -241,7 +263,7 @@ func GithubWorkOn(cwd string, args []string) error {
 	case "show":
 		return githubDefaultsShow(args[2:])
 	default:
-		return fmt.Errorf("GitHub/work-on execution commands are not yet available in standalone Go binaries; use a checkout with built dist assets or the npm wrapper")
+		return fmt.Errorf("Unknown work-on defaults subcommand: %s\n\n%s", args[1], GithubWorkOnHelp)
 	}
 }
 
@@ -260,7 +282,7 @@ func GithubReviewRules(cwd string, args []string) error {
 	case "show":
 		return githubReviewRulesConfigShow(args[2:])
 	default:
-		return fmt.Errorf("GitHub review-rules execution commands are not yet available in standalone Go binaries; use a checkout with built dist assets or the npm wrapper")
+		return fmt.Errorf("Unknown review-rules config subcommand: %s\n\n%s", args[1], ReviewRulesHelp)
 	}
 }
 
@@ -826,7 +848,7 @@ func githubReviewRulesLifecycle(args []string) error {
 		}
 		return nil
 	default:
-		return fmt.Errorf("GitHub review-rules subcommand %s is not yet available in standalone Go binaries; use a checkout with built dist assets or the npm wrapper", subcommand)
+		return fmt.Errorf("Unknown review-rules subcommand: %s\n\n%s", subcommand, ReviewRulesHelp)
 	}
 }
 
@@ -1086,7 +1108,7 @@ func resolveGithubRunManifestPath(runID string, useLast bool) (string, string, e
 			}
 			if filepath.Base(filepath.Dir(path)) == runID {
 				foundManifest = path
-				foundRepoRoot = filepath.Dir(filepath.Dir(path))
+				foundRepoRoot = filepath.Dir(filepath.Dir(filepath.Dir(path)))
 				return filepath.SkipAll
 			}
 			return nil
@@ -1386,9 +1408,6 @@ func githubAPICollectReviewHistory(repoSlug string, prNumbers []int, apiBaseURL 
 		var prComments []githubPullReviewCommentPayload
 		if err := githubAPIGetJSON(apiBaseURL, token, fmt.Sprintf("/repos/%s/pulls/%d/comments?per_page=100", repoSlug, prNumber), &prComments); err != nil {
 			return nil, nil, nil, err
-		}
-		for _, comment := range prComments {
-			comment.PullRequestReviewID = comment.PullRequestReviewID
 		}
 		comments = append(comments, prComments...)
 	}

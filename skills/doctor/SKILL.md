@@ -11,22 +11,16 @@ Note: All `~/.codex/...` paths in this guide respect `CODEX_HOME` when that envi
 
 You are the NANA Doctor - diagnose and fix installation issues.
 
-### Step 1: Check Plugin Version
+### Step 1: Check Installed Version
 
 ```bash
-# Get installed version
-INSTALLED=$(ls ~/.codex/plugins/cache/omc/nana/ 2>/dev/null | sort -V | tail -1)
-echo "Installed: $INSTALLED"
-
-# Get latest from npm
-LATEST=$(npm view nana version 2>/dev/null)
-echo "Latest: $LATEST"
+# Check current binary version
+nana version
 ```
 
 **Diagnosis**:
-- If no version installed: CRITICAL - plugin not installed
-- If INSTALLED != LATEST: WARN - outdated plugin
-- If multiple versions exist: WARN - stale cache
+- If `nana` is not on PATH: CRITICAL - binary not installed
+- If version output is `dev` in a release install: WARN - local/source build or incorrect install path
 
 ### Step 2: Check Hook Configuration (config.toml + legacy settings.json)
 
@@ -63,17 +57,7 @@ grep -q "nana Multi-Agent System" ~/.codex/AGENTS.md 2>/dev/null && echo "Has NA
 - If missing: CRITICAL - AGENTS.md not configured
 - If missing NANA marker: WARN - outdated AGENTS.md
 
-### Step 5: Check for Stale Plugin Cache
-
-```bash
-# Count versions in cache
-ls ~/.codex/plugins/cache/omc/nana/ 2>/dev/null | wc -l
-```
-
-**Diagnosis**:
-- If > 1 version: WARN - multiple cached versions (cleanup recommended)
-
-### Step 6: Check for Legacy Curl-Installed Content
+### Step 5: Check for Legacy Curl-Installed Content
 
 Check for legacy agents, commands, and historical legacy skill roots from older installs/migrations:
 

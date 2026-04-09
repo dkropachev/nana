@@ -8,8 +8,8 @@ Describe the problem and why this change is needed.
 
 ## Validation
 
-- [ ] `npm run build`
-- [ ] `npm test`
+- [ ] `go test ./...`
+- [ ] `go vet ./...`
 - [ ] `nana doctor` (when setup/config behavior changes)
 
 ## Checklist
