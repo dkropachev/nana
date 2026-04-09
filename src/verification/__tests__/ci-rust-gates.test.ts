@@ -37,7 +37,7 @@ describe('CI Rust gates', () => {
     const workflowPath = join(process.cwd(), '.github', 'workflows', 'ci.yml');
     const workflow = readFileSync(workflowPath, 'utf-8');
 
-    assert.match(workflow, /needs:\s*\[rustfmt, clippy, lint, typecheck, test, coverage-team-critical, coverage-ts-full, coverage-rust, ralph-persistence-gate, build\]/);
+    assert.match(workflow, /needs:\s*\[rustfmt, clippy, lint, typecheck, go-smoke, test, coverage-ts-full, coverage-rust, build\]/);
     assert.match(workflow, /needs\.rustfmt\.result/);
     assert.match(workflow, /needs\.clippy\.result/);
     assert.match(workflow, /echo "  rustfmt: \$\{\{ needs\.rustfmt\.result \}\}"/);

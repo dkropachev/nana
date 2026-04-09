@@ -17,7 +17,7 @@ Plan creates comprehensive, actionable work plans through intelligent interactio
 
 <Do_Not_Use_When>
 - User wants autonomous end-to-end execution -- use `autopilot` instead
-- User wants to start coding immediately with a clear task -- use `ralph` or delegate to executor
+- User wants to start coding immediately with a clear task -- delegate to an executor or continue directly on the normal path
 - User asks a simple question that can be answered directly -- just answer it
 - Task is a single focused fix with obvious scope -- skip planning, just do it
 </Do_Not_Use_When>
@@ -97,18 +97,18 @@ Jumping into code without understanding requirements leads to rework, scope cree
    b. Deduplicate and categorize the suggestions
    c. Update the plan file in `.nana/plans/` with the accepted improvements (add missing details, refine steps, strengthen acceptance criteria, ADR updates, etc.)
    d. Note which improvements were applied in a brief changelog section at the end of the plan
-   e. Before any execution handoff, derive an explicit **available-agent-types roster** from the known prompt catalog and add concrete **follow-up staffing guidance** for both `$ralph` and `$team` (recommended roles, counts, suggested reasoning levels by lane, and why each lane exists)
-   f. For the `$team` path, add an explicit launch-hint block with concrete `nana team` / `$team` commands and a **team verification path** (what team proves before shutdown, what Ralph verifies after handoff)
+   e. Before any execution handoff, derive an explicit **available-agent-types roster** from the known prompt catalog and add concrete **follow-up staffing guidance** for the selected downstream path (recommended roles, counts, suggested reasoning levels by lane, and why each lane exists)
+   f. If the plan is expected to feed GitHub-oriented work, include explicit `nana review` / `nana work-on` handoff hints and the corresponding verification path
 7. On Critic approval (with improvements applied): *(--interactive only)* If running with `--interactive`, use `AskUserQuestion` to present the plan with these options:
-   - **Approve and execute** — proceed to implementation via ralph+ultrawork
-   - **Approve and implement via team** — proceed to implementation via coordinated parallel team agents
+   - **Approve and execute** — proceed to direct implementation
+   - **Approve and continue with GitHub flow** — proceed via `nana review` or `nana work-on`
    - **Request changes** — return to step 1 with user feedback
    - **Reject** — discard the plan entirely
    If NOT running with `--interactive`, output the final approved plan and stop. Do NOT auto-execute.
 8. *(--interactive only)* User chooses via the structured `AskUserQuestion` UI (never ask for approval in plain text)
 9. On user approval (--interactive only):
-   - **Approve and execute**: **MUST** invoke `$ralph` with the approved plan path from `.nana/plans/` as context **plus the explicit available-agent-types roster, suggested reasoning levels, concrete role allocation guidance, and direct launch hints for Ralph follow-up work**. Do NOT implement directly. Do NOT edit source code files in the planning agent. The ralph skill handles execution via ultrawork parallel agents.
-   - **Approve and implement via team**: **MUST** invoke `$team` with the approved plan path from `.nana/plans/` as context **plus the explicit available-agent-types roster, suggested reasoning levels, concrete staffing / worker-role allocation guidance, explicit `nana team` / `$team` launch hints, and the team verification path**. Do NOT implement directly. The team skill coordinates parallel agents across the staged pipeline for faster execution on large tasks.
+   - **Approve and execute**: continue on the normal implementation path using the approved plan as the source of truth. Do NOT implement directly inside the planning artifact review flow.
+   - **Approve and continue with GitHub flow**: hand off the approved plan to `nana review` or `nana work-on` with explicit verification expectations.
 
 ### Review Mode (`--review`)
 
@@ -130,7 +130,7 @@ Every plan includes:
 - Verification Steps
 - For consensus/ralplan: **RALPLAN-DR summary** (Principles, Decision Drivers, Options)
 - For consensus/ralplan final output: **ADR** (Decision, Drivers, Alternatives considered, Why chosen, Consequences, Follow-ups)
-- For consensus/ralplan execution handoff: **Available-Agent-Types Roster**, **Follow-up Staffing Guidance** (including suggested reasoning levels by lane), explicit `nana team` / `$team` **Launch Hints**, and **Team Verification Path**
+- For consensus/ralplan execution handoff: **Available-Agent-Types Roster**, **Follow-up Staffing Guidance** (including suggested reasoning levels by lane), explicit downstream **Launch Hints**, and a matching verification path
 - For deliberate consensus mode: **Pre-mortem (3 scenarios)** and **Expanded Test Plan** (unit/integration/e2e/observability)
 
 Plans are saved to `.nana/plans/`. Drafts go to `.nana/drafts/`.
@@ -148,8 +148,8 @@ Plans are saved to `.nana/plans/`. Drafts go to `.nana/drafts/`.
 - **CRITICAL — Consensus mode agent calls MUST be sequential, never parallel.** Always await the Architect result before issuing the Critic call.
 - In consensus mode, default to RALPLAN-DR short mode; enable deliberate mode on `--deliberate` or explicit high-risk signals (auth/security, migrations, destructive changes, production incidents, compliance/PII, public API breakage)
 - In consensus mode with `--interactive`: use `AskUserQuestion` for the user feedback step (step 2) and the final approval step (step 7) -- never ask for approval in plain text. Without `--interactive`, auto-proceed through planning steps without pausing. Output the final plan without execution.
-- In consensus mode with `--interactive`, on user approval **MUST** invoke `$ralph` for execution (step 9) -- never implement directly in the planning agent
-- In consensus mode, execution follow-up handoff **MUST** include an explicit available-agent-types roster plus concrete staffing / role-allocation guidance grounded in that roster, suggested reasoning levels by lane, explicit `nana team` / `$team` launch hints, and a team verification path
+- In consensus mode with `--interactive`, on user approval continue into the selected downstream execution surface -- never implement directly in the planning artifact review flow
+- In consensus mode, execution follow-up handoff **MUST** include an explicit available-agent-types roster plus concrete staffing / role-allocation guidance grounded in that roster, suggested reasoning levels by lane, explicit downstream launch hints, and a matching verification path
 </Tool_Usage>
 
 
@@ -214,8 +214,8 @@ Why bad: Decision fatigue. Present one option with trade-offs, get reaction, the
 <Escalation_And_Stop_Conditions>
 - Stop interviewing when requirements are clear enough to plan -- do not over-interview
 - In consensus mode, stop after 5 Planner/Architect/Critic iterations and present the best version
-- Consensus mode outputs the plan by default; with `--interactive`, user can approve and hand off to ralph/team
-- If the user says "just do it" or "skip planning", **MUST** invoke `$ralph` to transition to execution mode. Do NOT implement directly in the planning agent.
+- Consensus mode outputs the plan by default; with `--interactive`, user can approve and hand off to the selected downstream execution surface
+- If the user says "just do it" or "skip planning", transition out of planning into normal execution rather than implementing directly inside the planning flow.
 - Escalate to the user when there are irreconcilable trade-offs that require a business decision
 </Escalation_And_Stop_Conditions>
 

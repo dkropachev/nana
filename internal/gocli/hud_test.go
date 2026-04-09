@@ -1,0 +1,134 @@
+package gocli
+
+import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestHUDHelp(t *testing.T) {
+	output, err := captureStdout(t, func() error {
+		return HUD(t.TempDir(), "/tmp/nana", []string{"--help"})
+	})
+	if err != nil {
+		t.Fatalf("HUD(--help): %v", err)
+	}
+	if !strings.Contains(output, "nana hud") || !strings.Contains(output, "--watch") {
+		t.Fatalf("unexpected HUD help output: %q", output)
+	}
+}
+
+func TestHUDJSONOutput(t *testing.T) {
+	cwd := t.TempDir()
+	stateDir := filepath.Join(cwd, ".nana", "state")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state: %v", err)
+	}
+
+	writeJSON := func(path string, value any) {
+		t.Helper()
+		payload, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", path, err)
+		}
+		if err := os.WriteFile(path, payload, 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	writeJSON(filepath.Join(stateDir, "team-state.json"), map[string]any{
+		"active":      true,
+		"agent_count": 3,
+	})
+	writeJSON(filepath.Join(cwd, ".nana", "metrics.json"), map[string]any{
+		"total_turns":    10,
+		"session_turns":  4,
+		"last_activity":  time.Now().UTC().Format(time.RFC3339Nano),
+		"session_tokens": 123,
+	})
+	writeJSON(filepath.Join(stateDir, "session.json"), map[string]any{
+		"session_id": "sess-1",
+		"started_at": time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339Nano),
+	})
+
+	output, err := captureStdout(t, func() error {
+		return HUD(cwd, "/tmp/nana", []string{"--json"})
+	})
+	if err != nil {
+		t.Fatalf("HUD(--json): %v", err)
+	}
+
+	var parsed HUDRenderContext
+	if err := json.Unmarshal([]byte(output), &parsed); err != nil {
+		t.Fatalf("parse HUD json: %v\noutput=%s", err, output)
+	}
+	if parsed.Team == nil || parsed.Team.AgentCount != 3 {
+		t.Fatalf("unexpected team payload: %+v", parsed.Team)
+	}
+	if parsed.Session == nil || parsed.Session.SessionID != "sess-1" {
+		t.Fatalf("unexpected session payload: %+v", parsed.Session)
+	}
+}
+
+func TestHUDSessionScopedModePrecedence(t *testing.T) {
+	cwd := t.TempDir()
+	rootStateDir := filepath.Join(cwd, ".nana", "state")
+	sessionStateDir := filepath.Join(rootStateDir, "sessions", "sess-hud")
+	if err := os.MkdirAll(sessionStateDir, 0o755); err != nil {
+		t.Fatalf("mkdir session state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootStateDir, "session.json"), []byte(`{"session_id":"sess-hud","started_at":"2026-04-08T00:00:00Z"}`), 0o644); err != nil {
+		t.Fatalf("write session.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootStateDir, "ralph-state.json"), []byte(`{"active":true,"iteration":9,"max_iterations":10}`), 0o644); err != nil {
+		t.Fatalf("write root ralph: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionStateDir, "ralph-state.json"), []byte(`{"active":true,"iteration":2,"max_iterations":10}`), 0o644); err != nil {
+		t.Fatalf("write session ralph: %v", err)
+	}
+
+	ctx, err := readAllHUDState(cwd, ResolvedHUDConfig{
+		Preset: HUDPresetFocused,
+		Git: HUDGitConfig{
+			Display: "repo-branch",
+		},
+	})
+	if err != nil {
+		t.Fatalf("readAllHUDState: %v", err)
+	}
+	if ctx.Ralph == nil || ctx.Ralph.Iteration != 2 {
+		t.Fatalf("expected session-scoped Ralph state, got %+v", ctx.Ralph)
+	}
+}
+
+func TestBuildGitBranchLabelUsesConfiguredRepoLabel(t *testing.T) {
+	cwd := t.TempDir()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "hud-test@example.com"},
+		{"config", "user.name", "HUD Test"},
+		{"commit", "--allow-empty", "-m", "init"},
+		{"checkout", "-b", "feature/test"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = cwd
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, output)
+		}
+	}
+
+	label := buildGitBranchLabel(cwd, ResolvedHUDConfig{
+		Preset: HUDPresetFocused,
+		Git: HUDGitConfig{
+			Display:   "repo-branch",
+			RepoLabel: "manual",
+		},
+	})
+	if label != "manual/feature/test" {
+		t.Fatalf("buildGitBranchLabel() = %q", label)
+	}
+}

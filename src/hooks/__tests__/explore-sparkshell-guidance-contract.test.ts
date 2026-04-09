@@ -49,8 +49,6 @@ describe('explore + sparkshell guidance contract', () => {
       'skills/deep-interview/SKILL.md',
       'skills/plan/SKILL.md',
       'skills/ralplan/SKILL.md',
-      'skills/ralph/SKILL.md',
-      'skills/team/SKILL.md',
     ]) {
       expectPatterns(surface, [
         /USE_NANA_EXPLORE_CMD/i,
@@ -67,10 +65,10 @@ describe('explore + sparkshell guidance contract', () => {
       /explicit opt-?in/i,
     ]);
 
-    expectPatterns('skills/team/SKILL.md', [
+    expectPatterns('AGENTS.md', [
       /nana sparkshell --tmux-pane/i,
       /explicit opt-?in/i,
-      /raw `tmux capture-pane` evidence/i,
+      /tmux-pane summaries/i,
     ]);
   });
 });

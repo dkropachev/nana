@@ -19,8 +19,7 @@ describe('nana setup skills overwrite behavior', () => {
       const skillsDir = join(wd, '.codex', 'skills');
       const installed = new Set(await readdir(skillsDir));
 
-      assert.equal(installed.has('team'), true);
-      assert.equal(installed.has('worker'), true);
+      assert.equal(installed.has('worker'), false);
       assert.equal(installed.has('swarm'), false);
       assert.equal(installed.has('ecomode'), false);
       assert.equal(installed.has('ultraqa'), false);
@@ -47,7 +46,7 @@ describe('nana setup skills overwrite behavior', () => {
 
       await setup({ scope: 'project' });
 
-      const staleSkills = ['swarm', 'ecomode', 'ultraqa', 'configure-discord', 'configure-telegram', 'configure-slack', 'configure-openclaw'];
+      const staleSkills = ['analyze', 'ecomode', 'review'];
       for (const staleSkill of staleSkills) {
         const staleDir = join(wd, '.codex', 'skills', staleSkill);
         await mkdir(staleDir, { recursive: true });
@@ -60,7 +59,6 @@ describe('nana setup skills overwrite behavior', () => {
       for (const staleSkill of staleSkills) {
         assert.equal(existsSync(join(wd, '.codex', 'skills', staleSkill)), false);
       }
-      assert.equal(existsSync(join(wd, '.codex', 'skills', 'team')), true);
     } finally {
       process.chdir(previousCwd);
       await rm(wd, { recursive: true, force: true });
@@ -85,7 +83,7 @@ describe('nana setup skills overwrite behavior', () => {
       await setup({ scope: 'project', force: true });
 
       assert.equal(existsSync(join(wd, '.codex', 'skills', staleSkill)), false);
-      assert.equal(existsSync(join(wd, '.codex', 'skills', 'team')), true);
+      assert.equal(existsSync(join(wd, '.codex', 'skills', 'team')), false);
     } finally {
       process.chdir(previousCwd);
       await rm(wd, { recursive: true, force: true });
@@ -135,13 +133,13 @@ describe('nana setup skills overwrite behavior', () => {
       };
 
       await setup({ scope: 'project', verbose: true });
-      await mkdir(join(wd, '.codex', 'skills', 'swarm'), { recursive: true });
-      await writeFile(join(wd, '.codex', 'skills', 'swarm', 'SKILL.md'), '# stale swarm\n');
+      await mkdir(join(wd, '.codex', 'skills', 'ecomode'), { recursive: true });
+      await writeFile(join(wd, '.codex', 'skills', 'ecomode', 'SKILL.md'), '# stale ecomode\n');
       await setup({ scope: 'project', force: true, verbose: true });
 
       const output = logs.join('\n');
-      assert.match(output, /skipped swarm\/ \(status: alias\)/);
-      assert.match(output, /removed stale skill swarm\/ \(status: alias\)/);
+      assert.match(output, /skipped ecomode\/ \(status: merged\)/);
+      assert.match(output, /removed stale skill ecomode\/ \(status: merged\)/);
       assert.match(output, /skills: updated=/);
     } finally {
       console.log = originalLog;

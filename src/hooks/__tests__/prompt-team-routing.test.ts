@@ -3,12 +3,11 @@ import assert from 'node:assert/strict';
 import { loadSurface } from './prompt-guidance-test-helpers.js';
 
 for (const surface of ['AGENTS.md', 'templates/AGENTS.md']) {
-  describe(`${surface} team-vs-non-team routing guardrails`, () => {
+  describe(`${surface} orchestration routing guardrails`, () => {
     it('selects a single orchestration lane before execution', () => {
       assert.match(loadSurface(surface), /Choose the lane before acting/i);
       assert.match(loadSurface(surface), /\$deep-interview/i);
       assert.match(loadSurface(surface), /\$ralplan/i);
-      assert.match(loadSurface(surface), /\$team/i);
       assert.match(loadSurface(surface), /Solo execute/i);
     });
 

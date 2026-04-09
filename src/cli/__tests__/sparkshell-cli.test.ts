@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
+  goSparkShellBinaryPath,
   isSparkShellNativeCompatibilityFailure,
   nestedRepoLocalSparkShellBinaryPath,
   packagedSparkShellBinaryCandidatePaths,
@@ -60,6 +61,26 @@ describe('resolveSparkShellBinaryPath', () => {
       );
     } finally {
       await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('prefers the Go shim when NANA_SPARKSHELL_IMPL=go and the shim exists', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'nana-sparkshell-go-shim-'));
+    try {
+      const goShim = goSparkShellBinaryPath(wd, process.platform);
+      await mkdir(join(wd, 'bin', 'go'), { recursive: true });
+      await writeFile(goShim, process.platform === 'win32' ? '@echo off\r\nexit /b 0\r\n' : '#!/bin/sh\nexit 0\n');
+      if (process.platform !== 'win32') await chmod(goShim, 0o755);
+
+      assert.equal(
+        resolveSparkShellBinaryPath({
+          packageRoot: wd,
+          env: { NANA_SPARKSHELL_IMPL: 'go' },
+        }),
+        goShim,
+      );
+    } finally {
+      await rm(wd, { recursive: true, force: true });
     }
   });
 

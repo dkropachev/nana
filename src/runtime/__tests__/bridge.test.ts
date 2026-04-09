@@ -49,4 +49,16 @@ describe('resolveRuntimeBinaryPath', () => {
     });
     assert.equal(actual, 'nana-runtime');
   });
+
+  it('prefers the Go shim when NANA_RUNTIME_IMPL=go and the shim exists', () => {
+    const actual = resolveRuntimeBinaryPath({
+      env: { NANA_RUNTIME_IMPL: 'go' } as NodeJS.ProcessEnv,
+      goPath: '/repo/bin/go/nana-runtime',
+      debugPath: '/debug/runtime',
+      releasePath: '/release/runtime',
+      fallbackBinary: 'nana-runtime',
+      exists: (candidate) => candidate === '/repo/bin/go/nana-runtime',
+    });
+    assert.equal(actual, '/repo/bin/go/nana-runtime');
+  });
 });

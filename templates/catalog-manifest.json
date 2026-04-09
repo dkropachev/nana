@@ -10,21 +10,7 @@
       "internalRequired": false
     },
     {
-      "name": "ralph",
-      "category": "execution",
-      "status": "active",
-      "core": true,
-      "internalRequired": false
-    },
-    {
       "name": "ultrawork",
-      "category": "execution",
-      "status": "active",
-      "core": true,
-      "internalRequired": false
-    },
-    {
-      "name": "team",
       "category": "execution",
       "status": "active",
       "core": true,
@@ -35,22 +21,6 @@
       "category": "execution",
       "status": "merged",
       "canonical": "ultrawork",
-      "core": false,
-      "internalRequired": false
-    },
-    {
-      "name": "ultraqa",
-      "category": "execution",
-      "status": "merged",
-      "canonical": "ralph",
-      "core": false,
-      "internalRequired": false
-    },
-    {
-      "name": "swarm",
-      "category": "execution",
-      "status": "alias",
-      "canonical": "team",
       "core": false,
       "internalRequired": false
     },
@@ -279,21 +249,6 @@
       "canonical": "configure-notifications",
       "core": false,
       "internalRequired": false
-    },
-    {
-      "name": "ralph-init",
-      "category": "utility",
-      "status": "merged",
-      "canonical": "plan",
-      "core": false,
-      "internalRequired": false
-    },
-    {
-      "name": "worker",
-      "category": "utility",
-      "status": "internal",
-      "core": false,
-      "internalRequired": true
     }
   ],
   "agents": [
@@ -326,11 +281,6 @@
       "name": "executor",
       "category": "build",
       "status": "active"
-    },
-    {
-      "name": "team-executor",
-      "category": "build",
-      "status": "internal"
     },
     {
       "name": "verifier",

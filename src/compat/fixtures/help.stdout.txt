@@ -14,16 +14,15 @@ Usage:
   nana investigate <issue-url>  Alias for: nana issue investigate <issue-url>
   nana sync [flags]             Alias for: nana issue sync [flags]
   nana issue     GitHub issue-centric aliases for implement/investigate/sync
+  nana review    Review an external GitHub PR with automatic onboarding
   nana review-rules  Mine PR review history into repo-scoped persistent rules
   nana work-on   Launch GitHub-targeted issue/PR implementation and review sync
-  nana research  Launch thin-supervisor autoresearch with keep/discard/reset parity
   nana reflect   Default read-only reflection entrypoint (may adaptively use sparkshell backend)
   nana session   Search prior local session transcripts and history artifacts
   nana agents-init [path]
                 Bootstrap lightweight AGENTS.md files for a repo/subtree
   nana deepinit [path]
                 Alias for agents-init (lightweight AGENTS bootstrap only)
-  nana ralph     Launch Codex with ralph persistence mode active
   nana version   Show version information
   nana hooks     Manage hook plugins (init|status|validate|test)
   nana hud       Show HUD statusline (--watch, --json, --preset=NAME)

@@ -132,14 +132,9 @@ Combine with other skills for comprehensive fixing:
 ```
 Spawns multiple build-fixer agents in parallel for different files.
 
-**With Ralph:**
+**With GitHub Review / Work-on:**
+```bash
+nana review https://github.com/acme/widget/pull/77
+nana work-on start https://github.com/acme/widget/issues/42
 ```
-/ralph fix the build
-```
-Keeps trying until build passes, even if it takes multiple iterations.
-
-**With Team:**
-```
-/team "debug build failures and fix type errors"
-```
-Uses: explore → build-fixer → verifier workflow.
+Use these when the build break is part of a GitHub-targeted review or implementation flow.

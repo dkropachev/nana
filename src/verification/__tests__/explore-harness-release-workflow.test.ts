@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 describe('native release workflow', () => {
-  it('defines a unified tag workflow that publishes both Rust binaries before npm publish', () => {
+  it('defines a unified tag workflow that publishes Rust binaries plus the Go CLI before npm publish', () => {
     const workflowPath = join(process.cwd(), '.github', 'workflows', 'release.yml');
     assert.equal(existsSync(workflowPath), true, `missing workflow: ${workflowPath}`);
 
@@ -33,6 +33,9 @@ describe('native release workflow', () => {
     assert.match(workflow, /softprops\/action-gh-release@v2/);
     assert.match(workflow, /nana-explore-harness/);
     assert.match(workflow, /nana-sparkshell/);
+    assert.match(workflow, /Build Go CLI release asset for target/);
+    assert.match(workflow, /build-go-release-asset\.mjs/);
+    assert.match(workflow, /--require-products "nana,nana-explore-harness,nana-sparkshell"/);
     assert.match(workflow, /native-release-manifest\.json/);
     assert.match(workflow, /Publish Native Assets/);
     assert.match(workflow, /Smoke Verify Native Assets/);

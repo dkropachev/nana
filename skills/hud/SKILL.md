@@ -11,7 +11,7 @@ The NANA HUD uses a two-layer architecture:
 
 1. **Layer 1 - Codex built-in statusLine**: Real-time TUI footer showing model, git branch, and context usage. Configured via `[tui] status_line` in `~/.codex/config.toml`. Zero code required.
 
-2. **Layer 2 - `nana hud` CLI command**: Shows NANA-specific orchestration state (ralph, ultrawork, autopilot, team, pipeline, ecomode, turns). Reads `.nana/state/` files.
+2. **Layer 2 - `nana hud` CLI command**: Shows NANA-specific orchestration state (autopilot, ultrawork, pipeline, ecomode, turns, and internal runtime markers). Reads `.nana/state/` files.
 
 ## Quick Commands
 
@@ -28,17 +28,17 @@ The NANA HUD uses a two-layer architecture:
 
 ### minimal
 ```
-[NANA] ralph:3/10 | turns:42
+[NANA] autopilot:execution | turns:42
 ```
 
 ### focused (default)
 ```
-[NANA] ralph:3/10 | ultrawork | team:3 workers | turns:42 | last:5s ago
+[NANA] autopilot:execution | ultrawork | turns:42 | last:5s ago
 ```
 
 ### full
 ```
-[NANA] ralph:3/10 | ultrawork | autopilot:execution | team:3 workers | pipeline:exec | turns:42 | last:5s ago | total-turns:156
+[NANA] ultrawork | autopilot:execution | pipeline:exec | turns:42 | last:5s ago | total-turns:156
 ```
 
 ## Setup
@@ -62,10 +62,8 @@ Available built-in items (Codex CLI v0.101.0+):
 ## Layer 2: NANA Orchestration HUD
 
 The `nana hud` command reads these state files:
-- `.nana/state/ralph-state.json` - Ralph loop iteration
 - `.nana/state/ultrawork-state.json` - Ultrawork mode
 - `.nana/state/autopilot-state.json` - Autopilot phase
-- `.nana/state/team-state.json` - Team workers
 - `.nana/state/pipeline-state.json` - Pipeline stage
 - `.nana/state/ecomode-state.json` - Ecomode active
 - `.nana/state/hud-state.json` - Last activity (from notify hook)
@@ -83,8 +81,8 @@ HUD config stored at `.nana/hud-config.json`:
 ## Color Coding
 
 - **Green**: Normal/healthy
-- **Yellow**: Warning (ralph >70% of max)
-- **Red**: Critical (ralph >90% of max)
+- **Yellow**: Warning
+- **Red**: Critical
 
 ## Troubleshooting
 
@@ -95,4 +93,4 @@ If the TUI statusline is not showing:
 
 If `nana hud` shows "No active modes":
 - This is expected when no workflows are running
-- Start a workflow (ralph, autopilot, etc.) and check again
+- Start a workflow (for example autopilot) and check again

@@ -17,7 +17,7 @@ Autopilot takes a brief product idea and autonomously handles the full lifecycle
 <Do_Not_Use_When>
 - User wants to explore options or brainstorm -- use `plan` skill instead
 - User says "just explain", "draft only", or "what would you suggest" -- respond conversationally
-- User wants a single focused code change -- use `ralph` or delegate to an executor agent
+- User wants a single focused code change -- delegate to an executor agent instead
 - User wants to review or critique an existing plan -- use `plan --review`
 - Task is a quick fix or small bug -- use direct executor delegation
 </Do_Not_Use_When>
@@ -86,9 +86,7 @@ Most non-trivial software tasks require coordinated phases: understanding requir
 
 6. **Phase 5 - Cleanup**: Clear all mode state via NANA MCP tools on successful completion
    - `state_clear({mode: "autopilot"})`
-   - `state_clear({mode: "ralph"})`
    - `state_clear({mode: "ultrawork"})`
-   - `state_clear({mode: "ultraqa"})`
    - Or run `/cancel` for clean exit
 </Steps>
 
@@ -139,7 +137,7 @@ Why good: Clear product concept with a specific feature. The "build me" trigger 
 
 <Bad>
 User: "fix the bug in the login page"
-Why bad: This is a single focused fix, not a multi-phase project. Use direct executor delegation or ralph instead.
+Why bad: This is a single focused fix, not a multi-phase project. Use direct executor delegation instead.
 </Bad>
 
 <Bad>
@@ -206,7 +204,7 @@ deep-interview -> ralplan -> autopilot
 ## Pipeline Orchestrator (v0.8+)
 
 Autopilot can be driven by the configurable pipeline orchestrator (`src/pipeline/`), which
-sequences stages through a uniform `PipelineStage` interface:
+sequences internal stages through a uniform `PipelineStage` interface:
 
 ```
 RALPLAN (consensus planning) -> team-exec (Codex CLI workers) -> ralph-verify (architect verification)
@@ -217,8 +215,8 @@ Pipeline configuration options:
 ```toml
 [nana.autopilot.pipeline]
 maxRalphIterations = 10    # Ralph verification iteration ceiling
-workerCount = 2            # Number of Codex CLI team workers
-agentType = "executor"     # Agent type for team workers
+workerCount = 2            # Number of Codex CLI execution workers
+agentType = "executor"     # Agent type for execution workers
 ```
 
 The pipeline persists state via `pipeline-state.json` and supports resume from the last

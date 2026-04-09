@@ -88,6 +88,17 @@ interface ManifestAsset {
   download_url: string;
 }
 
+interface SupplementalAsset {
+  product: string;
+  version: string;
+  target: string;
+  archive: string;
+  binary: string;
+  binary_path: string;
+  sha256: string;
+  size: number;
+}
+
 const plan = JSON.parse(readFileSync(resolve(planPath!), 'utf-8')) as Plan;
 const files = walk(resolve(artifactsDir!));
 const byName = new Map(files.map((file) => [file.split('/').pop()!, file]));
@@ -121,6 +132,27 @@ for (const artifact of Object.values(plan.artifacts)) {
     sha256: parseChecksum(readFileSync(checksumPath, 'utf-8')),
     size: statSync(archivePath).size,
     download_url: `${releaseBaseUrl!.replace(/\/$/, '')}/${artifact.name}`,
+  });
+}
+
+for (const file of files) {
+  if (!file.endsWith('.metadata.json')) continue;
+  const parsed = JSON.parse(readFileSync(file, 'utf-8')) as SupplementalAsset;
+  const mapped = mapTriple(parsed.target);
+  if (!mapped) continue;
+  assets.push({
+    product: parsed.product,
+    version: parsed.version,
+    platform: mapped.platform,
+    arch: mapped.arch,
+    target: parsed.target,
+    ...(mapped.libc ? { libc: mapped.libc } : {}),
+    archive: parsed.archive,
+    binary: parsed.binary,
+    binary_path: parsed.binary_path,
+    sha256: parsed.sha256,
+    size: parsed.size,
+    download_url: `${releaseBaseUrl!.replace(/\/$/, '')}/${parsed.archive}`,
   });
 }
 

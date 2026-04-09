@@ -23,12 +23,9 @@ You can include these words naturally in your request for explicit control:
 
 | Keyword | Effect | Example |
 |---------|--------|---------|
-| **ralph** | Persistence mode | "ralph: fix all the bugs" |
 | **ralplan** | Iterative planning | "ralplan this feature" |
 | **ulw** | Max parallelism | "ulw refactor the API" |
 | **plan** | Planning interview | "plan the new endpoints" |
-
-**ralph includes ultrawork:** When you activate ralph mode, it automatically includes ultrawork's parallel execution. No need to combine keywords.
 
 ## Stopping Things
 
@@ -59,7 +56,7 @@ That command is intentionally narrower than full setup: it only bootstraps `AGEN
 
 ## For 2.x Users
 
-Your old commands still work! `/ralph`, `/ultrawork`, `/plan`, etc. all function exactly as before.
+Core planning shortcuts like `/plan` still work, and GitHub workflows live under `nana review` and `nana work-on`.
 
 But now you don't NEED them - everything is automatic.
 
@@ -135,9 +132,6 @@ Based on patterns found, output recommendations:
 **If high Opus usage (>40%) and no ecomode:**
 - "Consider using ecomode for routine tasks to save tokens"
 
-**If no team usage:**
-- "Try /team for coordinated review workflows"
-
 **If no security-reviewer usage:**
 - "Use security-reviewer after auth/API changes"
 
@@ -168,11 +162,10 @@ TOP AGENTS:
 
 UNDERUTILIZED FEATURES:
 - ecomode: 0 uses (could save ~30% on routine tasks)
-- team: 0 uses (great for coordinated workflows)
 
 RECOMMENDATIONS:
 1. Set defaultExecutionMode: "ecomode" to save tokens
-2. Try /team for PR review workflows
+2. Try `nana review` for persisted external PR review workflows
 3. Use explore agent before architect to save context
 ```
 

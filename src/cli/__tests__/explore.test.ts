@@ -18,6 +18,7 @@ import {
   repoBuiltExploreHarnessCommand,
   resolveExploreHarnessCommand,
   resolveExploreHarnessCommandWithHydration,
+  resolveGoExploreHarnessCommand,
   resolveExploreSparkShellRoute,
   resolvePackagedExploreHarnessCommand,
 } from '../explore.js';
@@ -311,6 +312,26 @@ describe('resolveExploreHarnessCommand', () => {
   it('uses env override when provided', () => {
     const resolved = resolveExploreHarnessCommand('/repo', { NANA_EXPLORE_BIN: '/tmp/nana-explore-stub' } as NodeJS.ProcessEnv);
     assert.deepEqual(resolved, { command: '/tmp/nana-explore-stub', args: [] });
+  });
+
+  it('prefers the Go shim when NANA_EXPLORE_IMPL=go and the shim exists', () => {
+    return (async () => {
+      const wd = await mkdtemp(join(tmpdir(), 'nana-explore-go-shim-'));
+      try {
+        const goShim = resolveGoExploreHarnessCommand(wd, process.platform);
+        await mkdir(join(wd, 'bin', 'go'), { recursive: true });
+        await writeFile(join(wd, 'package.json'), '{}\n');
+        await writeFile(goShim.command, '#!/bin/sh\nexit 0\n');
+        if (process.platform !== 'win32') await chmod(goShim.command, 0o755);
+
+        const resolved = resolveExploreHarnessCommand(wd, {
+          NANA_EXPLORE_IMPL: 'go',
+        } as NodeJS.ProcessEnv);
+        assert.deepEqual(resolved, goShim);
+      } finally {
+        await rm(wd, { recursive: true, force: true });
+      }
+    })();
   });
 
   it('prefers a packaged native harness binary when present', async () => {

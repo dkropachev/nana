@@ -19,7 +19,7 @@
 It keeps Codex as the execution engine and makes it easier to:
 - start a stronger Codex session by default
 - run one consistent workflow from clarification to completion
-- invoke the canonical skills with `$deep-interview`, `$ralplan`, `$team`, and `$ralph`
+- invoke the canonical skills with `$deep-interview` and `$ralplan`
 - keep project guidance, plans, logs, and state in `.nana/`
 
 ## Core Maintainers
@@ -50,6 +50,14 @@ It keeps Codex as the execution engine and makes it easier to:
 If you want the default NANA experience, start here:
 
 ```bash
+curl -L -o nana <release-binary-url>
+chmod +x nana
+sudo mv nana /usr/local/bin/nana
+```
+
+Or use the npm wrapper:
+
+```bash
 npm install -g @openai/codex nana
 nana setup
 nana --madmax --high
@@ -60,17 +68,17 @@ Then work normally inside Codex:
 ```text
 $deep-interview "clarify the authentication change"
 $ralplan "approve the auth plan and review tradeoffs"
-$ralph "carry the approved plan to completion"
-$team 3:executor "execute the approved plan in parallel"
+nana review https://github.com/acme/widget/pull/77
+nana work-on start https://github.com/acme/widget/issues/42
 ```
 
 That is the main path.
-Start NANA strongly, clarify first when needed, approve the plan, then choose `$team` for coordinated parallel execution or `$ralph` for the persistent completion loop.
+Start NANA strongly, clarify first when needed, approve the plan, then move into direct implementation, GitHub review, or `work-on`.
 
 ## What NANA is for
 
 Use NANA if you already like Codex and want a better day-to-day runtime around it:
-- a standard workflow built around `$deep-interview`, `$ralplan`, `$team`, and `$ralph`
+- a standard workflow built around `$deep-interview` and `$ralplan`
 - specialist roles and supporting skills when the task needs them
 - project guidance through scoped `AGENTS.md`
 - durable state under `.nana/` for plans, logs, memory, and mode tracking
@@ -81,11 +89,10 @@ If you want plain Codex with no extra workflow layer, you probably do not need N
 
 ### Requirements
 
-- Node.js 20+
 - Codex CLI installed: `npm install -g @openai/codex`
 - Codex auth configured
-- `tmux` on macOS/Linux if you later want the durable team runtime
-- `psmux` on native Windows if you later want Windows team mode
+- For native Go binary releases: no Node.js runtime required for core CLI usage
+- For the npm wrapper / legacy JS paths: Node.js 20+
 
 ### A good first session
 
@@ -100,11 +107,9 @@ Then try the canonical workflow:
 ```text
 $deep-interview "clarify the authentication change"
 $ralplan "approve the safest implementation path"
-$ralph "carry the approved plan to completion"
-$team 3:executor "execute the approved plan in parallel"
+nana review https://github.com/acme/widget/pull/77
+nana work-on start https://github.com/acme/widget/issues/42
 ```
-
-Use `$team` when the approved plan needs coordinated parallel work, or `$ralph` when one persistent owner should keep pushing to completion.
 
 ## A simple mental model
 
@@ -124,13 +129,13 @@ Most users should think of NANA as **better task routing + better workflow + bet
 2. Launch with `nana --madmax --high`
 3. Use `$deep-interview "..."` when the request or boundaries are still unclear
 4. Use `$ralplan "..."` to approve the plan and review tradeoffs
-5. Choose `$team` for coordinated parallel execution or `$ralph` for persistent completion loops
+5. Continue with direct implementation, `nana review`, or `nana work-on`
 
 ## Recommended workflow
 
 1. `$deep-interview` — clarify scope when the request or boundaries are still vague.
 2. `$ralplan` — turn that clarified scope into an approved architecture and implementation plan.
-3. `$team` or `$ralph` — use `$team` for coordinated parallel execution, or `$ralph` when you want a persistent completion loop with one owner.
+3. Continue with direct implementation or the GitHub-oriented surfaces like `nana review` and `nana work-on`.
 
 ## Common in-session surfaces
 
@@ -138,8 +143,8 @@ Most users should think of NANA as **better task routing + better workflow + bet
 | --- | --- |
 | `$deep-interview "..."` | clarifying intent, boundaries, and non-goals |
 | `$ralplan "..."` | approving the implementation plan and tradeoffs |
-| `$ralph "..."` | persistent completion and verification loops |
-| `$team "..."` | coordinated parallel execution when the work is big enough |
+| `nana review <pr-url>` | reviewing external pull requests with persisted findings |
+| `nana work-on start <issue-or-pr-url>` | GitHub-targeted implementation and review-sync workflows |
 | `/skills` | browsing installed skills and supporting helpers |
 
 ## GitHub Work-on Overrides
@@ -224,17 +229,6 @@ Behavior:
 
 These are useful, but they are not the main onboarding path.
 
-### Team runtime
-
-Use the team runtime when you specifically need durable tmux/worktree coordination, not as the default way to begin using NANA.
-
-```bash
-nana team 3:executor "fix the failing tests with verification"
-nana team status <team-name>
-nana team resume <team-name>
-nana team shutdown <team-name>
-```
-
 ### Setup, doctor, and HUD
 
 These are operator/support surfaces:
@@ -250,23 +244,10 @@ These are operator/support surfaces:
 Examples:
 
 ```bash
-nana explore --prompt "find where team state is written"
+nana explore --prompt "find where GitHub review state is written"
 nana sparkshell git status
 nana sparkshell --tmux-pane %12 --tail-lines 400
 ```
-
-### Platform notes for team mode
-
-`nana team` needs a tmux-compatible backend:
-
-| Platform | Install |
-| --- | --- |
-| macOS | `brew install tmux` |
-| Ubuntu/Debian | `sudo apt install tmux` |
-| Fedora | `sudo dnf install tmux` |
-| Arch | `sudo pacman -S tmux` |
-| Windows | `winget install psmux` |
-| Windows (WSL2) | `sudo apt install tmux` |
 
 ## Known issues
 

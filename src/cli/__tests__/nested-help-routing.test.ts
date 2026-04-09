@@ -27,14 +27,13 @@ describe('nested help routing', () => {
     [['investigate', '--help'], /nana issue - GitHub issue-oriented aliases/i],
     [['implement', '--help'], /nana issue - GitHub issue-oriented aliases/i],
     [['sync', '--help'], /nana issue - GitHub issue-oriented aliases/i],
+    [['review', '--help'], /nana review - Review an external GitHub PR with deterministic persistence/i],
     [['review-rules', '--help'], /nana review-rules - Persistent repo rules mined from PR review history/i],
-    [['research', '--help'], /Usage:[\s\S]*nana research <mission-dir>/i],
     [['issue', '--help'], /nana issue - GitHub issue-oriented aliases/i],
     [['work-on', '--help'], /nana work-on - GitHub-targeted issue\/PR implementation helper/i],
     [['reflect', '--help'], /Usage:\s*nana reflect --prompt/i],
     [['hud', '--help'], /Usage:\s*\n\s*nana hud\s+Show current HUD state/i],
     [['hooks', '--help'], /Usage:\s*\n\s*nana hooks init/i],
-    [['ralph', '--help'], /nana ralph - Launch Codex with ralph persistence mode active/i],
   ] satisfies Array<[string[], RegExp]>) {
     it(`routes ${argv.join(' ')} to command-local help`, async () => {
       const cwd = await mkdtemp(join(tmpdir(), 'nana-nested-help-'));

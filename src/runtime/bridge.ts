@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { nanaStateDir } from '../utils/paths.js';
 
 const __bridge_dirname = dirname(fileURLToPath(import.meta.url));
+const NANA_RUNTIME_IMPL_ENV = 'NANA_RUNTIME_IMPL';
 
 // ---------------------------------------------------------------------------
 // Types matching Rust JSON schema
@@ -110,6 +111,8 @@ export interface MailboxRecord {
 let schemaValidated = false;
 
 export interface RuntimeBinaryDiscoveryOptions {
+  env?: NodeJS.ProcessEnv;
+  goPath?: string;
   debugPath?: string;
   releasePath?: string;
   fallbackBinary?: string;
@@ -118,8 +121,14 @@ export interface RuntimeBinaryDiscoveryOptions {
 
 export function resolveRuntimeBinaryPath(options: RuntimeBinaryDiscoveryOptions = {}): string {
   const exists = options.exists ?? existsSync;
-  const envOverride = process.env.NANA_RUNTIME_BINARY?.trim();
+  const env = options.env ?? process.env;
+  const envOverride = env.NANA_RUNTIME_BINARY?.trim();
   if (envOverride) return envOverride;
+
+  const goShim = options.goPath ?? resolve(__bridge_dirname, '../../bin/go/nana-runtime');
+  if (env[NANA_RUNTIME_IMPL_ENV]?.trim().toLowerCase() === 'go' && exists(goShim)) {
+    return goShim;
+  }
 
   const workspaceDebug = options.debugPath ?? resolve(__bridge_dirname, '../../target/debug/nana-runtime');
   if (exists(workspaceDebug)) return workspaceDebug;

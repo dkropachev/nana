@@ -24,7 +24,6 @@ describe('nana session help', () => {
       const mainHelp = runNana(cwd, ['--help']);
       assert.equal(mainHelp.status, 0, mainHelp.stderr || mainHelp.stdout);
       assert.match(mainHelp.stdout, /nana resume\s+Resume a previous interactive Codex session/i);
-      assert.match(mainHelp.stdout, /nana research\s+Launch thin-supervisor autoresearch with keep\/discard\/reset parity/i);
       assert.match(mainHelp.stdout, /nana session\s+Search prior local session transcripts/i);
 
       const sessionHelp = runNana(cwd, ['session', '--help']);

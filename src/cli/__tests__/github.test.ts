@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readlink, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import {
@@ -20,8 +20,10 @@ import {
   buildLaneExecutionInstructions,
   GITHUB_APPEND_ENV,
   githubCommand,
+  githubPullReviewCommand,
   githubReviewRulesCommand,
   investigateGithubTarget,
+  parseGithubReviewArgs,
   isSandboxLeaseStale,
   parseGithubArgs,
   parseGithubTargetUrl,
@@ -498,6 +500,56 @@ describe('parseGithubArgs', () => {
   });
 });
 
+describe('parseGithubReviewArgs', () => {
+  it('parses review mode and per-item context', () => {
+    assert.deepEqual(
+      parseGithubReviewArgs([
+        'https://github.com/acme/widget/pull/77',
+        '--mode',
+        'manual',
+        '--per-item-context',
+        'isolated',
+      ]),
+      {
+        subcommand: 'review',
+        target: {
+          owner: 'acme',
+          repoName: 'widget',
+          repoSlug: 'acme/widget',
+          targetKind: 'pr',
+          targetNumber: 77,
+          canonicalUrl: 'https://github.com/acme/widget/pull/77',
+        },
+        mode: 'manual',
+        reviewer: '@me',
+        perItemContext: 'isolated',
+      },
+    );
+  });
+
+  it('parses followup with allow-open', () => {
+    assert.deepEqual(
+      parseGithubReviewArgs([
+        'followup',
+        'https://github.com/acme/widget/pull/77',
+        '--allow-open',
+      ]),
+      {
+        subcommand: 'followup',
+        target: {
+          owner: 'acme',
+          repoName: 'widget',
+          repoSlug: 'acme/widget',
+          targetKind: 'pr',
+          targetNumber: 77,
+          canonicalUrl: 'https://github.com/acme/widget/pull/77',
+        },
+        allowOpen: true,
+      },
+    );
+  });
+});
+
 describe('isSandboxLeaseStale', () => {
   it('treats expired leases as stale', () => {
     assert.equal(
@@ -513,6 +565,369 @@ describe('isSandboxLeaseStale', () => {
       }, Date.parse('2026-04-03T10:01:00.000Z')),
       true,
     );
+  });
+});
+
+describe('github review', () => {
+  it('automatically onboards a repo, posts request changes, and persists review buckets', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'nana-github-pr-review-auto-'));
+    try {
+      const homeDir = join(wd, 'home');
+      await mkdir(homeDir, { recursive: true });
+      const { barePath, mainSha, prSha } = await createBareRemote(wd);
+      const reviewRequests: Array<{ path: string; body: unknown }> = [];
+      const messages: string[] = [];
+
+      const fetchImpl: typeof fetch = async (input, init) => {
+        const url = typeof input === 'string'
+          ? new URL(input)
+          : input instanceof URL
+            ? input
+            : new URL(input.url);
+        const key = `${url.pathname}${url.search}`;
+        if (key === '/user') return jsonResponse({ login: 'dkropachev' });
+        if (key === '/repos/acme/widget') {
+          return jsonResponse({
+            name: 'widget',
+            full_name: 'acme/widget',
+            clone_url: barePath,
+            default_branch: 'main',
+            html_url: 'https://github.com/acme/widget',
+          });
+        }
+        if (key === '/repos/acme/widget/issues/77') {
+          return jsonResponse({
+            number: 77,
+            title: 'PR 77',
+            body: 'Review this change',
+            html_url: 'https://github.com/acme/widget/pull/77',
+            state: 'open',
+            updated_at: '2026-04-03T10:00:00.000Z',
+            user: { login: 'requester' },
+            pull_request: {},
+          });
+        }
+        if (key === '/repos/acme/widget/pulls/77') {
+          return jsonResponse({
+            number: 77,
+            title: 'PR 77',
+            body: 'Review this change',
+            html_url: 'https://github.com/acme/widget/pull/77',
+            state: 'open',
+            merged_at: null,
+            updated_at: '2026-04-03T10:00:00.000Z',
+            user: { login: 'requester' },
+            head: { ref: 'feature/pr-77', sha: prSha, repo: { full_name: 'acme/widget' } },
+            base: { ref: 'main', sha: mainSha, repo: { full_name: 'acme/widget' } },
+          });
+        }
+        if (key === '/repos/acme/widget/pulls/77/reviews' && init?.method === 'POST') {
+          reviewRequests.push({
+            path: key,
+            body: JSON.parse(String(init.body || '{}')),
+          });
+          return jsonResponse({ id: 91, html_url: 'https://github.com/acme/widget/pull/77#pullrequestreview-91' });
+        }
+        return new Response(`unexpected route: ${key}`, { status: 500 });
+      };
+
+      let codexCall = 0;
+      await githubPullReviewCommand(
+        ['https://github.com/acme/widget/pull/77'],
+        {
+          homeDir,
+          env: { ...process.env, GH_TOKEN: 'test-token' } as NodeJS.ProcessEnv,
+          fetchImpl,
+          writeLine: (line) => messages.push(line),
+          codexExec: async () => {
+            codexCall += 1;
+            if (codexCall === 1) {
+              return JSON.stringify({
+                findings: [
+                  {
+                    title: 'Feature marker should explain the new behavior',
+                    severity: 'medium',
+                    path: 'feature.txt',
+                    line: 1,
+                    summary: 'The new file does not explain why the branch-specific marker exists.',
+                    detail: 'The added marker is too terse and leaves the reason for the branch-only behavior implicit.',
+                    fix: 'Add one more line that states the intent of the feature branch file.',
+                    rationale: 'Future reviewers will have to reconstruct the context from the PR.',
+                  },
+                ],
+              });
+            }
+            return JSON.stringify({
+              items: [
+                {
+                  candidate_index: 0,
+                  verdict: 'accepted',
+                  summary: 'The new file still needs intent spelled out.',
+                  detail: 'The file is introduced by this PR and the content is too terse to explain why it exists.',
+                  fix: 'Expand the file with one sentence describing the feature branch intent.',
+                  rationale: 'This is new behavior in the PR, not a pre-existing issue.',
+                },
+              ],
+            });
+          },
+        },
+      );
+
+      assert.equal(reviewRequests.length, 1);
+      const posted = reviewRequests[0]!.body as {
+        event: string;
+        comments?: Array<{ path: string; line: number; side: string; body: string }>;
+        body: string;
+      };
+      assert.equal(posted.event, 'REQUEST_CHANGES');
+      assert.equal(posted.comments?.[0]?.path, 'feature.txt');
+      assert.equal(posted.comments?.[0]?.line, 1);
+      assert.equal(posted.comments?.[0]?.side, 'RIGHT');
+      assert.match(posted.body, /Found actionable issues/i);
+
+      const repoRoot = join(homeDir, '.nana', 'repos', 'acme', 'widget');
+      const reviewRoot = join(repoRoot, 'reviews', 'pr-77');
+      assert.equal(existsSync(join(repoRoot, 'repo.json')), true);
+      assert.equal(existsSync(join(reviewRoot, 'active.json')), false);
+
+      const runs = await readdir(join(reviewRoot, 'runs'));
+      assert.equal(runs.length, 1);
+      const runRoot = join(reviewRoot, 'runs', runs[0]!);
+      const accepted = JSON.parse(await readFile(join(runRoot, 'accepted.json'), 'utf-8')) as Array<{ path: string; pr_permalink: string; main_permalink: string }>;
+      assert.equal(accepted.length, 1);
+      assert.match(accepted[0]!.pr_permalink, new RegExp(prSha));
+      assert.match(accepted[0]!.main_permalink, new RegExp(mainSha));
+      assert.match(messages.join('\n'), /Completed review/i);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('reopens manual review iterations and auto-resumes an unfinished PR review', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'nana-github-pr-review-manual-'));
+    try {
+      const homeDir = join(wd, 'home');
+      await mkdir(homeDir, { recursive: true });
+      const { barePath, mainSha, prSha } = await createBareRemote(wd);
+      const reviewRequests: Array<unknown> = [];
+      const fetchImpl: typeof fetch = async (input, init) => {
+        const url = typeof input === 'string'
+          ? new URL(input)
+          : input instanceof URL
+            ? input
+            : new URL(input.url);
+        const key = `${url.pathname}${url.search}`;
+        if (key === '/user') return jsonResponse({ login: 'dkropachev' });
+        if (key === '/repos/acme/widget') {
+          return jsonResponse({
+            name: 'widget',
+            full_name: 'acme/widget',
+            clone_url: barePath,
+            default_branch: 'main',
+            html_url: 'https://github.com/acme/widget',
+          });
+        }
+        if (key === '/repos/acme/widget/issues/77') {
+          return jsonResponse({
+            number: 77,
+            title: 'PR 77',
+            body: 'Review this change',
+            html_url: 'https://github.com/acme/widget/pull/77',
+            state: 'open',
+            updated_at: '2026-04-03T10:00:00.000Z',
+            user: { login: 'requester' },
+            pull_request: {},
+          });
+        }
+        if (key === '/repos/acme/widget/pulls/77') {
+          return jsonResponse({
+            number: 77,
+            title: 'PR 77',
+            body: 'Review this change',
+            html_url: 'https://github.com/acme/widget/pull/77',
+            state: 'open',
+            merged_at: null,
+            updated_at: '2026-04-03T10:00:00.000Z',
+            user: { login: 'requester' },
+            head: { ref: 'feature/pr-77', sha: prSha, repo: { full_name: 'acme/widget' } },
+            base: { ref: 'main', sha: mainSha, repo: { full_name: 'acme/widget' } },
+          });
+        }
+        if (key === '/repos/acme/widget/pulls/77/reviews' && init?.method === 'POST') {
+          reviewRequests.push(JSON.parse(String(init.body || '{}')));
+          return jsonResponse({ id: 92, html_url: 'https://github.com/acme/widget/pull/77#pullrequestreview-92' });
+        }
+        return new Response(`unexpected route: ${key}`, { status: 500 });
+      };
+
+      let reconsiderCount = 0;
+      let editorOpenCount = 0;
+      const openEditor = async (path: string): Promise<void> => {
+        editorOpenCount += 1;
+        const current = await readFile(path, 'utf-8');
+        if (editorOpenCount === 1) {
+          await writeFile(
+            path,
+            current
+              .replace(/Action:\s*accept/i, 'Action: argue')
+              .replace(/Explanation:\s*\n/i, 'Explanation:\n     Please double-check whether this really needs a stronger explanation.\n'),
+            'utf-8',
+          );
+          return;
+        }
+        await writeFile(
+          path,
+          current
+            .replace(/Action:\s*argue/i, 'Action: accept')
+            .replace(/Explanation:\s*\n(?:\s+.*\n)?/i, 'Explanation:\n'),
+          'utf-8',
+        );
+      };
+
+      await githubPullReviewCommand(
+        ['https://github.com/acme/widget/pull/77', '--mode', 'manual'],
+        {
+          homeDir,
+          env: { ...process.env, GH_TOKEN: 'test-token' } as NodeJS.ProcessEnv,
+          fetchImpl,
+          openEditor,
+          codexExec: async (_prompt) => {
+            reconsiderCount += 1;
+            if (reconsiderCount === 1) {
+              return JSON.stringify({
+                findings: [
+                  {
+                    title: 'Feature marker should explain the new behavior',
+                    severity: 'medium',
+                    path: 'feature.txt',
+                    line: 1,
+                    summary: 'The new file does not explain why the branch-specific marker exists.',
+                    detail: 'The added marker is too terse and leaves the reason for the branch-only behavior implicit.',
+                    fix: 'Add one more line that states the intent of the feature branch file.',
+                    rationale: 'Future reviewers will have to reconstruct the context from the PR.',
+                  },
+                ],
+              });
+            }
+            return JSON.stringify({
+              items: [
+                {
+                  candidate_index: 0,
+                  verdict: 'accepted',
+                  summary: 'The file still needs intent spelled out.',
+                  detail: 'The added file is introduced by this PR and still lacks explicit intent.',
+                  fix: 'State why the file exists.',
+                  rationale: 'The problem is still in the PR after reconsideration.',
+                },
+              ],
+            });
+          },
+        },
+      );
+
+      assert.equal(reviewRequests.length, 1);
+      const repoRoot = join(homeDir, '.nana', 'repos', 'acme', 'widget', 'reviews', 'pr-77');
+      const [runId] = await readdir(join(repoRoot, 'runs'));
+      assert.equal(existsSync(join(repoRoot, 'runs', runId!, 'manual-pending.json')), false);
+      assert.equal(existsSync(join(repoRoot, 'active.json')), false);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('shows pre-existing findings through review followup and requires closed PR by default', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'nana-github-pr-review-followup-'));
+    try {
+      const homeDir = join(wd, 'home');
+      await mkdir(homeDir, { recursive: true });
+      const { barePath, mainSha, prSha } = await createBareRemote(wd);
+      const repoRoot = join(homeDir, '.nana', 'repos', 'acme', 'widget');
+      const runRoot = join(repoRoot, 'reviews', 'pr-77', 'runs', 'gr-seed');
+      await mkdir(runRoot, { recursive: true });
+      await writeFile(
+        join(runRoot, 'dropped-preexisting.json'),
+        JSON.stringify([
+          {
+            id: 'seed',
+            fingerprint: 'abc',
+            title: 'Existing gap predates this PR',
+            severity: 'medium',
+            path: 'README.md',
+            line: 1,
+            summary: 'Existing gap predates this PR',
+            detail: 'This was already present on the base branch.',
+            fix: '',
+            rationale: 'Base branch already had it.',
+            changed_in_pr: false,
+            changed_line_in_pr: false,
+            main_permalink: `https://github.com/acme/widget/blob/${mainSha}/README.md#L1`,
+            pr_permalink: `https://github.com/acme/widget/blob/${prSha}/README.md#L1`,
+            iteration: 1,
+            user_explanation: 'Seen on base before the PR changes.',
+          },
+        ], null, 2),
+        'utf-8',
+      );
+
+      const openFetch = createFetchStub({
+        '/repos/acme/widget': {
+          name: 'widget',
+          full_name: 'acme/widget',
+          clone_url: barePath,
+          default_branch: 'main',
+          html_url: 'https://github.com/acme/widget',
+        },
+        '/repos/acme/widget/issues/77': {
+          number: 77,
+          title: 'PR 77',
+          body: 'Review this change',
+          html_url: 'https://github.com/acme/widget/pull/77',
+          state: 'open',
+          updated_at: '2026-04-03T10:00:00.000Z',
+          user: { login: 'requester' },
+          pull_request: {},
+        },
+        '/repos/acme/widget/pulls/77': {
+          number: 77,
+          title: 'PR 77',
+          body: 'Review this change',
+          html_url: 'https://github.com/acme/widget/pull/77',
+          state: 'open',
+          merged_at: null,
+          updated_at: '2026-04-03T10:00:00.000Z',
+          user: { login: 'requester' },
+          head: { ref: 'feature/pr-77', sha: prSha, repo: { full_name: 'acme/widget' } },
+          base: { ref: 'main', sha: mainSha, repo: { full_name: 'acme/widget' } },
+        },
+      });
+
+      await assert.rejects(
+        githubPullReviewCommand(
+          ['followup', 'https://github.com/acme/widget/pull/77'],
+          {
+            homeDir,
+            env: { ...process.env, GH_TOKEN: 'test-token' } as NodeJS.ProcessEnv,
+            fetchImpl: openFetch,
+          },
+        ),
+        /still open/i,
+      );
+
+      const lines: string[] = [];
+      await githubPullReviewCommand(
+        ['followup', 'https://github.com/acme/widget/pull/77', '--allow-open'],
+        {
+          homeDir,
+          env: { ...process.env, GH_TOKEN: 'test-token' } as NodeJS.ProcessEnv,
+          fetchImpl: openFetch,
+          writeLine: (line) => lines.push(line),
+        },
+      );
+      assert.match(lines.join('\n'), /Existing gap predates this PR/i);
+      assert.match(lines.join('\n'), /README\.md:1/i);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
   });
 });
 

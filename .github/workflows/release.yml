@@ -106,6 +106,9 @@ jobs:
             target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -134,6 +137,11 @@ jobs:
       - name: Build dist artifacts for target
         shell: bash
         run: dist build -a local --target "${{ matrix.target }}" --output-format=json > dist-build-${{ matrix.target }}.json
+      - name: Build Go CLI release asset for target
+        shell: bash
+        run: |
+          mkdir -p go-release-assets
+          node scripts/build-go-release-asset.mjs --target "${{ matrix.target }}" --out-dir go-release-assets
       - name: Upload target release artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -141,6 +149,7 @@ jobs:
           path: |
             target/distrib/*
             dist-build-${{ matrix.target }}.json
+            go-release-assets/*
           if-no-files-found: error
 
   publish-native-assets:
@@ -174,7 +183,7 @@ jobs:
             --artifacts-dir release-assets \
             --out release-assets/native-release-manifest.json \
             --release-base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}" \
-            --require-products "nana-explore-harness,nana-sparkshell"
+            --require-products "nana,nana-explore-harness,nana-sparkshell"
       - name: Upload release asset bundle for follow-up jobs
         uses: actions/upload-artifact@v4
         with:

@@ -33,26 +33,31 @@ function setMockCodexHome(codexHomePath: string): () => void {
 }
 
 describe("worker bootstrap", () => {
-  it("worker skill lifecycle instructions are claim-safe (issue #448)", async () => {
-    const workerSkill = await readFile(
-      join(process.cwd(), "skills", "worker", "SKILL.md"),
-      "utf8",
-    );
+  it("generated worker runtime instructions are claim-safe (issue #448)", () => {
+    const content = generateWorkerRootAgentsContent({
+      teamName: 'alpha-team',
+      workerName: 'worker-1',
+      workerRole: 'executor',
+      rolePromptContent: 'Execute assigned work only.',
+      teamStateRoot: '/tmp/state-root',
+      leaderCwd: '/repo',
+      worktreePath: '/repo/.nana/team/worktrees/worker-1',
+    });
 
-    assert.match(workerSkill, /nana team api claim-task/);
-    assert.match(workerSkill, /nana team api transition-task-status/);
-    assert.match(workerSkill, /nana team api release-task-claim/);
+    assert.match(content, /nana team api claim-task/);
+    assert.match(content, /nana team api transition-task-status/);
+    assert.match(content, /nana team api release-task-claim/);
     assert.match(
-      workerSkill,
+      content,
       /\$\{CODEX_HOME:-~\/\.codex\}\/skills\/worker\/SKILL\.md/,
     );
-    assert.doesNotMatch(workerSkill, /Write completion to the task file/i);
+    assert.doesNotMatch(content, /Write completion to the task file/i);
     assert.doesNotMatch(
-      workerSkill,
+      content,
       /`?\{"status":"completed","result":"\.\.\."\}`?/,
     );
     assert.doesNotMatch(
-      workerSkill,
+      content,
       /`?\{"status":"failed","error":"\.\.\."\}`?/,
     );
   });

@@ -272,23 +272,17 @@ The security-reviewer agent verifies:
 
 ## Use with Other Skills
 
-**With Team:**
+**With GitHub Review:**
+```bash
+nana review https://github.com/acme/widget/pull/77
 ```
-/team "run security review on authentication module"
-```
-Uses: explore → security-reviewer → executor → security-reviewer (re-verify)
+Use persisted PR review when auditing an external pull request.
 
-**With Swarm:**
+**With Ultrawork:**
 ```
-/swarm 4:security-reviewer "audit all API endpoints"
+/ultrawork security review all API endpoints
 ```
-Parallel security review across multiple endpoints.
-
-**With Ralph:**
-```
-/ralph security-review then fix all issues
-```
-Review, fix, re-review until all issues resolved.
+Parallel security review across multiple endpoints when you intentionally want broad fanout.
 
 ## Best Practices
 

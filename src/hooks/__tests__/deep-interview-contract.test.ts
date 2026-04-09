@@ -133,8 +133,8 @@ describe("deep-interview Ouroboros contract", () => {
 		assert.match(deepInterviewSkill, /Execution Bridge/i);
 		assert.match(deepInterviewSkill, /\$ralplan/i);
 		assert.match(deepInterviewSkill, /\$autopilot/i);
-		assert.match(deepInterviewSkill, /\$ralph/i);
-		assert.match(deepInterviewSkill, /\$team/i);
+		assert.match(deepInterviewSkill, /nana review/i);
+		assert.match(deepInterviewSkill, /nana work-on/i);
 		assert.match(deepInterviewSkill, /Input Artifact/i);
 		assert.match(deepInterviewSkill, /Invocation/i);
 		assert.match(deepInterviewSkill, /Consumer Behavior/i);
@@ -151,8 +151,8 @@ describe("deep-interview Ouroboros contract", () => {
 			deepInterviewSkill,
 			/preserve intent, non-goals, decision boundaries, acceptance criteria/i,
 		);
-		assert.match(deepInterviewSkill, /binding context/i);
-		assert.match(deepInterviewSkill, /team verification path/i);
+		assert.match(deepInterviewSkill, /binding context|requirements source of truth/i);
+		assert.match(deepInterviewSkill, /GitHub-oriented surfaces|direct implementation/i);
 	});
 
 	it("uses NANA-native output paths", () => {

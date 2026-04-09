@@ -14,10 +14,10 @@ import {
 import { isUnderspecifiedForExecution, applyRalplanGate } from '../keyword-detector.js';
 import { KEYWORD_TRIGGER_DEFINITIONS } from '../keyword-registry.js';
 
-describe('keyword detector swarm/team compatibility', () => {
+describe('keyword detector surviving workflow compatibility', () => {
   it('keeps explicit $skill order in detectKeywords results (left-to-right)', () => {
-    const matches = detectKeywords('$analyze $ultraqa $code-review now');
-    assert.deepEqual(matches.map((m) => m.skill).slice(0, 3), ['analyze', 'ultraqa', 'code-review']);
+    const matches = detectKeywords('$analyze $autopilot $code-review now');
+    assert.deepEqual(matches.map((m) => m.skill).slice(0, 3), ['analyze', 'autopilot', 'code-review']);
   });
 
   it('de-duplicates repeated explicit skill tokens', () => {
@@ -26,13 +26,13 @@ describe('keyword detector swarm/team compatibility', () => {
   });
 
   it('limits explicit multi-skill invocation to the first contiguous $skill block', () => {
-    const matches = detectKeywords('$ralplan Fix issue #1030 and ensure other directives ($ralph, $team, $deep-interview) are not affected');
+    const matches = detectKeywords('$ralplan Fix issue #1030 and ensure other directives ($autopilot, $deep-interview) are not affected');
     assert.deepEqual(matches.map((m) => m.skill), ['ralplan']);
   });
 
   it('does not merge implicit keyword matches when an explicit $skill is present', () => {
-    const matches = detectKeywords('please run $team and then analyze the result');
-    assert.deepEqual(matches.map((m) => m.skill), ['team']);
+    const matches = detectKeywords('please run $autopilot and then analyze the result');
+    assert.deepEqual(matches.map((m) => m.skill), ['autopilot']);
   });
 
   it('does not auto-detect keywords for explicit /prompts invocation without $skills', () => {
@@ -66,78 +66,10 @@ describe('keyword detector swarm/team compatibility', () => {
   });
 
   it('supports explicit multi-skill invocation by prioritizing left-most $skill', () => {
-    const match = detectPrimaryKeyword('$ultraqa $analyze $code-review run now');
+    const match = detectPrimaryKeyword('$autopilot $analyze $code-review run now');
     assert.ok(match);
-    assert.equal(match.skill, 'ultraqa');
-    assert.equal(match.keyword.toLowerCase(), '$ultraqa');
-  });
-
-  it('maps "coordinated team" phrase to team orchestration skill', () => {
-    const match = detectPrimaryKeyword('run a coordinated team for implementation');
-
-    assert.ok(match);
-    assert.equal(match.skill, 'team');
-    assert.match(match.keyword.toLowerCase(), /team/);
-  });
-
-  it('maps "swarm" to team orchestration skill', () => {
-    const match = detectPrimaryKeyword('please use swarm for this task');
-
-    assert.ok(match);
-    assert.equal(match.skill, 'team');
-  });
-
-  it('maps "coordinated swarm" phrase to team orchestration skill', () => {
-    const match = detectPrimaryKeyword('run a coordinated swarm for implementation');
-
-    assert.ok(match);
-    assert.equal(match.skill, 'team');
-    assert.match(match.keyword.toLowerCase(), /swarm/);
-  });
-
-  it('keeps swarm trigger priority aligned with team trigger', () => {
-    const teamMatch = detectKeywords('use team agents for this').find((entry) => entry.skill === 'team');
-    const swarmMatch = detectKeywords('use swarm for this').find((entry) => entry.skill === 'team');
-
-    assert.ok(teamMatch);
-    assert.ok(swarmMatch);
-    assert.equal(swarmMatch.priority, teamMatch.priority);
-  });
-
-  it('does not trigger team keyword from filesystem/team-state path text', () => {
-    const match = detectPrimaryKeyword('You have 1 new message(s). Read .nana/state/team/execute-plan/mailbox/worker-3.json, act now, reply with concrete progress, then continue assigned work or next feasible task.');
-    assert.equal(match, null);
-  });
-
-  it('does not trigger team skill from incidental prose usage', () => {
-    const match = detectPrimaryKeyword('the team reviewed the document and shared feedback');
-    assert.equal(match, null);
-  });
-
-  it('still triggers team for explicit $team invocation', () => {
-    const match = detectPrimaryKeyword('please run $team now');
-    assert.ok(match);
-    assert.equal(match.skill, 'team');
-  });
-
-  it('does not trigger keyword detector for explicit /prompts:swarm invocation', () => {
-    const match = detectPrimaryKeyword('use /prompts:swarm for this');
-    assert.equal(match, null);
-  });
-
-  it('prefers ralplan over ralph when both keywords are present', () => {
-    const match = detectPrimaryKeyword('use ralph mode but do ralplan first');
-
-    assert.ok(match);
-    assert.equal(match.skill, 'ralplan');
-  });
-
-  it('applies longest-match tie-breaker when priorities are equal', () => {
-    const match = detectPrimaryKeyword('please run a coordinated swarm for this');
-
-    assert.ok(match);
-    assert.equal(match.skill, 'team');
-    assert.equal(match.keyword.toLowerCase(), 'coordinated swarm');
+    assert.equal(match.skill, 'autopilot');
+    assert.equal(match.keyword.toLowerCase(), '$autopilot');
   });
 
   it('maps "deep interview" phrase to deep-interview skill', () => {
@@ -190,16 +122,16 @@ describe('keyword detector swarm/team compatibility', () => {
 });
 
 describe('keyword registry coverage', () => {
-  it('includes key team/swarm aliases in runtime keyword registry', () => {
+  it('includes surviving workflow aliases in runtime keyword registry', () => {
     const registryKeywords = new Set(KEYWORD_TRIGGER_DEFINITIONS.map((v) => v.keyword.toLowerCase()));
-    assert.ok(registryKeywords.has('ultraqa'));
+    assert.ok(registryKeywords.has('autopilot'));
+    assert.ok(registryKeywords.has('build me'));
     assert.ok(registryKeywords.has('analyze'));
     assert.ok(registryKeywords.has('investigate'));
     assert.ok(registryKeywords.has('code review'));
     assert.ok(registryKeywords.has('code-review'));
-    assert.ok(registryKeywords.has('coordinated team'));
-    assert.ok(registryKeywords.has('swarm'));
-    assert.ok(registryKeywords.has('coordinated swarm'));
+    assert.ok(registryKeywords.has('ultrawork'));
+    assert.ok(registryKeywords.has('parallel'));
     assert.ok(registryKeywords.has('ouroboros'));
     assert.ok(registryKeywords.has("don't assume"));
     assert.ok(registryKeywords.has('interview me'));
@@ -378,12 +310,12 @@ describe('keyword detector skill-active-state lifecycle', () => {
 
       const result = await recordSkillActivation({
         stateDir,
-        text: 'please run ralph now',
+        text: 'please analyze this now',
         nowIso: '2026-02-26T00:00:00.000Z',
       });
 
       assert.ok(result);
-      assert.equal(result.skill, 'ralph');
+      assert.equal(result.skill, 'analyze');
       assert.equal(result.activated_at, '2026-02-26T00:00:00.000Z');
     } finally {
       await rm(cwd, { recursive: true, force: true });
@@ -430,7 +362,7 @@ describe('keyword detector skill-active-state lifecycle', () => {
 
 describe('isUnderspecifiedForExecution', () => {
   it('flags vague prompt with no files or functions', () => {
-    assert.equal(isUnderspecifiedForExecution('ralph fix this'), true);
+    assert.equal(isUnderspecifiedForExecution('autopilot fix this'), true);
   });
 
   it('flags short vague prompt', () => {
@@ -438,11 +370,11 @@ describe('isUnderspecifiedForExecution', () => {
   });
 
   it('flags prompt with only keyword and generic words', () => {
-    assert.equal(isUnderspecifiedForExecution('team improve performance'), true);
+    assert.equal(isUnderspecifiedForExecution('ultrawork improve performance'), true);
   });
 
   it('passes prompt with a file path reference', () => {
-    assert.equal(isUnderspecifiedForExecution('ralph fix src/hooks/bridge.ts'), false);
+    assert.equal(isUnderspecifiedForExecution('autopilot fix src/hooks/bridge.ts'), false);
   });
 
   it('passes prompt with a file extension reference', () => {
@@ -454,11 +386,11 @@ describe('isUnderspecifiedForExecution', () => {
   });
 
   it('passes prompt with a camelCase symbol', () => {
-    assert.equal(isUnderspecifiedForExecution('team fix processKeywordDetector'), false);
+    assert.equal(isUnderspecifiedForExecution('autopilot fix processKeywordDetector'), false);
   });
 
   it('passes prompt with a PascalCase symbol', () => {
-    assert.equal(isUnderspecifiedForExecution('ralph update UserModel'), false);
+    assert.equal(isUnderspecifiedForExecution('autopilot update UserModel'), false);
   });
 
   it('passes prompt with snake_case symbol', () => {
@@ -470,7 +402,7 @@ describe('isUnderspecifiedForExecution', () => {
   });
 
   it('passes prompt with numbered steps', () => {
-    assert.equal(isUnderspecifiedForExecution('ralph do:\n1. Add input validation\n2. Write tests\n3. Update README'), false);
+    assert.equal(isUnderspecifiedForExecution('autopilot do:\n1. Add input validation\n2. Write tests\n3. Update README'), false);
   });
 
   it('passes prompt with acceptance criteria keyword', () => {
@@ -478,11 +410,11 @@ describe('isUnderspecifiedForExecution', () => {
   });
 
   it('passes prompt with a specific error reference', () => {
-    assert.equal(isUnderspecifiedForExecution('ralph fix TypeError in auth handler'), false);
+    assert.equal(isUnderspecifiedForExecution('autopilot fix TypeError in auth handler'), false);
   });
 
   it('passes with force: escape hatch prefix', () => {
-    assert.equal(isUnderspecifiedForExecution('force: ralph refactor the auth module'), false);
+    assert.equal(isUnderspecifiedForExecution('force: autopilot refactor the auth module'), false);
   });
 
   it('passes with ! escape hatch prefix', () => {
@@ -498,7 +430,7 @@ describe('isUnderspecifiedForExecution', () => {
   });
 
   it('passes prompt with test runner command', () => {
-    assert.equal(isUnderspecifiedForExecution('ralph npm test && fix failures'), false);
+    assert.equal(isUnderspecifiedForExecution('autopilot npm test && fix failures'), false);
   });
 
   it('passes longer prompt that exceeds word threshold', () => {
@@ -513,49 +445,11 @@ describe('isUnderspecifiedForExecution', () => {
 });
 
 describe('applyRalplanGate', () => {
-  it('does not re-enter ralplan for a short approved team follow-up', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'nana-keyword-gate-followup-'));
-    try {
-      const plansDir = join(cwd, '.nana', 'plans');
-      await mkdir(plansDir, { recursive: true });
-      await writeFile(
-        join(plansDir, 'prd-issue-831.md'),
-        '# Approved plan\n\nLaunch hint: nana team 3:executor "Execute approved issue 831 plan"\n',
-      );
-      await writeFile(join(plansDir, 'test-spec-issue-831.md'), '# Test spec\n');
-
-      const result = applyRalplanGate(['team'], 'team', { cwd });
-      assert.equal(result.gateApplied, false);
-      assert.deepEqual(result.keywords, ['team']);
-    } finally {
-      await rm(cwd, { recursive: true, force: true });
-    }
-  });
-
-  it('does not re-enter ralplan for a short approved Korean team follow-up', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'nana-keyword-gate-followup-ko-'));
-    try {
-      const plansDir = join(cwd, '.nana', 'plans');
-      await mkdir(plansDir, { recursive: true });
-      await writeFile(
-        join(plansDir, 'prd-issue-831.md'),
-        '# Approved plan\n\nLaunch hint: nana team 3:executor "Execute approved issue 831 plan"\n',
-      );
-      await writeFile(join(plansDir, 'test-spec-issue-831.md'), '# Test spec\n');
-
-      const result = applyRalplanGate(['team'], 'team으로 해줘', { cwd });
-      assert.equal(result.gateApplied, false);
-      assert.deepEqual(result.keywords, ['team']);
-    } finally {
-      await rm(cwd, { recursive: true, force: true });
-    }
-  });
-
   it('redirects underspecified execution keywords to ralplan', () => {
-    const result = applyRalplanGate(['ralph'], 'ralph fix this');
+    const result = applyRalplanGate(['autopilot'], 'autopilot fix this');
     assert.equal(result.gateApplied, true);
     assert.ok(result.keywords.includes('ralplan'));
-    assert.ok(!result.keywords.includes('ralph'));
+    assert.ok(!result.keywords.includes('autopilot'));
   });
 
   it('redirects autopilot to ralplan when underspecified', () => {
@@ -565,13 +459,13 @@ describe('applyRalplanGate', () => {
   });
 
   it('does not gate well-specified prompts', () => {
-    const result = applyRalplanGate(['ralph'], 'ralph fix src/hooks/bridge.ts null check');
+    const result = applyRalplanGate(['autopilot'], 'autopilot fix src/hooks/bridge.ts null check');
     assert.equal(result.gateApplied, false);
-    assert.ok(result.keywords.includes('ralph'));
+    assert.ok(result.keywords.includes('autopilot'));
   });
 
   it('does not gate when cancel is present', () => {
-    const result = applyRalplanGate(['cancel', 'ralph'], 'cancel ralph');
+    const result = applyRalplanGate(['cancel', 'autopilot'], 'cancel autopilot');
     assert.equal(result.gateApplied, false);
   });
 
@@ -587,26 +481,26 @@ describe('applyRalplanGate', () => {
   });
 
   it('preserves non-execution keywords when gating', () => {
-    const result = applyRalplanGate(['ralph', 'tdd'], 'ralph tdd fix this');
+    const result = applyRalplanGate(['autopilot', 'tdd'], 'autopilot tdd fix this');
     assert.equal(result.gateApplied, true);
     assert.ok(result.keywords.includes('tdd'));
     assert.ok(result.keywords.includes('ralplan'));
-    assert.ok(!result.keywords.includes('ralph'));
+    assert.ok(!result.keywords.includes('autopilot'));
   });
 
   it('handles force: escape hatch — does not gate', () => {
-    const result = applyRalplanGate(['ralph'], 'force: ralph refactor the auth module');
+    const result = applyRalplanGate(['autopilot'], 'force: autopilot refactor the auth module');
     assert.equal(result.gateApplied, false);
   });
 
   it('gates multiple execution keywords at once', () => {
-    const result = applyRalplanGate(['ralph', 'team'], 'ralph team fix this');
+    const result = applyRalplanGate(['autopilot', 'ultrawork'], 'autopilot ultrawork fix this');
     assert.equal(result.gateApplied, true);
     assert.ok(result.keywords.includes('ralplan'));
-    assert.ok(!result.keywords.includes('ralph'));
-    assert.ok(!result.keywords.includes('team'));
-    assert.ok(result.gatedKeywords.includes('ralph'));
-    assert.ok(result.gatedKeywords.includes('team'));
+    assert.ok(!result.keywords.includes('autopilot'));
+    assert.ok(!result.keywords.includes('ultrawork'));
+    assert.ok(result.gatedKeywords.includes('autopilot'));
+    assert.ok(result.gatedKeywords.includes('ultrawork'));
   });
 
   it('returns empty keywords unchanged when no keywords', () => {
@@ -622,8 +516,8 @@ describe('applyRalplanGate', () => {
   });
 
   it('reports gatedKeywords correctly', () => {
-    const result = applyRalplanGate(['ralph', 'ultrawork'], 'ralph ultrawork build');
-    assert.ok(result.gatedKeywords.includes('ralph'));
+    const result = applyRalplanGate(['autopilot', 'ultrawork'], 'autopilot ultrawork build');
+    assert.ok(result.gatedKeywords.includes('autopilot'));
     assert.ok(result.gatedKeywords.includes('ultrawork'));
   });
 });

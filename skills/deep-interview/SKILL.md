@@ -12,7 +12,7 @@ Deep Interview is an intent-first Socratic clarification loop before planning or
 - The request is broad, ambiguous, or missing concrete acceptance criteria
 - The user says "deep interview", "interview me", "ask me everything", "don't assume", or "ouroboros"
 - The user wants to avoid misaligned implementation from underspecified requirements
-- You need a requirements artifact before handing off to `ralplan`, `autopilot`, `ralph`, or `team`
+- You need a requirements artifact before handing off to `ralplan`, `autopilot`, or a downstream execution/review surface
 </Use_When>
 
 <Do_Not_Use_When>
@@ -30,12 +30,12 @@ Execution quality is usually bottlenecked by intent clarity, not just missing im
 - **Quick (`--quick`)**: fast pre-PRD pass; target threshold `<= 0.30`; max rounds 5
 - **Standard (`--standard`, default)**: full requirement interview; target threshold `<= 0.20`; max rounds 12
 - **Deep (`--deep`)**: high-rigor exploration; target threshold `<= 0.15`; max rounds 20
-- **Autoresearch (`--autoresearch`)**: same interview rigor as Standard, but specialized for `nana autoresearch` launch readiness and `.nana/specs/` mission/sandbox artifact handoff
+- **Autoresearch (`--autoresearch`)**: same interview rigor as Standard, but specialized for autoresearch launch readiness and `.nana/specs/` mission/sandbox artifact handoff
 
 If no flag is provided, use **Standard**.
 
 <Mode_Flags>
-- **`--autoresearch`**: switch the interview into autoresearch-intake mode for `nana autoresearch` handoff. In this mode, the interview should converge on a launch-ready research mission, write canonical artifacts under `.nana/specs/`, and preserve the explicit `refine further` vs `launch` boundary for downstream CLI intake.
+- **`--autoresearch`**: switch the interview into autoresearch-intake mode. In this mode, the interview should converge on a launch-ready research mission, write canonical artifacts under `.nana/specs/`, and preserve the explicit `refine further` vs `launch` boundary for downstream artifact consumers.
 </Mode_Flags>
 </Depth_Profiles>
 
@@ -200,7 +200,7 @@ When threshold is met (or user exits with warning / hard cap):
 
 Spec should include:
 - Metadata (profile, rounds, final ambiguity, threshold, context type)
-- Context snapshot reference/path (for ralplan/team reuse)
+- Context snapshot reference/path (for downstream planning/execution reuse)
 - Clarity breakdown table
 - Intent (why the user wants this)
 - Desired Outcome
@@ -217,7 +217,7 @@ Spec should include:
 
 ### Autoresearch specialization
 
-When the clarified task is specifically about `nana autoresearch`, or the skill is invoked with `--autoresearch`, keep the interview domain-specific and emit launch-consumable artifacts without skipping clarification.
+When the clarified task is specifically about autoresearch, or the skill is invoked with `--autoresearch`, keep the interview domain-specific and emit launch-consumable artifacts without skipping clarification.
 
 - **Accepted seed inputs:** `topic`, `evaluator`, `keep-policy`, `slug`, existing mission draft text, and prior evaluator examples/templates
 - **Required interview focus:** mission clarity, evaluator readiness, keep policy, slug/session naming, and whether the draft is ready to launch now or should refine further
@@ -235,7 +235,7 @@ When the clarified task is specifically about `nana autoresearch`, or the skill 
   - `sandbox.md`
   - `result.json`
 - **Launch-readiness rule:** mark the draft as **not launch-ready** while the evaluator command still contains placeholder markers such as `<...>`, `TODO`, `TBD`, `REPLACE_ME`, `CHANGEME`, or `your-command-here`
-- **Structured result contract:** `result.json` should point to the draft + mission/sandbox artifacts and carry the finalized `topic`, `evaluatorCommand`, `keepPolicy`, `slug`, `launchReady`, and `blockedReasons` fields so `nana autoresearch` can consume it directly
+- **Structured result contract:** `result.json` should point to the draft + mission/sandbox artifacts and carry the finalized `topic`, `evaluatorCommand`, `keepPolicy`, `slug`, `launchReady`, and `blockedReasons` fields so downstream tooling can consume it directly
 - **Confirmation bridge:** after artifact generation, offer at least `refine further` and `launch`; do not launch detached tmux until the user explicitly confirms `launch`
 - **Handoff rule:** downstream execution must preserve the clarified mission intent, evaluator expectations, decision boundaries, and launch-readiness status from this artifact rather than bypassing the draft review step
 
@@ -250,7 +250,7 @@ Present execution options after artifact generation using explicit handoff contr
 - **Skipped / Already-Satisfied Stages:** Requirements discovery, ambiguity clarification, and early intent-boundary elicitation
 - **Expected Output:** Canonical planning artifacts under `.nana/plans/`, especially `prd-*.md` and `test-spec-*.md`
 - **Best When:** Requirements are clear enough to stop interviewing, but architectural validation / consensus planning is still desirable
-- **Next Recommended Step:** Use the approved planning artifacts with `$autopilot`, `$ralph`, or `$team` depending on the desired execution style
+- **Next Recommended Step:** Use the approved planning artifacts with `$autopilot`, direct implementation, `nana review`, or `nana work-on` depending on the desired next step
 
 ### 2. **`$autopilot`**
 - **Input Artifact:** `.nana/specs/deep-interview-{slug}.md`
@@ -259,25 +259,16 @@ Present execution options after artifact generation using explicit handoff contr
 - **Skipped / Already-Satisfied Stages:** Initial requirement discovery and ambiguity reduction
 - **Expected Output:** Planning/execution progress, QA evidence, and validation artifacts produced by autopilot
 - **Best When:** The clarified spec is already strong enough for direct planning + execution without an additional consensus gate
-- **Next Recommended Step:** Continue through autopilot's execution/QA/validation flow; if coordination-heavy execution emerges, prefer a follow-up `$team` or `$ralph` lane as appropriate
+- **Next Recommended Step:** Continue through autopilot's execution/QA/validation flow, or switch to direct implementation / GitHub-oriented surfaces if that is the simpler fit
 
-### 3. **`$ralph`**
+### 3. **Direct implementation / GitHub workflows**
 - **Input Artifact:** `.nana/specs/deep-interview-{slug}.md`
-- **Invocation:** `$ralph <spec-path>`
-- **Consumer Behavior:** Use the spec's acceptance criteria and boundary constraints as the persistence target. Do not reopen requirements discovery unless the user explicitly asks to refine further.
-- **Skipped / Already-Satisfied Stages:** Requirement interview, ambiguity clarification, and initial scope-definition work
-- **Expected Output:** Iterative execution progress and verification evidence tracked against the clarified criteria
-- **Best When:** The task benefits from persistent sequential completion pressure and the user wants execution to keep moving until the criteria are satisfied or a real blocker exists
-- **Next Recommended Step:** Continue Ralph's persistence loop; if work expands into coordination-heavy lanes, hand off to `$team` and keep Ralph for verification continuity
-
-### 4. **`$team`**
-- **Input Artifact:** `.nana/specs/deep-interview-{slug}.md`
-- **Invocation:** `$team <spec-path>`
-- **Consumer Behavior:** Treat the spec as shared execution context for coordinated parallel work. Preserve the clarified intent, non-goals, decision boundaries, and acceptance criteria as common lane constraints.
+- **Invocation:** Continue on the richer normal execution path, `nana review <pr-url>`, or `nana work-on start <issue-or-pr-url>`
+- **Consumer Behavior:** Treat the spec as the current requirements source of truth. Preserve the clarified intent, non-goals, decision boundaries, and acceptance criteria.
 - **Skipped / Already-Satisfied Stages:** Requirement clarification and early ambiguity reduction
-- **Expected Output:** Coordinated multi-agent execution against the shared spec, with evidence that can later feed a Ralph verification pass when appropriate
-- **Best When:** The task is large, multi-lane, or blocker-sensitive enough to justify coordinated parallel execution instead of a single persistent loop
-- **Next Recommended Step:** Follow the team verification path when the coordinated execution phase finishes; escalate to a separate Ralph loop only when a later persistent verification/fix owner is still needed
+- **Expected Output:** Direct implementation progress, GitHub review findings, or GitHub execution artifacts depending on the chosen surface
+- **Best When:** The task is already clear enough for implementation or repository-linked follow-up work without additional workflow fanout
+- **Next Recommended Step:** Continue until the clarified criteria are satisfied, then verify against the spec
 
 ### 5. **Refine further**
 - **Input Artifact:** Existing transcript, context snapshot, and current spec draft
@@ -321,7 +312,7 @@ Present execution options after artifact generation using explicit handoff contr
 - [ ] Transcript written to `.nana/interviews/{slug}-{timestamp}.md`
 - [ ] Spec written to `.nana/specs/deep-interview-{slug}.md`
 - [ ] Brownfield questions use evidence-backed confirmation when applicable
-- [ ] Handoff options provided (`$ralplan`, `$autopilot`, `$ralph`, `$team`)
+- [ ] Handoff options provided (`$ralplan`, `$autopilot`, direct implementation / GitHub surfaces)
 - [ ] No direct implementation performed in this mode
 </Final_Checklist>
 

@@ -174,11 +174,8 @@ export const SKILL_CONTRACTS: GuidanceSurfaceContract[] = [
   'build-fix',
   'code-review',
   'plan',
-  'ralph',
   'ralplan',
   'security-review',
-  'team',
-  'ultraqa',
 ].map((name) => ({
   id: name,
   path: `skills/${name}/SKILL.md`,

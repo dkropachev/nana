@@ -8,7 +8,7 @@ import { Readable } from 'node:stream';
 import { spawnPlatformCommandSync } from '../utils/platform-command.js';
 import { getPackageRoot } from '../utils/package.js';
 
-export type NativeProduct = 'nana-explore-harness' | 'nana-sparkshell';
+export type NativeProduct = 'nana' | 'nana-explore-harness' | 'nana-sparkshell';
 export type NativeLibc = 'musl' | 'glibc';
 
 export interface NativeReleaseAsset {

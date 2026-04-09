@@ -35,7 +35,6 @@ describe('agents/definitions', () => {
     const buildAgents = getAgentsByCategory('build');
     assert.ok(buildAgents.length > 0);
     assert.ok(buildAgents.some((agent) => agent.name === 'executor'));
-    assert.ok(buildAgents.some((agent) => agent.name === 'team-executor'));
 
     const allowed: AgentDefinition['category'][] = [
       'build',
@@ -71,7 +70,6 @@ describe('agents/definitions', () => {
     assert.equal(AGENT_DEFINITIONS.architect.modelClass, 'frontier');
     assert.equal(AGENT_DEFINITIONS['security-reviewer'].modelClass, 'frontier');
     assert.equal(AGENT_DEFINITIONS['test-engineer'].modelClass, 'frontier');
-    assert.equal(AGENT_DEFINITIONS['team-executor'].modelClass, 'frontier');
     assert.equal(AGENT_DEFINITIONS.vision.modelClass, 'frontier');
 
     assert.equal(AGENT_DEFINITIONS.explore.modelClass, 'fast');

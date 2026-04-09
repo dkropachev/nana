@@ -26,19 +26,15 @@
       <ol>
         <li><code>$deep-interview</code> - clarify intent, boundaries, and non-goals when the task is still fuzzy.</li>
         <li><code>$ralplan</code> - approve the plan and tradeoffs before execution.</li>
-        <li><code>$team</code> or <code>$ralph</code> - choose <code>$team</code> for coordinated parallel execution, or <code>$ralph</code> for a persistent completion loop.</li>
+        <li>Continue with direct implementation or GitHub-oriented surfaces like <code>nana review</code> and <code>nana work-on</code>.</li>
       </ol>
 
       <h2>Execution Modes</h2>
       <ul>
-        <li><code>$team</code> - coordinated multi-agent execution for the approved plan</li>
-        <li><code>$ralph</code> - persistence loop until completion</li>
         <li><code>$autopilot</code> - full autonomous execution when you intentionally skip the standard workflow</li>
         <li><code>$ultrawork</code> - max parallel execution</li>
         <li><code>$visual-verdict</code> - structured visual QA loop for screenshot/reference matching</li>
         <li><code>$ecomode</code> - token-efficient model routing</li>
-        <li><code>$ultraqa</code> - test/verify/fix loop</li>
-        <li><code>$swarm</code> - team compatibility facade</li>
       </ul>
 
       <h2>Planning & Clarification</h2>
@@ -66,15 +62,13 @@
         <li><code>$cancel</code>, <code>$doctor</code>, <code>$help</code>, <code>$note</code>, <code>$trace</code></li>
         <li><code>$skill</code></li>
         <li><code>$hud</code>, <code>$nana-setup</code>, <code>$configure-notifications</code></li>
-        <li><code>$ralph-init</code></li>
-        <li><code>$worker</code> (internal) - team worker protocol / lifecycle</li>
       </ul>
 
       <h2>Usage Examples</h2>
       <pre><code>$deep-interview "clarify the auth change"
 $ralplan "approve the auth plan and review tradeoffs"
-$ralph "carry the approved plan to completion"
-$team 3:executor "execute the approved plan in parallel"
+nana review https://github.com/acme/widget/pull/77
+nana work-on start https://github.com/acme/widget/issues/42
 $code-review "review current branch"
 $doctor</code></pre>
 

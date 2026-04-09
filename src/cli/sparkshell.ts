@@ -19,6 +19,7 @@ import {
 } from './native-assets.js';
 
 const NANA_SPARKSHELL_BIN_ENV = SPARKSHELL_BIN_ENV_SHARED;
+const NANA_SPARKSHELL_IMPL_ENV = 'NANA_SPARKSHELL_IMPL';
 
 export const SPARKSHELL_USAGE = [
   'Usage: nana sparkshell <command> [args...]',
@@ -55,6 +56,13 @@ function resolveSignalExitCode(signal: NodeJS.Signals | null): number {
 
 export function sparkshellBinaryName(platform: NodeJS.Platform = process.platform): string {
   return platform === 'win32' ? 'nana-sparkshell.exe' : 'nana-sparkshell';
+}
+
+export function goSparkShellBinaryPath(
+  packageRoot = getPackageRoot(),
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return join(packageRoot, 'bin', 'go', sparkshellBinaryName(platform));
 }
 
 export function packagedSparkShellBinaryPath(
@@ -114,6 +122,11 @@ export function resolveSparkShellBinaryPath(options: ResolveSparkShellBinaryPath
     return isAbsolute(override) ? override : resolve(cwd, override);
   }
 
+  const goShim = goSparkShellBinaryPath(packageRoot, platform);
+  if (env[NANA_SPARKSHELL_IMPL_ENV]?.trim().toLowerCase() === 'go' && exists(goShim)) {
+    return goShim;
+  }
+
   for (const packaged of packagedSparkShellBinaryCandidatePaths(packageRoot, platform, arch, env, linuxLibcPreference)) {
     if (exists(packaged)) return packaged;
   }
@@ -147,6 +160,11 @@ export async function resolveSparkShellBinaryPathWithHydration(
   const override = env[NANA_SPARKSHELL_BIN_ENV]?.trim();
   if (override) {
     return isAbsolute(override) ? override : resolve(cwd, override);
+  }
+
+  const goShim = goSparkShellBinaryPath(packageRoot, platform);
+  if (env[NANA_SPARKSHELL_IMPL_ENV]?.trim().toLowerCase() === 'go' && exists(goShim)) {
+    return goShim;
   }
 
   const version = await getPackageVersion(packageRoot);

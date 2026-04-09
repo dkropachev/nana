@@ -15,14 +15,13 @@ Ultrawork is a parallel execution engine that runs multiple agents simultaneousl
 </Use_When>
 
 <Do_Not_Use_When>
-- Task requires guaranteed completion with verification -- use `ralph` instead (ralph includes ultrawork)
-- Task requires a full autonomous pipeline -- use `autopilot` instead (autopilot includes ralph which includes ultrawork)
+- Task requires a full autonomous pipeline -- use `autopilot` instead
 - There is only one sequential task with no parallelism opportunity -- delegate directly to an executor agent
-- User needs session persistence for resume -- use `ralph` which adds persistence on top of ultrawork
+- User needs persistence or richer lifecycle management -- use a broader execution surface instead
 </Do_Not_Use_When>
 
 <Why_This_Exists>
-Sequential task execution wastes time when tasks are independent. Ultrawork enables firing multiple agents simultaneously and routing each to the right model tier, reducing total execution time while controlling token costs. It is designed as a composable component that ralph and autopilot layer on top of.
+Sequential task execution wastes time when tasks are independent. Ultrawork enables firing multiple agents simultaneously and routing each to the right model tier, reducing total execution time while controlling token costs. It is designed as a composable parallelism component that broader execution flows can layer on top of.
 </Why_This_Exists>
 
 <Execution_Policy>
@@ -110,8 +109,8 @@ Why bad: THOROUGH tier is expensive overkill for a trivial fix. Use LOW-tier exe
 </Examples>
 
 <Escalation_And_Stop_Conditions>
-- When ultrawork is invoked directly (not via ralph), apply lightweight verification only -- build passes, tests pass, no new errors
-- For full persistence and comprehensive architect verification, recommend switching to `ralph` mode
+- When ultrawork is invoked directly, apply lightweight verification only -- build passes, tests pass, no new errors
+- For stronger persistence or broader lifecycle management, recommend switching to a richer execution surface
 - If a task fails repeatedly across retries, report the issue rather than retrying indefinitely
 - Escalate to the user when tasks have unclear dependencies or conflicting requirements
 </Escalation_And_Stop_Conditions>
@@ -127,17 +126,12 @@ Why bad: THOROUGH tier is expensive overkill for a trivial fix. Use LOW-tier exe
 ## Relationship to Other Modes
 
 ```
-ralph (persistence wrapper)
- \-- includes: ultrawork (this skill)
-     \-- provides: parallel execution only
-
 autopilot (autonomous execution)
- \-- includes: ralph
-     \-- includes: ultrawork (this skill)
+ \-- may include: ultrawork (this skill)
 
 ecomode (token efficiency)
  \-- modifies: ultrawork's model selection
 ```
 
-Ultrawork is the parallelism layer. Ralph adds persistence and verification. Autopilot adds the full lifecycle pipeline. Ecomode adjusts ultrawork's model routing to favor cheaper models.
+Ultrawork is the parallelism layer. Autopilot adds the broader lifecycle pipeline. Ecomode adjusts ultrawork's model routing to favor cheaper models.
 </Advanced>

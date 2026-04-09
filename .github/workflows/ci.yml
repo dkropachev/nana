@@ -64,6 +64,17 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm run check:no-unused
 
+  go-smoke:
+    name: Go Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run Go test suite
+        run: go test ./...
+
   test:
     name: Test (Node ${{ matrix.node-version }} / ${{ matrix.lane }})
     runs-on: ubuntu-latest
@@ -73,8 +84,6 @@ jobs:
         include:
           - node-version: 20
             lane: full
-          - node-version: 22
-            lane: smoke
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v6
@@ -83,61 +92,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Run full suite
-        if: matrix.lane == 'full'
         run: npm test
-      - name: Run cross-rebase smoke command
-        if: matrix.lane == 'smoke'
-        run: npm run test:team:cross-rebase-smoke
-      - name: Run remaining smoke suite
-        if: matrix.lane == 'smoke'
-        run: |
-          node --test \
-            dist/cli/__tests__/packaged-script-resolution.test.js \
-            dist/cli/__tests__/package-bin-contract.test.js \
-            dist/cli/__tests__/explore.test.js \
-            dist/cli/__tests__/sparkshell-cli.test.js \
-            dist/hooks/__tests__/explore-routing.test.js \
-            dist/hooks/__tests__/explore-sparkshell-guidance-contract.test.js \
-            dist/scripts/__tests__/smoke-packed-install.test.js \
-            dist/verification/__tests__/explore-harness-release-workflow.test.js \
-            dist/compat/__tests__/*.test.js
-
-  coverage-team-critical:
-    name: Coverage Gate (Team Critical)
-    runs-on: ubuntu-latest
-    needs: [typecheck]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 20
-          cache: npm
-      - run: npm ci
-      - name: Run team/state coverage gate
-        run: npm run coverage:team-critical
-      - name: Add coverage summary to job summary
-        run: |
-          node -e '
-            const fs = require("node:fs");
-            const summary = JSON.parse(fs.readFileSync("coverage/team/coverage-summary.json", "utf8"));
-            const total = summary.total;
-            const lines = [
-              "## Team/State Coverage Summary",
-              "",
-              "| Metric | Pct | Covered / Total |",
-              "|---|---:|---:|",
-              `| Lines | ${total.lines.pct}% | ${total.lines.covered} / ${total.lines.total} |`,
-              `| Functions | ${total.functions.pct}% | ${total.functions.covered} / ${total.functions.total} |`,
-              `| Branches | ${total.branches.pct}% | ${total.branches.covered} / ${total.branches.total} |`,
-              `| Statements | ${total.statements.pct}% | ${total.statements.covered} / ${total.statements.total} |`
-            ];
-            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${lines.join("\n")}\n`);
-          '
-      - name: Upload team coverage artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: team-critical-coverage
-          path: coverage/team/
 
   coverage-ts-full:
     name: Coverage Report (TypeScript Full)
@@ -220,32 +175,10 @@ jobs:
           name: rust-coverage
           path: coverage/rust/
 
-  ralph-persistence-gate:
-    name: Ralph Persistence Gate
-    runs-on: ubuntu-latest
-    needs: [typecheck]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 20
-          cache: npm
-      - run: npm ci
-      - run: npm run build
-      - name: Run Ralph persistence verification matrix
-        run: |
-          node --test \
-            dist/cli/__tests__/session-scoped-runtime.test.js \
-            dist/mcp/__tests__/trace-server.test.js \
-            dist/hud/__tests__/state.test.js \
-            dist/mcp/__tests__/state-server-ralph-phase.test.js \
-            dist/ralph/__tests__/persistence.test.js \
-            dist/verification/__tests__/ralph-persistence-gate.test.js
-
   build:
     name: Build (Full Source Build)
     runs-on: ubuntu-latest
-    needs: [rustfmt, clippy, lint, typecheck, test, ralph-persistence-gate]
+    needs: [rustfmt, clippy, lint, typecheck, go-smoke, test]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v6
@@ -261,7 +194,7 @@ jobs:
     name: CI Status
     if: always()
     runs-on: ubuntu-latest
-    needs: [rustfmt, clippy, lint, typecheck, test, coverage-team-critical, coverage-ts-full, coverage-rust, ralph-persistence-gate, build]
+    needs: [rustfmt, clippy, lint, typecheck, go-smoke, test, coverage-ts-full, coverage-rust, build]
     steps:
       - name: Check required job results
         run: |
@@ -269,22 +202,20 @@ jobs:
              [[ "${{ needs.clippy.result }}" != "success" ]] ||
              [[ "${{ needs.lint.result }}" != "success" ]] ||
              [[ "${{ needs.typecheck.result }}" != "success" ]] ||
+             [[ "${{ needs.go-smoke.result }}" != "success" ]] ||
              [[ "${{ needs.test.result }}" != "success" ]] ||
-             [[ "${{ needs.coverage-team-critical.result }}" != "success" ]] ||
              [[ "${{ needs.coverage-ts-full.result }}" != "success" ]] ||
              [[ "${{ needs.coverage-rust.result }}" != "success" ]] ||
-             [[ "${{ needs.ralph-persistence-gate.result }}" != "success" ]] ||
              [[ "${{ needs.build.result }}" != "success" ]]; then
             echo "::error::One or more required CI jobs failed"
             echo "  rustfmt: ${{ needs.rustfmt.result }}"
             echo "  clippy: ${{ needs.clippy.result }}"
             echo "  lint: ${{ needs.lint.result }}"
             echo "  typecheck: ${{ needs.typecheck.result }}"
+            echo "  go-smoke: ${{ needs.go-smoke.result }}"
             echo "  test: ${{ needs.test.result }}"
-            echo "  coverage-team-critical: ${{ needs.coverage-team-critical.result }}"
             echo "  coverage-ts-full: ${{ needs.coverage-ts-full.result }}"
             echo "  coverage-rust: ${{ needs.coverage-rust.result }}"
-            echo "  ralph-persistence-gate: ${{ needs.ralph-persistence-gate.result }}"
             echo "  build: ${{ needs.build.result }}"
             exit 1
           fi

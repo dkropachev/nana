@@ -20,9 +20,9 @@ describe('catalog schema', () => {
 
   it('enforces required core skills as active', () => {
     const broken = JSON.parse(JSON.stringify(readSourceManifest()));
-    const idx = broken.skills.findIndex((s: { name: string }) => s.name === 'team');
+    const idx = broken.skills.findIndex((s: { name: string }) => s.name === 'autopilot');
     broken.skills[idx].status = 'deprecated';
-    assert.throws(() => validateCatalogManifest(broken), /missing_core_skill:team/);
+    assert.throws(() => validateCatalogManifest(broken), /missing_core_skill:autopilot/);
   });
 
   it('requires canonical for alias/merged skill entries', () => {

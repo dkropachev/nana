@@ -26,6 +26,7 @@ const PROMPT_FLAG = '--prompt';
 const PROMPT_FILE_FLAG = '--prompt-file';
 export const EXPLORE_BIN_ENV = EXPLORE_BIN_ENV_SHARED;
 const EXPLORE_SPARK_MODEL_ENV = 'NANA_EXPLORE_SPARK_MODEL';
+const NANA_EXPLORE_IMPL_ENV = 'NANA_EXPLORE_IMPL';
 
 export interface ParsedExploreArgs {
   prompt?: string;
@@ -159,6 +160,16 @@ export function packagedExploreHarnessBinaryName(platform: NodeJS.Platform = pro
   return platform === 'win32' ? 'nana-explore-harness.exe' : 'nana-explore-harness';
 }
 
+export function resolveGoExploreHarnessCommand(
+  packageRoot = getPackageRoot(),
+  platform: NodeJS.Platform = process.platform,
+): ExploreHarnessCommand {
+  return {
+    command: join(packageRoot, 'bin', 'go', packagedExploreHarnessBinaryName(platform)),
+    args: [],
+  };
+}
+
 export function resolvePackagedExploreHarnessCommand(
   packageRoot = getPackageRoot(),
   platform: NodeJS.Platform = process.platform,
@@ -278,6 +289,11 @@ export function resolveExploreHarnessCommand(
     return { command: isAbsolute(override) ? override : join(packageRoot, override), args: [] };
   }
 
+  const goShim = resolveGoExploreHarnessCommand(packageRoot);
+  if (env[NANA_EXPLORE_IMPL_ENV]?.trim().toLowerCase() === 'go' && existsSync(goShim.command)) {
+    return goShim;
+  }
+
   const packaged = resolvePackagedExploreHarnessCommand(packageRoot);
   if (packaged) return packaged;
 
@@ -302,6 +318,11 @@ export async function resolveExploreHarnessCommandWithHydration(
   const override = env[EXPLORE_BIN_ENV]?.trim();
   if (override) {
     return { command: isAbsolute(override) ? override : join(packageRoot, override), args: [] };
+  }
+
+  const goShim = resolveGoExploreHarnessCommand(packageRoot);
+  if (env[NANA_EXPLORE_IMPL_ENV]?.trim().toLowerCase() === 'go' && existsSync(goShim.command)) {
+    return goShim;
   }
 
   const version = await getPackageVersion(packageRoot);

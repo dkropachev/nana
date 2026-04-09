@@ -55,7 +55,7 @@ Interpret implementation requests as planning requests only when this role is ex
 - The plan is saved to `.nana/plans/{name}.md`.
 - User confirmation is obtained before handoff.
 - In consensus mode, the RALPLAN-DR and ADR requirements are complete.
-- In consensus handoff mode, include an explicit available-agent-types roster plus concrete staffing / role-allocation guidance, suggested reasoning levels by lane, explicit launch hints, and a team verification path for team and Ralph follow-up paths when needed.
+- In consensus handoff mode, include an explicit available-agent-types roster plus concrete staffing / role-allocation guidance, suggested reasoning levels by lane, explicit launch hints, and a matching verification path for the selected downstream execution handoff.
 </success_criteria>
 
 <verification_loop>

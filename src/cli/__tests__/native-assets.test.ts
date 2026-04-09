@@ -198,6 +198,74 @@ describe('native asset helpers', () => {
     }
   });
 
+  it('hydrates the top-level nana binary from the release manifest into the cache', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'nana-native-hydrate-cli-'));
+    const cacheDir = join(wd, 'cache');
+    const assetRoot = join(wd, 'assets');
+    try {
+      await mkdir(assetRoot, { recursive: true });
+      await writeFile(join(wd, 'package.json'), JSON.stringify({
+        version: '0.8.15',
+        repository: { url: 'git+https://github.com/Yeachan-Heo/nana.git' },
+      }));
+
+      const stagingDir = join(wd, 'staging');
+      await mkdir(stagingDir, { recursive: true });
+      const binaryPath = join(stagingDir, process.platform === 'win32' ? 'nana.exe' : 'nana');
+      await writeFile(binaryPath, process.platform === 'win32' ? '@echo off\r\necho hydrated-cli\r\n' : '#!/bin/sh\necho hydrated-cli\n');
+      await chmod(binaryPath, 0o755);
+
+      const archivePath = join(assetRoot, process.platform === 'win32' ? 'nana-x86_64-pc-windows-msvc.zip' : 'nana-x86_64-unknown-linux-musl.tar.gz');
+      const archive = process.platform === 'win32'
+        ? spawnSync('powershell', ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', `Compress-Archive -LiteralPath '${binaryPath.replace(/'/g, "''")}' -DestinationPath '${archivePath.replace(/'/g, "''")}' -Force`], { encoding: 'utf-8' })
+        : spawnSync('tar', ['-czf', archivePath, '-C', stagingDir, 'nana'], { encoding: 'utf-8' });
+      assert.equal(archive.status, 0, archive.stderr || archive.stdout);
+      const archiveBuffer = await readFile(archivePath);
+
+      const manifest = {
+        version: '0.8.15',
+        tag: 'v0.8.15',
+        assets: [
+          {
+            product: 'nana',
+            version: '0.8.15',
+            platform: process.platform === 'win32' ? 'win32' : 'linux',
+            arch: 'x64',
+            archive: archivePath.split('/').pop()!,
+            binary: process.platform === 'win32' ? 'nana.exe' : 'nana',
+            binary_path: process.platform === 'win32' ? 'nana.exe' : 'nana',
+            sha256: sha256(archiveBuffer),
+            size: archiveBuffer.length,
+            download_url: '',
+          },
+        ],
+      };
+
+      const server = await startStaticServer(assetRoot);
+      try {
+        manifest.assets[0].download_url = `${server.baseUrl}/${manifest.assets[0].archive}`;
+        await writeFile(join(assetRoot, 'native-release-manifest.json'), JSON.stringify(manifest, null, 2));
+
+        const hydrated = await hydrateNativeBinary('nana', {
+          packageRoot: wd,
+          env: {
+            NANA_NATIVE_MANIFEST_URL: `${server.baseUrl}/native-release-manifest.json`,
+            NANA_NATIVE_CACHE_DIR: cacheDir,
+          },
+          platform: process.platform === 'win32' ? 'win32' : 'linux',
+          arch: 'x64',
+        });
+
+        assert.ok(hydrated, 'expected hydrated nana binary path');
+        assert.match(hydrated!, /nana/);
+      } finally {
+        await server.close();
+      }
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
   it('hydrates a native binary when the archive wraps files in a top-level directory', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'nana-native-hydrate-nested-'));
     const cacheDir = join(wd, 'cache');

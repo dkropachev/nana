@@ -58,9 +58,9 @@ The consensus workflow:
    d. Return to Critic evaluation
    e. Repeat this loop until Critic returns `APPROVE` or 5 iterations are reached
    f. If 5 iterations are reached without `APPROVE`, present the best version to the user
-6. On Critic approval *(--interactive only)*: If `--interactive` is set, use `AskUserQuestion` to present the plan with approval options (Approve and execute via ralph / Approve and implement via team / Request changes / Reject). Final plan must include ADR (Decision, Drivers, Alternatives considered, Why chosen, Consequences, Follow-ups), an explicit available-agent-types roster, concrete follow-up staffing guidance for both `ralph` and `team`, suggested reasoning levels by lane, explicit `nana team` / `$team` launch hints, and a concrete **team verification** path. Otherwise, output the final plan and stop.
-7. *(--interactive only)* User chooses: Approve (ralph or team), Request changes, or Reject
-8. *(--interactive only)* On approval: invoke `$ralph` for sequential execution or `$team` for parallel team execution with the explicit available-agent-types roster, reasoning-by-lane guidance, role/staffing allocation guidance, launch hints, and verification-path guidance from the approved plan -- never implement directly
+6. On Critic approval *(--interactive only)*: If `--interactive` is set, use `AskUserQuestion` to present the plan with approval options (Approve and execute / Approve and continue with GitHub flow / Request changes / Reject). Final plan must include ADR (Decision, Drivers, Alternatives considered, Why chosen, Consequences, Follow-ups), an explicit available-agent-types roster, concrete follow-up staffing guidance for the selected downstream path, suggested reasoning levels by lane, explicit downstream launch hints, and a matching verification path. Otherwise, output the final plan and stop.
+7. *(--interactive only)* User chooses: Approve and execute, Approve and continue with GitHub flow, Request changes, or Reject
+8. *(--interactive only)* On approval: continue into the selected downstream execution surface with the explicit available-agent-types roster, reasoning-by-lane guidance, role/staffing allocation guidance, launch hints, and verification-path guidance from the approved plan -- never implement directly
 
 > **Important:** Steps 3 and 4 MUST run sequentially. Do NOT issue both agent calls in the same parallel batch. Always await the Architect result before invoking Critic.
 
@@ -87,7 +87,7 @@ Do not hand off to execution modes until this intake is complete; if urgency for
 
 ### Why the Gate Exists
 
-Execution modes (ralph, autopilot, team, ultrawork) spin up heavy multi-agent orchestration. When launched on a vague request like "ralph improve the app", agents have no clear target — they waste cycles on scope discovery that should happen during planning, often delivering partial or misaligned work that requires rework.
+Heavy execution modes (autopilot, ultrawork, and similar high-fanout execution paths) spin up substantial orchestration. When launched on a vague request like "autopilot improve the app", agents have no clear target — they waste cycles on scope discovery that should happen during planning, often delivering partial or misaligned work that requires rework.
 
 The ralplan-first gate intercepts underspecified execution requests and redirects them through the ralplan consensus planning workflow. This ensures:
 - **Explicit scope**: A PRD defines exactly what will be built
@@ -98,21 +98,21 @@ The ralplan-first gate intercepts underspecified execution requests and redirect
 ### Good vs Bad Prompts
 
 **Passes the gate** (specific enough for direct execution):
-- `ralph fix the null check in src/hooks/bridge.ts:326`
+- `autopilot fix the null check in src/hooks/bridge.ts:326`
 - `autopilot implement issue #42`
-- `team add validation to function processKeywordDetector`
-- `ralph do:\n1. Add input validation\n2. Write tests\n3. Update README`
+- `autopilot add validation to function processKeywordDetector`
+- `autopilot do:\n1. Add input validation\n2. Write tests\n3. Update README`
 - `ultrawork add the user model in src/models/user.ts`
 
 **Gated — redirected to ralplan** (needs scoping first):
-- `ralph fix this`
+- `autopilot fix this`
 - `autopilot build the app`
-- `team improve performance`
-- `ralph add authentication`
+- `ultrawork improve performance`
+- `autopilot add authentication`
 - `ultrawork make it better`
 
 **Bypass the gate** (when you know what you want):
-- `force: ralph refactor the auth module`
+- `force: autopilot refactor the auth module`
 - `! autopilot optimize everything`
 
 ### When the Gate Does NOT Trigger
@@ -121,30 +121,30 @@ The gate auto-passes when it detects **any** concrete signal. You do not need al
 
 | Signal Type | Example prompt | Why it passes |
 |---|---|---|
-| File path | `ralph fix src/hooks/bridge.ts` | References a specific file |
-| Issue/PR number | `ralph implement #42` | Has a concrete work item |
-| camelCase symbol | `ralph fix processKeywordDetector` | Names a specific function |
-| PascalCase symbol | `ralph update UserModel` | Names a specific class |
-| snake_case symbol | `team fix user_model` | Names a specific identifier |
-| Test runner | `ralph npm test && fix failures` | Has an explicit test target |
-| Numbered steps | `ralph do:\n1. Add X\n2. Test Y` | Structured deliverables |
-| Acceptance criteria | `ralph add login - acceptance criteria: ...` | Explicit success definition |
-| Error reference | `ralph fix TypeError in auth` | Specific error to address |
-| Code block | `ralph add: \`\`\`ts ... \`\`\`` | Concrete code provided |
-| Escape prefix | `force: ralph do it` or `! ralph do it` | Explicit user override |
+| File path | `autopilot fix src/hooks/bridge.ts` | References a specific file |
+| Issue/PR number | `autopilot implement #42` | Has a concrete work item |
+| camelCase symbol | `autopilot fix processKeywordDetector` | Names a specific function |
+| PascalCase symbol | `autopilot update UserModel` | Names a specific class |
+| snake_case symbol | `autopilot fix user_model` | Names a specific identifier |
+| Test runner | `autopilot npm test && fix failures` | Has an explicit test target |
+| Numbered steps | `autopilot do:\n1. Add X\n2. Test Y` | Structured deliverables |
+| Acceptance criteria | `autopilot add login - acceptance criteria: ...` | Explicit success definition |
+| Error reference | `autopilot fix TypeError in auth` | Specific error to address |
+| Code block | `autopilot add: \`\`\`ts ... \`\`\`` | Concrete code provided |
+| Escape prefix | `force: autopilot do it` or `! autopilot do it` | Explicit user override |
 
 ### End-to-End Flow Example
 
-1. User types: `ralph add user authentication`
-2. Gate detects: execution keyword (`ralph`) + underspecified prompt (no files, functions, or test spec)
+1. User types: `autopilot add user authentication`
+2. Gate detects: execution keyword (`autopilot`) + underspecified prompt (no files, functions, or test spec)
 3. Gate redirects to **ralplan** with message explaining the redirect
 4. Ralplan consensus runs:
    - **Planner** creates initial plan (which files, what auth method, what tests)
    - **Architect** reviews for soundness
    - **Critic** validates quality and testability
 5. On consensus approval, user chooses execution path:
-   - **ralph**: sequential execution with verification
-   - **team**: parallel coordinated agents
+   - **direct implementation**
+   - **GitHub flow (`nana review` / `nana work-on`)**
 6. Execution begins with a clear, bounded plan
 
 ### Troubleshooting
@@ -152,7 +152,7 @@ The gate auto-passes when it detects **any** concrete signal. You do not need al
 | Issue | Solution |
 |-------|----------|
 | Gate fires on a well-specified prompt | Add a file reference, function name, or issue number to anchor the request |
-| Want to bypass the gate | Prefix with `force:` or `!` (e.g., `force: ralph fix it`) |
+| Want to bypass the gate | Prefix with `force:` or `!` (e.g., `force: autopilot fix it`) |
 | Gate does not fire on a vague prompt | The gate only catches prompts with <=15 effective words and no concrete anchors; add more detail or use `$ralplan` explicitly |
 | Redirected to ralplan but want to skip planning | In the ralplan workflow, say "just do it" or "skip planning" to transition directly to execution |
 

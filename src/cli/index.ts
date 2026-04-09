@@ -12,9 +12,9 @@ import { uninstall } from "./uninstall.js";
 import { version } from "./version.js";
 import { hooksCommand } from "./hooks.js";
 import { hudCommand } from "../hud/index.js";
-import { ralphCommand } from "./ralph.js";
 import {
   githubCommand,
+  githubPullReviewCommand,
   githubReviewRulesCommand,
   investigateGithubTarget,
   resolveGithubRunIdForTargetUrl,
@@ -26,8 +26,6 @@ import { agentsInitCommand } from "./agents-init.js";
 import { agentsCommand } from "./agents.js";
 import { askCommand } from "./ask.js";
 import { sessionCommand } from "./session-search.js";
-import { autoresearchCommand } from "./autoresearch.js";
-import { teamCommand } from "./team.js";
 import {
   MADMAX_FLAG,
   CODEX_BYPASS_FLAG,
@@ -109,6 +107,32 @@ export function resolveNotifyFallbackWatcherScript(pkgRoot = getPackageRoot()): 
   return join(pkgRoot, "dist", "scripts", "notify-fallback-watcher.js");
 }
 
+export function resolveGoCliBinaryPath(
+  pkgRoot = getPackageRoot(),
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return join(pkgRoot, "bin", platform === "win32" ? "nana.exe" : "nana");
+}
+
+export function shouldDelegateToGoCLI(
+  env: NodeJS.ProcessEnv = process.env,
+  options: {
+    pkgRoot?: string;
+    exists?: (path: string) => boolean;
+    platform?: NodeJS.Platform;
+  } = {},
+): boolean {
+  if (env[NANA_GO_SHIM_ACTIVE_ENV] === "1") return false;
+  if (env[NANA_IMPL_ENV]?.trim().toLowerCase() !== "go") return false;
+  const exists = options.exists ?? existsSync;
+  return exists(
+    resolveGoCliBinaryPath(
+      options.pkgRoot ?? getPackageRoot(),
+      options.platform ?? process.platform,
+    ),
+  );
+}
+
 export function resolveHookDerivedWatcherScript(pkgRoot = getPackageRoot()): string {
   return join(pkgRoot, "dist", "scripts", "hook-derived-watcher.js");
 }
@@ -127,16 +151,15 @@ Usage:
   nana uninstall Remove NANA configuration and clean up installed artifacts
   nana doctor    Check installation health
   nana cleanup   Kill orphaned NANA MCP server processes and remove stale NANA /tmp directories
-  nana doctor --team  Check team/swarm runtime health diagnostics
   nana auth pull Pull credentials from legacy ~/.codex/auth.json into the resolved NANA Codex home
   nana ask <claude|gemini> ...  Run a local provider advisor prompt
   nana implement <issue-url>    Alias for: nana issue implement <issue-url>
   nana investigate <issue-url>  Alias for: nana issue investigate <issue-url>
   nana sync [flags]             Alias for: nana issue sync [flags]
   nana issue     GitHub issue-centric aliases for implement/investigate/sync
+  nana review    Review an external GitHub PR with automatic onboarding
   nana review-rules  Mine PR review history into repo-scoped persistent rules
   nana work-on   Launch GitHub-targeted issue/PR implementation and review sync
-  nana team      Launch or manage coordinated team execution
   nana resume    Resume a previous interactive Codex session
   nana reflect   Default read-only reflection entrypoint (may adaptively use sparkshell backend)
   nana session   Search prior local session transcripts and history artifacts
@@ -145,9 +168,6 @@ Usage:
   nana agents    Manage Codex native agent TOML files
   nana deepinit [path]
                 Alias for agents-init (lightweight AGENTS bootstrap only)
-  nana ralph     Launch Codex with ralph persistence mode active
-  nana autoresearch  Launch thin-supervisor autoresearch with keep/discard/reset parity
-  nana research  Launch thin-supervisor autoresearch with keep/discard/reset parity
   nana version   Show version information
   nana hooks     Manage hook plugins (init|status|validate|test)
   nana hud       Show HUD statusline (--watch, --json, --preset=NAME)
@@ -168,10 +188,6 @@ Options:
                 (shorthand for: -c model_reasoning_effort="xhigh")
   --madmax      DANGEROUS: bypass Codex approvals and sandbox
                 (alias for --dangerously-bypass-approvals-and-sandbox)
-  --spark       Use the Codex spark model (~1.3x faster) for team workers only
-                Workers get the configured low-complexity team model; leader model unchanged
-  --madmax-spark  spark model for workers + bypass approvals for leader and workers
-                (shorthand for: --spark --madmax)
   --notify-temp  Enable temporary notification routing for this run/session only
   --discord      Select Discord provider for temporary notification mode
   --slack        Select Slack provider for temporary notification mode
@@ -196,6 +212,8 @@ const REASONING_KEY = "model_reasoning_effort";
 const MODEL_INSTRUCTIONS_FILE_KEY = "model_instructions_file";
 const TEAM_WORKER_LAUNCH_ARGS_ENV = "NANA_TEAM_WORKER_LAUNCH_ARGS";
 const TEAM_INHERIT_LEADER_FLAGS_ENV = "NANA_TEAM_INHERIT_LEADER_FLAGS";
+const NANA_IMPL_ENV = "NANA_IMPL";
+const NANA_GO_SHIM_ACTIVE_ENV = "NANA_GO_SHIM_ACTIVE";
 const NANA_BYPASS_DEFAULT_SYSTEM_PROMPT_ENV = "NANA_BYPASS_DEFAULT_SYSTEM_PROMPT";
 const NANA_MODEL_INSTRUCTIONS_FILE_ENV = "NANA_MODEL_INSTRUCTIONS_FILE";
 const NANA_RALPH_APPEND_INSTRUCTIONS_FILE_ENV =
@@ -235,8 +253,8 @@ type CliCommand =
   | "investigate"
   | "sync"
   | "issue"
+  | "review"
   | "review-rules"
-  | "team"
   | "setup"
   | "agents"
   | "agents-init"
@@ -263,19 +281,16 @@ const NESTED_HELP_COMMANDS = new Set<CliCommand>([
   "investigate",
   "sync",
   "issue",
+  "review",
   "review-rules",
-  "team",
-  "research",
   "agents",
   "agents-init",
   "deepinit",
   "exec",
   "ask",
-  "team",
   "work-on",
   "hooks",
   "hud",
-  "ralph",
   "reflect",
   "resume",
   "session",
@@ -610,14 +625,11 @@ export function resolveCliInvocation(args: string[]): ResolvedCliInvocation {
   if (firstArg === "issue") {
     return { command: "issue", launchArgs: [] };
   }
-  if (firstArg === "team") {
-    return { command: "team", launchArgs: [] };
+  if (firstArg === "review") {
+    return { command: "review", launchArgs: [] };
   }
   if (firstArg === "review-rules") {
     return { command: "review-rules", launchArgs: [] };
-  }
-  if (firstArg === "autoresearch") {
-    return { command: "research", launchArgs: [] };
   }
   if (firstArg === "resume") {
     return { command: "resume", launchArgs: args.slice(1) };
@@ -637,6 +649,15 @@ export function resolveNotifyTempContract(
 
 export function commandOwnsLocalHelp(command: CliCommand): boolean {
   return NESTED_HELP_COMMANDS.has(command);
+}
+
+function isRemovedCommand(command: CliCommand): boolean {
+  return (
+    command === "team" ||
+    command === "ralph" ||
+    command === "research" ||
+    command === "autoresearch"
+  );
 }
 
 export type CodexLaunchPolicy = "inside-tmux" | "detached-tmux" | "direct";
@@ -832,6 +853,28 @@ export function buildHudPaneCleanupTargets(
 }
 
 export async function main(args: string[]): Promise<void> {
+  if (shouldDelegateToGoCLI(process.env)) {
+    const goBinaryPath = resolveGoCliBinaryPath();
+    const { result } = spawnPlatformCommandSync(goBinaryPath, args, {
+      cwd: process.cwd(),
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        [NANA_GO_SHIM_ACTIVE_ENV]: "1",
+      },
+      encoding: "utf-8",
+    });
+    if (result.error) {
+      throw result.error;
+    }
+    if (typeof result.status === "number" && result.status !== 0) {
+      process.exitCode = result.status;
+    } else if (result.signal) {
+      process.exitCode = resolveSignalExitCode(result.signal);
+    }
+    return;
+  }
+
   const knownCommands = new Set([
     "launch",
     "exec",
@@ -841,7 +884,7 @@ export async function main(args: string[]): Promise<void> {
     "investigate",
     "sync",
     "issue",
-    "team",
+    "review",
     "setup",
     "agents",
     "agents-init",
@@ -850,11 +893,8 @@ export async function main(args: string[]): Promise<void> {
     "doctor",
     "cleanup",
     "work-on",
-    "autoresearch",
-    "research",
     "reflect",
     "sparkshell",
-    "ralph",
     "session",
     "resume",
     "version",
@@ -876,7 +916,7 @@ export async function main(args: string[]): Promise<void> {
     team: flags.has("--team"),
   };
 
-  if (flags.has("--help") && !commandOwnsLocalHelp(command)) {
+  if (flags.has("--help") && !commandOwnsLocalHelp(command) && !isRemovedCommand(command)) {
     console.log(HELP);
     return;
   }
@@ -889,11 +929,10 @@ export async function main(args: string[]): Promise<void> {
       "implement",
       "investigate",
       "sync",
+      "review",
       "work-on",
-    "issue",
-    "review-rules",
-    "research",
-      "ralph",
+      "issue",
+      "review-rules",
     ]);
     if (launchBootstrapCommands.has(command)) {
       const bootstrap = await bootstrapResolvedCodexAuth(process.cwd(), process.env);
@@ -928,8 +967,8 @@ export async function main(args: string[]): Promise<void> {
       case "issue":
         await issueCommand(args.slice(1));
         break;
-      case "team":
-        await teamCommand(args.slice(1));
+      case "review":
+        await githubPullReviewCommand(args.slice(1));
         break;
       case "review-rules":
         await reviewRulesCommand(args.slice(1));
@@ -971,9 +1010,6 @@ export async function main(args: string[]): Promise<void> {
       case "cleanup":
         await cleanupCommand(args.slice(1));
         break;
-      case "research":
-        await autoresearchCommand(args.slice(1));
-        break;
       case "reflect":
         await exploreCommand(args.slice(1));
         break;
@@ -985,9 +1021,6 @@ export async function main(args: string[]): Promise<void> {
         break;
       case "session":
         await sessionCommand(args.slice(1));
-        break;
-      case "ralph":
-        await ralphCommand(args.slice(1));
         break;
       case "version":
         version();
@@ -1012,6 +1045,11 @@ export async function main(args: string[]): Promise<void> {
       case "-h":
         console.log(HELP);
         break;
+      case "team":
+      case "ralph":
+      case "research":
+      case "autoresearch":
+        throw new Error(`Removed command: ${command}`);
       default:
         if (
           firstArg &&

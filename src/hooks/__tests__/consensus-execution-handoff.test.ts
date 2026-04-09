@@ -3,7 +3,7 @@
  *
  * Verifies that the plan skill's consensus mode (ralplan) mandates:
  * 1. Structured AskUserQuestion for approval (not plain text)
- * 2. Explicit $ralph invocation on approval
+ * 2. Explicit downstream execution handoff on approval
  * 3. Prohibition of direct implementation from the planning agent
  * 4. User feedback step after Planner but before Architect/Critic
  * 5. RALPLAN-DR short mode and deliberate mode requirements
@@ -58,12 +58,12 @@ describe('Consensus mode execution handoff (plan/SKILL.md)', () => {
     );
   });
 
-  it('should mandate $ralph invocation for execution on user approval', () => {
+  it('should mandate explicit downstream handoff for execution on user approval', () => {
     const consensusSection = extractSection(planSkill, 'Consensus Mode');
     assert.ok(consensusSection, 'Consensus Mode section should exist');
     assert.ok(
-      consensusSection.includes('$ralph'),
-      'Consensus mode should reference $ralph invocation'
+      consensusSection.includes('nana review') || consensusSection.includes('nana work-on') || consensusSection.includes('direct implementation'),
+      'Consensus mode should reference explicit downstream execution handoff'
     );
   });
 
@@ -71,8 +71,8 @@ describe('Consensus mode execution handoff (plan/SKILL.md)', () => {
     const consensusSection = extractSection(planSkill, 'Consensus Mode');
     assert.ok(consensusSection, 'Consensus Mode section should exist');
     assert.ok(
-      /MUST.*\$ralph/s.test(consensusSection) || /\$ralph.*MUST/s.test(consensusSection),
-      'Consensus mode should use MUST language around $ralph invocation'
+      /MUST.*available-agent-types roster/s.test(consensusSection) || /MUST.*execution handoff/s.test(consensusSection),
+      'Consensus mode should use MUST language around execution handoff'
     );
   });
 
@@ -107,10 +107,10 @@ describe('Consensus mode execution handoff (plan/SKILL.md)', () => {
     assert.ok(reviewSection.includes('Evaluate via Critic'));
   });
 
-  it('should reference $ralph in Escalation section', () => {
+  it('should reference an explicit execution handoff in the escalation section', () => {
     assert.ok(
-      planSkill.includes('$ralph'),
-      'plan/SKILL.md should reference $ralph for execution handoff'
+      planSkill.includes('nana review') || planSkill.includes('nana work-on') || planSkill.includes('direct implementation'),
+      'plan/SKILL.md should reference explicit downstream execution handoff'
     );
   });
 
@@ -142,8 +142,8 @@ describe('Consensus mode execution handoff (plan/SKILL.md)', () => {
     assert.match(consensusSection, /available-agent-types roster/i);
     assert.match(consensusSection, /staffing guidance|role allocation/i);
     assert.match(consensusSection, /reasoning levels? by lane|suggested reasoning/i);
-    assert.match(consensusSection, /nana team|launch hint/i);
-    assert.match(consensusSection, /team verification path/i);
+    assert.match(consensusSection, /launch hint|nana review|nana work-on/i);
+    assert.match(consensusSection, /verification path/i);
   });
 
   it('should mention deliberate mode requirements in consensus mode', () => {
@@ -281,12 +281,12 @@ describe('RALPLAN-DR in ralplan/SKILL.md', () => {
     );
   });
 
-  it('should document roster-aware team and ralph follow-up guidance', () => {
+  it('should document roster-aware downstream follow-up guidance', () => {
     assert.match(ralplanSkill, /available-agent-types roster/i);
     assert.match(ralplanSkill, /staffing guidance|role\/staffing allocation/i);
     assert.match(ralplanSkill, /reasoning levels? by lane|reasoning-by-lane/i);
-    assert.match(ralplanSkill, /nana team|launch hints?/i);
-    assert.match(ralplanSkill, /team verification/i);
+    assert.match(ralplanSkill, /nana review|nana work-on|launch hints?/i);
+    assert.match(ralplanSkill, /verification path/i);
   });
 });
 
@@ -321,12 +321,12 @@ describe('Architect prompt RALPLAN-DR sections', () => {
 });
 
 describe('Planner prompt follow-up staffing guidance', () => {
-  it('should require roster-aware staffing guidance for team and ralph handoff', () => {
+  it('should require roster-aware staffing guidance for downstream execution handoff', () => {
     assert.match(plannerPrompt, /available-agent-types roster/i);
-    assert.match(plannerPrompt, /team and ralph follow-up paths/i);
+    assert.match(plannerPrompt, /selected downstream path|execution handoff/i);
     assert.match(plannerPrompt, /reasoning levels? by lane|suggested reasoning/i);
     assert.match(plannerPrompt, /launch hints?/i);
-    assert.match(plannerPrompt, /team verification path/i);
+    assert.match(plannerPrompt, /verification path/i);
   });
 });
 

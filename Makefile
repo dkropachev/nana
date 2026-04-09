@@ -8,16 +8,18 @@ PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 NANA_BIN ?= $(BINDIR)/nana
 REPO_ROOT := $(abspath .)
-NANA_ENTRY := $(REPO_ROOT)/dist/cli/nana.js
+NANA_ENTRY := $(REPO_ROOT)/bin/nana
 
-.PHONY: help build build-full test test-node check lint verify install uninstall run setup doctor clean
+.PHONY: help build build-go build-full test test-go test-node check lint verify install uninstall run setup doctor clean
 
 help:
 	@printf '%s\n' \
 		'Targets:' \
 		'  build       Build dist/cli/nana.js' \
+		'  build-go    Build the Go CLI to bin/nana' \
 		'  build-full  Build JS plus native explore/sparkshell assets' \
 		'  test        Run the repo test suite' \
+		'  test-go     Run the Go test suite' \
 		'  test-node   Run node-based tests only' \
 		'  check       Run unused-symbol/type checks' \
 		'  lint        Run biome lint' \
@@ -32,11 +34,17 @@ help:
 build:
 	$(NPM) run build
 
+build-go:
+	$(NPM) run build:go
+
 build-full:
 	$(NPM) run build:full
 
 test:
 	$(NPM) test
+
+test-go:
+	$(NPM) run test:go
 
 test-node:
 	$(NPM) run test:node
@@ -52,22 +60,21 @@ verify: build
 	$(NPM) run check:no-unused
 	$(NPM) run lint
 
-install: build
+install: build-go
 	$(INSTALL) -d "$(BINDIR)"
-	@printf '%s\n' '#!/bin/sh' 'exec "$(NODE)" "$(NANA_ENTRY)" "$$@"' > "$(NANA_BIN)"
-	chmod 0755 "$(NANA_BIN)"
+	$(INSTALL) "$(NANA_ENTRY)" "$(NANA_BIN)"
 
 uninstall:
 	rm -f "$(NANA_BIN)"
 
-run: build
+run: build-go
 	"$(NANA_BIN)" $(ARGS)
 
-setup: build
-	$(NODE) dist/cli/nana.js setup $(ARGS)
+setup: build-go
+	"$(NANA_ENTRY)" setup $(ARGS)
 
-doctor: build
-	$(NODE) dist/cli/nana.js doctor $(ARGS)
+doctor: build-go
+	"$(NANA_ENTRY)" doctor $(ARGS)
 
 clean:
 	rm -rf dist

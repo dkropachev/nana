@@ -99,47 +99,6 @@ switch (command.command) {
 }
 
 describe('rust runtime legacy-reader compatibility', () => {
-  it('keeps team status on the manifest-authored compatibility view', async () => {
-    const wd = await mkdtemp(join(tmpdir(), 'nana-rust-compat-team-'));
-    try {
-      const teamStateRoot = join(wd, '.nana', 'state');
-      await withTempTeamStateRoot(teamStateRoot, async () => {
-        await initTeamState('rust-compat-team', 'compatibility lane', 'executor', 1, wd);
-
-        const teamDir = join(teamStateRoot, 'team', 'rust-compat-team');
-        const configPath = join(teamDir, 'config.json');
-        const manifestPath = join(teamDir, 'manifest.v2.json');
-        const config = JSON.parse(await readFile(configPath, 'utf-8')) as Record<string, unknown>;
-        const manifest = JSON.parse(await readFile(manifestPath, 'utf-8')) as Record<string, unknown>;
-
-        config.workspace_mode = 'single';
-        config.tmux_session = 'nana-team-legacy-rust-compat-team';
-        manifest.workspace_mode = 'worktree';
-        manifest.tmux_session = 'nana-team-rust-compat-team';
-
-        await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
-        await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-
-        const result = runNana(wd, ['team', 'status', 'rust-compat-team', '--json'], { NANA_TEAM_STATE_ROOT: teamStateRoot });
-        if (shouldSkipForSpawnPermissions(result.error)) return;
-
-        assert.equal(result.status, 0, result.stderr || result.stdout);
-        const payload = JSON.parse(result.stdout) as {
-          command?: string;
-          team_name?: string;
-          status?: string;
-          workspace_mode?: string | null;
-        };
-        assert.equal(payload.command, 'nana team status');
-        assert.equal(payload.team_name, 'rust-compat-team');
-        assert.equal(payload.status, 'ok');
-        assert.equal(payload.workspace_mode, 'worktree');
-      });
-    } finally {
-      await rm(wd, { recursive: true, force: true });
-    }
-  });
-
   it('keeps doctor --team on the manifest-authored tmux session', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'nana-rust-compat-doctor-'));
     try {

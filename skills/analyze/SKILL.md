@@ -26,7 +26,7 @@ Examples:
 
 ## Do not use when
 
-- User wants code changes made — use `$ralph` or executor instead
+- User wants code changes made — use direct implementation or an executor instead
 - User wants a full plan with acceptance criteria — use `$plan` instead
 - User wants a quick file lookup — use explore agent instead
 - User asks a simple factual question answerable from one file — just read and answer
@@ -79,17 +79,16 @@ Down-rank a hypothesis when:
 - it makes no distinctive prediction compared with rivals
 - a stronger alternative explains the same facts with fewer assumptions
 
-## Team-mode orchestration (when using $team)
+## Multi-lane investigation pattern
 
-For complex investigations, use `$team` to run parallel tracer lanes:
+For complex investigations, use multiple deliberately different tracer lanes:
 
 1. Restate the observed result or "why" question precisely
 2. Generate multiple deliberately different candidate hypotheses
-3. Spawn **3 tracer lanes** via `$team`
-4. Assign one lane per hypothesis
-5. Each lane gathers evidence **for** and **against** its hypothesis
-6. Run a **rebuttal round** between the leading hypothesis and the strongest alternative
-7. Merge findings into a ranked synthesis
+3. Assign one lane per hypothesis
+4. Each lane gathers evidence **for** and **against** its hypothesis
+5. Run a **rebuttal round** between the leading hypothesis and the strongest alternative
+6. Merge findings into a ranked synthesis
 
 ### Default hypothesis lanes
 
@@ -136,7 +135,7 @@ After the initial evidence pass, pressure-test with these lenses when relevant:
 3. **Generate hypotheses**: At least 2-3 competing explanations
 4. **Route to analyzer**:
    - For simple cases: investigate directly with file reads and reasoning
-   - For complex cases: use `$team` with tracer lanes
+   - For complex cases: use multiple tracer lanes on the richer normal path
    - Use `ask_codex` with `agent_role: "architect"` when available
 5. **Falsify**: Try to break your own best hypothesis
 6. **Return structured findings**: Present with evidence, file references, and actionable recommendations

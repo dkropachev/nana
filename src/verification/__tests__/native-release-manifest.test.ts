@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 describe('native release manifest generator', () => {
-  it('annotates Linux libc variants and sorts musl assets before glibc fallbacks', async () => {
+  it('annotates Linux libc variants, includes supplemental Go CLI assets, and sorts musl assets before glibc fallbacks', async () => {
     const root = await mkdtemp(join(tmpdir(), 'nana-native-release-manifest-'));
     try {
       const artifactsDir = join(root, 'artifacts');
@@ -18,6 +18,17 @@ describe('native release manifest generator', () => {
       await writeFile(join(artifactsDir, `${muslArchive}.sha256`), 'musl-checksum\n');
       await writeFile(join(artifactsDir, glibcArchive), 'glibc');
       await writeFile(join(artifactsDir, `${glibcArchive}.sha256`), 'glibc-checksum\n');
+      await writeFile(join(artifactsDir, 'nana-x86_64-apple-darwin.zip'), 'go-cli');
+      await writeFile(join(artifactsDir, 'nana-x86_64-apple-darwin.metadata.json'), JSON.stringify({
+        product: 'nana',
+        version: '0.10.2',
+        target: 'x86_64-apple-darwin',
+        archive: 'nana-x86_64-apple-darwin.zip',
+        binary: 'nana',
+        binary_path: 'nana',
+        sha256: 'go-cli-checksum',
+        size: 6,
+      }, null, 2));
 
       const planPath = join(root, 'dist-plan.json');
       await writeFile(planPath, JSON.stringify({
@@ -73,18 +84,23 @@ describe('native release manifest generator', () => {
       assert.equal(result.status, 0, result.stderr || result.stdout);
 
       const manifest = JSON.parse(await readFile(outputPath, 'utf-8')) as {
-        assets: Array<{ archive: string; libc?: string; target?: string }>;
+        assets: Array<{ archive: string; libc?: string; target?: string; product: string }>;
       };
+      const nanaAsset = manifest.assets.find((asset) => asset.product === 'nana');
+      assert.ok(nanaAsset);
+      assert.equal(nanaAsset?.product, 'nana');
+      assert.equal(nanaAsset?.archive, 'nana-x86_64-apple-darwin.zip');
+      assert.equal(nanaAsset?.target, 'x86_64-apple-darwin');
       assert.deepEqual(
-        manifest.assets.map((asset) => asset.archive),
+        manifest.assets.filter((asset) => asset.product === 'nana-sparkshell').map((asset) => asset.archive),
         [muslArchive, glibcArchive],
       );
       assert.deepEqual(
-        manifest.assets.map((asset) => asset.libc),
+        manifest.assets.filter((asset) => asset.product === 'nana-sparkshell').map((asset) => asset.libc),
         ['musl', 'glibc'],
       );
       assert.deepEqual(
-        manifest.assets.map((asset) => asset.target),
+        manifest.assets.filter((asset) => asset.product === 'nana-sparkshell').map((asset) => asset.target),
         ['x86_64-unknown-linux-musl', 'x86_64-unknown-linux-gnu'],
       );
     } finally {

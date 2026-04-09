@@ -14,7 +14,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { classifyTaskSize, isHeavyMode, type TaskSizeResult, type TaskSizeThresholds } from './task-size-detector.js';
-import { isApprovedExecutionFollowupShortcut, type FollowupMode } from '../team/followup-planner.js';
 import { isPlanningComplete, readPlanningArtifacts } from '../planning/artifacts.js';
 import { KEYWORD_TRIGGER_DEFINITIONS, compareKeywordMatches } from './keyword-registry.js';
 
@@ -120,23 +119,6 @@ const KEYWORD_MAP: Array<{ pattern: RegExp; skill: string; priority: number }> =
   priority: entry.priority,
 }));
 
-const KEYWORDS_REQUIRING_INTENT = new Set(['team', 'swarm']);
-
-const TEAM_SWARM_INTENT_PATTERNS: Record<'team' | 'swarm', RegExp[]> = {
-  team: [
-    /(?:^|[^\w])\$(?:team)\b/i,
-    /\/prompts:team\b/i,
-    /\b(?:use|run|start|enable|launch|invoke|activate|orchestrate|coordinate)\s+(?:a\s+|an\s+|the\s+)?team\b/i,
-    /\bteam\s+(?:mode|orchestration|workflow|agents?)\b/i,
-  ],
-  swarm: [
-    /(?:^|[^\w])\$(?:swarm)\b/i,
-    /\/prompts:swarm\b/i,
-    /\b(?:use|run|start|enable|launch|invoke|activate|orchestrate|coordinate)\s+(?:a\s+|an\s+|the\s+)?swarm\b/i,
-    /\bswarm\s+(?:mode|orchestration|workflow|agents?)\b/i,
-  ],
-};
-
 function hasExplicitPromptsInvocation(text: string): boolean {
   return /(?:^|\s)\/prompts:[\w.-]+(?=[\s.,!?;:]|$)/i.test(text);
 }
@@ -152,7 +134,7 @@ function extractExplicitSkillInvocations(text: string): KeywordMatch[] {
     const token = (match[1] ?? '').toLowerCase();
     if (!token) continue;
 
-    const normalizedSkill = token === 'swarm' ? 'team' : token;
+    const normalizedSkill = token;
     const registryEntry = KEYWORD_TRIGGER_DEFINITIONS.find((entry) => entry.skill.toLowerCase() === normalizedSkill);
     if (!registryEntry) continue;
 
@@ -177,12 +159,6 @@ function extractExplicitSkillInvocations(text: string): KeywordMatch[] {
   return results;
 }
 
-function hasIntentContextForKeyword(text: string, keyword: string): boolean {
-  if (!KEYWORDS_REQUIRING_INTENT.has(keyword.toLowerCase())) return true;
-  const k = keyword.toLowerCase() as 'team' | 'swarm';
-  return TEAM_SWARM_INTENT_PATTERNS[k].some((pattern) => pattern.test(text));
-}
-
 /**
  * Detect keywords in user input text
  * Returns explicit `$skill` matches first (left-to-right),
@@ -202,7 +178,6 @@ export function detectKeywords(text: string): KeywordMatch[] {
   for (const { pattern, skill, priority } of KEYWORD_MAP) {
     const match = text.match(pattern);
     if (match) {
-      if (!hasIntentContextForKeyword(text, match[0].toLowerCase())) continue;
       implicit.push({
         keyword: match[0],
         skill,
@@ -309,9 +284,7 @@ export async function recordSkillActivation(input: RecordSkillActivationInput): 
  * These modes spin up heavy orchestration and should not run on vague requests.
  */
 export const EXECUTION_GATE_KEYWORDS = new Set<string>([
-  'ralph',
   'autopilot',
-  'team',
   'ultrawork',
 ]);
 
@@ -375,7 +348,7 @@ export function isUnderspecifiedForExecution(text: string): boolean {
 
   // Strip mode keywords for effective word counting
   const stripped = trimmed
-    .replace(/\b(?:ralph|autopilot|team|ultrawork|ulw|swarm)\b/gi, '')
+    .replace(/\b(?:autopilot|ultrawork|ulw)\b/gi, '')
     .trim();
   const effectiveWords = stripped.split(/\s+/).filter(w => w.length > 0).length;
 
@@ -426,22 +399,7 @@ export function applyRalplanGate(
     return { keywords, gateApplied: false, gatedKeywords: [] };
   }
 
-  const planningComplete = isPlanningComplete(readPlanningArtifacts(options.cwd ?? process.cwd()));
-  const shortFollowupBypasses = executionKeywords.filter((keyword) => {
-    const normalizedKeyword = keyword === 'swarm' ? 'team' : keyword;
-    if (normalizedKeyword !== 'team' && normalizedKeyword !== 'ralph') return false;
-    return isApprovedExecutionFollowupShortcut(
-      normalizedKeyword as FollowupMode,
-      text,
-      {
-        planningComplete,
-        priorSkill: options.priorSkill,
-      },
-    );
-  });
-  if (shortFollowupBypasses.length > 0) {
-    return { keywords, gateApplied: false, gatedKeywords: [] };
-  }
+  void isPlanningComplete(readPlanningArtifacts(options.cwd ?? process.cwd()));
 
   // Gate: replace execution keywords with ralplan
   const filtered = keywords.filter(k => !EXECUTION_GATE_KEYWORDS.has(k));
@@ -468,7 +426,7 @@ export interface TaskSizeFilterOptions {
 
 /**
  * Get all keywords with task-size-based filtering applied.
- * For small tasks, heavy orchestration modes (ralph/autopilot/team/ultrawork etc.)
+ * For small tasks, heavy orchestration modes (autopilot/ultrawork/ralplan etc.)
  * are suppressed to avoid over-orchestration.
  */
 export function getAllKeywordsWithSizeCheck(

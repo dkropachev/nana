@@ -197,17 +197,11 @@ The code-reviewer agent checks:
 
 ## Use with Other Skills
 
-**With Team:**
+**With GitHub Review:**
+```bash
+nana review https://github.com/acme/widget/pull/77
 ```
-/team "review recent auth changes and report findings"
-```
-Includes coordinated review execution across specialized agents.
-
-**With Ralph:**
-```
-/ralph code-review then fix all issues
-```
-Review code, get feedback, fix until approved.
+Use persisted PR review when the target is an external GitHub pull request.
 
 **With Ultrawork:**
 ```

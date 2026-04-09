@@ -30,18 +30,6 @@ const EXECUTOR_AGENT: AgentDefinition = {
   category: 'build',
 };
 
-const TEAM_EXECUTOR_AGENT: AgentDefinition = {
-  name: 'team-executor',
-  description: 'Supervised team execution for conservative delivery lanes',
-  deliveryClass: 'executor',
-  reasoningEffort: 'medium',
-  posture: 'deep-worker',
-  modelClass: 'frontier',
-  routingRole: 'executor',
-  tools: 'execution',
-  category: 'build',
-};
-
 export const AGENT_DEFINITIONS: Record<string, AgentDefinition> = {
   // Build/Analysis Lane
   'explore': {
@@ -100,7 +88,6 @@ export const AGENT_DEFINITIONS: Record<string, AgentDefinition> = {
     category: 'build',
   },
   'executor': EXECUTOR_AGENT,
-  'team-executor': TEAM_EXECUTOR_AGENT,
   'verifier': {
     name: 'verifier',
     description: 'Completion evidence, claim validation, test adequacy',

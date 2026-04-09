@@ -130,8 +130,6 @@ Default posture: work directly.
 Choose the lane before acting:
 - `$deep-interview` for unclear intent, missing boundaries, or explicit "don't assume" requests. This mode clarifies and hands off; it does not implement.
 - `$ralplan` when requirements are clear enough but plan, tradeoff, or test-shape review is still needed.
-- `$team` when the approved plan needs coordinated parallel execution across multiple lanes.
-- `$ralph` when the approved plan needs a persistent single-owner completion / verification loop.
 - **Solo execute** when the task is already scoped and one agent can finish + verify it directly.
 
 Delegate only when it materially improves quality, speed, or safety. Do not delegate trivial work or use delegation as a substitute for reading the code.
@@ -198,20 +196,17 @@ Specialists remain available through advanced role surfaces such as `/prompts:*`
 When the user message contains a mapped keyword, activate the corresponding skill immediately.
 Do not ask for confirmation.
 
-Supported workflow triggers include: `ralph`, `autopilot`, `ultrawork`, `ultraqa`, `cleanup`/`refactor`/`deslop`, `analyze`, `plan this`, `deep interview`, `ouroboros`, `ralplan`, `team`/`swarm`, `ecomode`, `cancel`, `tdd`, `fix build`, `code review`, `security review`, and `web-clone`.
+Supported workflow triggers include: `autopilot`, `ultrawork`, `cleanup`/`refactor`/`deslop`, `analyze`, `plan this`, `deep interview`, `ouroboros`, `ralplan`, `ecomode`, `cancel`, `tdd`, `fix build`, `code review`, `security review`, and `web-clone`.
 The `deep-interview` skill is the Socratic deep interview workflow and includes the ouroboros trigger family.
 
 | Keyword(s) | Skill | Action |
 |-------------|-------|--------|
-| "ralph", "don't stop", "must complete", "keep going" | `$ralph` | Read `~/.codex/skills/ralph/SKILL.md`, execute persistence loop |
 | "autopilot", "build me", "I want a" | `$autopilot` | Read `~/.codex/skills/autopilot/SKILL.md`, execute autonomous pipeline |
 | "ultrawork", "ulw", "parallel" | `$ultrawork` | Read `~/.codex/skills/ultrawork/SKILL.md`, execute parallel agents |
-| "ultraqa" | `$ultraqa` | Read `~/.codex/skills/ultraqa/SKILL.md`, run QA cycling workflow |
 | "analyze", "investigate" | `$analyze` | Read `~/.codex/skills/analyze/SKILL.md`, run deep analysis |
 | "plan this", "plan the", "let's plan" | `$plan` | Read `~/.codex/skills/plan/SKILL.md`, start planning workflow |
 | "interview", "deep interview", "gather requirements", "interview me", "don't assume", "ouroboros" | `$deep-interview` | Read `~/.codex/skills/deep-interview/SKILL.md`, run Ouroboros-inspired Socratic ambiguity-gated interview workflow |
 | "ralplan", "consensus plan" | `$ralplan` | Read `~/.codex/skills/ralplan/SKILL.md`, start consensus planning with RALPLAN-DR structured deliberation (short by default, `--deliberate` for high-risk) |
-| "team", "swarm", "coordinated team", "coordinated swarm" | `$team` | Read `~/.codex/skills/team/SKILL.md`, start team orchestration (swarm compatibility alias) |
 | "ecomode", "eco", "budget" | `$ecomode` | Read `~/.codex/skills/ecomode/SKILL.md`, enable token-efficient mode |
 | "cancel", "stop", "abort" | `$cancel` | Read `~/.codex/skills/cancel/SKILL.md`, cancel active modes |
 | "tdd", "test first" | `$tdd` | Read `~/.codex/skills/tdd/SKILL.md`, start test-driven workflow |
@@ -227,8 +222,7 @@ Detection rules:
 - If the user explicitly invokes `/prompts:<name>`, do not auto-activate keyword skills unless explicit `$name` tokens are also present.
 - The rest of the user message becomes the task description.
 
-Ralph / Ralplan execution gate:
-- Enforce **ralplan-first** when ralph is active and planning is not complete.
+Ralplan execution gate:
 - Planning is complete only after both `.nana/plans/prd-*.md` and `.nana/plans/test-spec-*.md` exist.
 - Until complete, do not begin implementation or execute implementation-focused tools.
 </keyword_detection>
@@ -237,25 +231,21 @@ Ralph / Ralplan execution gate:
 
 <skills>
 Skills are workflow commands.
-Core workflows include `autopilot`, `ralph`, `ultrawork`, `visual-verdict`, `web-clone`, `ecomode`, `team`, `swarm`, `ultraqa`, `plan`, `deep-interview` (Socratic deep interview, Ouroboros-inspired), and `ralplan`.
+Core workflows include `autopilot`, `ultrawork`, `visual-verdict`, `web-clone`, `ecomode`, `plan`, `deep-interview` (Socratic deep interview, Ouroboros-inspired), and `ralplan`.
 Utilities include `cancel`, `note`, `doctor`, `help`, and `trace`.
 </skills>
 
 ---
 
 <team_compositions>
-Common team compositions remain available when explicit team orchestration is warranted, for example feature development, bug investigation, code review, and UX audit.
+Common multi-lane execution patterns remain available internally when explicit coordination is warranted.
 </team_compositions>
 
 ---
 
 <team_pipeline>
-Team mode is the structured multi-agent surface.
-Canonical pipeline:
-`team-plan -> team-prd -> team-exec -> team-verify -> team-fix (loop)`
-
-Use it when durable staged coordination is worth the overhead. Otherwise, stay direct.
-Terminal states: `complete`, `failed`, `cancelled`.
+Internal staged coordination may still use `team-plan -> team-prd -> team-exec -> team-verify -> team-fix (loop)` state naming.
+User-facing execution should stay on direct implementation, `nana review`, or `nana work-on`.
 </team_pipeline>
 
 ---
@@ -298,8 +288,6 @@ Verification loop: identify what proves the claim, run the verification, read th
 Mode selection:
 - Use `$deep-interview` first when the request is broad, intent/boundaries are unclear, or the user says not to assume.
 - Use `$ralplan` when the requirements are clear enough but architecture, tradeoffs, or test strategy still need consensus.
-- Use `$team` when the approved plan has multiple independent lanes, shared blockers, or durable coordination needs.
-- Use `$ralph` when the approved plan should stay in a persistent completion / verification loop with one owner.
 - Otherwise execute directly in solo mode.
 - Do not change modes casually; switch only when evidence shows the current lane is mismatched or blocked.
 
@@ -338,7 +326,7 @@ Parallelization:
 - If correctness depends on retrieval, diagnostics, tests, or other tools, continue using them until the task is grounded and verified.
 
 Anti-slop workflow:
-- Cleanup/refactor/deslop work still follows the same `$deep-interview` -> `$ralplan` -> `$team`/`$ralph` path; use `$ai-slop-cleaner` as a bounded helper inside the chosen execution lane, not as a competing top-level workflow.
+- Cleanup/refactor/deslop work still follows the same `$deep-interview` -> `$ralplan` -> execution path; use `$ai-slop-cleaner` as a bounded helper inside the chosen execution lane, not as a competing top-level workflow.
 - Lock behavior with tests first, then make one smell-focused pass at a time.
 - Prefer deletion, reuse, and boundary repair over new layers.
 - Keep writer/reviewer pass separation for cleanup plans and approvals.
@@ -350,8 +338,8 @@ Visual iteration gate:
 Continuation:
 Before concluding, confirm: no pending work, features working, tests passing, zero known errors, verification evidence collected. If not, continue.
 
-Ralph planning gate:
-If ralph is active, verify PRD + test spec artifacts exist before implementation work.
+Planning gate:
+Verify PRD + test spec artifacts exist before implementation work when a planning workflow requires them.
 </execution_protocols>
 
 <cancellation>

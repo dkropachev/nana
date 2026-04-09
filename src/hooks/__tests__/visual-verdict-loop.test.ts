@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const visualVerdictSkill = readFileSync(join(__dirname, '../../../skills/visual-verdict/SKILL.md'), 'utf-8');
-const ralphSkill = readFileSync(join(__dirname, '../../../skills/ralph/SKILL.md'), 'utf-8');
+const rootAgents = readFileSync(join(__dirname, '../../../AGENTS.md'), 'utf-8');
 
 describe('visual-verdict skill contract', () => {
   it('documents required JSON fields', () => {
@@ -22,19 +22,14 @@ describe('visual-verdict skill contract', () => {
   });
 });
 
-describe('ralph visual loop integration guidance', () => {
-  it('requires running $visual-verdict before next edit', () => {
-    assert.match(ralphSkill, /\$visual-verdict/);
-    assert.match(ralphSkill, /before every next edit/i);
+describe('visual loop guidance on surviving surfaces', () => {
+  it('requires running $visual-verdict before the next edit', () => {
+    assert.match(rootAgents, /\$visual-verdict/);
+    assert.match(rootAgents, /every iteration before the next edit/i);
   });
 
-  it('documents -i and --images-dir flags', () => {
-    assert.match(ralphSkill, /-i <image-path>/);
-    assert.match(ralphSkill, /--images-dir <directory>/);
-  });
-
-  it('requires persisting visual feedback to ralph-progress ledger', () => {
-    assert.match(ralphSkill, /ralph-progress\.json/);
-    assert.match(ralphSkill, /numeric \+ qualitative feedback/i);
+  it('persists visual feedback to the ralph-progress ledger path', () => {
+    assert.match(rootAgents, /ralph-progress\.json/);
+    assert.match(rootAgents, /Persist verdict JSON/i);
   });
 });

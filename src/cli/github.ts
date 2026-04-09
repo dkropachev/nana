@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { chmod, lstat, mkdir, readFile, readlink, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
@@ -11,6 +11,7 @@ import { isSessionStale, readSessionState } from '../hooks/session.js';
 import { getPackageRoot } from '../utils/package.js';
 import { defaultUserCodexHome } from '../utils/paths.js';
 import { CODEX_BYPASS_FLAG } from './constants.js';
+import { classifySpawnError, spawnPlatformCommandSync } from '../utils/platform-command.js';
 import {
   resolveConcernMatchForFiles,
   resolveGithubConcernRegistry,
@@ -66,6 +67,21 @@ Override shapes:
 
 Auth:
   Uses GH_TOKEN / GITHUB_TOKEN when set, otherwise falls back to \`gh auth token\`.
+`;
+
+export const GITHUB_REVIEW_HELP = `nana review - Review an external GitHub PR with deterministic persistence
+
+Usage:
+  nana review <github-pr-url> [--mode automatic|manual] [--reviewer <login|@me>] [--per-item-context shared|isolated]
+  nana review followup <github-pr-url> [--allow-open]
+  nana review help
+
+Behavior:
+  - automatically onboards the repo into ~/.nana/repos/<owner>/<repo> when needed
+  - automatically resumes an unfinished review run when the same PR already has one
+  - persists accepted, user-dropped, not-real, and pre-existing findings separately
+  - manual mode opens an editable markdown review file and loops until no argue items remain
+  - followup prints findings that predated the reviewed PR and fails when the PR is still open unless --allow-open is passed
 `;
 
 type GithubTargetKind = 'issue' | 'pr';
@@ -432,6 +448,138 @@ export interface GithubWorkonManifest {
   pr_base_repo?: string;
 }
 
+type GithubPullReviewMode = 'automatic' | 'manual';
+type GithubPullReviewPerItemContext = 'shared' | 'isolated';
+type GithubPullReviewStatus = 'running' | 'awaiting-manual' | 'completed';
+type GithubPullReviewFindingSeverity = 'critical' | 'high' | 'medium' | 'low';
+type GithubPullReviewFindingBucket = 'accepted' | 'user_dropped' | 'not_real' | 'preexisting';
+
+interface GithubPullReviewFinding {
+  id: string;
+  fingerprint: string;
+  title: string;
+  severity: GithubPullReviewFindingSeverity;
+  path: string;
+  line?: number;
+  summary: string;
+  detail: string;
+  fix: string;
+  rationale: string;
+  changed_in_pr: boolean;
+  changed_line_in_pr: boolean;
+  main_permalink?: string;
+  pr_permalink?: string;
+  iteration: number;
+  evidence?: string[];
+  user_explanation?: string;
+}
+
+interface GithubPullReviewManifest {
+  version: 1;
+  run_id: string;
+  created_at: string;
+  updated_at: string;
+  status: GithubPullReviewStatus;
+  repo_slug: string;
+  repo_owner: string;
+  repo_name: string;
+  managed_repo_root: string;
+  source_path: string;
+  review_root: string;
+  review_file_path?: string;
+  mode: GithubPullReviewMode;
+  per_item_context: GithubPullReviewPerItemContext;
+  reviewer_login: string;
+  target_url: string;
+  target_number: number;
+  target_title: string;
+  target_state: string;
+  default_branch: string;
+  default_branch_sha: string;
+  pr_head_ref: string;
+  pr_head_sha: string;
+  pr_base_ref: string;
+  pr_base_sha: string;
+  posted_review_id?: number;
+  posted_review_url?: string;
+  posted_review_event?: 'APPROVE' | 'REQUEST_CHANGES';
+  iteration: number;
+}
+
+interface GithubPullReviewActiveState {
+  version: 1;
+  run_id: string;
+  status: GithubPullReviewStatus;
+  updated_at: string;
+}
+
+interface GithubPullReviewAiCandidate {
+  title: string;
+  severity: GithubPullReviewFindingSeverity;
+  path: string;
+  line?: number;
+  summary: string;
+  detail: string;
+  fix?: string;
+  rationale?: string;
+}
+
+interface GithubPullReviewAiCandidateResponse {
+  findings: GithubPullReviewAiCandidate[];
+}
+
+interface GithubPullReviewAiValidationItem {
+  candidate_index: number;
+  verdict: 'accepted' | 'not_real' | 'preexisting';
+  summary?: string;
+  detail?: string;
+  fix?: string;
+  rationale?: string;
+  explanation?: string;
+}
+
+interface GithubPullReviewAiValidationResponse {
+  items: GithubPullReviewAiValidationItem[];
+}
+
+interface GithubReviewCommand {
+  subcommand: 'review';
+  target: ParsedGithubTargetUrl;
+  mode: GithubPullReviewMode;
+  reviewer: string;
+  perItemContext: GithubPullReviewPerItemContext;
+}
+
+interface GithubReviewFollowupCommand {
+  subcommand: 'followup';
+  target: ParsedGithubTargetUrl;
+  allowOpen: boolean;
+}
+
+interface GithubReviewHelpCommand {
+  subcommand: 'help';
+}
+
+type ParsedGithubReviewArgs =
+  | GithubReviewCommand
+  | GithubReviewFollowupCommand
+  | GithubReviewHelpCommand;
+
+interface GithubPullReviewCommandDependencies {
+  fetchImpl?: typeof fetch;
+  writeLine?: (line: string) => void;
+  now?: () => Date;
+  env?: NodeJS.ProcessEnv;
+  execFileSyncImpl?: typeof execFileSync;
+  homeDir?: string;
+  codexExec?: (prompt: string, options: {
+    cwd: string;
+    codexArgs?: string[];
+    env: NodeJS.ProcessEnv;
+  }) => Promise<string>;
+  openEditor?: (path: string, options?: { cwd?: string; editor?: string }) => Promise<void>;
+}
+
 interface GithubStartCommand {
   subcommand: 'start';
   target: ParsedGithubTargetUrl;
@@ -567,6 +715,24 @@ interface GithubRunPaths {
   manifestPath: string;
   startInstructionsPath: string;
   feedbackInstructionsPath: string;
+}
+
+interface GithubPullReviewPaths {
+  prRoot: string;
+  activePath: string;
+  runsDir: string;
+}
+
+interface GithubPullReviewRunPaths {
+  runDir: string;
+  manifestPath: string;
+  reviewFilePath: string;
+  manualPendingPath: string;
+  candidatesPath: string;
+  acceptedPath: string;
+  droppedUserPath: string;
+  droppedNotRealPath: string;
+  droppedPreexistingPath: string;
 }
 
 interface GithubVerificationSourceFile {
@@ -1241,6 +1407,23 @@ function parseReviewRulesMode(value: string | undefined, flag = '--review-rules-
   throw new Error(`Invalid ${flag} value: ${value}. Expected one of manual, automatic.\n${GITHUB_HELP}`);
 }
 
+function parsePullReviewMode(value: string | undefined, flag = '--mode'): GithubPullReviewMode {
+  const raw = value?.trim().toLowerCase();
+  if (!raw) throw new Error(`Missing value after ${flag}.\n${GITHUB_REVIEW_HELP}`);
+  if (raw === 'manual' || raw === 'automatic') return raw;
+  throw new Error(`Invalid ${flag} value: ${value}. Expected one of manual, automatic.\n${GITHUB_REVIEW_HELP}`);
+}
+
+function parsePullReviewPerItemContext(
+  value: string | undefined,
+  flag = '--per-item-context',
+): GithubPullReviewPerItemContext {
+  const raw = value?.trim().toLowerCase();
+  if (!raw) throw new Error(`Missing value after ${flag}.\n${GITHUB_REVIEW_HELP}`);
+  if (raw === 'shared' || raw === 'isolated') return raw;
+  throw new Error(`Invalid ${flag} value: ${value}. Expected one of shared, isolated.\n${GITHUB_REVIEW_HELP}`);
+}
+
 function parseLoginList(value: string | undefined, flag: string): string[] {
   const raw = value?.trim();
   if (!raw) throw new Error(`Missing value after ${flag}.\n${GITHUB_HELP}`);
@@ -1744,6 +1927,84 @@ export function parseGithubArgs(args: readonly string[]): ParsedGithubArgs {
   throw new Error(`Unknown work-on subcommand: ${first}.\n${GITHUB_HELP}`);
 }
 
+export function parseGithubReviewArgs(args: readonly string[]): ParsedGithubReviewArgs {
+  const values = [...args];
+  const first = values[0];
+  if (!first || isHelpToken(first)) return { subcommand: 'help' };
+
+  if (first === 'followup') {
+    const rawTarget = values[1];
+    if (!rawTarget || rawTarget.startsWith('-')) {
+      throw new Error(`Usage: nana review followup <github-pr-url> [--allow-open]\n\n${GITHUB_REVIEW_HELP}`);
+    }
+    const target = parseGithubTargetUrl(rawTarget);
+    if (target.targetKind !== 'pr') {
+      throw new Error(`nana review followup expects a pull request URL.\n${GITHUB_REVIEW_HELP}`);
+    }
+    let allowOpen = false;
+    for (let index = 2; index < values.length; index += 1) {
+      const token = values[index];
+      if (isHelpToken(token)) return { subcommand: 'help' };
+      if (token === '--allow-open') {
+        allowOpen = true;
+        continue;
+      }
+      throw new Error(`Unknown review followup option: ${token}\n${GITHUB_REVIEW_HELP}`);
+    }
+    return { subcommand: 'followup', target, allowOpen };
+  }
+
+  const target = parseGithubTargetUrl(first);
+  if (target.targetKind !== 'pr') {
+    throw new Error(`nana review expects a pull request URL.\n${GITHUB_REVIEW_HELP}`);
+  }
+  let mode: GithubPullReviewMode = 'automatic';
+  let reviewer = '@me';
+  let perItemContext: GithubPullReviewPerItemContext = 'shared';
+  for (let index = 1; index < values.length; index += 1) {
+    const token = values[index];
+    if (isHelpToken(token)) return { subcommand: 'help' };
+    if (token === '--mode') {
+      mode = parsePullReviewMode(values[index + 1], '--mode');
+      index += 1;
+      continue;
+    }
+    if (token.startsWith('--mode=')) {
+      mode = parsePullReviewMode(token.slice('--mode='.length), '--mode');
+      continue;
+    }
+    if (token === '--reviewer') {
+      reviewer = values[index + 1]?.trim() || '';
+      if (!reviewer) throw new Error(`Missing value after --reviewer.\n${GITHUB_REVIEW_HELP}`);
+      index += 1;
+      continue;
+    }
+    if (token.startsWith('--reviewer=')) {
+      reviewer = token.slice('--reviewer='.length).trim();
+      if (!reviewer) throw new Error(`Missing value after --reviewer.\n${GITHUB_REVIEW_HELP}`);
+      continue;
+    }
+    if (token === '--per-item-context') {
+      perItemContext = parsePullReviewPerItemContext(values[index + 1], '--per-item-context');
+      index += 1;
+      continue;
+    }
+    if (token.startsWith('--per-item-context=')) {
+      perItemContext = parsePullReviewPerItemContext(token.slice('--per-item-context='.length), '--per-item-context');
+      continue;
+    }
+    throw new Error(`Unknown review option: ${token}\n${GITHUB_REVIEW_HELP}`);
+  }
+
+  return {
+    subcommand: 'review',
+    target,
+    mode,
+    reviewer,
+    perItemContext,
+  };
+}
+
 function normalizeLogin(login: string | undefined): string | undefined {
   const trimmed = login?.trim();
   if (!trimmed) return undefined;
@@ -1897,6 +2158,31 @@ function githubRunPaths(repoRoot: string, runId: string): GithubRunPaths {
     manifestPath: join(runDir, 'manifest.json'),
     startInstructionsPath: join(runDir, 'start-instructions.md'),
     feedbackInstructionsPath: join(runDir, 'feedback-instructions.md'),
+  };
+}
+
+function githubPullReviewPaths(repoRoot: string, prNumber: number): GithubPullReviewPaths {
+  const prRoot = join(repoRoot, 'reviews', `pr-${prNumber}`);
+  return {
+    prRoot,
+    activePath: join(prRoot, 'active.json'),
+    runsDir: join(prRoot, 'runs'),
+  };
+}
+
+function githubPullReviewRunPaths(repoRoot: string, prNumber: number, runId: string): GithubPullReviewRunPaths {
+  const reviewPaths = githubPullReviewPaths(repoRoot, prNumber);
+  const runDir = join(reviewPaths.runsDir, runId);
+  return {
+    runDir,
+    manifestPath: join(runDir, 'manifest.json'),
+    reviewFilePath: join(runDir, 'review.md'),
+    manualPendingPath: join(runDir, 'manual-pending.json'),
+    candidatesPath: join(runDir, 'candidates.json'),
+    acceptedPath: join(runDir, 'accepted.json'),
+    droppedUserPath: join(runDir, 'dropped-user.json'),
+    droppedNotRealPath: join(runDir, 'dropped-not-real.json'),
+    droppedPreexistingPath: join(runDir, 'dropped-preexisting.json'),
   };
 }
 
@@ -9966,6 +10252,985 @@ export async function githubCommand(
   }
 
   await syncGithubWorkon(parsed, deps);
+}
+
+function buildPullReviewRunId(now: Date): string {
+  return `gr-${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizePullReviewSeverity(value: string | undefined): GithubPullReviewFindingSeverity {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === 'critical' || normalized === 'high' || normalized === 'medium' || normalized === 'low') {
+    return normalized;
+  }
+  return 'medium';
+}
+
+function buildPullReviewFindingFingerprint(input: {
+  title: string;
+  path: string;
+  line?: number;
+  summary: string;
+}): string {
+  return createHash('sha1')
+    .update([
+      input.path.trim().toLowerCase(),
+      String(input.line ?? ''),
+      input.title.trim().toLowerCase(),
+      input.summary.trim().toLowerCase(),
+    ].join('\n'))
+    .digest('hex');
+}
+
+async function readPullReviewManifest(manifestPath: string): Promise<GithubPullReviewManifest> {
+  return JSON.parse(await readFile(manifestPath, 'utf-8')) as GithubPullReviewManifest;
+}
+
+async function writePullReviewManifest(paths: GithubPullReviewRunPaths, manifest: GithubPullReviewManifest): Promise<void> {
+  await mkdir(paths.runDir, { recursive: true });
+  await writeJsonFile(paths.manifestPath, manifest);
+}
+
+async function writePullReviewActive(paths: GithubPullReviewPaths, active: GithubPullReviewActiveState): Promise<void> {
+  await mkdir(paths.prRoot, { recursive: true });
+  await writeJsonFile(paths.activePath, active);
+}
+
+async function clearPullReviewActive(paths: GithubPullReviewPaths): Promise<void> {
+  await rm(paths.activePath, { force: true });
+}
+
+async function readPullReviewBucket(path: string): Promise<GithubPullReviewFinding[]> {
+  return (await readJsonFile<GithubPullReviewFinding[]>(path)) ?? [];
+}
+
+async function writePullReviewBucket(path: string, findings: readonly GithubPullReviewFinding[]): Promise<void> {
+  await writeJsonFile(path, findings);
+}
+
+async function loadPersistedPullReviewBuckets(
+  reviewPaths: GithubPullReviewPaths,
+): Promise<{
+  userDropped: Map<string, GithubPullReviewFinding>;
+  notReal: Map<string, GithubPullReviewFinding>;
+  preexisting: Map<string, GithubPullReviewFinding>;
+}> {
+  const userDropped = new Map<string, GithubPullReviewFinding>();
+  const notReal = new Map<string, GithubPullReviewFinding>();
+  const preexisting = new Map<string, GithubPullReviewFinding>();
+  if (!existsSync(reviewPaths.runsDir)) {
+    return { userDropped, notReal, preexisting };
+  }
+  const entries = await readdir(reviewPaths.runsDir, { withFileTypes: true });
+  const runIds = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+  const prNumber = Number.parseInt(reviewPaths.prRoot.split('pr-').pop() || '', 10);
+  const repoRoot = dirname(dirname(reviewPaths.prRoot));
+  for (const runId of runIds) {
+    const runPaths = githubPullReviewRunPaths(repoRoot, prNumber, runId);
+    for (const finding of await readPullReviewBucket(runPaths.droppedUserPath)) userDropped.set(finding.fingerprint, finding);
+    for (const finding of await readPullReviewBucket(runPaths.droppedNotRealPath)) notReal.set(finding.fingerprint, finding);
+    for (const finding of await readPullReviewBucket(runPaths.droppedPreexistingPath)) preexisting.set(finding.fingerprint, finding);
+  }
+  return { userDropped, notReal, preexisting };
+}
+
+async function resolveActivePullReviewRun(
+  paths: GithubPullReviewPaths,
+): Promise<{ active: GithubPullReviewActiveState; manifest: GithubPullReviewManifest; runPaths: GithubPullReviewRunPaths } | null> {
+  const active = await readJsonFile<GithubPullReviewActiveState>(paths.activePath);
+  if (!active?.run_id) return null;
+  const runPaths = githubPullReviewRunPaths(dirname(dirname(paths.prRoot)), Number.parseInt(paths.prRoot.split('pr-').pop() || '', 10), active.run_id);
+  if (!existsSync(runPaths.manifestPath)) return null;
+  const manifest = await readPullReviewManifest(runPaths.manifestPath);
+  return { active, manifest, runPaths };
+}
+
+function escapeMarkdownText(value: string): string {
+  return value.replace(/[*_`]/g, '').trim();
+}
+
+function convertBackticksToItalics(value: string): string {
+  return value.replace(/`([^`]+)`/g, '*$1*');
+}
+
+function renderFindingReference(finding: Pick<GithubPullReviewFinding, 'path' | 'line'>): string {
+  return finding.line != null ? `${finding.path}:${finding.line}` : finding.path;
+}
+
+function renderFindingLink(finding: Pick<GithubPullReviewFinding, 'changed_line_in_pr' | 'pr_permalink' | 'main_permalink'>): string | undefined {
+  return finding.changed_line_in_pr ? finding.pr_permalink : finding.main_permalink;
+}
+
+function formatPullReviewFindingForGithub(finding: GithubPullReviewFinding): string {
+  const reference = `*${escapeMarkdownText(renderFindingReference(finding))}*`;
+  const detail = convertBackticksToItalics(escapeMarkdownText(finding.detail));
+  const fix = convertBackticksToItalics(escapeMarkdownText(finding.fix));
+  const link = renderFindingLink(finding);
+  return [
+    `[${finding.severity.toUpperCase()}] ${convertBackticksToItalics(escapeMarkdownText(finding.title))}`,
+    `${reference} - ${detail}`,
+    fix ? `Fix: ${fix}` : '',
+    link ? `Reference: ${link}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function formatPullReviewSummary(findings: readonly GithubPullReviewFinding[], event: 'APPROVE' | 'REQUEST_CHANGES'): string {
+  if (event === 'APPROVE') {
+    return 'Reviewed the PR. No actionable issues found.';
+  }
+  const lines = [
+    'Found actionable issues that should be fixed before merge.',
+    '',
+  ];
+  for (const [index, finding] of findings.entries()) {
+    lines.push(`${index + 1}. ${formatPullReviewFindingForGithub(finding)}`);
+    lines.push('');
+  }
+  return lines.join('\n').trim();
+}
+
+function buildPullReviewMarkdown(findings: readonly GithubPullReviewFinding[]): string {
+  const lines = [
+    '# NANA PR Review',
+    '',
+    'Fill every finding before closing the editor.',
+    '',
+    '- `Action:` must be one of `drop`, `accept`, or `argue`.',
+    '- `Explanation:` is required for `drop` and `argue`.',
+    '- Accepted findings will be posted to GitHub when the loop finishes.',
+    '- Dropped findings are remembered and suppressed in later review iterations for this PR.',
+    '',
+  ];
+  for (const [index, finding] of findings.entries()) {
+    lines.push(`${index + 1}. [${finding.severity.toUpperCase()}] ${finding.title}`);
+    lines.push(`   - Code: ${renderFindingReference(finding)}`);
+    lines.push(`   - Summary: ${finding.summary}`);
+    lines.push('   - Detail: |');
+    for (const detailLine of finding.detail.split('\n')) {
+      lines.push(`     ${detailLine}`);
+    }
+    if (finding.fix.trim()) {
+      lines.push('   - Fix: |');
+      for (const fixLine of finding.fix.split('\n')) {
+        lines.push(`     ${fixLine}`);
+      }
+    }
+    lines.push('   - Action: accept');
+    lines.push('   - Explanation:');
+    lines.push('');
+  }
+  return lines.join('\n').trimEnd() + '\n';
+}
+
+function parsePullReviewMarkdown(content: string, findings: readonly GithubPullReviewFinding[]): Array<{
+  finding: GithubPullReviewFinding;
+  action: 'drop' | 'accept' | 'argue';
+  explanation: string;
+}> {
+  const sections = content.split(/^\d+\.\s/m).slice(1);
+  if (sections.length !== findings.length) {
+    throw new Error(`Manual review file is malformed: expected ${findings.length} items, found ${sections.length}.`);
+  }
+  return sections.map((section, index) => {
+    const actionMatch = section.match(/^\s+- Action:\s*(drop|accept|argue)\s*$/m);
+    if (!actionMatch) {
+      throw new Error(`Manual review file is malformed: item ${index + 1} is missing Action.`);
+    }
+    const action = actionMatch[1] as 'drop' | 'accept' | 'argue';
+    const explanationStart = section.match(/^\s+- Explanation:\s*$/m);
+    let explanation = '';
+    if (explanationStart?.index != null) {
+      const slice = section.slice(explanationStart.index + explanationStart[0].length);
+      const lines = slice
+        .split('\n')
+        .map((line) => line.replace(/^\s+/, ''))
+        .filter((line) => line.trim().length > 0);
+      explanation = lines.join('\n').trim();
+    }
+    if ((action === 'drop' || action === 'argue') && !explanation) {
+      throw new Error(`Manual review file is malformed: item ${index + 1} requires Explanation for action ${action}.`);
+    }
+    return { finding: findings[index]!, action, explanation };
+  });
+}
+
+async function defaultOpenEditor(
+  path: string,
+  options: { cwd?: string; editor?: string } = {},
+): Promise<void> {
+  const editor = options.editor ?? process.env.EDITOR ?? process.env.VISUAL ?? 'vi';
+  const result = spawnSync(editor, [path], {
+    cwd: options.cwd,
+    stdio: 'inherit',
+    env: process.env,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`editor exited with status ${result.status ?? 'unknown'}`);
+  }
+}
+
+async function defaultCodexExec(
+  prompt: string,
+  options: { cwd: string; codexArgs?: string[]; env: NodeJS.ProcessEnv },
+): Promise<string> {
+  const args = ['exec', CODEX_BYPASS_FLAG, ...(options.codexArgs ?? []), '-'];
+  const { result } = spawnPlatformCommandSync('codex', args, {
+    cwd: options.cwd,
+    env: options.env,
+    encoding: 'utf-8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    input: prompt,
+  });
+  if (result.error) {
+    const kind = classifySpawnError(result.error as NodeJS.ErrnoException);
+    if (kind === 'missing') throw new Error('codex executable not found in PATH');
+    if (kind === 'blocked') throw new Error(`codex executable is blocked in the current environment (${(result.error as NodeJS.ErrnoException).code || 'blocked'})`);
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(`codex review exec failed (${result.status ?? 'unknown'}): ${(result.stderr || '').trim()}`);
+  }
+  return `${result.stdout || ''}`.trim();
+}
+
+function extractJsonObject(text: string): string {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) return fenced[1].trim();
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start >= 0 && end > start) return text.slice(start, end + 1).trim();
+  throw new Error(`AI output did not contain JSON: ${text.slice(0, 200)}`);
+}
+
+function parsePullReviewAiCandidateResponse(text: string): GithubPullReviewAiCandidateResponse {
+  return JSON.parse(extractJsonObject(text)) as GithubPullReviewAiCandidateResponse;
+}
+
+function parsePullReviewAiValidationResponse(text: string): GithubPullReviewAiValidationResponse {
+  return JSON.parse(extractJsonObject(text)) as GithubPullReviewAiValidationResponse;
+}
+
+function pullReviewCheckoutPath(runPaths: GithubPullReviewRunPaths): string {
+  return join(runPaths.runDir, 'checkout');
+}
+
+async function ensurePullReviewCheckout(
+  paths: ManagedRepoPaths,
+  repoMeta: ManagedRepoMetadata,
+  target: ParsedGithubTargetUrl,
+  targetContext: GithubTargetContext,
+  runPaths: GithubPullReviewRunPaths,
+): Promise<string> {
+  ensureSourceClone(paths, repoMeta);
+  if (!targetContext.pullRequest) throw new Error('Review target is missing pull request metadata.');
+  const checkoutPath = pullReviewCheckoutPath(runPaths);
+  const headRef = `refs/remotes/origin/nana-review-pr/${target.targetNumber}`;
+  const baseRef = `refs/remotes/origin/nana-review-base/${target.targetNumber}`;
+  gitExec(paths.sourcePath, ['fetch', '--force', 'origin', targetContext.pullRequest.base.ref]);
+  gitExec(paths.sourcePath, ['fetch', '--force', 'origin', `${targetContext.pullRequest.base.ref}:${baseRef}`]);
+  gitExec(paths.sourcePath, ['fetch', '--force', 'origin', `pull/${target.targetNumber}/head:${headRef}`]);
+  await removeExistingSandboxWorktree(paths, checkoutPath);
+  await mkdir(runPaths.runDir, { recursive: true });
+  gitExec(paths.sourcePath, ['worktree', 'add', '--force', '--detach', checkoutPath, targetContext.pullRequest.head.sha]);
+  return checkoutPath;
+}
+
+function resolveDefaultBranchHeadSha(repoPath: string, defaultBranch: string): string {
+  return readGitText(repoPath, ['rev-parse', `origin/${defaultBranch}`]);
+}
+
+function readGitText(cwd: string, args: string[]): string {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trimEnd();
+}
+
+function listPullReviewChangedFiles(repoPath: string, baseSha: string, headSha: string): string[] {
+  const output = readGitText(repoPath, ['diff', '--name-only', `${baseSha}..${headSha}`]);
+  return output.split('\n').map((line) => line.trim()).filter(Boolean);
+}
+
+function readPullReviewDiff(repoPath: string, baseSha: string, headSha: string, path?: string): string {
+  const args = ['diff', '--no-color', '--unified=5', `${baseSha}..${headSha}`];
+  if (path) args.push('--', path);
+  return readGitText(repoPath, args);
+}
+
+function buildChangedLineMap(repoPath: string, baseSha: string, headSha: string): Map<string, Array<{ start: number; end: number }>> {
+  const diff = readGitText(repoPath, ['diff', '--no-color', '--unified=0', `${baseSha}..${headSha}`]);
+  const map = new Map<string, Array<{ start: number; end: number }>>();
+  let currentPath: string | null = null;
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+++ b/')) {
+      currentPath = line.slice('+++ b/'.length).trim();
+      if (!map.has(currentPath)) map.set(currentPath, []);
+      continue;
+    }
+    const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (!match || !currentPath) continue;
+    const start = Number.parseInt(match[1] || '0', 10);
+    const count = Number.parseInt(match[2] || '1', 10);
+    if (count <= 0) continue;
+    map.get(currentPath)?.push({ start, end: start + count - 1 });
+  }
+  return map;
+}
+
+function isChangedLine(
+  changedLineMap: Map<string, Array<{ start: number; end: number }>>,
+  path: string,
+  line: number | undefined,
+): boolean {
+  if (line == null) return false;
+  const ranges = changedLineMap.get(path);
+  if (!ranges) return false;
+  return ranges.some((range) => line >= range.start && line <= range.end);
+}
+
+function buildGithubBlobPermalink(repoSlug: string, sha: string, path: string, line?: number): string {
+  const encodedPath = path.split('/').map((segment) => encodeURIComponent(segment)).join('/');
+  return `https://github.com/${repoSlug}/blob/${sha}/${encodedPath}${line != null ? `#L${line}` : ''}`;
+}
+
+function readFileAtGitRef(repoPath: string, sha: string, path: string): string | undefined {
+  const result = gitExecAllowFailure(repoPath, ['show', `${sha}:${path}`]);
+  if (!result.ok) return undefined;
+  return result.stdout;
+}
+
+function buildReviewSuppressionDigest(
+  buckets: {
+    userDropped: Map<string, GithubPullReviewFinding>;
+    notReal: Map<string, GithubPullReviewFinding>;
+    preexisting: Map<string, GithubPullReviewFinding>;
+  },
+): string {
+  const lines: string[] = [];
+  for (const bucket of [buckets.userDropped, buckets.notReal, buckets.preexisting]) {
+    for (const finding of bucket.values()) {
+      lines.push(`- ${finding.title} @ ${renderFindingReference(finding)} :: ${finding.user_explanation ?? finding.summary}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+function buildPullReviewGenerationPrompt(input: {
+  manifest: GithubPullReviewManifest;
+  changedFiles: readonly string[];
+  diff: string;
+  suppressionDigest: string;
+}): string {
+  return [
+    'Review this pull request and return JSON only.',
+    '',
+    'Output schema:',
+    '{"findings":[{"title":"string","severity":"critical|high|medium|low","path":"string","line":123,"summary":"string","detail":"string","fix":"string","rationale":"string"}]}',
+    '',
+    'Rules:',
+    '- Be concise and concrete.',
+    '- Report only actionable code issues.',
+    '- Assume the reader already knows the repository.',
+    '- Prefer findings tied to concrete file paths and line numbers in changed files.',
+    '- Do not include markdown fences.',
+    '- If there are no issues, return {"findings":[]}.',
+    '',
+    `PR: ${input.manifest.target_url}`,
+    `Title: ${input.manifest.target_title}`,
+    `Base: ${input.manifest.pr_base_ref} (${input.manifest.pr_base_sha})`,
+    `Head: ${input.manifest.pr_head_ref} (${input.manifest.pr_head_sha})`,
+    '',
+    'Changed files:',
+    ...input.changedFiles.map((file) => `- ${file}`),
+    '',
+    input.suppressionDigest ? `Previously dropped/suppressed findings for this PR:\n${input.suppressionDigest}\n` : '',
+    'Diff:',
+    input.diff,
+    '',
+  ].join('\n');
+}
+
+function buildPullReviewValidationPrompt(input: {
+  manifest: GithubPullReviewManifest;
+  candidates: readonly GithubPullReviewFinding[];
+  contexts: ReadonlyArray<{
+    headExcerpt?: string;
+    baseExcerpt?: string;
+    pathDiff: string;
+  }>;
+}): string {
+  const items = input.candidates.map((candidate, index) => {
+    const context = input.contexts[index]!;
+    return [
+      `Candidate ${index}:`,
+      JSON.stringify({
+        candidate_index: index,
+        title: candidate.title,
+        severity: candidate.severity,
+        path: candidate.path,
+        line: candidate.line,
+        summary: candidate.summary,
+        detail: candidate.detail,
+        fix: candidate.fix,
+        rationale: candidate.rationale,
+      }, null, 2),
+      'Head excerpt:',
+      context.headExcerpt ?? '(none)',
+      'Base excerpt:',
+      context.baseExcerpt ?? '(none)',
+      'Path diff:',
+      context.pathDiff || '(none)',
+      '',
+    ].join('\n');
+  }).join('\n');
+  return [
+    'Validate these PR review findings and return JSON only.',
+    '',
+    'Output schema:',
+    '{"items":[{"candidate_index":0,"verdict":"accepted|not_real|preexisting","summary":"string","detail":"string","fix":"string","rationale":"string","explanation":"string"}]}',
+    '',
+    'Rules:',
+    '- Classify each candidate as accepted, not_real, or preexisting.',
+    '- Use preexisting only when the underlying problem clearly existed in the base version before this PR.',
+    '- Keep text concise.',
+    '- Do not omit any candidate.',
+    '- Do not include markdown fences.',
+    '',
+    `PR: ${input.manifest.target_url}`,
+    items,
+  ].join('\n');
+}
+
+function buildPullReviewReconsiderPrompt(input: {
+  finding: GithubPullReviewFinding;
+  explanation: string;
+  headExcerpt?: string;
+  baseExcerpt?: string;
+  pathDiff: string;
+}): string {
+  return [
+    'Reconsider this PR review finding using the human explanation and return JSON only.',
+    '',
+    'Output schema:',
+    '{"items":[{"candidate_index":0,"verdict":"accepted|not_real|preexisting","summary":"string","detail":"string","fix":"string","rationale":"string","explanation":"string"}]}',
+    '',
+    'Human explanation:',
+    input.explanation,
+    '',
+    'Finding:',
+    JSON.stringify({
+      candidate_index: 0,
+      title: input.finding.title,
+      severity: input.finding.severity,
+      path: input.finding.path,
+      line: input.finding.line,
+      summary: input.finding.summary,
+      detail: input.finding.detail,
+      fix: input.finding.fix,
+      rationale: input.finding.rationale,
+    }, null, 2),
+    'Head excerpt:',
+    input.headExcerpt ?? '(none)',
+    'Base excerpt:',
+    input.baseExcerpt ?? '(none)',
+    'Path diff:',
+    input.pathDiff || '(none)',
+    '',
+  ].join('\n');
+}
+
+async function collectPullReviewValidationContexts(
+  repoPath: string,
+  baseSha: string,
+  headSha: string,
+  findings: readonly GithubPullReviewFinding[],
+): Promise<Array<{ headExcerpt?: string; baseExcerpt?: string; pathDiff: string }>> {
+  return findings.map((finding) => ({
+    headExcerpt: finding.line != null ? buildCodeContextExcerpt(readFileAtGitRef(repoPath, headSha, finding.path) ?? '', finding.line) : undefined,
+    baseExcerpt: finding.line != null ? buildCodeContextExcerpt(readFileAtGitRef(repoPath, baseSha, finding.path) ?? '', finding.line) : undefined,
+    pathDiff: readPullReviewDiff(repoPath, baseSha, headSha, finding.path),
+  }));
+}
+
+async function generatePullReviewCandidates(
+  manifest: GithubPullReviewManifest,
+  repoPath: string,
+  buckets: {
+    userDropped: Map<string, GithubPullReviewFinding>;
+    notReal: Map<string, GithubPullReviewFinding>;
+    preexisting: Map<string, GithubPullReviewFinding>;
+  },
+  codexExec: NonNullable<GithubPullReviewCommandDependencies['codexExec']>,
+  env: NodeJS.ProcessEnv,
+): Promise<GithubPullReviewFinding[]> {
+  const changedFiles = listPullReviewChangedFiles(repoPath, manifest.pr_base_sha, manifest.pr_head_sha);
+  const diff = readPullReviewDiff(repoPath, manifest.pr_base_sha, manifest.pr_head_sha);
+  const suppressionDigest = buildReviewSuppressionDigest(buckets);
+  const response = parsePullReviewAiCandidateResponse(await codexExec(
+    buildPullReviewGenerationPrompt({ manifest, changedFiles, diff, suppressionDigest }),
+    { cwd: repoPath, env },
+  ));
+  const changedLineMap = buildChangedLineMap(repoPath, manifest.pr_base_sha, manifest.pr_head_sha);
+  const changedFilesSet = new Set(changedFiles);
+  const findings: GithubPullReviewFinding[] = [];
+  const seenFingerprints = new Set<string>();
+  for (const [index, rawFinding] of (response.findings ?? []).entries()) {
+    const path = rawFinding.path?.trim();
+    if (!path || !changedFilesSet.has(path)) continue;
+    const line = typeof rawFinding.line === 'number' && Number.isFinite(rawFinding.line) && rawFinding.line > 0
+      ? Math.trunc(rawFinding.line)
+      : undefined;
+    const summary = rawFinding.summary?.trim();
+    const title = rawFinding.title?.trim();
+    const detail = rawFinding.detail?.trim();
+    if (!summary || !title || !detail) continue;
+    const fingerprint = buildPullReviewFindingFingerprint({ title, path, line, summary });
+    if (seenFingerprints.has(fingerprint) || buckets.userDropped.has(fingerprint) || buckets.notReal.has(fingerprint) || buckets.preexisting.has(fingerprint)) {
+      continue;
+    }
+    seenFingerprints.add(fingerprint);
+    const changedLineInPr = isChangedLine(changedLineMap, path, line);
+    findings.push({
+      id: `${manifest.run_id}-cand-${index + 1}`,
+      fingerprint,
+      title,
+      severity: normalizePullReviewSeverity(rawFinding.severity),
+      path,
+      line,
+      summary,
+      detail,
+      fix: rawFinding.fix?.trim() || '',
+      rationale: rawFinding.rationale?.trim() || summary,
+      changed_in_pr: true,
+      changed_line_in_pr: changedLineInPr,
+      main_permalink: buildGithubBlobPermalink(manifest.repo_slug, manifest.default_branch_sha, path, line),
+      pr_permalink: buildGithubBlobPermalink(manifest.repo_slug, manifest.pr_head_sha, path, line),
+      iteration: manifest.iteration,
+    });
+  }
+  return findings;
+}
+
+async function validatePullReviewFindings(
+  manifest: GithubPullReviewManifest,
+  repoPath: string,
+  candidates: readonly GithubPullReviewFinding[],
+  codexExec: NonNullable<GithubPullReviewCommandDependencies['codexExec']>,
+  env: NodeJS.ProcessEnv,
+  perItemContext: GithubPullReviewPerItemContext,
+): Promise<{
+  accepted: GithubPullReviewFinding[];
+  notReal: GithubPullReviewFinding[];
+  preexisting: GithubPullReviewFinding[];
+}> {
+  const contexts = await collectPullReviewValidationContexts(repoPath, manifest.pr_base_sha, manifest.pr_head_sha, candidates);
+  const accepted: GithubPullReviewFinding[] = [];
+  const notReal: GithubPullReviewFinding[] = [];
+  const preexisting: GithubPullReviewFinding[] = [];
+
+  const applyResponse = (items: readonly GithubPullReviewAiValidationItem[]): void => {
+    for (const item of items) {
+      const candidate = candidates[item.candidate_index];
+      if (!candidate) continue;
+      const refined: GithubPullReviewFinding = {
+        ...candidate,
+        summary: item.summary?.trim() || candidate.summary,
+        detail: item.detail?.trim() || candidate.detail,
+        fix: item.fix?.trim() || candidate.fix,
+        rationale: item.rationale?.trim() || candidate.rationale,
+        user_explanation: item.explanation?.trim() || undefined,
+      };
+      if (item.verdict === 'accepted') {
+        accepted.push(refined);
+      } else if (item.verdict === 'preexisting') {
+        preexisting.push(refined);
+      } else {
+        notReal.push(refined);
+      }
+    }
+  };
+
+  if (perItemContext === 'shared') {
+    const response = parsePullReviewAiValidationResponse(await codexExec(
+      buildPullReviewValidationPrompt({ manifest, candidates, contexts }),
+      { cwd: repoPath, env },
+    ));
+    applyResponse(response.items ?? []);
+    return { accepted, notReal, preexisting };
+  }
+
+  for (const [index, candidate] of candidates.entries()) {
+    const response = parsePullReviewAiValidationResponse(await codexExec(
+      buildPullReviewValidationPrompt({
+        manifest,
+        candidates: [candidate],
+        contexts: [contexts[index]!],
+      }),
+      { cwd: repoPath, env },
+    ));
+    const normalized = (response.items ?? []).map((item) => ({ ...item, candidate_index: index }));
+    applyResponse(normalized);
+  }
+  return { accepted, notReal, preexisting };
+}
+
+async function reconsiderPullReviewArguedFindings(
+  manifest: GithubPullReviewManifest,
+  repoPath: string,
+  argued: Array<{ finding: GithubPullReviewFinding; explanation: string }>,
+  codexExec: NonNullable<GithubPullReviewCommandDependencies['codexExec']>,
+  env: NodeJS.ProcessEnv,
+  perItemContext: GithubPullReviewPerItemContext,
+): Promise<{
+  accepted: GithubPullReviewFinding[];
+  notReal: GithubPullReviewFinding[];
+  preexisting: GithubPullReviewFinding[];
+}> {
+  const contexts = await collectPullReviewValidationContexts(repoPath, manifest.pr_base_sha, manifest.pr_head_sha, argued.map((entry) => entry.finding));
+  const accepted: GithubPullReviewFinding[] = [];
+  const notReal: GithubPullReviewFinding[] = [];
+  const preexisting: GithubPullReviewFinding[] = [];
+  const apply = (entry: { finding: GithubPullReviewFinding; explanation: string }, item: GithubPullReviewAiValidationItem): void => {
+    const refined: GithubPullReviewFinding = {
+      ...entry.finding,
+      summary: item.summary?.trim() || entry.finding.summary,
+      detail: item.detail?.trim() || entry.finding.detail,
+      fix: item.fix?.trim() || entry.finding.fix,
+      rationale: item.rationale?.trim() || entry.finding.rationale,
+      user_explanation: entry.explanation,
+    };
+    if (item.verdict === 'accepted') accepted.push(refined);
+    else if (item.verdict === 'preexisting') preexisting.push(refined);
+    else notReal.push(refined);
+  };
+
+  if (perItemContext === 'shared') {
+    const response = parsePullReviewAiValidationResponse(await codexExec(
+      buildPullReviewValidationPrompt({
+        manifest,
+        candidates: argued.map((entry) => entry.finding),
+        contexts,
+      }),
+      { cwd: repoPath, env },
+    ));
+    for (const item of response.items ?? []) {
+      const entry = argued[item.candidate_index];
+      if (entry) apply(entry, item);
+    }
+    return { accepted, notReal, preexisting };
+  }
+
+  for (const [index, entry] of argued.entries()) {
+    const response = parsePullReviewAiValidationResponse(await codexExec(
+      buildPullReviewReconsiderPrompt({
+        finding: entry.finding,
+        explanation: entry.explanation,
+        ...contexts[index]!,
+      }),
+      { cwd: repoPath, env },
+    ));
+    const item = response.items?.[0];
+    if (item) apply(entry, item);
+  }
+  return { accepted, notReal, preexisting };
+}
+
+async function submitGithubPullReview(
+  manifest: GithubPullReviewManifest,
+  findings: readonly GithubPullReviewFinding[],
+  context: GithubApiContext,
+): Promise<{ id?: number; html_url?: string; event: 'APPROVE' | 'REQUEST_CHANGES' }> {
+  const event: 'APPROVE' | 'REQUEST_CHANGES' = findings.length > 0 ? 'REQUEST_CHANGES' : 'APPROVE';
+  const body = formatPullReviewSummary(findings, event);
+  const commentable = findings
+    .filter((finding) => finding.changed_line_in_pr && finding.line != null)
+    .map((finding) => ({
+      path: finding.path,
+      line: finding.line!,
+      side: 'RIGHT',
+      body: formatPullReviewFindingForGithub(finding),
+    }));
+  try {
+    const payload = await githubApiRequestJson<{ id?: number; html_url?: string }>(
+      'POST',
+      `/repos/${manifest.repo_slug}/pulls/${manifest.target_number}/reviews`,
+      {
+        body,
+        event,
+        ...(commentable.length > 0 ? { comments: commentable } : {}),
+      },
+      context,
+    );
+    return { ...payload, event };
+  } catch (error) {
+    if (commentable.length === 0) throw error;
+    const payload = await githubApiRequestJson<{ id?: number; html_url?: string }>(
+      'POST',
+      `/repos/${manifest.repo_slug}/pulls/${manifest.target_number}/reviews`,
+      { body, event },
+      context,
+    );
+    return { ...payload, event };
+  }
+}
+
+async function runPullReviewManualLoop(
+  manifest: GithubPullReviewManifest,
+  runPaths: GithubPullReviewRunPaths,
+  reviewPaths: GithubPullReviewPaths,
+  repoPath: string,
+  acceptedSeed: GithubPullReviewFinding[],
+  codexExec: NonNullable<GithubPullReviewCommandDependencies['codexExec']>,
+  openEditor: NonNullable<GithubPullReviewCommandDependencies['openEditor']>,
+  env: NodeJS.ProcessEnv,
+): Promise<{
+  accepted: GithubPullReviewFinding[];
+  userDropped: GithubPullReviewFinding[];
+  notReal: GithubPullReviewFinding[];
+  preexisting: GithubPullReviewFinding[];
+}> {
+  let pending = [...acceptedSeed];
+  const accepted: GithubPullReviewFinding[] = [];
+  const userDropped: GithubPullReviewFinding[] = [];
+  const notReal: GithubPullReviewFinding[] = [];
+  const preexisting: GithubPullReviewFinding[] = [];
+
+  while (pending.length > 0) {
+    await writePullReviewBucket(runPaths.manualPendingPath, pending);
+    await writeFile(runPaths.reviewFilePath, buildPullReviewMarkdown(pending), 'utf-8');
+    await writePullReviewManifest(runPaths, {
+      ...manifest,
+      status: 'awaiting-manual',
+      updated_at: new Date().toISOString(),
+      review_file_path: runPaths.reviewFilePath,
+    });
+    await writePullReviewActive(reviewPaths, {
+      version: 1,
+      run_id: manifest.run_id,
+      status: 'awaiting-manual',
+      updated_at: new Date().toISOString(),
+    });
+    await openEditor(runPaths.reviewFilePath, { cwd: repoPath });
+    const content = await readFile(runPaths.reviewFilePath, 'utf-8');
+    const decisions = parsePullReviewMarkdown(content, pending);
+    const argued = decisions.filter((entry) => entry.action === 'argue').map((entry) => ({
+      finding: entry.finding,
+      explanation: entry.explanation,
+    }));
+    for (const entry of decisions.filter((item) => item.action === 'drop')) {
+      userDropped.push({ ...entry.finding, user_explanation: entry.explanation });
+    }
+    accepted.push(...decisions.filter((item) => item.action === 'accept').map((item) => item.finding));
+    if (argued.length === 0) break;
+    const reconsidered = await reconsiderPullReviewArguedFindings(
+      manifest,
+      repoPath,
+      argued,
+      codexExec,
+      env,
+      manifest.per_item_context,
+    );
+    notReal.push(...reconsidered.notReal);
+    preexisting.push(...reconsidered.preexisting);
+    pending = reconsidered.accepted;
+  }
+
+  await rm(runPaths.manualPendingPath, { force: true });
+  return { accepted, userDropped, notReal, preexisting };
+}
+
+async function showGithubPullReviewFollowup(
+  parsed: GithubReviewFollowupCommand,
+  dependencies: Required<Pick<GithubPullReviewCommandDependencies, 'fetchImpl' | 'writeLine' | 'env'>> & Pick<GithubPullReviewCommandDependencies, 'execFileSyncImpl' | 'homeDir'>,
+): Promise<void> {
+  const apiBaseUrl = dependencies.env.GITHUB_API_URL?.trim() || DEFAULT_GITHUB_API_BASE_URL;
+  const token = resolveGithubToken(dependencies.env, apiBaseUrl, dependencies.execFileSyncImpl);
+  const apiContext: GithubApiContext = { token, apiBaseUrl, fetchImpl: dependencies.fetchImpl };
+  const targetContext = await fetchTargetContext(parsed.target, apiContext);
+  if (!targetContext.pullRequest) throw new Error('Followup requires a pull request target.');
+  if (!parsed.allowOpen && targetContext.issue.state !== 'closed') {
+    throw new Error(`PR #${parsed.target.targetNumber} is still open. Re-run with --allow-open to inspect pre-existing findings before closure.`);
+  }
+  const nanaHome = resolveNanaHomeDir(dependencies.env, dependencies.homeDir);
+  const repoRoot = managedRepoPaths(nanaHome, join(parsed.target.owner, parsed.target.repoName)).repoRoot;
+  const reviewPaths = githubPullReviewPaths(repoRoot, parsed.target.targetNumber);
+  const buckets = await loadPersistedPullReviewBuckets(reviewPaths);
+  const findings = [...buckets.preexisting.values()];
+  if (findings.length === 0) {
+    dependencies.writeLine(`[review] No persisted pre-existing findings for ${parsed.target.canonicalUrl}.`);
+    return;
+  }
+  dependencies.writeLine(`[review] Pre-existing findings for ${parsed.target.canonicalUrl}:`);
+  for (const finding of findings) {
+    dependencies.writeLine(`- ${finding.title} (${renderFindingReference(finding)})`);
+    dependencies.writeLine(`  ${finding.user_explanation ?? finding.detail}`);
+    const link = renderFindingLink(finding);
+    if (link) dependencies.writeLine(`  ${link}`);
+  }
+}
+
+export async function githubPullReviewCommand(
+  args: string[],
+  dependencies: GithubPullReviewCommandDependencies = {},
+): Promise<void> {
+  const parsed = parseGithubReviewArgs(args);
+  const writeLine = dependencies.writeLine ?? ((line: string) => console.log(line));
+  const now = dependencies.now ?? (() => new Date());
+  const fetchImpl = dependencies.fetchImpl ?? fetch;
+  const env = dependencies.env ?? process.env;
+  const execFileSyncImpl = dependencies.execFileSyncImpl;
+  const homeDir = dependencies.homeDir;
+  const codexExec = dependencies.codexExec ?? defaultCodexExec;
+  const openEditor = dependencies.openEditor ?? defaultOpenEditor;
+
+  if (parsed.subcommand === 'help') {
+    writeLine(GITHUB_REVIEW_HELP);
+    return;
+  }
+
+  if (parsed.subcommand === 'followup') {
+    await showGithubPullReviewFollowup(parsed, { fetchImpl, writeLine, env, execFileSyncImpl, homeDir });
+    return;
+  }
+
+  const apiBaseUrl = env.GITHUB_API_URL?.trim() || DEFAULT_GITHUB_API_BASE_URL;
+  const token = resolveGithubToken(env, apiBaseUrl, execFileSyncImpl);
+  const apiContext: GithubApiContext = { token, apiBaseUrl, fetchImpl };
+  const viewerLogin = await resolveViewerLogin(apiContext);
+  const reviewerLogin = resolveReviewerLogin(parsed.reviewer, viewerLogin);
+  const targetContext = await fetchTargetContext(parsed.target, apiContext);
+  if (!targetContext.pullRequest) throw new Error('nana review requires a pull request URL.');
+  const nowValue = now();
+  const nanaHome = resolveNanaHomeDir(env, homeDir);
+  const managedPaths = managedRepoPaths(nanaHome, join(parsed.target.owner, parsed.target.repoName));
+  const repoMeta = await ensureManagedRepoMetadata(managedPaths, targetContext, nowValue);
+  const reviewPaths = githubPullReviewPaths(managedPaths.repoRoot, parsed.target.targetNumber);
+  const persistedBuckets = await loadPersistedPullReviewBuckets(reviewPaths);
+
+  let manifest: GithubPullReviewManifest;
+  let runPaths: GithubPullReviewRunPaths;
+  const activeRun = await resolveActivePullReviewRun(reviewPaths);
+  if (activeRun) {
+    manifest = activeRun.manifest;
+    runPaths = activeRun.runPaths;
+    writeLine(`[review] Resuming active review run ${manifest.run_id} for ${parsed.target.canonicalUrl}.`);
+  } else {
+    const runId = buildPullReviewRunId(nowValue);
+    runPaths = githubPullReviewRunPaths(managedPaths.repoRoot, parsed.target.targetNumber, runId);
+    manifest = {
+      version: 1,
+      run_id: runId,
+      created_at: nowValue.toISOString(),
+      updated_at: nowValue.toISOString(),
+      status: 'running',
+      repo_slug: repoMeta.repo_slug,
+      repo_owner: repoMeta.repo_owner,
+      repo_name: repoMeta.repo_name,
+      managed_repo_root: managedPaths.repoRoot,
+      source_path: managedPaths.sourcePath,
+      review_root: runPaths.runDir,
+      mode: parsed.mode,
+      per_item_context: parsed.perItemContext,
+      reviewer_login: reviewerLogin,
+      target_url: parsed.target.canonicalUrl,
+      target_number: parsed.target.targetNumber,
+      target_title: targetContext.issue.title,
+      target_state: targetContext.issue.state,
+      default_branch: repoMeta.default_branch,
+      default_branch_sha: '',
+      pr_head_ref: targetContext.pullRequest.head.ref,
+      pr_head_sha: targetContext.pullRequest.head.sha,
+      pr_base_ref: targetContext.pullRequest.base.ref,
+      pr_base_sha: targetContext.pullRequest.base.sha,
+      iteration: 1,
+    };
+    await writePullReviewManifest(runPaths, manifest);
+    await writePullReviewActive(reviewPaths, {
+      version: 1,
+      run_id: runId,
+      status: 'running',
+      updated_at: nowValue.toISOString(),
+    });
+  }
+
+  const repoPath = await ensurePullReviewCheckout(managedPaths, repoMeta, parsed.target, targetContext, runPaths);
+  const defaultBranchSha = resolveDefaultBranchHeadSha(managedPaths.sourcePath, repoMeta.default_branch);
+  if (manifest.default_branch_sha !== defaultBranchSha) {
+    manifest = {
+      ...manifest,
+      default_branch_sha: defaultBranchSha,
+      updated_at: new Date().toISOString(),
+    };
+    await writePullReviewManifest(runPaths, manifest);
+  }
+  let accepted: GithubPullReviewFinding[];
+  const droppedUser: GithubPullReviewFinding[] = [];
+  let droppedNotReal: GithubPullReviewFinding[];
+  let droppedPreexisting: GithubPullReviewFinding[];
+
+  if (activeRun && manifest.mode === 'manual' && manifest.status === 'awaiting-manual' && existsSync(runPaths.manualPendingPath)) {
+    accepted = await readPullReviewBucket(runPaths.manualPendingPath);
+    droppedNotReal = await readPullReviewBucket(runPaths.droppedNotRealPath);
+    droppedPreexisting = await readPullReviewBucket(runPaths.droppedPreexistingPath);
+  } else {
+    const candidates = await generatePullReviewCandidates(manifest, repoPath, persistedBuckets, codexExec, env);
+    await writePullReviewBucket(runPaths.candidatesPath, candidates);
+    const validated = await validatePullReviewFindings(
+      manifest,
+      repoPath,
+      candidates,
+      codexExec,
+      env,
+      manifest.per_item_context,
+    );
+    accepted = validated.accepted;
+    droppedNotReal = [...validated.notReal];
+    droppedPreexisting = [...validated.preexisting];
+  }
+
+  if (manifest.mode === 'manual') {
+    const manualResult = await runPullReviewManualLoop(
+      manifest,
+      runPaths,
+      reviewPaths,
+      repoPath,
+      accepted,
+      codexExec,
+      openEditor,
+      env,
+    );
+    accepted = manualResult.accepted;
+    droppedUser.push(...manualResult.userDropped);
+    droppedNotReal.push(...manualResult.notReal);
+    droppedPreexisting.push(...manualResult.preexisting);
+  } else {
+    await rm(runPaths.manualPendingPath, { force: true });
+  }
+
+  await writePullReviewBucket(runPaths.acceptedPath, accepted);
+  await writePullReviewBucket(runPaths.droppedUserPath, droppedUser);
+  await writePullReviewBucket(runPaths.droppedNotRealPath, droppedNotReal);
+  await writePullReviewBucket(runPaths.droppedPreexistingPath, droppedPreexisting);
+
+  const posted = await submitGithubPullReview(manifest, accepted, apiContext);
+  manifest = {
+    ...manifest,
+    status: 'completed',
+    updated_at: new Date().toISOString(),
+    posted_review_event: posted.event,
+    posted_review_id: posted.id,
+    posted_review_url: posted.html_url,
+  };
+  await writePullReviewManifest(runPaths, manifest);
+  await clearPullReviewActive(reviewPaths);
+
+  writeLine(`[review] Completed review for ${manifest.target_url}.`);
+  writeLine(`[review] Accepted=${accepted.length} user-dropped=${droppedUser.length} not-real=${droppedNotReal.length} pre-existing=${droppedPreexisting.length}.`);
+  if (manifest.posted_review_url) {
+    writeLine(`[review] GitHub review: ${manifest.posted_review_url}`);
+  }
 }
 
 export async function listGithubWorkonRunIds(nanaHome: string): Promise<string[]> {

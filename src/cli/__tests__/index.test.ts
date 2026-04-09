@@ -35,9 +35,11 @@ import {
   resolveNotifyTempContract,
   buildNotifyTempStartupMessages,
   buildNotifyFallbackWatcherEnv,
+  resolveGoCliBinaryPath,
   resolveNotifyFallbackWatcherScript,
   resolveHookDerivedWatcherScript,
   resolveNotifyHookScript,
+  shouldDelegateToGoCLI,
 } from "../index.js";
 import { HUD_TMUX_HEIGHT_LINES } from "../../hud/constants.js";
 import {
@@ -241,6 +243,55 @@ describe("resolveNotifyTempContract", () => {
   });
 });
 
+describe("Go CLI delegation", () => {
+  it("resolves the experimental Go binary path under bin/", () => {
+    assert.equal(
+      resolveGoCliBinaryPath("/repo", "linux"),
+      join("/repo", "bin", "nana"),
+    );
+    assert.equal(
+      resolveGoCliBinaryPath("C:\\repo", "win32"),
+      join("C:\\repo", "bin", "nana.exe"),
+    );
+  });
+
+  it("delegates only when NANA_IMPL=go and the binary exists", () => {
+    assert.equal(
+      shouldDelegateToGoCLI(
+        { NANA_IMPL: "go" },
+        {
+          pkgRoot: "/repo",
+          platform: "linux",
+          exists: (path) => path === join("/repo", "bin", "nana"),
+        },
+      ),
+      true,
+    );
+    assert.equal(
+      shouldDelegateToGoCLI(
+        { NANA_IMPL: "ts" },
+        {
+          pkgRoot: "/repo",
+          platform: "linux",
+          exists: () => true,
+        },
+      ),
+      false,
+    );
+    assert.equal(
+      shouldDelegateToGoCLI(
+        { NANA_IMPL: "go", NANA_GO_SHIM_ACTIVE: "1" },
+        {
+          pkgRoot: "/repo",
+          platform: "linux",
+          exists: () => true,
+        },
+      ),
+      false,
+    );
+  });
+});
+
 describe("watcher script path resolution", () => {
   it("resolves packaged watcher entrypoints from dist/scripts", () => {
     assert.equal(
@@ -408,15 +459,14 @@ describe("commandOwnsLocalHelp", () => {
   it("returns true for nested commands that render their own help output", () => {
     for (const command of [
       "agents-init",
-      "research",
       "deepinit",
       "reflect",
       "hooks",
       "hud",
-      "ralph",
       "resume",
       "session",
       "sparkshell",
+      "review",
       "review-rules",
     ]) {
       assert.equal(
@@ -459,7 +509,7 @@ describe("resolveCliInvocation", () => {
     );
   });
 
-  it("resolves research to research command", () => {
+  it("treats removed research command as a plain command token", () => {
     assert.deepEqual(resolveCliInvocation(["research", "missions/demo"]), {
       command: "research",
       launchArgs: [],
@@ -540,6 +590,13 @@ describe("resolveCliInvocation", () => {
   it("resolves review-rules to review-rules command", () => {
     assert.deepEqual(resolveCliInvocation(["review-rules", "scan", "acme/widget"]), {
       command: "review-rules",
+      launchArgs: [],
+    });
+  });
+
+  it("resolves review to review command", () => {
+    assert.deepEqual(resolveCliInvocation(["review", "https://github.com/acme/widget/pull/77"]), {
+      command: "review",
       launchArgs: [],
     });
   });

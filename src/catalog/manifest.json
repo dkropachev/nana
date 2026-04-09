@@ -9,19 +9,7 @@
       "core": true
     },
     {
-      "name": "ralph",
-      "category": "execution",
-      "status": "active",
-      "core": true
-    },
-    {
       "name": "ultrawork",
-      "category": "execution",
-      "status": "active",
-      "core": true
-    },
-    {
-      "name": "team",
       "category": "execution",
       "status": "active",
       "core": true
@@ -31,18 +19,6 @@
       "category": "execution",
       "status": "merged",
       "canonical": "ultrawork"
-    },
-    {
-      "name": "ultraqa",
-      "category": "execution",
-      "status": "merged",
-      "canonical": "ralph"
-    },
-    {
-      "name": "swarm",
-      "category": "execution",
-      "status": "alias",
-      "canonical": "team"
     },
     {
       "name": "plan",
@@ -220,18 +196,6 @@
       "canonical": "configure-notifications",
       "core": false,
       "internalRequired": false
-    },
-    {
-      "name": "ralph-init",
-      "category": "utility",
-      "status": "merged",
-      "canonical": "plan"
-    },
-    {
-      "name": "worker",
-      "category": "utility",
-      "status": "internal",
-      "internalRequired": true
     }
   ],
   "agents": [
@@ -264,11 +228,6 @@
       "name": "executor",
       "category": "build",
       "status": "active"
-    },
-    {
-      "name": "team-executor",
-      "category": "build",
-      "status": "internal"
     },
     {
       "name": "verifier",
