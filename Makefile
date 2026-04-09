@@ -8,7 +8,9 @@ NANA_BIN ?= $(BINDIR)/nana
 REPO_ROOT := $(abspath .)
 NANA_ENTRY := $(REPO_ROOT)/bin/nana
 
-.PHONY: help build test fmt vet verify install uninstall run setup doctor clean release-assets
+.PHONY: all help build test fmt vet verify install install-local uninstall run setup doctor clean release-assets
+
+all: build
 
 help:
 	@printf '%s\n' \
@@ -20,8 +22,9 @@ help:
 		'  verify      Run fmt + vet + test' \
 		'  release-assets  Build native release assets for the current platform' \
 		'  install     Install the built nana binary to $(NANA_BIN)' \
+		'  install-local  Alias for install (~/.local/bin/nana by default)' \
 		'  uninstall   Remove $(NANA_BIN)' \
-		'  run         Run the built NANA CLI (pass ARGS="...")' \
+		'  run         Run the freshly built repo binary (pass ARGS="...")' \
 		'  setup       Run nana setup from the built CLI' \
 		'  doctor      Run nana doctor from the built CLI' \
 		'  clean       Remove bin/'
@@ -62,11 +65,13 @@ install: build
 	$(INSTALL) -d "$(BINDIR)"
 	$(INSTALL) "$(NANA_ENTRY)" "$(NANA_BIN)"
 
+install-local: install
+
 uninstall:
 	rm -f "$(NANA_BIN)"
 
 run: build
-	"$(NANA_BIN)" $(ARGS)
+	"$(NANA_ENTRY)" $(ARGS)
 
 setup: build
 	"$(NANA_ENTRY)" setup $(ARGS)

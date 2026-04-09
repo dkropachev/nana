@@ -402,12 +402,15 @@ func checkMcpServers(configPath string) doctorCheck {
 	text := string(content)
 	mcpCount := strings.Count(text, "[mcp_servers.")
 	if mcpCount == 0 {
+		if strings.Contains(text, "USE_NANA_") || strings.Contains(text, "[agents]") {
+			return doctorCheck{Name: "MCP Servers", Status: "pass", Message: "no external MCP servers configured (current setup)"}
+		}
 		return doctorCheck{Name: "MCP Servers", Status: "warn", Message: "no MCP servers configured"}
 	}
 	if strings.Contains(text, "nana_state") || strings.Contains(text, "nana_memory") {
 		return doctorCheck{Name: "MCP Servers", Status: "pass", Message: fmt.Sprintf("%d servers configured (NANA present)", mcpCount)}
 	}
-	return doctorCheck{Name: "MCP Servers", Status: "warn", Message: fmt.Sprintf("%d servers but no NANA servers yet (expected before first setup; run \"nana setup --force\" once)", mcpCount)}
+	return doctorCheck{Name: "MCP Servers", Status: "pass", Message: fmt.Sprintf("%d servers configured", mcpCount)}
 }
 
 func homeDir() string {

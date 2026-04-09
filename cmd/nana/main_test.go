@@ -160,6 +160,39 @@ func TestBinaryNestedGithubHelpRoutesLocally(t *testing.T) {
 	}
 }
 
+func TestBinaryTopLevelHelpListsWorkOn(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cwd := t.TempDir()
+
+	cmd := runCommand(t, binaryPath, "help")
+	cmd.Dir = cwd
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("binary help failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "nana work-on") {
+		t.Fatalf("expected work-on in top-level help, got %q", output)
+	}
+}
+
+func TestBinaryHelpTopicRoutesToWorkOnHelp(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cwd := t.TempDir()
+
+	cmd := runCommand(t, binaryPath, "help", "work-on")
+	cmd.Dir = cwd
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("binary help work-on failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "nana work-on - GitHub-targeted issue/PR implementation helper") {
+		t.Fatalf("expected work-on help output, got %q", output)
+	}
+	if !strings.Contains(string(output), "nana work-on start <github-issue-or-pr-url>") {
+		t.Fatalf("expected work-on usage lines in output, got %q", output)
+	}
+}
+
 func TestBinaryReviewRulesWithoutSubcommandPrintsNativeHelp(t *testing.T) {
 	binaryPath := buildNanaBinary(t)
 	cwd := t.TempDir()

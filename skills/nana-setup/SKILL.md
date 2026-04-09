@@ -42,7 +42,7 @@ Supported setup flags (current implementation):
 - Local project orchestration file is `./AGENTS.md` (project root).
 - If `AGENTS.md` exists and `--force` is not used, interactive TTY runs ask whether to overwrite. Non-interactive runs preserve the file.
 - Scope targets:
-  - `user`: user directories (`~/.codex`, `~/.codex/skills`, `~/.nana/agents`)
+  - `user`: user directories (`~/.nana/codex-home`, `~/.nana/codex-home/skills`, `~/.nana/codex-home/agents`)
   - `project`: local directories (`./.codex`, `./.codex/skills`, `./.nana/agents`)
 - Migration hint: in `user` scope, if historical `~/.agents/skills` still exists alongside `${CODEX_HOME:-~/.codex}/skills`, current setup prints a cleanup hint because Codex may show duplicate skill entries until the legacy tree is removed or archived.
 - If persisted scope is `project`, `nana` launch automatically uses `CODEX_HOME=./.codex` unless user explicitly overrides `CODEX_HOME`.
@@ -70,9 +70,10 @@ nana doctor
 From `nana doctor`, expect:
 - Prompts installed (scope-dependent: user or project)
 - Skills installed (scope-dependent: user or project)
-- AGENTS.md found in project root
+- AGENTS.md found in the scope target (`~/.nana/codex-home/AGENTS.md` for user scope, project root for project scope)
 - `.nana/state` exists
-- NANA MCP servers configured in scope target `config.toml` (`~/.codex/config.toml` or `./.codex/config.toml`)
+- NANA-managed `config.toml` present in the scope target (`~/.nana/codex-home/config.toml` or `./.codex/config.toml`)
+- MCP server blocks are optional on the current Go-native install
 
 ## Troubleshooting
 

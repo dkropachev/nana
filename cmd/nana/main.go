@@ -17,7 +17,7 @@ Go-native commands:
   nana                Launch Codex with NANA session instructions
   nana exec ...       Run codex exec with NANA session instructions
   nana resume ...     Run codex resume with NANA session instructions
-  nana help
+  nana help [command]
   nana version
   nana status
   nana cancel
@@ -34,12 +34,16 @@ Go-native commands:
   nana session
   nana hooks
   nana doctor
+  nana work-on
 `
 
 func main() {
 	args := os.Args[1:]
 	invocation := gocli.ResolveCLIInvocation(args)
 	if invocation.Command == "help" {
+		if handleNestedHelp(args[1:]) {
+			return
+		}
 		fmt.Fprint(os.Stdout, helpText)
 		return
 	}
@@ -207,6 +211,67 @@ func main() {
 
 	fmt.Fprintf(os.Stderr, "nana: unknown command: %s\n", invocation.Command)
 	os.Exit(1)
+}
+
+func handleNestedHelp(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+
+	command := args[0]
+	if gocli.MaybeHandleGithubHelp(command, []string{command, "help"}) {
+		return true
+	}
+
+	cwd := mustGetwd()
+	repoRoot := legacyshim.ResolveRepoRoot(os.Getenv(legacyshim.RepoRootEnv), os.Args[0])
+
+	switch command {
+	case "cleanup":
+		mustHandleHelp(gocli.Cleanup([]string{"--help"}))
+		return true
+	case "ask":
+		mustHandleHelp(gocli.Ask(repoRoot, cwd, []string{"--help"}))
+		return true
+	case "agents":
+		mustHandleHelp(gocli.Agents(cwd, []string{"--help"}))
+		return true
+	case "agents-init", "deepinit":
+		mustHandleHelp(gocli.AgentsInit(repoRoot, cwd, []string{"--help"}))
+		return true
+	case "uninstall":
+		mustHandleHelp(gocli.Uninstall(repoRoot, cwd, []string{"--help"}))
+		return true
+	case "setup":
+		if err := gocli.Setup(repoRoot, cwd, []string{"--help"}); err != nil {
+			if err.Error() == "help requested" {
+				fmt.Fprintln(os.Stdout, "Usage: nana setup [--scope user|project] [--dry-run] [--force] [--verbose]")
+				return true
+			}
+			exitWithError(err)
+		}
+		return true
+	case "reflect", "explore":
+		mustHandleHelp(gocli.Reflect(repoRoot, cwd, []string{"--help"}))
+		return true
+	case "sparkshell":
+		mustHandleHelp(gocli.SparkShell(repoRoot, cwd, []string{"--help"}))
+		return true
+	case "session":
+		mustHandleHelp(gocli.Session([]string{"--help"}))
+		return true
+	case "hooks":
+		mustHandleHelp(gocli.Hooks(cwd, repoRoot, []string{"help"}))
+		return true
+	}
+
+	return false
+}
+
+func mustHandleHelp(err error) {
+	if err != nil {
+		exitWithError(err)
+	}
 }
 
 func mustGetwd() string {
