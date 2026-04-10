@@ -262,12 +262,19 @@ func readGithubPromptSurface(role string) (string, error) {
 func ensureGithubLaneCodexHome(sandboxPath string, laneAlias string) (string, error) {
 	sourceCodexHome := ResolveCodexHomeForLaunch(sandboxPath)
 	laneCodexHome := filepath.Join(sandboxPath, ".nana", "work-on", "codex-home", sanitizeLanePathToken(laneAlias))
-	if err := os.MkdirAll(laneCodexHome, 0o755); err != nil {
+	return ensureScopedCodexHome(sourceCodexHome, laneCodexHome)
+}
+
+func ensureScopedCodexHome(sourceCodexHome string, scopedCodexHome string) (string, error) {
+	if strings.TrimSpace(sourceCodexHome) == "" {
+		sourceCodexHome = ResolveCodexHomeForLaunch(".")
+	}
+	if err := os.MkdirAll(scopedCodexHome, 0o755); err != nil {
 		return "", err
 	}
 	for _, entry := range []string{"auth.json", "config.toml", "prompts", "skills", "agents"} {
 		source := filepath.Join(sourceCodexHome, entry)
-		target := filepath.Join(laneCodexHome, entry)
+		target := filepath.Join(scopedCodexHome, entry)
 		if _, err := os.Lstat(target); err == nil {
 			continue
 		}
@@ -285,7 +292,7 @@ func ensureGithubLaneCodexHome(sandboxPath string, laneAlias string) (string, er
 			}
 		}
 	}
-	return laneCodexHome, nil
+	return scopedCodexHome, nil
 }
 
 func sanitizeLanePathToken(value string) string {

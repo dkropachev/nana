@@ -63,6 +63,8 @@ type githubVerificationPlan struct {
 	Compile         []string                       `json:"compile"`
 	Unit            []string                       `json:"unit"`
 	Integration     []string                       `json:"integration"`
+	Benchmarks      []string                       `json:"benchmarks,omitempty"`
+	Warnings        []string                       `json:"warnings,omitempty"`
 	PlanFingerprint string                         `json:"plan_fingerprint,omitempty"`
 	SourceFiles     []githubVerificationSourceFile `json:"source_files,omitempty"`
 }
@@ -159,12 +161,16 @@ func githubInvestigateTarget(targetURL string) error {
 	fmt.Fprintf(os.Stdout, "[github] Review-rules mode: %s\n", reviewRulesMode)
 	fmt.Fprintf(
 		os.Stdout,
-		"[github] Verification plan: lint=%d compile=%d unit=%d integration=%d\n",
+		"[github] Verification plan: lint=%d compile=%d unit=%d integration=%d benchmark=%d\n",
 		len(verificationPlan.Lint),
 		len(verificationPlan.Compile),
 		len(verificationPlan.Unit),
 		len(verificationPlan.Integration),
+		len(verificationPlan.Benchmarks),
 	)
+	for _, warning := range verificationPlan.Warnings {
+		fmt.Fprintf(os.Stdout, "[github] Verification warning: %s\n", warning)
+	}
 	if settings.HotPathAPIProfile != nil {
 		fmt.Fprintf(os.Stdout, "[github] Hot-path API files: %s\n", joinOrNone(settings.HotPathAPIProfile.HotPathAPIFiles))
 		fmt.Fprintf(os.Stdout, "[github] Hot-path API tokens: %s\n", joinOrNone(settings.HotPathAPIProfile.APIIdentifierTokens))
@@ -448,10 +454,6 @@ func inferGithubHotPathProfile(repoCheckoutPath string, now time.Time) *githubHo
 	}
 }
 
-func sandboxVerificationDir(sandboxPath string) string {
-	return filepath.Join(sandboxPath, ".nana", "work-on", "verify")
-}
-
 func refreshGithubVerificationArtifacts(runID string, useLast bool) error {
 	manifestPath, repoRoot, err := resolveGithubRunManifestPath(runID, useLast)
 	if err != nil {
@@ -500,75 +502,12 @@ func refreshGithubVerificationArtifacts(runID string, useLast bool) error {
 }
 
 func writeGithubVerificationScripts(sandboxPath string, repoCheckoutPath string, plan githubVerificationPlan, runID string) (string, error) {
-	dir := sandboxVerificationDir(sandboxPath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	writeScript := func(name string, body []string) error {
-		path := filepath.Join(dir, name)
-		return os.WriteFile(path, []byte(strings.Join(body, "\n")+"\n"), 0o755)
-	}
-	buildCommandScript := func(commands []string, emptyMessage string) []string {
-		lines := []string{
-			"#!/usr/bin/env bash",
-			"set -euo pipefail",
-			fmt.Sprintf("cd %q", repoCheckoutPath),
-		}
-		if len(commands) == 0 {
-			lines = append(lines, fmt.Sprintf("echo %q", emptyMessage))
-		} else {
-			lines = append(lines, commands...)
-		}
-		return lines
-	}
-	if err := writeScript("lint.sh", buildCommandScript(plan.Lint, "No lint command detected for this repo.")); err != nil {
-		return "", err
-	}
-	if err := writeScript("compile.sh", buildCommandScript(plan.Compile, "No compile command detected for this repo.")); err != nil {
-		return "", err
-	}
-	if err := writeScript("unit-tests.sh", buildCommandScript(plan.Unit, "No unit-test command detected for this repo.")); err != nil {
-		return "", err
-	}
-	if err := writeScript("integration-tests.sh", buildCommandScript(plan.Integration, "No integration-test command detected for this repo.")); err != nil {
-		return "", err
-	}
-	if err := writeScript("refresh.sh", []string{
-		"#!/usr/bin/env bash",
-		"set -euo pipefail",
-		fmt.Sprintf("nana work-on verify-refresh --run-id %q", runID),
-	}); err != nil {
-		return "", err
-	}
-	if err := writeScript("worker-done.sh", []string{
-		"#!/usr/bin/env bash",
-		"set -euo pipefail",
-		fmt.Sprintf("DIR=%q", dir),
-		"\"$DIR/refresh.sh\"",
-		"\"$DIR/lint.sh\"",
-		"\"$DIR/compile.sh\"",
-		"\"$DIR/unit-tests.sh\"",
-	}); err != nil {
-		return "", err
-	}
-	if err := writeScript("all.sh", []string{
-		"#!/usr/bin/env bash",
-		"set -euo pipefail",
-		fmt.Sprintf("DIR=%q", dir),
-		"\"$DIR/refresh.sh\"",
-		"\"$DIR/lint.sh\"",
-		"\"$DIR/compile.sh\"",
-		"\"$DIR/unit-tests.sh\"",
-		"\"$DIR/integration-tests.sh\"",
-	}); err != nil {
-		return "", err
-	}
-	return dir, nil
+	return writeVerificationScripts("work-on", sandboxPath, repoCheckoutPath, plan, []string{"nana", "work-on", "verify-refresh", "--run-id", runID})
 }
 
 func detectGithubVerificationPlan(repoCheckoutPath string) githubVerificationPlan {
 	var source string
-	var lint, compile, unit, integration []string
+	var lint, compile, unit, integration, benchmarks, warnings []string
 	var sourceFiles []githubVerificationSourceFile
 	addSourceFile := func(path string, kind string) {
 		checksum, err := checksumFile(path)
@@ -597,16 +536,32 @@ func detectGithubVerificationPlan(repoCheckoutPath string) githubVerificationPla
 		if targets["compile"] {
 			compile = append(compile, "make compile")
 		}
-		if targets["test"] {
-			unit = append(unit, "make test")
-		}
 		if targets["test-unit"] {
 			unit = append(unit, "make test-unit")
+		} else if targets["test"] {
+			unit = append(unit, "make test")
+			if targets["test-integration"] {
+				warnings = append(warnings, "Repo exposes both `test` and `test-integration`, but no dedicated `test-unit`. Split unit and integration so Nana can run them separately.")
+			}
 		}
 		if targets["test-integration"] {
 			integration = append(integration, "make test-integration")
 		}
-		if len(lint)+len(compile)+len(unit)+len(integration) > 0 {
+		explicitBenchmarkEntrypoint := false
+		switch {
+		case targets["test-benchmark"]:
+			benchmarks = append(benchmarks, "make test-benchmark")
+			explicitBenchmarkEntrypoint = true
+		case targets["benchmark"]:
+			benchmarks = append(benchmarks, "make benchmark")
+			explicitBenchmarkEntrypoint = true
+		case targets["test-benchmark-jmh"]:
+			benchmarks = append(benchmarks, "make test-benchmark-jmh")
+		}
+		if !explicitBenchmarkEntrypoint && (targets["test-benchmark-e2e"] || targets["test-benchmark-jmh"] || targets["test-benchmark-jmh-quick"]) {
+			warnings = append(warnings, "Repo exposes benchmark targets but no single benchmark entrypoint. Add a dedicated benchmark target so Nana can keep benchmarks separate from unit and integration tests.")
+		}
+		if len(lint)+len(compile)+len(unit)+len(integration)+len(benchmarks) > 0 {
 			addSourceFile(makefilePath, "makefile")
 		}
 	}
@@ -631,7 +586,7 @@ func detectGithubVerificationPlan(repoCheckoutPath string) githubVerificationPla
 			addSourceFile(path, "heuristic")
 		} else if path := filepath.Join(repoCheckoutPath, "go.mod"); githubFileExists(path) {
 			source = "heuristic"
-			lint = []string{"gofmt -w .", "go vet ./..."}
+			lint = []string{`test -z "$(gofmt -l .)"`, "go vet ./..."}
 			compile = []string{"go test ./..."}
 			unit = []string{"go test ./..."}
 			addSourceFile(path, "heuristic")
@@ -640,7 +595,7 @@ func detectGithubVerificationPlan(repoCheckoutPath string) githubVerificationPla
 	if source == "" {
 		source = "heuristic"
 	}
-	fingerprintInput := strings.Join(append(append(append(append([]string{source}, lint...), compile...), unit...), integration...), "\n")
+	fingerprintInput := strings.Join(append(append(append(append(append(append([]string{source}, lint...), compile...), unit...), integration...), benchmarks...), warnings...), "\n")
 	for _, item := range sourceFiles {
 		fingerprintInput += "\n" + item.Path + "\n" + item.Checksum + "\n" + item.Kind
 	}
@@ -651,6 +606,8 @@ func detectGithubVerificationPlan(repoCheckoutPath string) githubVerificationPla
 		Compile:         compile,
 		Unit:            unit,
 		Integration:     integration,
+		Benchmarks:      benchmarks,
+		Warnings:        warnings,
 		PlanFingerprint: hex.EncodeToString(sum[:]),
 		SourceFiles:     sourceFiles,
 	}

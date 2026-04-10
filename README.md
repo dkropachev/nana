@@ -11,7 +11,7 @@
 [![Discord](https://img.shields.io/discord/1452487457085063218?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/PUwSMR9XNk)
 
 **Website:** https://yeachan-heo.github.io/nana-website/  
-**Docs:** [Getting Started](./docs/getting-started.html) · [Agents](./docs/agents.html) · [Skills](./docs/skills.html) · [Integrations](./docs/integrations.html) · [Demo](./DEMO.md) · [OpenClaw guide](./docs/openclaw-integration.md)
+**Docs:** [Getting Started](./docs/getting-started.html) · [Agents](./docs/agents.html) · [Skills](./docs/skills.html) · [Integrations](./docs/integrations.html) · [Work-local](./docs/work-local.md) · [Demo](./DEMO.md) · [OpenClaw guide](./docs/openclaw-integration.md)
 
 `nana` is a workflow layer for [OpenAI Codex CLI](https://github.com/openai/codex).
 
@@ -103,6 +103,7 @@ $deep-interview "clarify the authentication change"
 $ralplan "approve the safest implementation path"
 nana review https://github.com/acme/widget/pull/77
 nana work-on start https://github.com/acme/widget/issues/42
+nana work-local start --task "execute the approved local refactor plan"
 ```
 
 ## A simple mental model
@@ -123,13 +124,13 @@ Most users should think of NANA as **better task routing + better workflow + bet
 2. Launch with `nana --madmax --high`
 3. Use `$deep-interview "..."` when the request or boundaries are still unclear
 4. Use `$ralplan "..."` to approve the plan and review tradeoffs
-5. Continue with direct implementation, `nana review`, or `nana work-on`
+5. Continue with direct implementation, `nana review`, `nana work-on`, or `nana work-local`
 
 ## Recommended workflow
 
 1. `$deep-interview` — clarify scope when the request or boundaries are still vague.
 2. `$ralplan` — turn that clarified scope into an approved architecture and implementation plan.
-3. Continue with direct implementation or the GitHub-oriented surfaces like `nana review` and `nana work-on`.
+3. Continue with direct implementation, `nana work-local`, or the GitHub-oriented surfaces like `nana review` and `nana work-on`.
 
 ## Common in-session surfaces
 
@@ -137,9 +138,13 @@ Most users should think of NANA as **better task routing + better workflow + bet
 | --- | --- |
 | `$deep-interview "..."` | clarifying intent, boundaries, and non-goals |
 | `$ralplan "..."` | approving the implementation plan and tradeoffs |
+| `nana work-local start --task "..."` | long-running local plan execution in a managed sandbox with iterative verify/review/hardening |
+| `nana work-local logs --last` | inspect the current iteration logs and verification artifacts in one view |
 | `nana review <pr-url>` | reviewing external pull requests with persisted findings |
 | `nana work-on start <issue-or-pr-url>` | GitHub-targeted implementation and review-sync workflows |
 | `/skills` | browsing installed skills and supporting helpers |
+
+`nana work-local` stores its runtime state under `~/.nana/local-work/`, not inside the source repo. See [docs/work-local.md](./docs/work-local.md) for storage, resume, and troubleshooting details.
 
 ## GitHub Work-on Overrides
 

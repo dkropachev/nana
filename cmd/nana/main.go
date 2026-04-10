@@ -34,7 +34,9 @@ Go-native commands:
   nana session
   nana hooks
   nana doctor
+  nana repo onboard
   nana work-on
+  nana work-local
 `
 
 func main() {
@@ -187,8 +189,18 @@ func main() {
 			exitWithError(err)
 		}
 		return
+	case "repo":
+		if err := gocli.Repo(mustGetwd(), args[1:]); err != nil {
+			exitWithError(err)
+		}
+		return
 	case "work-on":
 		if _, err := gocli.GithubWorkOnCommand(mustGetwd(), args[1:]); err != nil {
+			exitWithError(err)
+		}
+		return
+	case "work-local":
+		if err := gocli.WorkLocal(mustGetwd(), args[1:]); err != nil {
 			exitWithError(err)
 		}
 		return
@@ -262,6 +274,12 @@ func handleNestedHelp(args []string) bool {
 		return true
 	case "hooks":
 		mustHandleHelp(gocli.Hooks(cwd, repoRoot, []string{"help"}))
+		return true
+	case "repo":
+		mustHandleHelp(gocli.Repo(cwd, []string{"help"}))
+		return true
+	case "work-local":
+		mustHandleHelp(gocli.WorkLocal(cwd, []string{"help"}))
 		return true
 	}
 

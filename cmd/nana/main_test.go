@@ -144,7 +144,9 @@ func TestBinaryNestedGithubHelpRoutesLocally(t *testing.T) {
 		{args: []string{"issue", "--help"}, expected: "nana issue - GitHub issue-oriented aliases"},
 		{args: []string{"review", "--help"}, expected: "nana review - Review an external GitHub PR with deterministic persistence"},
 		{args: []string{"review-rules", "--help"}, expected: "nana review-rules - Persistent repo rules mined from PR review history"},
+		{args: []string{"repo", "--help"}, expected: "nana repo - Repository onboarding and verification-plan inspection"},
 		{args: []string{"work-on", "--help"}, expected: "nana work-on - GitHub-targeted issue/PR implementation helper"},
+		{args: []string{"work-local", "--help"}, expected: "nana work-local - Autonomous local plan execution for git-backed local repos"},
 	}
 
 	for _, tc := range testCases {
@@ -160,7 +162,7 @@ func TestBinaryNestedGithubHelpRoutesLocally(t *testing.T) {
 	}
 }
 
-func TestBinaryTopLevelHelpListsWorkOn(t *testing.T) {
+func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 	binaryPath := buildNanaBinary(t)
 	cwd := t.TempDir()
 
@@ -170,8 +172,8 @@ func TestBinaryTopLevelHelpListsWorkOn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("binary help failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "nana work-on") {
-		t.Fatalf("expected work-on in top-level help, got %q", output)
+	if !strings.Contains(string(output), "nana repo onboard") || !strings.Contains(string(output), "nana work-on") || !strings.Contains(string(output), "nana work-local") {
+		t.Fatalf("expected work surfaces in top-level help, got %q", output)
 	}
 }
 
@@ -190,6 +192,42 @@ func TestBinaryHelpTopicRoutesToWorkOnHelp(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "nana work-on start <github-issue-or-pr-url>") {
 		t.Fatalf("expected work-on usage lines in output, got %q", output)
+	}
+}
+
+func TestBinaryHelpTopicRoutesToWorkLocalHelp(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cwd := t.TempDir()
+
+	cmd := runCommand(t, binaryPath, "help", "work-local")
+	cmd.Dir = cwd
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("binary help work-local failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "nana work-local - Autonomous local plan execution for git-backed local repos") {
+		t.Fatalf("expected work-local help output, got %q", output)
+	}
+	if !strings.Contains(string(output), "nana work-local start") || !strings.Contains(string(output), "nana work-local logs") || !strings.Contains(string(output), "--global-last") {
+		t.Fatalf("expected work-local usage lines in output, got %q", output)
+	}
+}
+
+func TestBinaryHelpTopicRoutesToRepoHelp(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cwd := t.TempDir()
+
+	cmd := runCommand(t, binaryPath, "help", "repo")
+	cmd.Dir = cwd
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("binary help repo failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "nana repo - Repository onboarding and verification-plan inspection") {
+		t.Fatalf("expected repo help output, got %q", output)
+	}
+	if !strings.Contains(string(output), "nana repo onboard") {
+		t.Fatalf("expected repo usage lines in output, got %q", output)
 	}
 }
 
