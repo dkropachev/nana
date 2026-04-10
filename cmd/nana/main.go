@@ -22,7 +22,7 @@ Go-native commands:
   nana status
   nana cancel
   nana reasoning
-  nana auth pull
+  nana account <subcommand>
   nana cleanup
   nana ask
   nana agents
@@ -90,12 +90,8 @@ func main() {
 			exitWithError(err)
 		}
 		return
-	case "auth":
-		if len(args) < 2 || args[1] != "pull" {
-			fmt.Fprintln(os.Stdout, "Usage: nana auth pull")
-			return
-		}
-		if err := gocli.AuthPull(); err != nil {
+	case "account":
+		if err := gocli.Account(args[1:]); err != nil {
 			exitWithError(err)
 		}
 		return

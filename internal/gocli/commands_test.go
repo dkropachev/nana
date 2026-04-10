@@ -121,7 +121,7 @@ func TestResolveCodexHomeForLaunch(t *testing.T) {
 	}
 }
 
-func TestAuthPull(t *testing.T) {
+func TestAccountPull(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".nana", "codex-home"))
@@ -133,11 +133,11 @@ func TestAuthPull(t *testing.T) {
 		t.Fatalf("write source: %v", err)
 	}
 
-	output, err := captureStdout(t, AuthPull)
+	output, err := captureStdout(t, AccountPull)
 	if err != nil {
-		t.Fatalf("AuthPull(): %v", err)
+		t.Fatalf("AccountPull(): %v", err)
 	}
-	if !strings.Contains(output, "Pulled Codex credentials") {
+	if !strings.Contains(output, `Registered Codex credentials as account "primary"`) {
 		t.Fatalf("unexpected output: %q", output)
 	}
 	target, err := os.ReadFile(ResolvedCodexAuthPath())

@@ -98,6 +98,14 @@ type HUDSessionState struct {
 	StartedAt string `json:"started_at"`
 }
 
+type HUDAccountState struct {
+	Active          string `json:"active,omitempty"`
+	PendingActive   string `json:"pending_active,omitempty"`
+	RestartRequired bool   `json:"restart_required,omitempty"`
+	LastUsageResult string `json:"last_usage_result,omitempty"`
+	Degraded        bool   `json:"degraded,omitempty"`
+}
+
 type HUDRenderContext struct {
 	Version       string           `json:"version,omitempty"`
 	GitBranch     string           `json:"gitBranch,omitempty"`
@@ -109,6 +117,7 @@ type HUDRenderContext struct {
 	Autoresearch  *HUDModeState    `json:"autoresearch,omitempty"`
 	Ultraqa       *HUDModeState    `json:"ultraqa,omitempty"`
 	Team          *HUDModeState    `json:"team,omitempty"`
+	Account       *HUDAccountState `json:"account,omitempty"`
 	Metrics       *HUDMetrics      `json:"metrics,omitempty"`
 	HUDNotify     *HUDNotifyState  `json:"hudNotify,omitempty"`
 	Session       *HUDSessionState `json:"session,omitempty"`
@@ -321,6 +330,7 @@ func readAllHUDState(cwd string, config ResolvedHUDConfig) (HUDRenderContext, er
 	autoresearch, _ := readHUDModeState(cwd, "autoresearch")
 	ultraqa, _ := readHUDModeState(cwd, "ultraqa")
 	team, _ := readHUDModeState(cwd, "team")
+	account, _ := readHUDAccountState(cwd)
 	metrics, _ := readHUDMetrics(cwd)
 	hudNotify, _ := readHUDNotifyState(cwd)
 	session, _ := readHUDSessionState(cwd)
@@ -336,6 +346,7 @@ func readAllHUDState(cwd string, config ResolvedHUDConfig) (HUDRenderContext, er
 		Autoresearch:  autoresearch,
 		Ultraqa:       ultraqa,
 		Team:          team,
+		Account:       account,
 		Metrics:       metrics,
 		HUDNotify:     hudNotify,
 		Session:       session,
@@ -444,6 +455,34 @@ func readHUDSessionState(cwd string) (*HUDSessionState, error) {
 	return &state, nil
 }
 
+func readHUDAccountState(cwd string) (*HUDAccountState, error) {
+	codexHome := ResolveCodexHomeForLaunch(cwd)
+	registry, err := loadManagedAuthRegistry(codexHome)
+	if err != nil {
+		return nil, err
+	}
+	if len(registry.Accounts) == 0 {
+		return nil, nil
+	}
+	state, err := loadManagedAuthRuntimeState(codexHome)
+	if err != nil {
+		return nil, err
+	}
+	account := &HUDAccountState{
+		Active:          strings.TrimSpace(state.Active),
+		PendingActive:   strings.TrimSpace(state.PendingActive),
+		RestartRequired: state.RestartRequired,
+		Degraded:        state.Degraded,
+	}
+	if account.Active != "" {
+		account.LastUsageResult = strings.TrimSpace(state.Accounts[account.Active].LastUsageResult)
+	}
+	if account.Active == "" && account.PendingActive == "" && !account.RestartRequired {
+		return nil, nil
+	}
+	return account, nil
+}
+
 func readHUDJSON(path string, target interface{}) error {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -548,6 +587,7 @@ func renderHUD(ctx HUDRenderContext, preset HUDPreset) string {
 		appendIf(renderHUDUltraqa(ctx.Ultraqa))
 	}
 	appendIf(renderHUDTeam(ctx.Team))
+	appendIf(renderHUDAccount(ctx.Account))
 	appendIf(renderHUDTurns(ctx))
 	if preset != HUDPresetMinimal {
 		appendIf(renderHUDTokens(ctx))
@@ -655,6 +695,29 @@ func renderHUDTeam(state *HUDModeState) string {
 		return "team:" + strings.TrimSpace(state.TeamName)
 	}
 	return "team"
+}
+
+func renderHUDAccount(state *HUDAccountState) string {
+	if state == nil || strings.TrimSpace(state.Active) == "" {
+		return ""
+	}
+	label := "account:" + strings.TrimSpace(state.Active)
+	if strings.TrimSpace(state.PendingActive) != "" && strings.TrimSpace(state.PendingActive) != strings.TrimSpace(state.Active) {
+		label += "->" + strings.TrimSpace(state.PendingActive)
+	}
+	switch strings.TrimSpace(state.LastUsageResult) {
+	case accountUsageResultTransient, accountUsageResultPermanent:
+		label += ":apierr"
+	case accountUsageResultStale:
+		label += ":stale"
+	}
+	if state.Degraded {
+		label += ":degraded"
+	}
+	if state.RestartRequired {
+		label += ":restart"
+	}
+	return label
 }
 
 func renderHUDTurns(ctx HUDRenderContext) string {

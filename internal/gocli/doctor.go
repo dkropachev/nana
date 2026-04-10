@@ -36,6 +36,7 @@ func Doctor(cwd string, repoRoot string) error {
 		checkNodeVersion(),
 		checkExploreHarness(repoRoot),
 		checkDirectory("Codex home", paths.codexHomeDir),
+		checkManagedAccounts(paths.codexHomeDir),
 		checkConfig(paths.configPath),
 		checkExploreRouting(paths.configPath),
 		checkPrompts(paths.promptsDir),
@@ -224,6 +225,63 @@ func checkDirectory(name string, path string) doctorCheck {
 		return doctorCheck{Name: name, Status: "pass", Message: path}
 	}
 	return doctorCheck{Name: name, Status: "warn", Message: fmt.Sprintf("%s (not created yet)", path)}
+}
+
+func checkManagedAccounts(codexHomeDir string) doctorCheck {
+	registry, err := loadManagedAuthRegistry(codexHomeDir)
+	if err != nil {
+		return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("invalid account registry: %v", err)}
+	}
+	if len(registry.Accounts) == 0 {
+		return doctorCheck{Name: "Accounts", Status: "pass", Message: "not configured"}
+	}
+	state, err := loadManagedAuthRuntimeState(codexHomeDir)
+	if err != nil {
+		return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("invalid account runtime state: %v", err)}
+	}
+	for _, account := range registry.Accounts {
+		if strings.TrimSpace(account.AuthPath) == "" {
+			return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("account %s has no credential path", account.Name)}
+		}
+		if _, err := os.Stat(account.AuthPath); err != nil {
+			return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("account %s credential file missing (%s)", account.Name, account.AuthPath)}
+		}
+		profile, err := readManagedAccountProfile(account.AuthPath)
+		if err != nil {
+			return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("account %s credentials unreadable: %v", account.Name, err)}
+		}
+		if !isChatGPTBackedAuthMode(profile.AuthMode) {
+			return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("account %s uses unsupported auth mode %q", account.Name, profile.AuthMode)}
+		}
+		if profile.Tokens == nil || strings.TrimSpace(profile.Tokens.AccessToken) == "" || strings.TrimSpace(profile.Tokens.RefreshToken) == "" || strings.TrimSpace(profile.Tokens.AccountID) == "" {
+			return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("account %s is missing ChatGPT token fields required for usage API checks", account.Name)}
+		}
+	}
+	if active := strings.TrimSpace(state.Active); active != "" && registry.account(active) == nil {
+		return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("active account %s not present in registry", active)}
+	}
+	if pending := strings.TrimSpace(state.PendingActive); pending != "" && registry.account(pending) == nil {
+		return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("pending account %s not present in registry", pending)}
+	}
+	message := fmt.Sprintf("%d configured (preferred=%s, active=%s)", len(registry.Accounts), displayOrFallback(registry.Preferred, "(none)"), displayOrFallback(state.Active, "(none)"))
+	if state.Degraded {
+		return doctorCheck{Name: "Accounts", Status: "warn", Message: message + fmt.Sprintf(", degraded=%s", displayOrFallback(state.DegradedReason, "yes"))}
+	}
+	for _, account := range registry.Accounts {
+		accountState := state.Accounts[account.Name]
+		switch accountState.LastUsageResult {
+		case accountUsageResultStale:
+			return doctorCheck{Name: "Accounts", Status: "warn", Message: message + fmt.Sprintf(", account %s usage telemetry stale", account.Name)}
+		case accountUsageResultPermanent:
+			return doctorCheck{Name: "Accounts", Status: "fail", Message: message + fmt.Sprintf(", account %s usage auth failed: %s", account.Name, displayOrFallback(accountState.LastUsageError, "unknown"))}
+		case accountUsageResultTransient:
+			return doctorCheck{Name: "Accounts", Status: "warn", Message: message + fmt.Sprintf(", account %s usage API unavailable", account.Name)}
+		}
+	}
+	if state.RestartRequired && strings.TrimSpace(state.PendingActive) != "" {
+		return doctorCheck{Name: "Accounts", Status: "warn", Message: message + fmt.Sprintf(", pending=%s restart required", state.PendingActive)}
+	}
+	return doctorCheck{Name: "Accounts", Status: "pass", Message: message}
 }
 
 func checkConfig(configPath string) doctorCheck {

@@ -54,6 +54,15 @@ func TestHUDJSONOutput(t *testing.T) {
 		"session_id": "sess-1",
 		"started_at": time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339Nano),
 	})
+	codexHome := filepath.Join(t.TempDir(), ".codex")
+	t.Setenv("CODEX_HOME", codexHome)
+	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
+		Preferred: "primary",
+		Accounts: map[string]managedAccountFixtureEntry{
+			"primary": {Profile: chatgptProfileJSON("primary-token", "primary-refresh", "primary-acct")},
+		},
+		Active: "primary",
+	})
 
 	output, err := captureStdout(t, func() error {
 		return HUD(cwd, "/tmp/nana", []string{"--json"})
@@ -71,6 +80,9 @@ func TestHUDJSONOutput(t *testing.T) {
 	}
 	if parsed.Session == nil || parsed.Session.SessionID != "sess-1" {
 		t.Fatalf("unexpected session payload: %+v", parsed.Session)
+	}
+	if parsed.Account == nil || parsed.Account.Active != "primary" {
+		t.Fatalf("unexpected account payload: %+v", parsed.Account)
 	}
 }
 
@@ -130,5 +142,18 @@ func TestBuildGitBranchLabelUsesConfiguredRepoLabel(t *testing.T) {
 	})
 	if label != "manual/feature/test" {
 		t.Fatalf("buildGitBranchLabel() = %q", label)
+	}
+}
+
+func TestRenderHUDIncludesPendingAccountRestart(t *testing.T) {
+	rendered := renderHUD(HUDRenderContext{
+		Account: &HUDAccountState{
+			Active:          "secondary",
+			PendingActive:   "primary",
+			RestartRequired: true,
+		},
+	}, HUDPresetFocused)
+	if !strings.Contains(rendered, "account:secondary->primary:restart") {
+		t.Fatalf("unexpected rendered HUD: %q", rendered)
 	}
 }

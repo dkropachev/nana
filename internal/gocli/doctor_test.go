@@ -76,3 +76,29 @@ func TestCheckMcpServersPassesWhenOnlyNonNanaServersConfigured(t *testing.T) {
 		t.Fatalf("unexpected message: %q", check.Message)
 	}
 }
+
+func TestCheckManagedAccountsPassesWhenNotConfigured(t *testing.T) {
+	check := checkManagedAccounts(t.TempDir())
+	if check.Status != "pass" || !strings.Contains(check.Message, "not configured") {
+		t.Fatalf("unexpected check: %#v", check)
+	}
+}
+
+func TestCheckManagedAccountsFailsWhenCredentialMissing(t *testing.T) {
+	codexHome := t.TempDir()
+	registry := ManagedAuthRegistry{
+		Version:   authRegistryVersion,
+		Preferred: "primary",
+		Accounts: []ManagedAuthAccount{
+			{Name: "primary", AuthPath: filepath.Join(codexHome, "auth-accounts", "primary.json"), Enabled: true},
+		},
+	}
+	if err := saveManagedAuthRegistry(codexHome, registry); err != nil {
+		t.Fatalf("save registry: %v", err)
+	}
+
+	check := checkManagedAccounts(codexHome)
+	if check.Status != "fail" || !strings.Contains(check.Message, "credential file missing") {
+		t.Fatalf("unexpected check: %#v", check)
+	}
+}

@@ -204,7 +204,10 @@ func runCodexSession(cwd string, codexArgs []string, notifyContract NotifyTempCo
 		return fmt.Errorf("codex is required: %w", err)
 	}
 
-	_, _ = bootstrapResolvedCodexAuth(cwd)
+	authManager, err := prepareManagedAuthManager(cwd, codexHome)
+	if err != nil {
+		return err
+	}
 
 	sessionID := fmt.Sprintf("nana-%d", time.Now().UnixNano())
 	if err := writeLaunchSessionStart(cwd, sessionID); err != nil {
@@ -224,8 +227,13 @@ func runCodexSession(cwd string, codexArgs []string, notifyContract NotifyTempCo
 	cmd.Dir = cwd
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = authManager.wrapOutput(os.Stderr)
 	cmd.Env = buildCodexEnv(notifyContract, codexHome)
+	stopAuthMonitor := make(chan struct{})
+	if authManager != nil {
+		authManager.start(stopAuthMonitor, time.Now().UTC())
+	}
+	defer close(stopAuthMonitor)
 	return cmd.Run()
 }
 
@@ -244,7 +252,19 @@ func buildCodexEnv(notifyContract NotifyTempContract, codexHome string) []string
 }
 
 func bootstrapResolvedCodexAuth(cwd string) (bool, error) {
-	target := filepath.Join(ResolveCodexHomeForLaunch(cwd), "auth.json")
+	codexHome := ResolveCodexHomeForLaunch(cwd)
+	target := filepath.Join(codexHome, "auth.json")
+	registry, err := loadManagedAuthRegistry(codexHome)
+	if err != nil {
+		return false, err
+	}
+	if len(registry.Accounts) > 0 {
+		manager, managerErr := prepareManagedAuthManager(cwd, codexHome)
+		if managerErr != nil {
+			return false, managerErr
+		}
+		return manager != nil, nil
+	}
 	if _, err := os.Stat(target); err == nil {
 		return false, nil
 	}

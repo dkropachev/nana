@@ -172,8 +172,23 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("binary help failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "nana repo onboard") || !strings.Contains(string(output), "nana work-on") || !strings.Contains(string(output), "nana work-local") {
+	if !strings.Contains(string(output), "nana repo onboard") || !strings.Contains(string(output), "nana work-on") || !strings.Contains(string(output), "nana work-local") || !strings.Contains(string(output), "nana account <subcommand>") {
 		t.Fatalf("expected work surfaces in top-level help, got %q", output)
+	}
+}
+
+func TestBinaryAuthCommandIsUnknown(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cwd := t.TempDir()
+
+	cmd := runCommand(t, binaryPath, "auth")
+	cmd.Dir = cwd
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected auth command to fail, got %q", output)
+	}
+	if !strings.Contains(string(output), "unknown command: auth") {
+		t.Fatalf("expected unknown auth command output, got %q", output)
 	}
 }
 
