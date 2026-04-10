@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,34 +94,36 @@ type localWorkLogsOptions struct {
 }
 
 type localWorkManifest struct {
-	Version                     int                         `json:"version"`
-	RunID                       string                      `json:"run_id"`
-	CreatedAt                   string                      `json:"created_at"`
-	UpdatedAt                   string                      `json:"updated_at"`
-	CompletedAt                 string                      `json:"completed_at,omitempty"`
-	Status                      string                      `json:"status"`
-	CurrentPhase                string                      `json:"current_phase,omitempty"`
-	CurrentIteration            int                         `json:"current_iteration,omitempty"`
-	RepoRoot                    string                      `json:"repo_root"`
-	RepoName                    string                      `json:"repo_name"`
-	RepoID                      string                      `json:"repo_id"`
-	SourceBranch                string                      `json:"source_branch"`
-	BaselineSHA                 string                      `json:"baseline_sha"`
-	SandboxPath                 string                      `json:"sandbox_path"`
-	SandboxRepoPath             string                      `json:"sandbox_repo_path"`
-	VerificationPlan            *githubVerificationPlan     `json:"verification_plan,omitempty"`
-	VerificationScriptsDir      string                      `json:"verification_scripts_dir,omitempty"`
-	InputPath                   string                      `json:"input_path"`
-	InputMode                   string                      `json:"input_mode"`
-	IntegrationPolicy           string                      `json:"integration_policy"`
-	GroupingPolicy              string                      `json:"grouping_policy,omitempty"`
-	ValidationParallelism       int                         `json:"validation_parallelism,omitempty"`
-	MaxIterations               int                         `json:"max_iterations"`
-	CurrentRound                int                         `json:"current_round,omitempty"`
-	CurrentSubphase             string                      `json:"current_subphase,omitempty"`
-	LastError                   string                      `json:"last_error,omitempty"`
-	RejectedFindingFingerprints []string                    `json:"rejected_finding_fingerprints,omitempty"`
-	Iterations                  []localWorkIterationSummary `json:"iterations,omitempty"`
+	Version                        int                          `json:"version"`
+	RunID                          string                       `json:"run_id"`
+	CreatedAt                      string                       `json:"created_at"`
+	UpdatedAt                      string                       `json:"updated_at"`
+	CompletedAt                    string                       `json:"completed_at,omitempty"`
+	Status                         string                       `json:"status"`
+	CurrentPhase                   string                       `json:"current_phase,omitempty"`
+	CurrentIteration               int                          `json:"current_iteration,omitempty"`
+	RepoRoot                       string                       `json:"repo_root"`
+	RepoName                       string                       `json:"repo_name"`
+	RepoID                         string                       `json:"repo_id"`
+	SourceBranch                   string                       `json:"source_branch"`
+	BaselineSHA                    string                       `json:"baseline_sha"`
+	SandboxPath                    string                       `json:"sandbox_path"`
+	SandboxRepoPath                string                       `json:"sandbox_repo_path"`
+	VerificationPlan               *githubVerificationPlan      `json:"verification_plan,omitempty"`
+	VerificationScriptsDir         string                       `json:"verification_scripts_dir,omitempty"`
+	InputPath                      string                       `json:"input_path"`
+	InputMode                      string                       `json:"input_mode"`
+	IntegrationPolicy              string                       `json:"integration_policy"`
+	GroupingPolicy                 string                       `json:"grouping_policy,omitempty"`
+	ValidationParallelism          int                          `json:"validation_parallelism,omitempty"`
+	MaxIterations                  int                          `json:"max_iterations"`
+	CurrentRound                   int                          `json:"current_round,omitempty"`
+	CurrentSubphase                string                       `json:"current_subphase,omitempty"`
+	LastError                      string                       `json:"last_error,omitempty"`
+	RejectedFindingFingerprints    []string                     `json:"rejected_finding_fingerprints,omitempty"`
+	PreexistingFindingFingerprints []string                     `json:"preexisting_finding_fingerprints,omitempty"`
+	PreexistingFindings            []localWorkRememberedFinding `json:"preexisting_findings,omitempty"`
+	Iterations                     []localWorkIterationSummary  `json:"iterations,omitempty"`
 }
 
 type localWorkIterationSummary struct {
@@ -141,8 +144,10 @@ type localWorkIterationSummary struct {
 	ValidatedFindings                     int      `json:"validated_findings,omitempty"`
 	ConfirmedFindings                     int      `json:"confirmed_findings,omitempty"`
 	RejectedFindings                      int      `json:"rejected_findings,omitempty"`
+	PreexistingFindings                   int      `json:"preexisting_findings,omitempty"`
 	ModifiedFindings                      int      `json:"modified_findings,omitempty"`
 	SkippedRejectedFindings               int      `json:"skipped_rejected_findings,omitempty"`
+	SkippedPreexistingFindings            int      `json:"skipped_preexisting_findings,omitempty"`
 	ValidationGroups                      []string `json:"validation_groups,omitempty"`
 	ValidationGroupRationales             []string `json:"validation_group_rationales,omitempty"`
 	RequestedGroupingPolicy               string   `json:"requested_grouping_policy,omitempty"`
@@ -196,12 +201,23 @@ type localWorkFindingGroup struct {
 type localWorkFindingDecisionStatus string
 
 const (
-	localWorkFindingConfirmed  localWorkFindingDecisionStatus = "confirmed"
-	localWorkFindingRejected   localWorkFindingDecisionStatus = "rejected"
-	localWorkFindingModified   localWorkFindingDecisionStatus = "modified"
-	localWorkFindingSuperseded localWorkFindingDecisionStatus = "superseded"
-	localWorkFindingPending    localWorkFindingDecisionStatus = "pending"
+	localWorkFindingConfirmed   localWorkFindingDecisionStatus = "confirmed"
+	localWorkFindingRejected    localWorkFindingDecisionStatus = "rejected"
+	localWorkFindingModified    localWorkFindingDecisionStatus = "modified"
+	localWorkFindingPreexisting localWorkFindingDecisionStatus = "preexisting"
+	localWorkFindingSuperseded  localWorkFindingDecisionStatus = "superseded"
+	localWorkFindingPending     localWorkFindingDecisionStatus = "pending"
 )
+
+type localWorkRememberedFinding struct {
+	Fingerprint string `json:"fingerprint"`
+	Title       string `json:"title"`
+	Path        string `json:"path"`
+	Line        int    `json:"line,omitempty"`
+	Summary     string `json:"summary,omitempty"`
+	Detail      string `json:"detail,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+}
 
 type localWorkValidatedFinding struct {
 	GroupID               string                         `json:"group_id"`
@@ -968,7 +984,7 @@ func startLocalWork(cwd string, options localWorkStartOptions) error {
 
 	now := ISOTimeNow()
 	manifest := localWorkManifest{
-		Version:                3,
+		Version:                4,
 		RunID:                  runID,
 		CreatedAt:              now,
 		UpdatedAt:              now,
@@ -1201,11 +1217,9 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			return err
 		}
 
-		initialFilteredCount := len(initialFindings)
-		filteredInitialFindings := filterRejectedFindings(initialFindings, manifest.RejectedFindingFingerprints)
-		initialFilteredCount -= len(filteredInitialFindings)
+		initialFilterResult := filterKnownFindings(initialFindings, manifest.RejectedFindingFingerprints, manifest.PreexistingFindingFingerprints)
 
-		initialGroups, initialGroupingResult, initialValidatorAttempts, validatedInitialFindings, rejectedInitialFingerprints, err := runLocalWorkValidationPhase(&manifest, &state, runDir, iterationDir, codexArgs, 0, filteredInitialFindings)
+		initialGroups, initialGroupingResult, initialValidatorAttempts, validatedInitialFindings, rejectedInitialFingerprints, preexistingInitialFindings, err := runLocalWorkValidationPhase(&manifest, &state, runDir, iterationDir, codexArgs, 0, initialFilterResult.Findings)
 		if err != nil {
 			manifest.Status = "failed"
 			manifest.LastError = err.Error()
@@ -1216,6 +1230,8 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			return err
 		}
 		manifest.RejectedFindingFingerprints = uniqueStrings(append(manifest.RejectedFindingFingerprints, rejectedInitialFingerprints...))
+		manifest.PreexistingFindingFingerprints = uniqueStrings(append(manifest.PreexistingFindingFingerprints, rememberedFindingFingerprints(preexistingInitialFindings)...))
+		manifest.PreexistingFindings = mergeRememberedFindings(manifest.PreexistingFindings, preexistingInitialFindings)
 		if err := writeLocalWorkManifest(manifest); err != nil {
 			return err
 		}
@@ -1229,6 +1245,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 		validationRationales := groupRationales(initialGroups)
 		validatedFindingCount := len(validatedInitialFindings)
 		rejectedFindingsCount := len(rejectedInitialFingerprints)
+		preexistingFindingsCount := len(preexistingInitialFindings)
 		modifiedFindingsCount := countValidatedFindingsByStatus(validatedInitialFindings, localWorkFindingModified)
 		confirmedFindingsCount := countValidatedFindingsByStatus(validatedInitialFindings, localWorkFindingConfirmed)
 		reviewRoundFingerprints := []string{}
@@ -1241,7 +1258,8 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 		groupingFallbackReason := initialGroupingResult.FallbackReason
 		groupingAttempts := initialGroupingResult.Attempts
 		validatorAttempts := initialValidatorAttempts
-		skippedRejectedFindings := initialFilteredCount
+		skippedRejectedFindings := initialFilterResult.SkippedRejected
+		skippedPreexistingFindings := initialFilterResult.SkippedPreexisting
 
 		for round := 1; round <= localWorkMaxReviewRounds && (!finalVerification.Passed || len(finalFindings) > 0); round++ {
 			roundsUsed = round
@@ -1358,10 +1376,8 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 				continue
 			}
 
-			filteredRoundCount := len(postHardeningFindings)
-			filteredRoundFindings := filterRejectedFindings(postHardeningFindings, manifest.RejectedFindingFingerprints)
-			filteredRoundCount -= len(filteredRoundFindings)
-			roundGroups, roundGroupingResult, roundValidatorAttempts, validatedRoundFindings, rejectedRoundFingerprints, err := runLocalWorkValidationPhase(&manifest, &state, runDir, iterationDir, codexArgs, round, filteredRoundFindings)
+			filteredRoundResult := filterKnownFindings(postHardeningFindings, manifest.RejectedFindingFingerprints, manifest.PreexistingFindingFingerprints)
+			roundGroups, roundGroupingResult, roundValidatorAttempts, validatedRoundFindings, rejectedRoundFingerprints, preexistingRoundFindings, err := runLocalWorkValidationPhase(&manifest, &state, runDir, iterationDir, codexArgs, round, filteredRoundResult.Findings)
 			if err != nil {
 				manifest.Status = "failed"
 				manifest.LastError = err.Error()
@@ -1372,6 +1388,8 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 				return err
 			}
 			manifest.RejectedFindingFingerprints = uniqueStrings(append(manifest.RejectedFindingFingerprints, rejectedRoundFingerprints...))
+			manifest.PreexistingFindingFingerprints = uniqueStrings(append(manifest.PreexistingFindingFingerprints, rememberedFindingFingerprints(preexistingRoundFindings)...))
+			manifest.PreexistingFindings = mergeRememberedFindings(manifest.PreexistingFindings, preexistingRoundFindings)
 			if err := writeLocalWorkManifest(manifest); err != nil {
 				return err
 			}
@@ -1384,11 +1402,13 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			validationRationales = append(validationRationales, groupRationales(roundGroups)...)
 			validatedFindingCount += len(validatedRoundFindings)
 			rejectedFindingsCount += len(rejectedRoundFingerprints)
+			preexistingFindingsCount += len(preexistingRoundFindings)
 			modifiedFindingsCount += countValidatedFindingsByStatus(validatedRoundFindings, localWorkFindingModified)
 			confirmedFindingsCount += countValidatedFindingsByStatus(validatedRoundFindings, localWorkFindingConfirmed)
 			reviewRoundFingerprints = append(reviewRoundFingerprints, sha256Hex(strings.Join(reviewFindingFingerprints(finalFindings), "\n")))
 			reviewFindingsByRound = append(reviewFindingsByRound, len(finalFindings))
-			skippedRejectedFindings += filteredRoundCount
+			skippedRejectedFindings += filteredRoundResult.SkippedRejected
+			skippedPreexistingFindings += filteredRoundResult.SkippedPreexisting
 			validatorAttempts += roundValidatorAttempts
 			groupingAttempts += roundGroupingResult.Attempts
 			if (len(roundGroups) > 0 || roundGroupingResult.Attempts > 0 || strings.TrimSpace(roundGroupingResult.FallbackReason) != "") && roundGroupingResult.EffectivePolicy != "" {
@@ -1457,8 +1477,10 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			ValidatedFindings:                     validatedFindingCount,
 			ConfirmedFindings:                     confirmedFindingsCount,
 			RejectedFindings:                      rejectedFindingsCount,
+			PreexistingFindings:                   preexistingFindingsCount,
 			ModifiedFindings:                      modifiedFindingsCount,
 			SkippedRejectedFindings:               skippedRejectedFindings,
+			SkippedPreexistingFindings:            skippedPreexistingFindings,
 			ValidationGroups:                      uniqueStrings(validationGroupIDs),
 			ValidationGroupRationales:             uniqueStrings(validationRationales),
 			RequestedGroupingPolicy:               requestedGroupingPolicy,
@@ -1503,6 +1525,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			if _, err := writeLocalWorkRetrospective(manifest); err != nil {
 				return err
 			}
+			printLocalWorkRememberedFindings(os.Stdout, "Pre-existing issues excluded from propagation", manifest.PreexistingFindings)
 			fmt.Fprintf(os.Stdout, "[local] Completed run %s after %d iteration(s).\n", manifest.RunID, iteration)
 			return nil
 		}
@@ -1535,7 +1558,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 	return errors.New(manifest.LastError)
 }
 
-func runLocalWorkValidationPhase(manifest *localWorkManifest, state *localWorkIterationRuntimeState, runDir string, iterationDir string, codexArgs []string, round int, findings []githubPullReviewFinding) ([]localWorkFindingGroup, localWorkGroupingResult, int, []localWorkValidatedFinding, []string, error) {
+func runLocalWorkValidationPhase(manifest *localWorkManifest, state *localWorkIterationRuntimeState, runDir string, iterationDir string, codexArgs []string, round int, findings []githubPullReviewFinding) ([]localWorkFindingGroup, localWorkGroupingResult, int, []localWorkValidatedFinding, []string, []localWorkRememberedFinding, error) {
 	contextName := "initial"
 	if round > 0 {
 		contextName = fmt.Sprintf("round-%d", round)
@@ -1543,10 +1566,10 @@ func runLocalWorkValidationPhase(manifest *localWorkManifest, state *localWorkIt
 	context := findLocalWorkValidationContext(state, contextName, round)
 	setLocalWorkProgress(manifest, state, "validation", "grouping", round)
 	if err := writeLocalWorkManifest(*manifest); err != nil {
-		return nil, localWorkGroupingResult{}, 0, nil, nil, err
+		return nil, localWorkGroupingResult{}, 0, nil, nil, nil, err
 	}
 	if err := writeLocalWorkRuntimeState(manifest.RunID, *state); err != nil {
-		return nil, localWorkGroupingResult{}, 0, nil, nil, err
+		return nil, localWorkGroupingResult{}, 0, nil, nil, nil, err
 	}
 
 	groupedPath := filepath.Join(iterationDir, "grouped-findings-initial.json")
@@ -1572,10 +1595,10 @@ func runLocalWorkValidationPhase(manifest *localWorkManifest, state *localWorkIt
 		var err error
 		groupingResult, groups, err = groupFindings(manifest, codexArgs, iterationDir, round, findings)
 		if err != nil {
-			return nil, localWorkGroupingResult{}, 0, nil, nil, err
+			return nil, localWorkGroupingResult{}, 0, nil, nil, nil, err
 		}
 		if err := writeJSONArtifact(groupedPath, groups); err != nil {
-			return nil, localWorkGroupingResult{}, 0, nil, nil, err
+			return nil, localWorkGroupingResult{}, 0, nil, nil, nil, err
 		}
 		context.RequestedPolicy = groupingResult.RequestedPolicy
 		context.EffectivePolicy = groupingResult.EffectivePolicy
@@ -1590,13 +1613,13 @@ func runLocalWorkValidationPhase(manifest *localWorkManifest, state *localWorkIt
 			})
 		}
 		if err := writeLocalWorkActiveState(runDir, manifest, state); err != nil {
-			return nil, localWorkGroupingResult{}, 0, nil, nil, err
+			return nil, localWorkGroupingResult{}, 0, nil, nil, nil, err
 		}
 	}
 
 	setLocalWorkProgress(manifest, state, "validation", "validation", round)
 	if err := writeLocalWorkActiveState(runDir, manifest, state); err != nil {
-		return nil, localWorkGroupingResult{}, 0, nil, nil, err
+		return nil, localWorkGroupingResult{}, 0, nil, nil, nil, err
 	}
 
 	validated := []localWorkValidatedFinding{}
@@ -1616,20 +1639,20 @@ func runLocalWorkValidationPhase(manifest *localWorkManifest, state *localWorkIt
 		})
 		if err != nil {
 			_ = writeLocalWorkActiveState(runDir, manifest, state)
-			return nil, groupingResult, validatorAttempts, nil, nil, err
+			return nil, groupingResult, validatorAttempts, nil, nil, nil, err
 		}
 		if err := writeJSONArtifact(validatedPath, validated); err != nil {
-			return nil, groupingResult, validatorAttempts, nil, nil, err
+			return nil, groupingResult, validatorAttempts, nil, nil, nil, err
 		}
 		if err := writeJSONArtifact(rejectedPath, rejected); err != nil {
-			return nil, groupingResult, validatorAttempts, nil, nil, err
+			return nil, groupingResult, validatorAttempts, nil, nil, nil, err
 		}
 		context.ValidationComplete = true
 		if err := writeLocalWorkActiveState(runDir, manifest, state); err != nil {
-			return nil, groupingResult, validatorAttempts, nil, nil, err
+			return nil, groupingResult, validatorAttempts, nil, nil, nil, err
 		}
 	}
-	return groups, groupingResult, validatorAttempts, validated, rejected, nil
+	return groups, groupingResult, validatorAttempts, validated, rejected, rememberedFindingsFromValidated(validated, localWorkFindingPreexisting), nil
 }
 
 func buildFindingHistoryEvents(iteration int, round int, phase string, validated []localWorkValidatedFinding) []localWorkFindingHistoryEvent {
@@ -1684,6 +1707,7 @@ type localWorkStatusSnapshot struct {
 	LastIteration            *localWorkIterationSummary       `json:"last_iteration,omitempty"`
 	ActiveValidationContext  *localWorkValidationContextState `json:"active_validation_context,omitempty"`
 	RejectedFingerprintCount int                              `json:"rejected_fingerprint_count,omitempty"`
+	PreexistingFindingCount  int                              `json:"preexisting_finding_count,omitempty"`
 	LastError                string                           `json:"last_error,omitempty"`
 }
 
@@ -1716,13 +1740,15 @@ func localWorkStatus(cwd string, options localWorkStatusOptions) error {
 	if snapshot.LastIteration != nil {
 		fmt.Fprintf(os.Stdout, "[local] Last verification: %s\n", snapshot.LastVerification)
 		fmt.Fprintf(os.Stdout, "[local] Last review findings: %d\n", snapshot.LastReviewFindings)
-		fmt.Fprintf(os.Stdout, "[local] Last validation: groups=%d validated=%d confirmed=%d rejected=%d modified=%d skipped-rejected=%d policy=%s",
+		fmt.Fprintf(os.Stdout, "[local] Last validation: groups=%d validated=%d confirmed=%d rejected=%d preexisting=%d modified=%d skipped-rejected=%d skipped-preexisting=%d policy=%s",
 			len(snapshot.LastIteration.ValidationGroups),
 			snapshot.LastIteration.ValidatedFindings,
 			snapshot.LastIteration.ConfirmedFindings,
 			snapshot.LastIteration.RejectedFindings,
+			snapshot.LastIteration.PreexistingFindings,
 			snapshot.LastIteration.ModifiedFindings,
 			snapshot.LastIteration.SkippedRejectedFindings,
+			snapshot.LastIteration.SkippedPreexistingFindings,
 			defaultString(snapshot.LastIteration.EffectiveGroupingPolicy, snapshot.LastIteration.RequestedGroupingPolicy))
 		if strings.TrimSpace(snapshot.LastIteration.GroupingFallbackReason) != "" {
 			fmt.Fprintf(os.Stdout, " fallback=%s", snapshot.LastIteration.GroupingFallbackReason)
@@ -1754,6 +1780,7 @@ func localWorkStatus(cwd string, options localWorkStatusOptions) error {
 		}
 	}
 	fmt.Fprintf(os.Stdout, "[local] Stored rejected findings: %d\n", snapshot.RejectedFingerprintCount)
+	fmt.Fprintf(os.Stdout, "[local] Stored pre-existing findings: %d\n", snapshot.PreexistingFindingCount)
 	if strings.TrimSpace(snapshot.LastError) != "" {
 		fmt.Fprintf(os.Stdout, "[local] Last error: %s\n", snapshot.LastError)
 	}
@@ -1785,6 +1812,7 @@ func localWorkBuildStatusSnapshot(manifest localWorkManifest, runDir string) (lo
 		Round:                    manifest.CurrentRound,
 		ActiveValidationContext:  activeContext,
 		RejectedFingerprintCount: len(manifest.RejectedFindingFingerprints),
+		PreexistingFindingCount:  len(manifest.PreexistingFindings),
 		LastError:                manifest.LastError,
 	}
 	if runtimeState != nil {
@@ -1895,13 +1923,15 @@ func localWorkLogs(cwd string, options localWorkLogsOptions) error {
 	fmt.Fprintf(os.Stdout, "[local] Iteration: %d\n", iteration)
 	fmt.Fprintf(os.Stdout, "[local] Iteration artifacts: %s\n", iterationDir)
 	if snapshot.LastIteration != nil {
-		fmt.Fprintf(os.Stdout, "[local] Validation summary: groups=%d validated=%d confirmed=%d rejected=%d modified=%d skipped-rejected=%d policy=%s",
+		fmt.Fprintf(os.Stdout, "[local] Validation summary: groups=%d validated=%d confirmed=%d rejected=%d preexisting=%d modified=%d skipped-rejected=%d skipped-preexisting=%d policy=%s",
 			len(snapshot.LastIteration.ValidationGroups),
 			snapshot.LastIteration.ValidatedFindings,
 			snapshot.LastIteration.ConfirmedFindings,
 			snapshot.LastIteration.RejectedFindings,
+			snapshot.LastIteration.PreexistingFindings,
 			snapshot.LastIteration.ModifiedFindings,
 			snapshot.LastIteration.SkippedRejectedFindings,
+			snapshot.LastIteration.SkippedPreexistingFindings,
 			defaultString(snapshot.LastIteration.EffectiveGroupingPolicy, snapshot.LastIteration.RequestedGroupingPolicy))
 		if strings.TrimSpace(snapshot.LastIteration.GroupingFallbackReason) != "" {
 			fmt.Fprintf(os.Stdout, " fallback=%s", snapshot.LastIteration.GroupingFallbackReason)
@@ -2072,7 +2102,7 @@ func refreshLocalWorkVerificationArtifactsInPlace(manifest *localWorkManifest) (
 
 func normalizeLocalWorkManifest(manifest *localWorkManifest) {
 	if manifest.Version == 0 {
-		manifest.Version = 3
+		manifest.Version = 4
 	}
 	if strings.TrimSpace(manifest.GroupingPolicy) == "" {
 		manifest.GroupingPolicy = localWorkDefaultGroupingPolicy
@@ -2622,6 +2652,16 @@ func validatedFindingsFromGroupDecision(group localWorkFindingGroup, groupResult
 				Reason:              strings.TrimSpace(decision.Reason),
 			})
 			rejected = append(rejected, finding.Fingerprint)
+		case localWorkFindingPreexisting:
+			validated = append(validated, localWorkValidatedFinding{
+				GroupID:             group.GroupID,
+				GroupRationale:      group.Rationale,
+				OriginalFingerprint: finding.Fingerprint,
+				CurrentFingerprint:  finding.Fingerprint,
+				Status:              localWorkFindingPreexisting,
+				Reason:              strings.TrimSpace(decision.Reason),
+				Finding:             &finding,
+			})
 		case localWorkFindingModified:
 			replacement := cloneFindingOrOriginal(decision.Replacement, finding)
 			replacementFingerprint := buildGithubPullReviewFindingFingerprint(replacement.Title, replacement.Path, replacement.Line, replacement.Summary)
@@ -2894,14 +2934,16 @@ func buildLocalWorkValidationPrompt(manifest localWorkManifest, group localWorkF
 		fmt.Sprintf("Group: %s", group.GroupID),
 		fmt.Sprintf("Group rationale: %s", defaultString(strings.TrimSpace(group.Rationale), "(none provided)")),
 		"",
-		"Decide each finding as one of: confirmed, rejected, modified.",
+		"Decide each finding as one of: confirmed, rejected, modified, preexisting.",
 		"- confirmed: the finding is valid as written",
 		"- rejected: the finding should be dropped from later validation and hardening in this run",
 		"- modified: the finding is directionally valid but must be rewritten into a better scoped or more accurate replacement",
+		"- preexisting: the issue clearly existed in the baseline before this run and should be remembered, reported, and excluded from hardening/propagation",
 		"",
 		"Return JSON only.",
-		`Schema: {"group":"...","decisions":[{"fingerprint":"...","status":"confirmed|rejected|modified","reason":"...","replacement":{"title":"...","severity":"low|medium|high|critical","path":"...","line":123,"summary":"...","detail":"...","fix":"...","rationale":"..."}}]}`,
-		"If you are unsure, prefer confirmed over rejected.",
+		`Schema: {"group":"...","decisions":[{"fingerprint":"...","status":"confirmed|rejected|modified|preexisting","reason":"...","replacement":{"title":"...","severity":"low|medium|high|critical","path":"...","line":123,"summary":"...","detail":"...","fix":"...","rationale":"..."}}]}`,
+		"If baseline evidence shows the issue already existed before this run's changes, choose preexisting.",
+		"If you are unsure, prefer confirmed over rejected or preexisting.",
 		"",
 		"Findings:",
 	}
@@ -2923,6 +2965,9 @@ func buildLocalWorkValidationPrompt(manifest localWorkManifest, group localWorkF
 			seenSnippets[finding.Path] = true
 			if snippet := localWorkFindingSnippet(manifest.SandboxRepoPath, finding); strings.TrimSpace(snippet) != "" {
 				lines = append(lines, fmt.Sprintf("  code: %s", promptSnippetLimit(snippet, 1200)))
+			}
+			if baseline := localWorkFindingBaselineSnippet(manifest, finding); strings.TrimSpace(baseline) != "" {
+				lines = append(lines, fmt.Sprintf("  baseline code: %s", promptSnippetLimit(baseline, 1200)))
 			}
 			if diff := localWorkFindingDiffSnippet(manifest, finding.Path); strings.TrimSpace(diff) != "" {
 				lines = append(lines, fmt.Sprintf("  diff: %s", promptSnippetLimit(diff, 1800)))
@@ -2954,7 +2999,7 @@ func parseLocalWorkValidationGroupResult(raw string, group localWorkFindingGroup
 			continue
 		}
 		switch decision.Status {
-		case localWorkFindingRejected, localWorkFindingModified, localWorkFindingConfirmed:
+		case localWorkFindingRejected, localWorkFindingModified, localWorkFindingConfirmed, localWorkFindingPreexisting:
 		default:
 			decision.Status = localWorkFindingConfirmed
 		}
@@ -2979,6 +3024,99 @@ func filterRejectedFindings(findings []githubPullReviewFinding, rejectedFingerpr
 		filtered = append(filtered, finding)
 	}
 	return filtered
+}
+
+type localWorkKnownFindingFilterResult struct {
+	Findings           []githubPullReviewFinding
+	SkippedRejected    int
+	SkippedPreexisting int
+}
+
+func filterKnownFindings(findings []githubPullReviewFinding, rejectedFingerprints []string, preexistingFingerprints []string) localWorkKnownFindingFilterResult {
+	result := localWorkKnownFindingFilterResult{Findings: findings}
+	if len(findings) == 0 {
+		return result
+	}
+	rejected := map[string]bool{}
+	for _, fingerprint := range rejectedFingerprints {
+		rejected[fingerprint] = true
+	}
+	preexisting := map[string]bool{}
+	for _, fingerprint := range preexistingFingerprints {
+		preexisting[fingerprint] = true
+	}
+	if len(rejected) == 0 && len(preexisting) == 0 {
+		return result
+	}
+	filtered := make([]githubPullReviewFinding, 0, len(findings))
+	for _, finding := range findings {
+		switch {
+		case preexisting[finding.Fingerprint]:
+			result.SkippedPreexisting++
+		case rejected[finding.Fingerprint]:
+			result.SkippedRejected++
+		default:
+			filtered = append(filtered, finding)
+		}
+	}
+	result.Findings = filtered
+	return result
+}
+
+func rememberedFindingsFromValidated(validated []localWorkValidatedFinding, status localWorkFindingDecisionStatus) []localWorkRememberedFinding {
+	out := []localWorkRememberedFinding{}
+	seen := map[string]bool{}
+	for _, item := range validated {
+		if item.Status != status || item.Finding == nil {
+			continue
+		}
+		if seen[item.CurrentFingerprint] {
+			continue
+		}
+		seen[item.CurrentFingerprint] = true
+		out = append(out, localWorkRememberedFinding{
+			Fingerprint: item.CurrentFingerprint,
+			Title:       item.Finding.Title,
+			Path:        item.Finding.Path,
+			Line:        item.Finding.Line,
+			Summary:     item.Finding.Summary,
+			Detail:      item.Finding.Detail,
+			Reason:      item.Reason,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Fingerprint < out[j].Fingerprint })
+	return out
+}
+
+func rememberedFindingFingerprints(findings []localWorkRememberedFinding) []string {
+	out := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		if strings.TrimSpace(finding.Fingerprint) == "" {
+			continue
+		}
+		out = append(out, finding.Fingerprint)
+	}
+	return out
+}
+
+func mergeRememberedFindings(existing []localWorkRememberedFinding, additions []localWorkRememberedFinding) []localWorkRememberedFinding {
+	if len(additions) == 0 {
+		return existing
+	}
+	merged := append([]localWorkRememberedFinding{}, existing...)
+	seen := map[string]bool{}
+	for _, finding := range merged {
+		seen[finding.Fingerprint] = true
+	}
+	for _, finding := range additions {
+		if strings.TrimSpace(finding.Fingerprint) == "" || seen[finding.Fingerprint] {
+			continue
+		}
+		seen[finding.Fingerprint] = true
+		merged = append(merged, finding)
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].Fingerprint < merged[j].Fingerprint })
+	return merged
 }
 
 func groupFindingsByModule(findings []githubPullReviewFinding) []localWorkFindingGroup {
@@ -3234,15 +3372,31 @@ func localWorkFindingSnippet(repoPath string, finding githubPullReviewFinding) s
 	if err != nil {
 		return ""
 	}
-	lines := strings.Split(string(content), "\n")
-	if finding.Line <= 0 || finding.Line > len(lines) {
+	return localWorkSnippetFromContent(string(content), finding.Line)
+}
+
+func localWorkFindingBaselineSnippet(manifest localWorkManifest, finding githubPullReviewFinding) string {
+	path := strings.TrimSpace(strings.TrimPrefix(finding.Path, "/"))
+	if path == "" || strings.TrimSpace(manifest.BaselineSHA) == "" {
+		return ""
+	}
+	content, err := githubGitOutput(manifest.SandboxRepoPath, "show", fmt.Sprintf("%s:%s", manifest.BaselineSHA, path))
+	if err != nil {
+		return ""
+	}
+	return localWorkSnippetFromContent(content, finding.Line)
+}
+
+func localWorkSnippetFromContent(content string, line int) string {
+	lines := strings.Split(content, "\n")
+	if line <= 0 || line > len(lines) {
 		return strings.Join(lines[:minInt(len(lines), localWorkPromptSnippetLines)], "\n")
 	}
-	start := finding.Line - 3
+	start := line - 3
 	if start < 0 {
 		start = 0
 	}
-	end := finding.Line + 2
+	end := line + 2
 	if end > len(lines) {
 		end = len(lines)
 	}
@@ -3594,6 +3748,27 @@ func reviewFindingFingerprints(findings []githubPullReviewFinding) []string {
 	return out
 }
 
+func printLocalWorkRememberedFindings(writer io.Writer, label string, findings []localWorkRememberedFinding) {
+	if writer == nil || len(findings) == 0 {
+		return
+	}
+	fmt.Fprintf(writer, "[local] %s: %d\n", label, len(findings))
+	for index, finding := range findings {
+		if index >= 5 {
+			fmt.Fprintf(writer, "[local] ... %d additional pre-existing issue(s) omitted\n", len(findings)-index)
+			return
+		}
+		ref := strings.TrimSpace(finding.Path)
+		if finding.Line > 0 {
+			ref = fmt.Sprintf("%s:%d", ref, finding.Line)
+		}
+		if ref == "" {
+			ref = finding.Fingerprint
+		}
+		fmt.Fprintf(writer, "[local] Pre-existing: %s (%s)\n", defaultString(strings.TrimSpace(finding.Title), finding.Fingerprint), ref)
+	}
+}
+
 func promptSnippet(value string) string {
 	return promptSnippetLimit(value, localWorkPromptSnippetChars)
 }
@@ -3712,19 +3887,21 @@ func writeLocalWorkRetrospective(manifest localWorkManifest) (string, error) {
 		fmt.Sprintf("- Grouping policy: %s", manifest.GroupingPolicy),
 		fmt.Sprintf("- Validation parallelism: %d", manifest.ValidationParallelism),
 		fmt.Sprintf("- Stored rejected findings: %d", len(manifest.RejectedFindingFingerprints)),
+		fmt.Sprintf("- Stored pre-existing findings: %d", len(manifest.PreexistingFindings)),
 		fmt.Sprintf("- Finding history events: %d", len(history)),
 		fmt.Sprintf("- Final diff: %s", defaultString(strings.TrimSpace(diffShortstat), "(no diff)")),
 		"",
 		"## Iterations",
 	}
 	for _, iteration := range manifest.Iterations {
-		lines = append(lines, fmt.Sprintf("- %d: %s; initial review=%d; validated=%d; confirmed=%d; rejected=%d; modified=%d; final review=%d; groups=%d; policy=%s; integration=%t",
+		lines = append(lines, fmt.Sprintf("- %d: %s; initial review=%d; validated=%d; confirmed=%d; rejected=%d; preexisting=%d; modified=%d; final review=%d; groups=%d; policy=%s; integration=%t",
 			iteration.Iteration,
 			iteration.VerificationSummary,
 			iteration.InitialReviewFindings,
 			iteration.ValidatedFindings,
 			iteration.ConfirmedFindings,
 			iteration.RejectedFindings,
+			iteration.PreexistingFindings,
 			iteration.ModifiedFindings,
 			iteration.ReviewFindings,
 			len(iteration.ValidationGroups),
@@ -3738,6 +3915,20 @@ func writeLocalWorkRetrospective(manifest localWorkManifest) (string, error) {
 		}
 		if strings.TrimSpace(iteration.GroupingFallbackReason) != "" {
 			lines = append(lines, "  - grouping fallback: "+iteration.GroupingFallbackReason)
+		}
+	}
+	if len(manifest.PreexistingFindings) > 0 {
+		lines = append(lines, "", "## Pre-existing issues excluded")
+		for _, finding := range manifest.PreexistingFindings {
+			ref := strings.TrimSpace(finding.Path)
+			if finding.Line > 0 {
+				ref = fmt.Sprintf("%s:%d", ref, finding.Line)
+			}
+			entry := fmt.Sprintf("- %s (%s)", defaultString(strings.TrimSpace(finding.Title), finding.Fingerprint), defaultString(ref, finding.Fingerprint))
+			if strings.TrimSpace(finding.Reason) != "" {
+				entry += ": " + strings.TrimSpace(finding.Reason)
+			}
+			lines = append(lines, entry)
 		}
 	}
 	if strings.TrimSpace(manifest.LastError) != "" {

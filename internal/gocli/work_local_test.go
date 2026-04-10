@@ -207,6 +207,21 @@ func TestFilterRejectedFindingsDropsRejectedFingerprints(t *testing.T) {
 	}
 }
 
+func TestFilterKnownFindingsSeparatesRejectedAndPreexistingFingerprints(t *testing.T) {
+	findings := []githubPullReviewFinding{
+		{Fingerprint: "keep", Title: "keep"},
+		{Fingerprint: "rejected", Title: "rejected"},
+		{Fingerprint: "preexisting", Title: "preexisting"},
+	}
+	filtered := filterKnownFindings(findings, []string{"rejected"}, []string{"preexisting"})
+	if len(filtered.Findings) != 1 || filtered.Findings[0].Fingerprint != "keep" {
+		t.Fatalf("unexpected filtered findings: %#v", filtered)
+	}
+	if filtered.SkippedRejected != 1 || filtered.SkippedPreexisting != 1 {
+		t.Fatalf("unexpected skipped counts: %#v", filtered)
+	}
+}
+
 func TestFindingsFromValidatedReplacesModifiedFindings(t *testing.T) {
 	original := githubPullReviewFinding{Fingerprint: "old", Title: "old", Path: "migrator/file.scala", Summary: "s", Detail: "d"}
 	replacement := githubPullReviewFinding{Fingerprint: "new", Title: "new", Path: "migrator/file.scala", Summary: "s2", Detail: "d2"}
@@ -978,6 +993,107 @@ func TestWorkLocalFindingHistoryRecordsLifecycle(t *testing.T) {
 	}
 	if statuses[localWorkFindingRejected] == 0 || statuses[localWorkFindingModified] == 0 || statuses[localWorkFindingSuperseded] == 0 {
 		t.Fatalf("expected rejected/modified/superseded events in history, got %#v", history)
+	}
+}
+
+func TestWorkLocalReportsAndFiltersPreexistingFindings(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	hardenedPath := filepath.Join(home, "hardened")
+	validateCountPath := filepath.Join(home, "validate-count")
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`PAYLOAD="$(cat)"`,
+		`inc() {`,
+		`  path="$1"`,
+		`  count=0`,
+		`  if [ -f "$path" ]; then count=$(cat "$path"); fi`,
+		`  count=$((count+1))`,
+		`  printf '%s' "$count" > "$path"`,
+		`}`,
+		`case "$PAYLOAD" in`,
+		`  *"# NANA Work-local Finding Grouping"*)`,
+		`    printf '{"groups":[{"group_id":"readme-batch","rationale":"shared readme context","findings":["readme.md|legacy heading needs cleanup|1|rename heading","readme.md|need stronger regression coverage|2|add regression"]}]}\n'`,
+		`    ;;`,
+		`  *"# NANA Work-local Finding Validation"*)`,
+		`    inc "$FAKE_VALIDATE_COUNT_PATH"`,
+		`    case "$PAYLOAD" in`,
+		`      *"baseline code: # local work"*)`,
+		`        printf '{"group":"readme-batch","decisions":[{"fingerprint":"readme.md|legacy heading needs cleanup|1|rename heading","status":"preexisting","reason":"the baseline code already contains the same heading issue"},{"fingerprint":"readme.md|need stronger regression coverage|2|add regression","status":"confirmed","reason":"new work needs coverage"}]}\n'`,
+		`        ;;`,
+		`      *)`,
+		`        printf 'baseline context missing\n' >&2`,
+		`        exit 91`,
+		`        ;;`,
+		`    esac`,
+		`    ;;`,
+		`  *"# NANA Work-local Hardening Pass"*)`,
+		`    : > "$FAKE_HARDENED_PATH"`,
+		`    printf 'added regression note\n' >> README.md`,
+		`    printf 'hardening-complete\n'`,
+		`    ;;`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    if [ -f "$FAKE_HARDENED_PATH" ]; then`,
+		`      printf '{"findings":[{"title":"Legacy heading needs cleanup","severity":"low","path":"README.md","line":1,"summary":"rename heading","detail":"detail-old","fix":"fix-old","rationale":"why-old"}]}\n'`,
+		`    else`,
+		`      printf '{"findings":[{"title":"Legacy heading needs cleanup","severity":"low","path":"README.md","line":1,"summary":"rename heading","detail":"detail-old","fix":"fix-old","rationale":"why-old"},{"title":"Need stronger regression coverage","severity":"medium","path":"README.md","line":2,"summary":"add regression","detail":"detail-new","fix":"fix-new","rationale":"why-new"}]}\n'`,
+		`    fi`,
+		`    ;;`,
+		`  *)`,
+		`    printf 'implemented\n' >> README.md`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_HARDENED_PATH", hardenedPath)
+	t.Setenv("FAKE_VALIDATE_COUNT_PATH", validateCountPath)
+
+	output, err := captureStdout(t, func() error {
+		return WorkLocal(repo, []string{"start", "--task", "Filter preexisting issues"})
+	})
+	if err != nil {
+		t.Fatalf("WorkLocal(start): %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "Pre-existing issues excluded from propagation: 1") || !strings.Contains(output, "Legacy heading needs cleanup") {
+		t.Fatalf("expected preexisting issue report in output, got %q", output)
+	}
+
+	validateCount, err := os.ReadFile(validateCountPath)
+	if err != nil {
+		t.Fatalf("read validate count: %v", err)
+	}
+	if strings.TrimSpace(string(validateCount)) != "1" {
+		t.Fatalf("expected validator to skip remembered preexisting finding on later rounds, got count %q", validateCount)
+	}
+
+	manifest, _ := mustLatestLocalWorkRun(t, repo)
+	if len(manifest.PreexistingFindings) != 1 || len(manifest.PreexistingFindingFingerprints) != 1 {
+		t.Fatalf("expected remembered preexisting finding in manifest, got %#v", manifest)
+	}
+	if len(manifest.Iterations) != 1 {
+		t.Fatalf("expected single iteration, got %#v", manifest.Iterations)
+	}
+	summary := manifest.Iterations[0]
+	if summary.PreexistingFindings != 1 || summary.SkippedPreexistingFindings != 1 || summary.ReviewFindings != 0 || summary.ReviewRoundsUsed != 1 {
+		t.Fatalf("unexpected iteration summary: %#v", summary)
+	}
+
+	retroOutput, err := captureStdout(t, func() error {
+		return WorkLocal(repo, []string{"retrospective", "--last"})
+	})
+	if err != nil {
+		t.Fatalf("WorkLocal(retrospective): %v", err)
+	}
+	if !strings.Contains(retroOutput, "## Pre-existing issues excluded") || !strings.Contains(retroOutput, "Legacy heading needs cleanup") {
+		t.Fatalf("expected retrospective to include preexisting issue section, got %q", retroOutput)
 	}
 }
 
