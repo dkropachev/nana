@@ -3,6 +3,7 @@ package gocli
 import (
 	"bytes"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,15 +16,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 const WorkLocalHelp = `nana work-local - Autonomous local plan execution for git-backed local repos
 
 Usage:
-  nana work-local start [--repo <path>] (--task <text> | --plan-file <path>) [--max-iterations <n>] [--integration <final|always|never>] [-- codex-args...]
+  nana work-local start [--repo <path>] (--task <text> | --plan-file <path>) [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [-- codex-args...]
   nana work-local resume [--run-id <id> | --last | --global-last] [--repo <path>] [-- codex-args...]
-  nana work-local status [--run-id <id> | --last | --global-last] [--repo <path>]
-  nana work-local logs [--run-id <id> | --last | --global-last] [--repo <path>] [--tail <n>]
+  nana work-local status [--run-id <id> | --last | --global-last] [--repo <path>] [--json]
+  nana work-local logs [--run-id <id> | --last | --global-last] [--repo <path>] [--tail <n>] [--json]
   nana work-local retrospective [--run-id <id> | --last | --global-last] [--repo <path>]
   nana work-local help
 
@@ -40,20 +43,35 @@ const (
 	localWorkMaxReviewRounds       = 2
 	localWorkRuntimeName           = "work-local"
 	localWorkPromptCharLimit       = 120000
+	localWorkGroupingPromptLimit   = 40000
+	localWorkValidationPromptLimit = 60000
 	localWorkPromptSnippetChars    = 2000
 	localWorkPromptSnippetLines    = 25
 	localWorkValidationParallelism = 4
+	localWorkMaxValidationParallel = 8
 	localWorkMaxValidationGroups   = 8
 	localWorkMaxFindingsPerGroup   = 10
+	localWorkMaxGroupingAttempts   = 3
+	localWorkMaxValidatorAttempts  = 3
+	localWorkDefaultGroupingPolicy = "ai"
+	localWorkPathGroupingPolicy    = "path"
+	localWorkSingletonPolicy       = "singleton"
 )
 
 type localWorkStartOptions struct {
-	RepoPath          string
-	Task              string
-	PlanFile          string
-	MaxIterations     int
-	IntegrationPolicy string
-	CodexArgs         []string
+	RepoPath              string
+	Task                  string
+	PlanFile              string
+	MaxIterations         int
+	IntegrationPolicy     string
+	GroupingPolicy        string
+	ValidationParallelism int
+	CodexArgs             []string
+}
+
+type localWorkStatusOptions struct {
+	RunSelection localWorkRunSelection
+	JSON         bool
 }
 
 type localWorkRunSelection struct {
@@ -71,6 +89,7 @@ type localWorkResumeOptions struct {
 type localWorkLogsOptions struct {
 	RunSelection localWorkRunSelection
 	TailLines    int
+	JSON         bool
 }
 
 type localWorkManifest struct {
@@ -94,7 +113,11 @@ type localWorkManifest struct {
 	InputPath                   string                      `json:"input_path"`
 	InputMode                   string                      `json:"input_mode"`
 	IntegrationPolicy           string                      `json:"integration_policy"`
+	GroupingPolicy              string                      `json:"grouping_policy,omitempty"`
+	ValidationParallelism       int                         `json:"validation_parallelism,omitempty"`
 	MaxIterations               int                         `json:"max_iterations"`
+	CurrentRound                int                         `json:"current_round,omitempty"`
+	CurrentSubphase             string                      `json:"current_subphase,omitempty"`
 	LastError                   string                      `json:"last_error,omitempty"`
 	RejectedFindingFingerprints []string                    `json:"rejected_finding_fingerprints,omitempty"`
 	Iterations                  []localWorkIterationSummary `json:"iterations,omitempty"`
@@ -119,7 +142,14 @@ type localWorkIterationSummary struct {
 	ConfirmedFindings                     int      `json:"confirmed_findings,omitempty"`
 	RejectedFindings                      int      `json:"rejected_findings,omitempty"`
 	ModifiedFindings                      int      `json:"modified_findings,omitempty"`
+	SkippedRejectedFindings               int      `json:"skipped_rejected_findings,omitempty"`
 	ValidationGroups                      []string `json:"validation_groups,omitempty"`
+	ValidationGroupRationales             []string `json:"validation_group_rationales,omitempty"`
+	RequestedGroupingPolicy               string   `json:"requested_grouping_policy,omitempty"`
+	EffectiveGroupingPolicy               string   `json:"effective_grouping_policy,omitempty"`
+	GroupingFallbackReason                string   `json:"grouping_fallback_reason,omitempty"`
+	GroupingAttempts                      int      `json:"grouping_attempts,omitempty"`
+	ValidatorAttempts                     int      `json:"validator_attempts,omitempty"`
 	ReviewRoundsUsed                      int      `json:"review_rounds_used,omitempty"`
 	ReviewFindingsByRound                 []int    `json:"review_findings_by_round,omitempty"`
 	ReviewRoundFingerprints               []string `json:"review_round_fingerprints,omitempty"`
@@ -158,8 +188,9 @@ type localWorkExecutionResult struct {
 }
 
 type localWorkFindingGroup struct {
-	GroupID  string                    `json:"group_id"`
-	Findings []githubPullReviewFinding `json:"findings"`
+	GroupID   string                    `json:"group_id"`
+	Rationale string                    `json:"rationale,omitempty"`
+	Findings  []githubPullReviewFinding `json:"findings"`
 }
 
 type localWorkFindingDecisionStatus string
@@ -174,6 +205,7 @@ const (
 
 type localWorkValidatedFinding struct {
 	GroupID               string                         `json:"group_id"`
+	GroupRationale        string                         `json:"group_rationale,omitempty"`
 	OriginalFingerprint   string                         `json:"original_fingerprint"`
 	CurrentFingerprint    string                         `json:"current_fingerprint"`
 	Status                localWorkFindingDecisionStatus `json:"status"`
@@ -195,7 +227,11 @@ type localWorkValidationGroupResult struct {
 }
 
 type localWorkGroupingResult struct {
-	Groups []localWorkGroupingGroup `json:"groups"`
+	RequestedPolicy string                   `json:"requested_policy,omitempty"`
+	EffectivePolicy string                   `json:"effective_policy,omitempty"`
+	FallbackReason  string                   `json:"fallback_reason,omitempty"`
+	Attempts        int                      `json:"attempts,omitempty"`
+	Groups          []localWorkGroupingGroup `json:"groups"`
 }
 
 type localWorkGroupingGroup struct {
@@ -204,35 +240,76 @@ type localWorkGroupingGroup struct {
 	Findings  []string `json:"findings"`
 }
 
-type localWorkRepoMetadata struct {
-	Version   int    `json:"version"`
-	RepoID    string `json:"repo_id"`
-	RepoRoot  string `json:"repo_root"`
-	RepoName  string `json:"repo_name"`
-	UpdatedAt string `json:"updated_at"`
+type localWorkIterationRuntimeState struct {
+	Version               int                               `json:"version"`
+	Iteration             int                               `json:"iteration"`
+	CurrentPhase          string                            `json:"current_phase,omitempty"`
+	CurrentSubphase       string                            `json:"current_subphase,omitempty"`
+	CurrentRound          int                               `json:"current_round,omitempty"`
+	GroupingPolicy        string                            `json:"grouping_policy,omitempty"`
+	ValidationParallelism int                               `json:"validation_parallelism,omitempty"`
+	ImplementCompleted    bool                              `json:"implement_completed,omitempty"`
+	VerificationCompleted bool                              `json:"verification_completed,omitempty"`
+	ReviewCompleted       bool                              `json:"review_completed,omitempty"`
+	ValidationContexts    []localWorkValidationContextState `json:"validation_contexts,omitempty"`
+	Rounds                []localWorkRoundRuntimeState      `json:"rounds,omitempty"`
 }
 
-type localWorkLatestRunPointer struct {
-	RepoID   string `json:"repo_id,omitempty"`
-	RepoRoot string `json:"repo_root"`
-	RunID    string `json:"run_id"`
+type localWorkValidationContextState struct {
+	Name               string                       `json:"name"`
+	Round              int                          `json:"round"`
+	RequestedPolicy    string                       `json:"requested_policy,omitempty"`
+	EffectivePolicy    string                       `json:"effective_policy,omitempty"`
+	FallbackReason     string                       `json:"fallback_reason,omitempty"`
+	Attempts           int                          `json:"attempts,omitempty"`
+	GroupingComplete   bool                         `json:"grouping_complete,omitempty"`
+	ValidationComplete bool                         `json:"validation_complete,omitempty"`
+	GroupStates        []localWorkRuntimeGroupState `json:"group_states,omitempty"`
 }
 
-type localWorkRunIndex struct {
-	Version         int                               `json:"version"`
-	GlobalLastRunID string                            `json:"global_last_run_id,omitempty"`
-	Entries         map[string]localWorkRunIndexEntry `json:"entries,omitempty"`
+type localWorkRoundRuntimeState struct {
+	Round                     int  `json:"round"`
+	HardeningCompleted        bool `json:"hardening_completed,omitempty"`
+	PostVerificationCompleted bool `json:"post_verification_completed,omitempty"`
+	PostReviewCompleted       bool `json:"post_review_completed,omitempty"`
 }
 
-type localWorkRunIndexEntry struct {
-	RunID        string `json:"run_id"`
-	RepoID       string `json:"repo_id"`
-	RepoRoot     string `json:"repo_root"`
-	RepoName     string `json:"repo_name"`
-	ManifestPath string `json:"manifest_path"`
-	Status       string `json:"status"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
+type localWorkRuntimeGroupState struct {
+	GroupID    string `json:"group_id"`
+	Rationale  string `json:"rationale,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Attempts   int    `json:"attempts,omitempty"`
+	ResultPath string `json:"result_path,omitempty"`
+	LastError  string `json:"last_error,omitempty"`
+}
+
+type localWorkValidationGroupProgress struct {
+	GroupID    string
+	Rationale  string
+	Status     string
+	Attempts   int
+	ResultPath string
+	LastError  string
+}
+
+type localWorkDBStore struct {
+	db *sql.DB
+}
+
+type localWorkFindingHistoryEvent struct {
+	Iteration             int                            `json:"iteration"`
+	Round                 int                            `json:"round"`
+	Phase                 string                         `json:"phase"`
+	GroupID               string                         `json:"group_id,omitempty"`
+	GroupRationale        string                         `json:"group_rationale,omitempty"`
+	OriginalFingerprint   string                         `json:"original_fingerprint"`
+	CurrentFingerprint    string                         `json:"current_fingerprint"`
+	Status                localWorkFindingDecisionStatus `json:"status"`
+	Title                 string                         `json:"title,omitempty"`
+	Path                  string                         `json:"path,omitempty"`
+	Line                  int                            `json:"line,omitempty"`
+	Reason                string                         `json:"reason,omitempty"`
+	SupersedesFingerprint string                         `json:"supersedes_fingerprint,omitempty"`
 }
 
 func WorkLocal(cwd string, args []string) error {
@@ -255,11 +332,11 @@ func WorkLocal(cwd string, args []string) error {
 		}
 		return resumeLocalWork(cwd, options)
 	case "status":
-		selection, err := parseLocalWorkRunSelection(args[1:], true)
+		options, err := parseLocalWorkStatusArgs(args[1:])
 		if err != nil {
 			return err
 		}
-		return localWorkStatus(cwd, selection)
+		return localWorkStatus(cwd, options)
 	case "logs":
 		options, err := parseLocalWorkLogsArgs(args[1:])
 		if err != nil {
@@ -283,10 +360,308 @@ func WorkLocal(cwd string, args []string) error {
 	}
 }
 
+func localWorkDBPath() string {
+	return filepath.Join(localWorkHomeRoot(), "state.db")
+}
+
+func openLocalWorkDB() (*localWorkDBStore, error) {
+	if err := os.MkdirAll(localWorkHomeRoot(), 0o755); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", localWorkDBPath())
+	if err != nil {
+		return nil, err
+	}
+	store := &localWorkDBStore{db: db}
+	if err := store.init(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+func (s *localWorkDBStore) Close() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	return s.db.Close()
+}
+
+func (s *localWorkDBStore) init() error {
+	statements := []string{
+		`PRAGMA journal_mode=WAL;`,
+		`PRAGMA foreign_keys=ON;`,
+		`PRAGMA busy_timeout=5000;`,
+		`PRAGMA synchronous=NORMAL;`,
+		`CREATE TABLE IF NOT EXISTS repos (
+			repo_id TEXT PRIMARY KEY,
+			repo_root TEXT NOT NULL UNIQUE,
+			repo_name TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS runs (
+			run_id TEXT PRIMARY KEY,
+			repo_id TEXT NOT NULL,
+			repo_root TEXT NOT NULL,
+			repo_name TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			completed_at TEXT,
+			status TEXT NOT NULL,
+			current_phase TEXT,
+			current_subphase TEXT,
+			current_iteration INTEGER,
+			current_round INTEGER,
+			sandbox_path TEXT NOT NULL,
+			sandbox_repo_path TEXT NOT NULL,
+			manifest_json TEXT NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_work_local_runs_repo_updated ON runs(repo_id, updated_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_work_local_runs_updated ON runs(updated_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS runtime_states (
+			run_id TEXT NOT NULL,
+			iteration INTEGER NOT NULL,
+			state_json TEXT NOT NULL,
+			PRIMARY KEY(run_id, iteration)
+		);`,
+		`CREATE TABLE IF NOT EXISTS finding_history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			run_id TEXT NOT NULL,
+			event_json TEXT NOT NULL
+		);`,
+	}
+	for _, stmt := range statements {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *localWorkDBStore) writeManifest(manifest localWorkManifest) error {
+	normalizeLocalWorkManifest(&manifest)
+	if strings.TrimSpace(manifest.RepoID) == "" {
+		manifest.RepoID = localWorkRepoID(manifest.RepoRoot)
+	}
+	if strings.TrimSpace(manifest.RepoName) == "" {
+		manifest.RepoName = filepath.Base(manifest.RepoRoot)
+	}
+	content, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`INSERT INTO repos(repo_id, repo_root, repo_name, updated_at)
+		 VALUES(?, ?, ?, ?)
+		 ON CONFLICT(repo_id) DO UPDATE SET
+		   repo_root=excluded.repo_root,
+		   repo_name=excluded.repo_name,
+		   updated_at=excluded.updated_at`,
+		manifest.RepoID, manifest.RepoRoot, manifest.RepoName, manifest.UpdatedAt,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO runs(run_id, repo_id, repo_root, repo_name, created_at, updated_at, completed_at, status, current_phase, current_subphase, current_iteration, current_round, sandbox_path, sandbox_repo_path, manifest_json)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(run_id) DO UPDATE SET
+		   repo_id=excluded.repo_id,
+		   repo_root=excluded.repo_root,
+		   repo_name=excluded.repo_name,
+		   created_at=excluded.created_at,
+		   updated_at=excluded.updated_at,
+		   completed_at=excluded.completed_at,
+		   status=excluded.status,
+		   current_phase=excluded.current_phase,
+		   current_subphase=excluded.current_subphase,
+		   current_iteration=excluded.current_iteration,
+		   current_round=excluded.current_round,
+		   sandbox_path=excluded.sandbox_path,
+		   sandbox_repo_path=excluded.sandbox_repo_path,
+		   manifest_json=excluded.manifest_json`,
+		manifest.RunID, manifest.RepoID, manifest.RepoRoot, manifest.RepoName, manifest.CreatedAt, manifest.UpdatedAt, nullableString(manifest.CompletedAt),
+		manifest.Status, nullableString(manifest.CurrentPhase), nullableString(manifest.CurrentSubphase), manifest.CurrentIteration, manifest.CurrentRound,
+		manifest.SandboxPath, manifest.SandboxRepoPath, string(content),
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *localWorkDBStore) writeActiveState(manifest localWorkManifest, state *localWorkIterationRuntimeState) error {
+	normalizeLocalWorkManifest(&manifest)
+	if strings.TrimSpace(manifest.RepoID) == "" {
+		manifest.RepoID = localWorkRepoID(manifest.RepoRoot)
+	}
+	if strings.TrimSpace(manifest.RepoName) == "" {
+		manifest.RepoName = filepath.Base(manifest.RepoRoot)
+	}
+	manifestContent, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	var stateContent []byte
+	if state != nil {
+		if state.Version == 0 {
+			state.Version = 1
+		}
+		stateContent, err = json.Marshal(state)
+		if err != nil {
+			return err
+		}
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`INSERT INTO repos(repo_id, repo_root, repo_name, updated_at)
+		 VALUES(?, ?, ?, ?)
+		 ON CONFLICT(repo_id) DO UPDATE SET
+		   repo_root=excluded.repo_root,
+		   repo_name=excluded.repo_name,
+		   updated_at=excluded.updated_at`,
+		manifest.RepoID, manifest.RepoRoot, manifest.RepoName, manifest.UpdatedAt,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO runs(run_id, repo_id, repo_root, repo_name, created_at, updated_at, completed_at, status, current_phase, current_subphase, current_iteration, current_round, sandbox_path, sandbox_repo_path, manifest_json)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(run_id) DO UPDATE SET
+		   repo_id=excluded.repo_id,
+		   repo_root=excluded.repo_root,
+		   repo_name=excluded.repo_name,
+		   created_at=excluded.created_at,
+		   updated_at=excluded.updated_at,
+		   completed_at=excluded.completed_at,
+		   status=excluded.status,
+		   current_phase=excluded.current_phase,
+		   current_subphase=excluded.current_subphase,
+		   current_iteration=excluded.current_iteration,
+		   current_round=excluded.current_round,
+		   sandbox_path=excluded.sandbox_path,
+		   sandbox_repo_path=excluded.sandbox_repo_path,
+		   manifest_json=excluded.manifest_json`,
+		manifest.RunID, manifest.RepoID, manifest.RepoRoot, manifest.RepoName, manifest.CreatedAt, manifest.UpdatedAt, nullableString(manifest.CompletedAt),
+		manifest.Status, nullableString(manifest.CurrentPhase), nullableString(manifest.CurrentSubphase), manifest.CurrentIteration, manifest.CurrentRound,
+		manifest.SandboxPath, manifest.SandboxRepoPath, string(manifestContent),
+	); err != nil {
+		return err
+	}
+	if state != nil {
+		if _, err := tx.Exec(
+			`INSERT INTO runtime_states(run_id, iteration, state_json)
+			 VALUES(?, ?, ?)
+			 ON CONFLICT(run_id, iteration) DO UPDATE SET state_json=excluded.state_json`,
+			manifest.RunID, state.Iteration, string(stateContent),
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *localWorkDBStore) readManifest(runID string) (localWorkManifest, error) {
+	row := s.db.QueryRow(`SELECT manifest_json FROM runs WHERE run_id = ?`, runID)
+	var raw string
+	if err := row.Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return localWorkManifest{}, fmt.Errorf("work-local run %s was not found", runID)
+		}
+		return localWorkManifest{}, err
+	}
+	var manifest localWorkManifest
+	if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
+		return localWorkManifest{}, err
+	}
+	normalizeLocalWorkManifest(&manifest)
+	return manifest, nil
+}
+
+func readLocalWorkManifestByRunID(runID string) (localWorkManifest, error) {
+	store, err := openLocalWorkDB()
+	if err != nil {
+		return localWorkManifest{}, err
+	}
+	defer store.Close()
+	return store.readManifest(runID)
+}
+
+func (s *localWorkDBStore) resolveRunID(cwd string, selection localWorkRunSelection) (string, error) {
+	if selection.RunID != "" {
+		row := s.db.QueryRow(`SELECT run_id FROM runs WHERE run_id = ?`, selection.RunID)
+		var runID string
+		if err := row.Scan(&runID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return "", fmt.Errorf("work-local run %s was not found", selection.RunID)
+			}
+			return "", err
+		}
+		return runID, nil
+	}
+	if selection.GlobalLast {
+		row := s.db.QueryRow(`SELECT run_id FROM runs ORDER BY updated_at DESC LIMIT 1`)
+		var runID string
+		if err := row.Scan(&runID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return "", fmt.Errorf("no global work-local run found under %s", localWorkHomeRoot())
+			}
+			return "", err
+		}
+		return runID, nil
+	}
+	repoRoot, err := resolveLocalWorkRepoRootForSelection(cwd, selection.RepoPath)
+	if err != nil {
+		return "", err
+	}
+	row := s.db.QueryRow(`SELECT run_id FROM runs WHERE repo_root = ? ORDER BY updated_at DESC LIMIT 1`, repoRoot)
+	var runID string
+	if err := row.Scan(&runID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("no work-local run found for repo %s", repoRoot)
+		}
+		return "", err
+	}
+	return runID, nil
+}
+
+func resolveLocalWorkRun(cwd string, selection localWorkRunSelection) (localWorkManifest, string, error) {
+	store, err := openLocalWorkDB()
+	if err != nil {
+		return localWorkManifest{}, "", err
+	}
+	defer store.Close()
+	runID, err := store.resolveRunID(cwd, selection)
+	if err != nil {
+		return localWorkManifest{}, "", err
+	}
+	manifest, err := store.readManifest(runID)
+	if err != nil {
+		return localWorkManifest{}, "", err
+	}
+	return manifest, localWorkRunDirByID(manifest.RepoID, manifest.RunID), nil
+}
+
+func nullableString(value string) interface{} {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
+}
+
 func parseLocalWorkStartArgs(args []string) (localWorkStartOptions, error) {
 	options := localWorkStartOptions{
-		MaxIterations:     localWorkDefaultMaxIterations,
-		IntegrationPolicy: "final",
+		MaxIterations:         localWorkDefaultMaxIterations,
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
 	}
 	passthroughIndex := len(args)
 	for index, token := range args {
@@ -357,6 +732,33 @@ func parseLocalWorkStartArgs(args []string) (localWorkStartOptions, error) {
 			index++
 		case strings.HasPrefix(token, "--integration="):
 			options.IntegrationPolicy = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(token, "--integration=")))
+		case token == "--grouping-policy":
+			value, err := requireLocalWorkFlagValue(parseArgs, index, "--grouping-policy")
+			if err != nil {
+				return localWorkStartOptions{}, err
+			}
+			options.GroupingPolicy = strings.ToLower(strings.TrimSpace(value))
+			index++
+		case strings.HasPrefix(token, "--grouping-policy="):
+			options.GroupingPolicy = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(token, "--grouping-policy=")))
+		case token == "--validation-parallelism":
+			value, err := requireLocalWorkFlagValue(parseArgs, index, "--validation-parallelism")
+			if err != nil {
+				return localWorkStartOptions{}, err
+			}
+			parsed, err := strconv.Atoi(strings.TrimSpace(value))
+			if err != nil || parsed <= 0 || parsed > localWorkMaxValidationParallel {
+				return localWorkStartOptions{}, fmt.Errorf("Invalid --validation-parallelism value %q. Expected 1-%d.\n%s", value, localWorkMaxValidationParallel, WorkLocalHelp)
+			}
+			options.ValidationParallelism = parsed
+			index++
+		case strings.HasPrefix(token, "--validation-parallelism="):
+			value := strings.TrimSpace(strings.TrimPrefix(token, "--validation-parallelism="))
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed <= 0 || parsed > localWorkMaxValidationParallel {
+				return localWorkStartOptions{}, fmt.Errorf("Invalid --validation-parallelism value %q. Expected 1-%d.\n%s", value, localWorkMaxValidationParallel, WorkLocalHelp)
+			}
+			options.ValidationParallelism = parsed
 		default:
 			return localWorkStartOptions{}, fmt.Errorf("Unknown work-local start option: %s\n\n%s", token, WorkLocalHelp)
 		}
@@ -370,6 +772,32 @@ func parseLocalWorkStartArgs(args []string) (localWorkStartOptions, error) {
 	default:
 		return localWorkStartOptions{}, fmt.Errorf("Invalid --integration value %q. Expected final, always, or never.\n%s", options.IntegrationPolicy, WorkLocalHelp)
 	}
+	switch options.GroupingPolicy {
+	case localWorkDefaultGroupingPolicy, localWorkPathGroupingPolicy, localWorkSingletonPolicy:
+	default:
+		return localWorkStartOptions{}, fmt.Errorf("Invalid --grouping-policy value %q. Expected ai, path, or singleton.\n%s", options.GroupingPolicy, WorkLocalHelp)
+	}
+	return options, nil
+}
+
+func parseLocalWorkStatusArgs(args []string) (localWorkStatusOptions, error) {
+	options := localWorkStatusOptions{
+		RunSelection: localWorkRunSelection{UseLast: true},
+	}
+	selectionArgs := make([]string, 0, len(args))
+	for _, token := range args {
+		switch token {
+		case "--json":
+			options.JSON = true
+		default:
+			selectionArgs = append(selectionArgs, token)
+		}
+	}
+	selection, err := parseLocalWorkRunSelection(selectionArgs, true)
+	if err != nil {
+		return localWorkStatusOptions{}, err
+	}
+	options.RunSelection = selection
 	return options, nil
 }
 
@@ -401,6 +829,8 @@ func parseLocalWorkLogsArgs(args []string) (localWorkLogsOptions, error) {
 	for index := 0; index < len(args); index++ {
 		token := args[index]
 		switch {
+		case token == "--json":
+			options.JSON = true
 		case token == "--tail":
 			value, err := requireLocalWorkFlagValue(args, index, "--tail")
 			if err != nil {
@@ -538,7 +968,7 @@ func startLocalWork(cwd string, options localWorkStartOptions) error {
 
 	now := ISOTimeNow()
 	manifest := localWorkManifest{
-		Version:                2,
+		Version:                3,
 		RunID:                  runID,
 		CreatedAt:              now,
 		UpdatedAt:              now,
@@ -557,6 +987,8 @@ func startLocalWork(cwd string, options localWorkStartOptions) error {
 		InputPath:              inputPath,
 		InputMode:              inputMode,
 		IntegrationPolicy:      options.IntegrationPolicy,
+		GroupingPolicy:         options.GroupingPolicy,
+		ValidationParallelism:  options.ValidationParallelism,
 		MaxIterations:          options.MaxIterations,
 	}
 	if err := writeLocalWorkManifest(manifest); err != nil {
@@ -568,20 +1000,17 @@ func startLocalWork(cwd string, options localWorkStartOptions) error {
 	fmt.Fprintf(os.Stdout, "[local] Run artifacts: %s\n", runDir)
 	fmt.Fprintf(os.Stdout, "[local] Verification policy: lint=%d compile=%d unit=%d integration=%d benchmark=%d integration_policy=%s\n",
 		len(verificationPlan.Lint), len(verificationPlan.Compile), len(verificationPlan.Unit), len(verificationPlan.Integration), len(verificationPlan.Benchmarks), options.IntegrationPolicy)
+	fmt.Fprintf(os.Stdout, "[local] Validation policy: grouping=%s parallelism=%d\n", options.GroupingPolicy, options.ValidationParallelism)
 	for _, warning := range verificationPlan.Warnings {
 		fmt.Fprintf(os.Stdout, "[local] Verification warning: %s\n", warning)
 	}
 
-	return executeLocalWorkLoop(localWorkManifestPathByID(repoID, runID), options.CodexArgs)
+	return executeLocalWorkLoop(runID, options.CodexArgs)
 }
 
 func resumeLocalWork(cwd string, options localWorkResumeOptions) error {
-	manifestPath, err := resolveLocalWorkManifestPath(cwd, options.RunSelection)
+	manifest, _, err := resolveLocalWorkRun(cwd, options.RunSelection)
 	if err != nil {
-		return err
-	}
-	var manifest localWorkManifest
-	if err := readGithubJSON(manifestPath, &manifest); err != nil {
 		return err
 	}
 	if manifest.Status == "completed" {
@@ -591,64 +1020,92 @@ func resumeLocalWork(cwd string, options localWorkResumeOptions) error {
 		return fmt.Errorf("work-local run %s has already exhausted max iterations (%d)", manifest.RunID, manifest.MaxIterations)
 	}
 	fmt.Fprintf(os.Stdout, "[local] Resuming run %s for %s\n", manifest.RunID, manifest.RepoRoot)
-	return executeLocalWorkLoop(manifestPath, options.CodexArgs)
+	return executeLocalWorkLoop(manifest.RunID, options.CodexArgs)
 }
 
-func executeLocalWorkLoop(manifestPath string, codexArgs []string) error {
-	var manifest localWorkManifest
-	if err := readGithubJSON(manifestPath, &manifest); err != nil {
+func executeLocalWorkLoop(runID string, codexArgs []string) error {
+	manifest, err := readLocalWorkManifestByRunID(runID)
+	if err != nil {
 		return err
 	}
 	nextIteration := localWorkNextIteration(manifest)
 	if nextIteration <= 0 {
 		nextIteration = 1
 	}
-	runDir := filepath.Dir(manifestPath)
+	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
 
 	for iteration := nextIteration; iteration <= manifest.MaxIterations; iteration++ {
-		startedAt := ISOTimeNow()
-		manifest.Status = "running"
-		manifest.CurrentIteration = iteration
-		manifest.CurrentPhase = "implement"
-		manifest.UpdatedAt = startedAt
-		manifest.LastError = ""
-		if err := writeLocalWorkManifest(manifest); err != nil {
-			return err
-		}
-
 		iterationDir := localWorkIterationDir(runDir, iteration)
 		if err := os.MkdirAll(iterationDir, 0o755); err != nil {
 			return err
 		}
-
-		implementPrompt, err := buildLocalWorkImplementPrompt(manifest, iteration)
+		state, err := readLocalWorkRuntimeState(manifest.RunID, iteration)
 		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(iterationDir, "implement-prompt.md"), []byte(implementPrompt), 0o644); err != nil {
-			return err
-		}
-		implementResult, err := runLocalWorkCodexPrompt(manifest, codexArgs, implementPrompt, "leader")
-		if err := os.WriteFile(filepath.Join(iterationDir, "implement-stdout.log"), []byte(implementResult.Stdout), 0o644); err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(iterationDir, "implement-stderr.log"), []byte(implementResult.Stderr), 0o644); err != nil {
-			return err
-		}
-		if err != nil {
-			manifest.Status = "failed"
-			manifest.CurrentPhase = "implement"
-			manifest.UpdatedAt = ISOTimeNow()
-			manifest.LastError = err.Error()
-			if writeErr := writeLocalWorkManifest(manifest); writeErr != nil {
-				return writeErr
+			if !os.IsNotExist(err) {
+				return err
 			}
+			state = localWorkIterationRuntimeState{
+				Version:               1,
+				Iteration:             iteration,
+				GroupingPolicy:        manifest.GroupingPolicy,
+				ValidationParallelism: manifest.ValidationParallelism,
+			}
+		}
+
+		startedAt := ISOTimeNow()
+		if len(manifest.Iterations) >= iteration {
+			startedAt = manifest.Iterations[iteration-1].StartedAt
+		}
+		manifest.Status = "running"
+		manifest.CurrentIteration = iteration
+		manifest.LastError = ""
+
+		setLocalWorkProgress(&manifest, &state, defaultString(state.CurrentPhase, "implement"), defaultString(state.CurrentSubphase, "implement"), state.CurrentRound)
+		if state.CurrentPhase == "" {
+			setLocalWorkProgress(&manifest, &state, "implement", "implement", 0)
+		}
+		if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 			return err
 		}
 
-		manifest.CurrentPhase = "verify-refresh"
-		manifest.UpdatedAt = ISOTimeNow()
-		if err := writeLocalWorkManifest(manifest); err != nil {
+		implementStdoutPath := filepath.Join(iterationDir, "implement-stdout.log")
+		implementStderrPath := filepath.Join(iterationDir, "implement-stderr.log")
+		if !state.ImplementCompleted {
+			setLocalWorkProgress(&manifest, &state, "implement", "implement", 0)
+			if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
+				return err
+			}
+			implementPrompt, err := buildLocalWorkImplementPrompt(manifest, iteration)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(iterationDir, "implement-prompt.md"), []byte(implementPrompt), 0o644); err != nil {
+				return err
+			}
+			implementResult, err := runLocalWorkCodexPrompt(manifest, codexArgs, implementPrompt, "leader")
+			if err := os.WriteFile(implementStdoutPath, []byte(implementResult.Stdout), 0o644); err != nil {
+				return err
+			}
+			if err := os.WriteFile(implementStderrPath, []byte(implementResult.Stderr), 0o644); err != nil {
+				return err
+			}
+			if err != nil {
+				manifest.Status = "failed"
+				manifest.LastError = err.Error()
+				manifest.UpdatedAt = ISOTimeNow()
+				if writeErr := writeLocalWorkActiveState(runDir, &manifest, &state); writeErr != nil {
+					return writeErr
+				}
+				return err
+			}
+			state.ImplementCompleted = true
+			if err := writeLocalWorkRuntimeState(manifest.RunID, state); err != nil {
+				return err
+			}
+		}
+
+		setLocalWorkProgress(&manifest, &state, "verify-refresh", "verify-refresh", 0)
+		if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 			return err
 		}
 		plan, scriptsDir, err := refreshLocalWorkVerificationArtifactsInPlace(&manifest)
@@ -661,78 +1118,115 @@ func executeLocalWorkLoop(manifestPath string, codexArgs []string) error {
 			return err
 		}
 
-		manifest.CurrentPhase = "verify"
-		manifest.UpdatedAt = ISOTimeNow()
-		if err := writeLocalWorkManifest(manifest); err != nil {
-			return err
+		verificationPath := filepath.Join(iterationDir, "verification.json")
+		initialVerification := localWorkVerificationReport{}
+		if state.VerificationCompleted {
+			if err := readGithubJSON(verificationPath, &initialVerification); err != nil {
+				state.VerificationCompleted = false
+			}
 		}
-		initialVerification, err := runLocalVerification(manifest.SandboxRepoPath, plan, manifest.IntegrationPolicy == "always")
-		if err != nil {
-			return err
+		if !state.VerificationCompleted {
+			setLocalWorkProgress(&manifest, &state, "verify", "verify", 0)
+			if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
+				return err
+			}
+			initialVerification, err = runLocalVerification(manifest.SandboxRepoPath, plan, manifest.IntegrationPolicy == "always")
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(verificationPath, mustMarshalJSON(initialVerification), 0o644); err != nil {
+				return err
+			}
+			state.VerificationCompleted = true
+			if err := writeLocalWorkRuntimeState(manifest.RunID, state); err != nil {
+				return err
+			}
 		}
-		if err := os.WriteFile(filepath.Join(iterationDir, "verification.json"), mustMarshalJSON(initialVerification), 0o644); err != nil {
+
+		reviewPromptPath := filepath.Join(iterationDir, "review-prompt.md")
+		reviewStdoutPath := filepath.Join(iterationDir, "review-stdout.log")
+		reviewStderrPath := filepath.Join(iterationDir, "review-stderr.log")
+		reviewFindingsPath := filepath.Join(iterationDir, "review-findings.json")
+		initialFindings := []githubPullReviewFinding{}
+		if state.ReviewCompleted {
+			if err := readGithubJSON(reviewFindingsPath, &initialFindings); err != nil {
+				state.ReviewCompleted = false
+			}
+		}
+		if !state.ReviewCompleted {
+			setLocalWorkProgress(&manifest, &state, "review", "review", 0)
+			if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
+				return err
+			}
+			reviewPrompt, err := buildLocalWorkReviewPrompt(manifest)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(reviewPromptPath, []byte(reviewPrompt), 0o644); err != nil {
+				return err
+			}
+			reviewResult, findings, err := runLocalWorkReview(manifest, codexArgs, reviewPrompt)
+			if err := os.WriteFile(reviewStdoutPath, []byte(reviewResult.Stdout), 0o644); err != nil {
+				return err
+			}
+			if err := os.WriteFile(reviewStderrPath, []byte(reviewResult.Stderr), 0o644); err != nil {
+				return err
+			}
+			if err := os.WriteFile(reviewFindingsPath, mustMarshalJSON(findings), 0o644); err != nil {
+				return err
+			}
+			if err != nil {
+				manifest.Status = "failed"
+				manifest.LastError = err.Error()
+				manifest.UpdatedAt = ISOTimeNow()
+				if writeErr := writeLocalWorkActiveState(runDir, &manifest, &state); writeErr != nil {
+					return writeErr
+				}
+				return err
+			}
+			initialFindings = findings
+			state.ReviewCompleted = true
+			if err := writeLocalWorkRuntimeState(manifest.RunID, state); err != nil {
+				return err
+			}
+		}
+
+		reviewPromptContent, _ := os.ReadFile(reviewPromptPath)
+		if len(reviewPromptContent) > 0 {
+			if err := os.WriteFile(filepath.Join(iterationDir, "review-initial-prompt.md"), reviewPromptContent, 0o644); err != nil {
+				return err
+			}
+		}
+		if err := os.WriteFile(filepath.Join(iterationDir, "review-initial-findings.json"), mustMarshalJSON(initialFindings), 0o644); err != nil {
 			return err
 		}
 
-		manifest.CurrentPhase = "review"
-		manifest.UpdatedAt = ISOTimeNow()
-		if err := writeLocalWorkManifest(manifest); err != nil {
-			return err
-		}
-		reviewPrompt, err := buildLocalWorkReviewPrompt(manifest)
-		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(iterationDir, "review-prompt.md"), []byte(reviewPrompt), 0o644); err != nil {
-			return err
-		}
-		reviewResult, initialFindings, err := runLocalWorkReview(manifest, codexArgs, reviewPrompt)
-		if err := os.WriteFile(filepath.Join(iterationDir, "review-stdout.log"), []byte(reviewResult.Stdout), 0o644); err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(iterationDir, "review-stderr.log"), []byte(reviewResult.Stderr), 0o644); err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(iterationDir, "review-findings.json"), mustMarshalJSON(initialFindings), 0o644); err != nil {
-			return err
-		}
+		initialFilteredCount := len(initialFindings)
+		filteredInitialFindings := filterRejectedFindings(initialFindings, manifest.RejectedFindingFingerprints)
+		initialFilteredCount -= len(filteredInitialFindings)
+
+		initialGroups, initialGroupingResult, initialValidatorAttempts, validatedInitialFindings, rejectedInitialFingerprints, err := runLocalWorkValidationPhase(&manifest, &state, runDir, iterationDir, codexArgs, 0, filteredInitialFindings)
 		if err != nil {
 			manifest.Status = "failed"
-			manifest.CurrentPhase = "review"
-			manifest.UpdatedAt = ISOTimeNow()
 			manifest.LastError = err.Error()
-			if writeErr := writeLocalWorkManifest(manifest); writeErr != nil {
+			manifest.UpdatedAt = ISOTimeNow()
+			if writeErr := writeLocalWorkActiveState(runDir, &manifest, &state); writeErr != nil {
 				return writeErr
 			}
-			return err
-		}
-
-		filteredInitialFindings := filterRejectedFindings(initialFindings, manifest.RejectedFindingFingerprints)
-		initialGroups, err := groupFindingsByAI(manifest, codexArgs, iterationDir, 0, filteredInitialFindings)
-		if err != nil {
-			return err
-		}
-		if err := writeJSONArtifact(filepath.Join(iterationDir, "grouped-findings-initial.json"), initialGroups); err != nil {
-			return err
-		}
-		validatedInitialFindings, rejectedInitialFingerprints, err := validateFindingGroups(manifest, codexArgs, iterationDir, 0, initialGroups)
-		if err != nil {
-			return err
-		}
-		if err := writeJSONArtifact(filepath.Join(iterationDir, "validated-findings-initial.json"), validatedInitialFindings); err != nil {
-			return err
-		}
-		if err := writeJSONArtifact(filepath.Join(iterationDir, "rejected-findings-initial.json"), rejectedInitialFingerprints); err != nil {
 			return err
 		}
 		manifest.RejectedFindingFingerprints = uniqueStrings(append(manifest.RejectedFindingFingerprints, rejectedInitialFingerprints...))
 		if err := writeLocalWorkManifest(manifest); err != nil {
 			return err
 		}
+		if err := appendLocalWorkFindingHistory(manifest.RunID, buildFindingHistoryEvents(iteration, 0, "initial", validatedInitialFindings)); err != nil {
+			return err
+		}
 
 		finalVerification := initialVerification
 		finalFindings := findingsFromValidated(validatedInitialFindings)
 		validationGroupIDs := groupIDs(initialGroups)
+		validationRationales := groupRationales(initialGroups)
 		validatedFindingCount := len(validatedInitialFindings)
 		rejectedFindingsCount := len(rejectedInitialFingerprints)
 		modifiedFindingsCount := countValidatedFindingsByStatus(validatedInitialFindings, localWorkFindingModified)
@@ -742,125 +1236,167 @@ func executeLocalWorkLoop(manifestPath string, codexArgs []string) error {
 		hardeningRoundFingerprints := []string{}
 		postHardeningVerificationFingerprints := []string{}
 		roundsUsed := 0
-
-		if err := os.WriteFile(filepath.Join(iterationDir, "review-initial-prompt.md"), []byte(reviewPrompt), 0o644); err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(iterationDir, "review-initial-findings.json"), mustMarshalJSON(initialFindings), 0o644); err != nil {
-			return err
-		}
+		requestedGroupingPolicy := manifest.GroupingPolicy
+		effectiveGroupingPolicy := initialGroupingResult.EffectivePolicy
+		groupingFallbackReason := initialGroupingResult.FallbackReason
+		groupingAttempts := initialGroupingResult.Attempts
+		validatorAttempts := initialValidatorAttempts
+		skippedRejectedFindings := initialFilteredCount
 
 		for round := 1; round <= localWorkMaxReviewRounds && (!finalVerification.Passed || len(finalFindings) > 0); round++ {
 			roundsUsed = round
+			roundState := findLocalWorkRoundState(&state, round)
 
-			manifest.CurrentPhase = "harden"
-			manifest.UpdatedAt = ISOTimeNow()
-			if err := writeLocalWorkManifest(manifest); err != nil {
-				return err
-			}
-
-			hardeningPrompt, err := buildLocalWorkHardeningPrompt(manifest, finalVerification, finalFindings)
-			if err != nil {
-				return err
-			}
-			if err := os.WriteFile(filepath.Join(iterationDir, fmt.Sprintf("hardening-round-%d-prompt.md", round)), []byte(hardeningPrompt), 0o644); err != nil {
-				return err
-			}
-			hardeningResult, err := runLocalWorkCodexPrompt(manifest, codexArgs, hardeningPrompt, fmt.Sprintf("hardener-round-%d", round))
-			if err := os.WriteFile(filepath.Join(iterationDir, fmt.Sprintf("hardening-round-%d-stdout.log", round)), []byte(hardeningResult.Stdout), 0o644); err != nil {
-				return err
-			}
-			if err := os.WriteFile(filepath.Join(iterationDir, fmt.Sprintf("hardening-round-%d-stderr.log", round)), []byte(hardeningResult.Stderr), 0o644); err != nil {
-				return err
-			}
-			if err != nil {
-				manifest.Status = "failed"
-				manifest.CurrentPhase = "harden"
-				manifest.UpdatedAt = ISOTimeNow()
-				manifest.LastError = err.Error()
-				if writeErr := writeLocalWorkManifest(manifest); writeErr != nil {
-					return writeErr
+			hardeningPromptPath := filepath.Join(iterationDir, fmt.Sprintf("hardening-round-%d-prompt.md", round))
+			hardeningStdoutPath := filepath.Join(iterationDir, fmt.Sprintf("hardening-round-%d-stdout.log", round))
+			hardeningStderrPath := filepath.Join(iterationDir, fmt.Sprintf("hardening-round-%d-stderr.log", round))
+			if !roundState.HardeningCompleted {
+				setLocalWorkProgress(&manifest, &state, "harden", "hardening", round)
+				if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
+					return err
 				}
-				return err
+				hardeningPrompt, err := buildLocalWorkHardeningPrompt(manifest, finalVerification, finalFindings)
+				if err != nil {
+					return err
+				}
+				if err := os.WriteFile(hardeningPromptPath, []byte(hardeningPrompt), 0o644); err != nil {
+					return err
+				}
+				hardeningResult, err := runLocalWorkCodexPrompt(manifest, codexArgs, hardeningPrompt, fmt.Sprintf("hardener-round-%d", round))
+				if err := os.WriteFile(hardeningStdoutPath, []byte(hardeningResult.Stdout), 0o644); err != nil {
+					return err
+				}
+				if err := os.WriteFile(hardeningStderrPath, []byte(hardeningResult.Stderr), 0o644); err != nil {
+					return err
+				}
+				if err != nil {
+					manifest.Status = "failed"
+					manifest.LastError = err.Error()
+					manifest.UpdatedAt = ISOTimeNow()
+					if writeErr := writeLocalWorkActiveState(runDir, &manifest, &state); writeErr != nil {
+						return writeErr
+					}
+					return err
+				}
+				roundState.HardeningCompleted = true
+				if err := writeLocalWorkRuntimeState(manifest.RunID, state); err != nil {
+					return err
+				}
 			}
-			hardeningRoundFingerprints = append(hardeningRoundFingerprints, sha256Hex(strings.TrimSpace(hardeningResult.Stdout)+"\n"+strings.TrimSpace(hardeningResult.Stderr)))
+			hardeningStdout, _ := os.ReadFile(hardeningStdoutPath)
+			hardeningStderr, _ := os.ReadFile(hardeningStderrPath)
+			hardeningRoundFingerprints = append(hardeningRoundFingerprints, sha256Hex(strings.TrimSpace(string(hardeningStdout))+"\n"+strings.TrimSpace(string(hardeningStderr))))
 
-			manifest.CurrentPhase = "verify-post-hardening"
-			manifest.UpdatedAt = ISOTimeNow()
-			if err := writeLocalWorkManifest(manifest); err != nil {
-				return err
-			}
-			finalVerification, err = runLocalVerification(manifest.SandboxRepoPath, plan, manifest.IntegrationPolicy == "always")
-			if err != nil {
-				return err
-			}
-			if err := os.WriteFile(filepath.Join(iterationDir, fmt.Sprintf("verification-round-%d-post-hardening.json", round)), mustMarshalJSON(finalVerification), 0o644); err != nil {
-				return err
+			postVerificationPath := filepath.Join(iterationDir, fmt.Sprintf("verification-round-%d-post-hardening.json", round))
+			if !roundState.PostVerificationCompleted {
+				setLocalWorkProgress(&manifest, &state, "verify-post-hardening", "verify-post-hardening", round)
+				if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
+					return err
+				}
+				finalVerification, err = runLocalVerification(manifest.SandboxRepoPath, plan, manifest.IntegrationPolicy == "always")
+				if err != nil {
+					return err
+				}
+				if err := os.WriteFile(postVerificationPath, mustMarshalJSON(finalVerification), 0o644); err != nil {
+					return err
+				}
+				roundState.PostVerificationCompleted = true
+				if err := writeLocalWorkRuntimeState(manifest.RunID, state); err != nil {
+					return err
+				}
+			} else if err := readGithubJSON(postVerificationPath, &finalVerification); err != nil {
+				roundState.PostVerificationCompleted = false
+				round--
+				continue
 			}
 			postHardeningVerificationFingerprints = append(postHardeningVerificationFingerprints, fingerprintVerificationReport(finalVerification))
 
-			manifest.CurrentPhase = "review-post-hardening"
-			manifest.UpdatedAt = ISOTimeNow()
-			if err := writeLocalWorkManifest(manifest); err != nil {
-				return err
+			postReviewFindingsPath := filepath.Join(iterationDir, fmt.Sprintf("review-round-%d-findings.json", round))
+			postReviewPromptPath := filepath.Join(iterationDir, fmt.Sprintf("review-round-%d-prompt.md", round))
+			postReviewStdoutPath := filepath.Join(iterationDir, fmt.Sprintf("review-round-%d-stdout.log", round))
+			postReviewStderrPath := filepath.Join(iterationDir, fmt.Sprintf("review-round-%d-stderr.log", round))
+			postHardeningFindings := []githubPullReviewFinding{}
+			if !roundState.PostReviewCompleted {
+				setLocalWorkProgress(&manifest, &state, "review-post-hardening", "review-post-hardening", round)
+				if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
+					return err
+				}
+				finalReviewPrompt, err := buildLocalWorkReviewPrompt(manifest)
+				if err != nil {
+					return err
+				}
+				if err := os.WriteFile(postReviewPromptPath, []byte(finalReviewPrompt), 0o644); err != nil {
+					return err
+				}
+				finalReviewResult, findings, err := runLocalWorkReview(manifest, codexArgs, finalReviewPrompt)
+				if err := os.WriteFile(postReviewStdoutPath, []byte(finalReviewResult.Stdout), 0o644); err != nil {
+					return err
+				}
+				if err := os.WriteFile(postReviewStderrPath, []byte(finalReviewResult.Stderr), 0o644); err != nil {
+					return err
+				}
+				if err := os.WriteFile(postReviewFindingsPath, mustMarshalJSON(findings), 0o644); err != nil {
+					return err
+				}
+				if err != nil {
+					manifest.Status = "failed"
+					manifest.LastError = err.Error()
+					manifest.UpdatedAt = ISOTimeNow()
+					if writeErr := writeLocalWorkActiveState(runDir, &manifest, &state); writeErr != nil {
+						return writeErr
+					}
+					return err
+				}
+				postHardeningFindings = findings
+				roundState.PostReviewCompleted = true
+				if err := writeLocalWorkRuntimeState(manifest.RunID, state); err != nil {
+					return err
+				}
+			} else if err := readGithubJSON(postReviewFindingsPath, &postHardeningFindings); err != nil {
+				roundState.PostReviewCompleted = false
+				round--
+				continue
 			}
-			finalReviewPrompt, err := buildLocalWorkReviewPrompt(manifest)
-			if err != nil {
-				return err
-			}
-			if err := os.WriteFile(filepath.Join(iterationDir, fmt.Sprintf("review-round-%d-prompt.md", round)), []byte(finalReviewPrompt), 0o644); err != nil {
-				return err
-			}
-			finalReviewResult, postHardeningFindings, err := runLocalWorkReview(manifest, codexArgs, finalReviewPrompt)
-			if err := os.WriteFile(filepath.Join(iterationDir, fmt.Sprintf("review-round-%d-stdout.log", round)), []byte(finalReviewResult.Stdout), 0o644); err != nil {
-				return err
-			}
-			if err := os.WriteFile(filepath.Join(iterationDir, fmt.Sprintf("review-round-%d-stderr.log", round)), []byte(finalReviewResult.Stderr), 0o644); err != nil {
-				return err
-			}
-			if err := os.WriteFile(filepath.Join(iterationDir, fmt.Sprintf("review-round-%d-findings.json", round)), mustMarshalJSON(postHardeningFindings), 0o644); err != nil {
-				return err
-			}
+
+			filteredRoundCount := len(postHardeningFindings)
+			filteredRoundFindings := filterRejectedFindings(postHardeningFindings, manifest.RejectedFindingFingerprints)
+			filteredRoundCount -= len(filteredRoundFindings)
+			roundGroups, roundGroupingResult, roundValidatorAttempts, validatedRoundFindings, rejectedRoundFingerprints, err := runLocalWorkValidationPhase(&manifest, &state, runDir, iterationDir, codexArgs, round, filteredRoundFindings)
 			if err != nil {
 				manifest.Status = "failed"
-				manifest.CurrentPhase = "review-post-hardening"
-				manifest.UpdatedAt = ISOTimeNow()
 				manifest.LastError = err.Error()
-				if writeErr := writeLocalWorkManifest(manifest); writeErr != nil {
+				manifest.UpdatedAt = ISOTimeNow()
+				if writeErr := writeLocalWorkActiveState(runDir, &manifest, &state); writeErr != nil {
 					return writeErr
 				}
-				return err
-			}
-			filteredRoundFindings := filterRejectedFindings(postHardeningFindings, manifest.RejectedFindingFingerprints)
-			roundGroups, err := groupFindingsByAI(manifest, codexArgs, iterationDir, round, filteredRoundFindings)
-			if err != nil {
-				return err
-			}
-			if err := writeJSONArtifact(filepath.Join(iterationDir, fmt.Sprintf("grouped-findings-round-%d.json", round)), roundGroups); err != nil {
-				return err
-			}
-			validatedRoundFindings, rejectedRoundFingerprints, err := validateFindingGroups(manifest, codexArgs, iterationDir, round, roundGroups)
-			if err != nil {
-				return err
-			}
-			if err := writeJSONArtifact(filepath.Join(iterationDir, fmt.Sprintf("validated-findings-round-%d.json", round)), validatedRoundFindings); err != nil {
-				return err
-			}
-			if err := writeJSONArtifact(filepath.Join(iterationDir, fmt.Sprintf("rejected-findings-round-%d.json", round)), rejectedRoundFingerprints); err != nil {
 				return err
 			}
 			manifest.RejectedFindingFingerprints = uniqueStrings(append(manifest.RejectedFindingFingerprints, rejectedRoundFingerprints...))
 			if err := writeLocalWorkManifest(manifest); err != nil {
 				return err
 			}
+			if err := appendLocalWorkFindingHistory(manifest.RunID, buildFindingHistoryEvents(iteration, round, fmt.Sprintf("round-%d", round), validatedRoundFindings)); err != nil {
+				return err
+			}
+
 			finalFindings = findingsFromValidated(validatedRoundFindings)
 			validationGroupIDs = append(validationGroupIDs, groupIDs(roundGroups)...)
+			validationRationales = append(validationRationales, groupRationales(roundGroups)...)
 			validatedFindingCount += len(validatedRoundFindings)
 			rejectedFindingsCount += len(rejectedRoundFingerprints)
 			modifiedFindingsCount += countValidatedFindingsByStatus(validatedRoundFindings, localWorkFindingModified)
 			confirmedFindingsCount += countValidatedFindingsByStatus(validatedRoundFindings, localWorkFindingConfirmed)
 			reviewRoundFingerprints = append(reviewRoundFingerprints, sha256Hex(strings.Join(reviewFindingFingerprints(finalFindings), "\n")))
 			reviewFindingsByRound = append(reviewFindingsByRound, len(finalFindings))
+			skippedRejectedFindings += filteredRoundCount
+			validatorAttempts += roundValidatorAttempts
+			groupingAttempts += roundGroupingResult.Attempts
+			if (len(roundGroups) > 0 || roundGroupingResult.Attempts > 0 || strings.TrimSpace(roundGroupingResult.FallbackReason) != "") && roundGroupingResult.EffectivePolicy != "" {
+				effectiveGroupingPolicy = roundGroupingResult.EffectivePolicy
+			}
+			if groupingFallbackReason == "" && roundGroupingResult.FallbackReason != "" {
+				groupingFallbackReason = roundGroupingResult.FallbackReason
+			}
 		}
 
 		if roundsUsed == 0 {
@@ -871,6 +1407,10 @@ func executeLocalWorkLoop(manifestPath string, codexArgs []string) error {
 
 		integrationRan := manifest.IntegrationPolicy == "always" && len(plan.Integration) > 0
 		if finalVerification.Passed && len(finalFindings) == 0 && manifest.IntegrationPolicy == "final" {
+			setLocalWorkProgress(&manifest, &state, "integration", "integration", roundsUsed)
+			if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
+				return err
+			}
 			integrationReport, err := runLocalIntegrationVerification(manifest.SandboxRepoPath, plan)
 			if err != nil {
 				return err
@@ -918,7 +1458,14 @@ func executeLocalWorkLoop(manifestPath string, codexArgs []string) error {
 			ConfirmedFindings:                     confirmedFindingsCount,
 			RejectedFindings:                      rejectedFindingsCount,
 			ModifiedFindings:                      modifiedFindingsCount,
+			SkippedRejectedFindings:               skippedRejectedFindings,
 			ValidationGroups:                      uniqueStrings(validationGroupIDs),
+			ValidationGroupRationales:             uniqueStrings(validationRationales),
+			RequestedGroupingPolicy:               requestedGroupingPolicy,
+			EffectiveGroupingPolicy:               defaultString(effectiveGroupingPolicy, requestedGroupingPolicy),
+			GroupingFallbackReason:                groupingFallbackReason,
+			GroupingAttempts:                      groupingAttempts,
+			ValidatorAttempts:                     validatorAttempts,
 			ReviewRoundsUsed:                      roundsUsed,
 			ReviewFindingsByRound:                 append([]int{}, reviewFindingsByRound...),
 			ReviewRoundFingerprints:               append([]string{}, reviewRoundFingerprints...),
@@ -934,13 +1481,16 @@ func executeLocalWorkLoop(manifestPath string, codexArgs []string) error {
 
 		manifest.Iterations = append(manifest.Iterations, summary)
 		manifest.UpdatedAt = summary.CompletedAt
-		manifest.CurrentPhase = "iteration-complete"
+		setLocalWorkProgress(&manifest, &state, "iteration-complete", "iteration-complete", 0)
 		if summary.Status == "completed" {
 			manifest.Status = "completed"
-			manifest.CurrentPhase = "completed"
+			setLocalWorkProgress(&manifest, &state, "completed", "completed", 0)
 			manifest.CompletedAt = summary.CompletedAt
 		}
 		if err := writeLocalWorkManifest(manifest); err != nil {
+			return err
+		}
+		if err := removeLocalWorkRuntimeState(manifest.RunID, iteration); err != nil {
 			return err
 		}
 
@@ -959,7 +1509,7 @@ func executeLocalWorkLoop(manifestPath string, codexArgs []string) error {
 
 		if stallReason := detectLocalWorkStall(manifest.Iterations); stallReason != "" {
 			manifest.Status = "failed"
-			manifest.CurrentPhase = "stalled"
+			setLocalWorkProgress(&manifest, nil, "stalled", "stalled", 0)
 			manifest.LastError = stallReason
 			manifest.UpdatedAt = ISOTimeNow()
 			if err := writeLocalWorkManifest(manifest); err != nil {
@@ -985,39 +1535,312 @@ func executeLocalWorkLoop(manifestPath string, codexArgs []string) error {
 	return errors.New(manifest.LastError)
 }
 
-func localWorkStatus(cwd string, selection localWorkRunSelection) error {
-	manifestPath, err := resolveLocalWorkManifestPath(cwd, selection)
+func runLocalWorkValidationPhase(manifest *localWorkManifest, state *localWorkIterationRuntimeState, runDir string, iterationDir string, codexArgs []string, round int, findings []githubPullReviewFinding) ([]localWorkFindingGroup, localWorkGroupingResult, int, []localWorkValidatedFinding, []string, error) {
+	contextName := "initial"
+	if round > 0 {
+		contextName = fmt.Sprintf("round-%d", round)
+	}
+	context := findLocalWorkValidationContext(state, contextName, round)
+	setLocalWorkProgress(manifest, state, "validation", "grouping", round)
+	if err := writeLocalWorkManifest(*manifest); err != nil {
+		return nil, localWorkGroupingResult{}, 0, nil, nil, err
+	}
+	if err := writeLocalWorkRuntimeState(manifest.RunID, *state); err != nil {
+		return nil, localWorkGroupingResult{}, 0, nil, nil, err
+	}
+
+	groupedPath := filepath.Join(iterationDir, "grouped-findings-initial.json")
+	validatedPath := filepath.Join(iterationDir, "validated-findings-initial.json")
+	rejectedPath := filepath.Join(iterationDir, "rejected-findings-initial.json")
+	if round > 0 {
+		groupedPath = filepath.Join(iterationDir, fmt.Sprintf("grouped-findings-round-%d.json", round))
+		validatedPath = filepath.Join(iterationDir, fmt.Sprintf("validated-findings-round-%d.json", round))
+		rejectedPath = filepath.Join(iterationDir, fmt.Sprintf("rejected-findings-round-%d.json", round))
+	}
+
+	groups := []localWorkFindingGroup{}
+	groupingResult := localWorkGroupingResult{}
+	if context.GroupingComplete {
+		if err := readGithubJSON(groupedPath, &groups); err != nil {
+			context.GroupingComplete = false
+		}
+		groupingResultPath := strings.Replace(groupedPath, "grouped-findings", "grouping", 1)
+		groupingResultPath = strings.Replace(groupingResultPath, ".json", "-result.json", 1)
+		_ = readGithubJSON(groupingResultPath, &groupingResult)
+	}
+	if !context.GroupingComplete {
+		var err error
+		groupingResult, groups, err = groupFindings(manifest, codexArgs, iterationDir, round, findings)
+		if err != nil {
+			return nil, localWorkGroupingResult{}, 0, nil, nil, err
+		}
+		if err := writeJSONArtifact(groupedPath, groups); err != nil {
+			return nil, localWorkGroupingResult{}, 0, nil, nil, err
+		}
+		context.RequestedPolicy = groupingResult.RequestedPolicy
+		context.EffectivePolicy = groupingResult.EffectivePolicy
+		context.FallbackReason = groupingResult.FallbackReason
+		context.Attempts = groupingResult.Attempts
+		context.GroupingComplete = true
+		context.GroupStates = make([]localWorkRuntimeGroupState, 0, len(groups))
+		for _, group := range groups {
+			context.GroupStates = append(context.GroupStates, localWorkRuntimeGroupState{
+				GroupID:   group.GroupID,
+				Rationale: group.Rationale,
+			})
+		}
+		if err := writeLocalWorkActiveState(runDir, manifest, state); err != nil {
+			return nil, localWorkGroupingResult{}, 0, nil, nil, err
+		}
+	}
+
+	setLocalWorkProgress(manifest, state, "validation", "validation", round)
+	if err := writeLocalWorkActiveState(runDir, manifest, state); err != nil {
+		return nil, localWorkGroupingResult{}, 0, nil, nil, err
+	}
+
+	validated := []localWorkValidatedFinding{}
+	rejected := []string{}
+	validatorAttempts := 0
+	if context.ValidationComplete {
+		if err := readGithubJSON(validatedPath, &validated); err != nil {
+			context.ValidationComplete = false
+		} else {
+			_ = readGithubJSON(rejectedPath, &rejected)
+		}
+	}
+	if !context.ValidationComplete {
+		var err error
+		validated, rejected, validatorAttempts, err = validateFindingGroups(*manifest, codexArgs, iterationDir, round, groups, context, func() error {
+			return writeLocalWorkActiveState(runDir, manifest, state)
+		})
+		if err != nil {
+			_ = writeLocalWorkActiveState(runDir, manifest, state)
+			return nil, groupingResult, validatorAttempts, nil, nil, err
+		}
+		if err := writeJSONArtifact(validatedPath, validated); err != nil {
+			return nil, groupingResult, validatorAttempts, nil, nil, err
+		}
+		if err := writeJSONArtifact(rejectedPath, rejected); err != nil {
+			return nil, groupingResult, validatorAttempts, nil, nil, err
+		}
+		context.ValidationComplete = true
+		if err := writeLocalWorkActiveState(runDir, manifest, state); err != nil {
+			return nil, groupingResult, validatorAttempts, nil, nil, err
+		}
+	}
+	return groups, groupingResult, validatorAttempts, validated, rejected, nil
+}
+
+func buildFindingHistoryEvents(iteration int, round int, phase string, validated []localWorkValidatedFinding) []localWorkFindingHistoryEvent {
+	events := make([]localWorkFindingHistoryEvent, 0, len(validated))
+	for _, item := range validated {
+		event := localWorkFindingHistoryEvent{
+			Iteration:             iteration,
+			Round:                 round,
+			Phase:                 phase,
+			GroupID:               item.GroupID,
+			GroupRationale:        item.GroupRationale,
+			OriginalFingerprint:   item.OriginalFingerprint,
+			CurrentFingerprint:    item.CurrentFingerprint,
+			Status:                item.Status,
+			Reason:                item.Reason,
+			SupersedesFingerprint: item.SupersedesFingerprint,
+		}
+		if item.Finding != nil {
+			event.Title = item.Finding.Title
+			event.Path = item.Finding.Path
+			event.Line = item.Finding.Line
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+func groupRationales(groups []localWorkFindingGroup) []string {
+	out := make([]string, 0, len(groups))
+	for _, group := range groups {
+		if strings.TrimSpace(group.Rationale) == "" {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s: %s", group.GroupID, strings.TrimSpace(group.Rationale)))
+	}
+	return out
+}
+
+type localWorkStatusSnapshot struct {
+	RunID                    string                           `json:"run_id"`
+	RepoRoot                 string                           `json:"repo_root"`
+	RunArtifacts             string                           `json:"run_artifacts"`
+	Sandbox                  string                           `json:"sandbox"`
+	Status                   string                           `json:"status"`
+	Iteration                int                              `json:"iteration"`
+	MaxIterations            int                              `json:"max_iterations"`
+	Phase                    string                           `json:"phase,omitempty"`
+	Subphase                 string                           `json:"subphase,omitempty"`
+	Round                    int                              `json:"round,omitempty"`
+	LastVerification         string                           `json:"last_verification,omitempty"`
+	LastReviewFindings       int                              `json:"last_review_findings,omitempty"`
+	LastIteration            *localWorkIterationSummary       `json:"last_iteration,omitempty"`
+	ActiveValidationContext  *localWorkValidationContextState `json:"active_validation_context,omitempty"`
+	RejectedFingerprintCount int                              `json:"rejected_fingerprint_count,omitempty"`
+	LastError                string                           `json:"last_error,omitempty"`
+}
+
+func localWorkStatus(cwd string, options localWorkStatusOptions) error {
+	manifest, runDir, err := resolveLocalWorkRun(cwd, options.RunSelection)
 	if err != nil {
 		return err
 	}
-	var manifest localWorkManifest
-	if err := readGithubJSON(manifestPath, &manifest); err != nil {
+	snapshot, err := localWorkBuildStatusSnapshot(manifest, runDir)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "[local] Run id: %s\n", manifest.RunID)
-	fmt.Fprintf(os.Stdout, "[local] Repo root: %s\n", manifest.RepoRoot)
-	fmt.Fprintf(os.Stdout, "[local] Run artifacts: %s\n", filepath.Dir(manifestPath))
-	fmt.Fprintf(os.Stdout, "[local] Sandbox: %s\n", manifest.SandboxPath)
-	fmt.Fprintf(os.Stdout, "[local] Status: %s\n", manifest.Status)
-	fmt.Fprintf(os.Stdout, "[local] Iteration: %d/%d (phase=%s)\n", manifest.CurrentIteration, manifest.MaxIterations, defaultString(manifest.CurrentPhase, "n/a"))
-	if len(manifest.Iterations) > 0 {
-		last := manifest.Iterations[len(manifest.Iterations)-1]
-		fmt.Fprintf(os.Stdout, "[local] Last verification: %s\n", last.VerificationSummary)
-		fmt.Fprintf(os.Stdout, "[local] Last review findings: %d\n", last.ReviewFindings)
+	if options.JSON {
+		_, err := os.Stdout.Write(mustMarshalJSON(snapshot))
+		return err
 	}
-	if strings.TrimSpace(manifest.LastError) != "" {
-		fmt.Fprintf(os.Stdout, "[local] Last error: %s\n", manifest.LastError)
+	fmt.Fprintf(os.Stdout, "[local] Run id: %s\n", snapshot.RunID)
+	fmt.Fprintf(os.Stdout, "[local] Repo root: %s\n", snapshot.RepoRoot)
+	fmt.Fprintf(os.Stdout, "[local] Run artifacts: %s\n", snapshot.RunArtifacts)
+	fmt.Fprintf(os.Stdout, "[local] Sandbox: %s\n", snapshot.Sandbox)
+	fmt.Fprintf(os.Stdout, "[local] Status: %s\n", snapshot.Status)
+	fmt.Fprintf(os.Stdout, "[local] Iteration: %d/%d (phase=%s", snapshot.Iteration, snapshot.MaxIterations, defaultString(snapshot.Phase, "n/a"))
+	if strings.TrimSpace(snapshot.Subphase) != "" {
+		fmt.Fprintf(os.Stdout, ", subphase=%s", snapshot.Subphase)
+	}
+	if snapshot.Round > 0 {
+		fmt.Fprintf(os.Stdout, ", round=%d", snapshot.Round)
+	}
+	fmt.Fprintln(os.Stdout, ")")
+	if snapshot.LastIteration != nil {
+		fmt.Fprintf(os.Stdout, "[local] Last verification: %s\n", snapshot.LastVerification)
+		fmt.Fprintf(os.Stdout, "[local] Last review findings: %d\n", snapshot.LastReviewFindings)
+		fmt.Fprintf(os.Stdout, "[local] Last validation: groups=%d validated=%d confirmed=%d rejected=%d modified=%d skipped-rejected=%d policy=%s",
+			len(snapshot.LastIteration.ValidationGroups),
+			snapshot.LastIteration.ValidatedFindings,
+			snapshot.LastIteration.ConfirmedFindings,
+			snapshot.LastIteration.RejectedFindings,
+			snapshot.LastIteration.ModifiedFindings,
+			snapshot.LastIteration.SkippedRejectedFindings,
+			defaultString(snapshot.LastIteration.EffectiveGroupingPolicy, snapshot.LastIteration.RequestedGroupingPolicy))
+		if strings.TrimSpace(snapshot.LastIteration.GroupingFallbackReason) != "" {
+			fmt.Fprintf(os.Stdout, " fallback=%s", snapshot.LastIteration.GroupingFallbackReason)
+		}
+		fmt.Fprintln(os.Stdout)
+	}
+	if snapshot.ActiveValidationContext != nil {
+		fmt.Fprintf(os.Stdout, "[local] Active validation context: %s", snapshot.ActiveValidationContext.Name)
+		if snapshot.ActiveValidationContext.Round > 0 {
+			fmt.Fprintf(os.Stdout, " (round=%d)", snapshot.ActiveValidationContext.Round)
+		}
+		fmt.Fprintf(os.Stdout, " policy=%s", defaultString(snapshot.ActiveValidationContext.EffectivePolicy, snapshot.ActiveValidationContext.RequestedPolicy))
+		if strings.TrimSpace(snapshot.ActiveValidationContext.FallbackReason) != "" {
+			fmt.Fprintf(os.Stdout, " fallback=%s", snapshot.ActiveValidationContext.FallbackReason)
+		}
+		fmt.Fprintln(os.Stdout)
+		for _, group := range snapshot.ActiveValidationContext.GroupStates {
+			if strings.TrimSpace(group.Status) == "" {
+				continue
+			}
+			fmt.Fprintf(os.Stdout, "[local] Validation group: %s status=%s attempts=%d", group.GroupID, group.Status, group.Attempts)
+			if strings.TrimSpace(group.Rationale) != "" {
+				fmt.Fprintf(os.Stdout, " rationale=%s", group.Rationale)
+			}
+			if strings.TrimSpace(group.LastError) != "" {
+				fmt.Fprintf(os.Stdout, " error=%s", group.LastError)
+			}
+			fmt.Fprintln(os.Stdout)
+		}
+	}
+	fmt.Fprintf(os.Stdout, "[local] Stored rejected findings: %d\n", snapshot.RejectedFingerprintCount)
+	if strings.TrimSpace(snapshot.LastError) != "" {
+		fmt.Fprintf(os.Stdout, "[local] Last error: %s\n", snapshot.LastError)
 	}
 	return nil
 }
 
-func localWorkLogs(cwd string, options localWorkLogsOptions) error {
-	manifestPath, err := resolveLocalWorkManifestPath(cwd, options.RunSelection)
-	if err != nil {
-		return err
+func localWorkBuildStatusSnapshot(manifest localWorkManifest, runDir string) (localWorkStatusSnapshot, error) {
+	var runtimeState *localWorkIterationRuntimeState
+	if manifest.CurrentIteration > 0 {
+		state, err := readLocalWorkRuntimeState(manifest.RunID, manifest.CurrentIteration)
+		if err != nil && !os.IsNotExist(err) {
+			return localWorkStatusSnapshot{}, err
+		}
+		if err == nil {
+			runtimeState = &state
+		}
 	}
-	var manifest localWorkManifest
-	if err := readGithubJSON(manifestPath, &manifest); err != nil {
+	activeContext := localWorkActiveValidationContextFromRuntimeState(runtimeState)
+	snapshot := localWorkStatusSnapshot{
+		RunID:                    manifest.RunID,
+		RepoRoot:                 manifest.RepoRoot,
+		RunArtifacts:             runDir,
+		Sandbox:                  manifest.SandboxPath,
+		Status:                   manifest.Status,
+		Iteration:                manifest.CurrentIteration,
+		MaxIterations:            manifest.MaxIterations,
+		Phase:                    manifest.CurrentPhase,
+		Subphase:                 manifest.CurrentSubphase,
+		Round:                    manifest.CurrentRound,
+		ActiveValidationContext:  activeContext,
+		RejectedFingerprintCount: len(manifest.RejectedFindingFingerprints),
+		LastError:                manifest.LastError,
+	}
+	if runtimeState != nil {
+		snapshot.Phase = runtimeState.CurrentPhase
+		snapshot.Subphase = runtimeState.CurrentSubphase
+		snapshot.Round = runtimeState.CurrentRound
+	}
+	if len(manifest.Iterations) > 0 {
+		last := manifest.Iterations[len(manifest.Iterations)-1]
+		snapshot.LastVerification = last.VerificationSummary
+		snapshot.LastReviewFindings = last.ReviewFindings
+		snapshot.LastIteration = &last
+	}
+	return snapshot, nil
+}
+
+func localWorkActiveValidationContextFromRuntimeState(runtimeState *localWorkIterationRuntimeState) *localWorkValidationContextState {
+	if runtimeState == nil {
+		return nil
+	}
+	expectedName := "initial"
+	if runtimeState.CurrentRound > 0 {
+		expectedName = fmt.Sprintf("round-%d", runtimeState.CurrentRound)
+	}
+	for _, context := range runtimeState.ValidationContexts {
+		if context.Name == expectedName {
+			copied := context
+			return &copied
+		}
+	}
+	for _, context := range runtimeState.ValidationContexts {
+		for _, group := range context.GroupStates {
+			if group.Status == "failed" || group.Status == "running" {
+				copied := context
+				return &copied
+			}
+		}
+	}
+	return nil
+}
+
+func loadLocalWorkActiveValidationContext(runID string, iteration int, round int) *localWorkValidationContextState {
+	if iteration <= 0 {
+		return nil
+	}
+	state, err := readLocalWorkRuntimeState(runID, iteration)
+	if err != nil {
+		return nil
+	}
+	state.CurrentRound = round
+	return localWorkActiveValidationContextFromRuntimeState(&state)
+}
+
+func localWorkLogs(cwd string, options localWorkLogsOptions) error {
+	manifest, runDir, err := resolveLocalWorkRun(cwd, options.RunSelection)
+	if err != nil {
 		return err
 	}
 	iteration := manifest.CurrentIteration
@@ -1027,20 +1850,129 @@ func localWorkLogs(cwd string, options localWorkLogsOptions) error {
 	if iteration <= 0 {
 		return fmt.Errorf("work-local run %s has no iteration artifacts yet", manifest.RunID)
 	}
-	iterationDir := localWorkIterationDir(filepath.Dir(manifestPath), iteration)
+	iterationDir := localWorkIterationDir(runDir, iteration)
 	if _, err := os.Stat(iterationDir); err != nil {
 		return fmt.Errorf("work-local run %s iteration %d logs not found at %s", manifest.RunID, iteration, iterationDir)
 	}
-
+	snapshot, err := localWorkBuildStatusSnapshot(manifest, runDir)
+	if err != nil {
+		return err
+	}
+	grouping := localWorkLatestGroupingResult(iterationDir)
+	files, err := localWorkLogFiles(iterationDir)
+	if err != nil {
+		return err
+	}
+	entries := make([]map[string]string, 0, len(files))
+	for _, path := range files {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		display := string(content)
+		if options.TailLines > 0 {
+			display = tailLines(display, options.TailLines)
+		}
+		entries = append(entries, map[string]string{
+			"name":    filepath.Base(path),
+			"path":    path,
+			"content": display,
+		})
+	}
+	if options.JSON {
+		payload := map[string]interface{}{
+			"run":           snapshot,
+			"iteration":     iteration,
+			"artifacts":     iterationDir,
+			"runtime_state": loadLocalWorkRuntimeStateSummary(manifest.RunID, iteration),
+			"grouping":      grouping,
+			"files":         entries,
+		}
+		_, err := os.Stdout.Write(mustMarshalJSON(payload))
+		return err
+	}
 	fmt.Fprintf(os.Stdout, "[local] Run id: %s\n", manifest.RunID)
 	fmt.Fprintf(os.Stdout, "[local] Iteration: %d\n", iteration)
 	fmt.Fprintf(os.Stdout, "[local] Iteration artifacts: %s\n", iterationDir)
+	if snapshot.LastIteration != nil {
+		fmt.Fprintf(os.Stdout, "[local] Validation summary: groups=%d validated=%d confirmed=%d rejected=%d modified=%d skipped-rejected=%d policy=%s",
+			len(snapshot.LastIteration.ValidationGroups),
+			snapshot.LastIteration.ValidatedFindings,
+			snapshot.LastIteration.ConfirmedFindings,
+			snapshot.LastIteration.RejectedFindings,
+			snapshot.LastIteration.ModifiedFindings,
+			snapshot.LastIteration.SkippedRejectedFindings,
+			defaultString(snapshot.LastIteration.EffectiveGroupingPolicy, snapshot.LastIteration.RequestedGroupingPolicy))
+		if strings.TrimSpace(snapshot.LastIteration.GroupingFallbackReason) != "" {
+			fmt.Fprintf(os.Stdout, " fallback=%s", snapshot.LastIteration.GroupingFallbackReason)
+		}
+		fmt.Fprintln(os.Stdout)
+		for _, rationale := range snapshot.LastIteration.ValidationGroupRationales {
+			fmt.Fprintf(os.Stdout, "[local] Group: %s\n", rationale)
+		}
+	}
+	if len(grouping.Groups) > 0 {
+		fmt.Fprintf(os.Stdout, "[local] Effective grouping: %s\n", defaultString(grouping.EffectivePolicy, grouping.RequestedPolicy))
+	}
+	if snapshot.ActiveValidationContext != nil {
+		fmt.Fprintf(os.Stdout, "[local] Active validation context: %s", snapshot.ActiveValidationContext.Name)
+		if snapshot.ActiveValidationContext.Round > 0 {
+			fmt.Fprintf(os.Stdout, " (round=%d)", snapshot.ActiveValidationContext.Round)
+		}
+		fmt.Fprintf(os.Stdout, " policy=%s", defaultString(snapshot.ActiveValidationContext.EffectivePolicy, snapshot.ActiveValidationContext.RequestedPolicy))
+		if strings.TrimSpace(snapshot.ActiveValidationContext.FallbackReason) != "" {
+			fmt.Fprintf(os.Stdout, " fallback=%s", snapshot.ActiveValidationContext.FallbackReason)
+		}
+		fmt.Fprintln(os.Stdout)
+		for _, group := range snapshot.ActiveValidationContext.GroupStates {
+			if strings.TrimSpace(group.Status) == "" {
+				continue
+			}
+			fmt.Fprintf(os.Stdout, "[local] Validation group: %s status=%s attempts=%d", group.GroupID, group.Status, group.Attempts)
+			if strings.TrimSpace(group.Rationale) != "" {
+				fmt.Fprintf(os.Stdout, " rationale=%s", group.Rationale)
+			}
+			if strings.TrimSpace(group.LastError) != "" {
+				fmt.Fprintf(os.Stdout, " error=%s", group.LastError)
+			}
+			fmt.Fprintln(os.Stdout)
+		}
+	}
+	for _, entry := range entries {
+		fmt.Fprintf(os.Stdout, "\n== %s ==\n", entry["name"])
+		if strings.TrimSpace(entry["content"]) == "" {
+			fmt.Fprintln(os.Stdout, "(empty)")
+			continue
+		}
+		fmt.Fprint(os.Stdout, entry["content"])
+		if !strings.HasSuffix(entry["content"], "\n") {
+			fmt.Fprintln(os.Stdout)
+		}
+	}
+	return nil
+}
 
+func loadLocalWorkRuntimeStateSummary(runID string, iteration int) interface{} {
+	if iteration <= 0 {
+		return nil
+	}
+	state, err := readLocalWorkRuntimeState(runID, iteration)
+	if err != nil {
+		return nil
+	}
+	return state
+}
+
+func localWorkLogFiles(iterationDir string) ([]string, error) {
 	patterns := []string{
+		"runtime-state.json",
 		"implement-stdout.log",
 		"implement-stderr.log",
 		"review-stdout.log",
 		"review-stderr.log",
+		"grouping-*.json",
+		"grouping-*.log",
+		"grouping-*.md",
 		"grouped-findings-*.json",
 		"validated-findings-*.json",
 		"rejected-findings-*.json",
@@ -1052,16 +1984,14 @@ func localWorkLogs(cwd string, options localWorkLogsOptions) error {
 		"verification-round-*-post-hardening.json",
 		"review-initial-findings.json",
 		"review-round-*-findings.json",
-		"validation-groups/*/*.json",
-		"validation-groups/*/*.log",
+		"validation-groups/*/*",
 	}
-
 	seen := map[string]bool{}
 	files := []string{}
 	for _, pattern := range patterns {
 		matches, err := filepath.Glob(filepath.Join(iterationDir, pattern))
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for _, match := range matches {
 			if seen[match] {
@@ -1071,40 +2001,36 @@ func localWorkLogs(cwd string, options localWorkLogsOptions) error {
 			files = append(files, match)
 		}
 	}
-	if len(files) == 0 {
-		return fmt.Errorf("work-local run %s iteration %d has no log files yet", manifest.RunID, iteration)
-	}
 	sort.Strings(files)
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no log files found at %s", iterationDir)
+	}
+	return files, nil
+}
 
-	for _, path := range files {
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		display := string(content)
-		if options.TailLines > 0 {
-			display = tailLines(display, options.TailLines)
-		}
-		fmt.Fprintf(os.Stdout, "\n== %s ==\n", filepath.Base(path))
-		if strings.TrimSpace(display) == "" {
-			fmt.Fprintln(os.Stdout, "(empty)")
-			continue
-		}
-		fmt.Fprint(os.Stdout, display)
-		if !strings.HasSuffix(display, "\n") {
-			fmt.Fprintln(os.Stdout)
+func localWorkLatestGroupingResult(iterationDir string) localWorkGroupingResult {
+	patterns := []string{
+		filepath.Join(iterationDir, "grouping-round-*-result.json"),
+		filepath.Join(iterationDir, "grouping-initial-result.json"),
+	}
+	matches := []string{}
+	for _, pattern := range patterns {
+		found, _ := filepath.Glob(pattern)
+		matches = append(matches, found...)
+	}
+	sort.Strings(matches)
+	for i := len(matches) - 1; i >= 0; i-- {
+		var result localWorkGroupingResult
+		if err := readGithubJSON(matches[i], &result); err == nil {
+			return result
 		}
 	}
-	return nil
+	return localWorkGroupingResult{}
 }
 
 func localWorkRetrospective(cwd string, selection localWorkRunSelection) error {
-	manifestPath, err := resolveLocalWorkManifestPath(cwd, selection)
+	manifest, _, err := resolveLocalWorkRun(cwd, selection)
 	if err != nil {
-		return err
-	}
-	var manifest localWorkManifest
-	if err := readGithubJSON(manifestPath, &manifest); err != nil {
 		return err
 	}
 	content, err := writeLocalWorkRetrospective(manifest)
@@ -1116,12 +2042,8 @@ func localWorkRetrospective(cwd string, selection localWorkRunSelection) error {
 }
 
 func refreshLocalWorkVerificationArtifacts(cwd string, selection localWorkRunSelection) error {
-	manifestPath, err := resolveLocalWorkManifestPath(cwd, selection)
+	manifest, _, err := resolveLocalWorkRun(cwd, selection)
 	if err != nil {
-		return err
-	}
-	var manifest localWorkManifest
-	if err := readGithubJSON(manifestPath, &manifest); err != nil {
 		return err
 	}
 	plan, scriptsDir, err := refreshLocalWorkVerificationArtifactsInPlace(&manifest)
@@ -1146,6 +2068,21 @@ func refreshLocalWorkVerificationArtifactsInPlace(manifest *localWorkManifest) (
 		return githubVerificationPlan{}, "", err
 	}
 	return plan, scriptsDir, nil
+}
+
+func normalizeLocalWorkManifest(manifest *localWorkManifest) {
+	if manifest.Version == 0 {
+		manifest.Version = 3
+	}
+	if strings.TrimSpace(manifest.GroupingPolicy) == "" {
+		manifest.GroupingPolicy = localWorkDefaultGroupingPolicy
+	}
+	if manifest.ValidationParallelism <= 0 {
+		manifest.ValidationParallelism = localWorkValidationParallelism
+	}
+	if manifest.ValidationParallelism > localWorkMaxValidationParallel {
+		manifest.ValidationParallelism = localWorkMaxValidationParallel
+	}
 }
 
 func runLocalVerification(repoPath string, plan githubVerificationPlan, includeIntegration bool) (localWorkVerificationReport, error) {
@@ -1313,58 +2250,160 @@ func runLocalWorkReview(manifest localWorkManifest, codexArgs []string, prompt s
 	return result, findings, nil
 }
 
-func groupFindingsByAI(manifest localWorkManifest, codexArgs []string, iterationDir string, round int, findings []githubPullReviewFinding) ([]localWorkFindingGroup, error) {
+func groupFindings(manifest *localWorkManifest, codexArgs []string, iterationDir string, round int, findings []githubPullReviewFinding) (localWorkGroupingResult, []localWorkFindingGroup, error) {
+	requestedPolicy := manifest.GroupingPolicy
+	if strings.TrimSpace(requestedPolicy) == "" {
+		requestedPolicy = localWorkDefaultGroupingPolicy
+	}
 	if len(findings) == 0 {
-		return nil, nil
+		return localWorkGroupingResult{
+			RequestedPolicy: requestedPolicy,
+			EffectivePolicy: requestedPolicy,
+			Groups:          []localWorkGroupingGroup{},
+		}, nil, nil
 	}
-	prompt, err := buildLocalWorkGroupingPrompt(manifest, findings)
-	if err != nil {
-		return nil, err
+	switch requestedPolicy {
+	case localWorkPathGroupingPolicy:
+		groups := groupFindingsByModule(findings)
+		return localWorkGroupingResult{
+				RequestedPolicy: requestedPolicy,
+				EffectivePolicy: requestedPolicy,
+				Attempts:        1,
+				Groups:          groupingGroupsFromFindingGroups(groups),
+			}, groups, writeCanonicalGroupingArtifacts(iterationDir, round, localWorkGroupingResult{
+				RequestedPolicy: requestedPolicy,
+				EffectivePolicy: requestedPolicy,
+				Attempts:        1,
+				Groups:          groupingGroupsFromFindingGroups(groups),
+			})
+	case localWorkSingletonPolicy:
+		groups := groupFindingsAsSingletons(findings)
+		return localWorkGroupingResult{
+				RequestedPolicy: requestedPolicy,
+				EffectivePolicy: requestedPolicy,
+				Attempts:        1,
+				Groups:          groupingGroupsFromFindingGroups(groups),
+			}, groups, writeCanonicalGroupingArtifacts(iterationDir, round, localWorkGroupingResult{
+				RequestedPolicy: requestedPolicy,
+				EffectivePolicy: requestedPolicy,
+				Attempts:        1,
+				Groups:          groupingGroupsFromFindingGroups(groups),
+			})
+	default:
+		return groupFindingsByAI(manifest, codexArgs, iterationDir, round, findings)
 	}
+}
+
+func writeCanonicalGroupingArtifacts(iterationDir string, round int, result localWorkGroupingResult) error {
+	prefix := "grouping-initial"
+	if round > 0 {
+		prefix = fmt.Sprintf("grouping-round-%d", round)
+	}
+	return writeJSONArtifact(filepath.Join(iterationDir, prefix+"-result.json"), result)
+}
+
+func groupFindingsByAI(manifest *localWorkManifest, codexArgs []string, iterationDir string, round int, findings []githubPullReviewFinding) (localWorkGroupingResult, []localWorkFindingGroup, error) {
+	requestedPolicy := localWorkDefaultGroupingPolicy
 	prefix := "grouping-initial"
 	alias := "grouper-initial"
 	if round > 0 {
 		prefix = fmt.Sprintf("grouping-round-%d", round)
 		alias = fmt.Sprintf("grouper-round-%d", round)
 	}
-	if err := os.WriteFile(filepath.Join(iterationDir, prefix+"-prompt.md"), []byte(prompt), 0o644); err != nil {
-		return nil, err
+	var lastErr error
+	for attempt := 1; attempt <= localWorkMaxGroupingAttempts; attempt++ {
+		prompt, err := buildLocalWorkGroupingPrompt(*manifest, findings)
+		if err != nil {
+			return localWorkGroupingResult{}, nil, err
+		}
+		attemptBase := filepath.Join(iterationDir, fmt.Sprintf("%s-attempt-%d", prefix, attempt))
+		if err := os.WriteFile(attemptBase+"-prompt.md", []byte(prompt), 0o644); err != nil {
+			return localWorkGroupingResult{}, nil, err
+		}
+		result, err := runLocalWorkCodexPrompt(*manifest, codexArgs, prompt, alias)
+		if err := os.WriteFile(attemptBase+"-stdout.log", []byte(result.Stdout), 0o644); err != nil {
+			return localWorkGroupingResult{}, nil, err
+		}
+		if err := os.WriteFile(attemptBase+"-stderr.log", []byte(result.Stderr), 0o644); err != nil {
+			return localWorkGroupingResult{}, nil, err
+		}
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		groupingResult, err := parseLocalWorkGroupingResult(result.Stdout)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		groupingResult.RequestedPolicy = requestedPolicy
+		groupingResult.EffectivePolicy = localWorkDefaultGroupingPolicy
+		groupingResult.Attempts = attempt
+		groups, err := buildFindingGroupsFromGroupingResult(findings, groupingResult)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if err := writeCanonicalGroupingArtifacts(iterationDir, round, groupingResult); err != nil {
+			return localWorkGroupingResult{}, nil, err
+		}
+		return groupingResult, groups, nil
 	}
-	result, err := runLocalWorkCodexPrompt(manifest, codexArgs, prompt, alias)
-	if err := os.WriteFile(filepath.Join(iterationDir, prefix+"-stdout.log"), []byte(result.Stdout), 0o644); err != nil {
-		return nil, err
+	fallbackGroups := groupFindingsAsSingletons(findings)
+	groupingResult := localWorkGroupingResult{
+		RequestedPolicy: requestedPolicy,
+		EffectivePolicy: localWorkSingletonPolicy,
+		FallbackReason:  defaultString(errorString(lastErr), "invalid AI grouping output"),
+		Attempts:        localWorkMaxGroupingAttempts,
+		Groups:          groupingGroupsFromFindingGroups(fallbackGroups),
 	}
-	if err := os.WriteFile(filepath.Join(iterationDir, prefix+"-stderr.log"), []byte(result.Stderr), 0o644); err != nil {
-		return nil, err
+	if err := writeCanonicalGroupingArtifacts(iterationDir, round, groupingResult); err != nil {
+		return localWorkGroupingResult{}, nil, err
 	}
-	if err != nil {
-		return nil, err
-	}
-	groupingResult, err := parseLocalWorkGroupingResult(result.Stdout)
-	if err != nil {
-		return nil, err
-	}
-	if err := writeJSONArtifact(filepath.Join(iterationDir, prefix+"-result.json"), groupingResult); err != nil {
-		return nil, err
-	}
-	return buildFindingGroupsFromGroupingResult(findings, groupingResult)
+	return groupingResult, fallbackGroups, nil
 }
 
-func validateFindingGroups(manifest localWorkManifest, codexArgs []string, iterationDir string, round int, groups []localWorkFindingGroup) ([]localWorkValidatedFinding, []string, error) {
+func validateFindingGroups(manifest localWorkManifest, codexArgs []string, iterationDir string, round int, groups []localWorkFindingGroup, context *localWorkValidationContextState, persist func() error) ([]localWorkValidatedFinding, []string, int, error) {
 	if len(groups) == 0 {
-		return nil, nil, nil
+		return nil, nil, 0, nil
 	}
 
 	type groupOutcome struct {
 		groupID   string
+		attempts  int
 		validated []localWorkValidatedFinding
 		rejected  []string
+		lastError string
 		err       error
 	}
 
-	sem := make(chan struct{}, localWorkValidationParallelism)
+	parallelism := manifest.ValidationParallelism
+	if parallelism <= 0 {
+		parallelism = localWorkValidationParallelism
+	}
+	sem := make(chan struct{}, parallelism)
 	results := make(chan groupOutcome, len(groups))
+	progress := make(chan localWorkValidationGroupProgress, len(groups)*(localWorkMaxValidatorAttempts+2))
 	var wg sync.WaitGroup
+
+	for _, group := range groups {
+		state := findValidationGroupState(context, group.GroupID)
+		if state == nil {
+			continue
+		}
+		state.Rationale = group.Rationale
+		if state.Status == "completed" && strings.TrimSpace(state.ResultPath) != "" {
+			continue
+		}
+		state.Status = "queued"
+		state.Attempts = 0
+		state.LastError = ""
+	}
+	if persist != nil {
+		if err := persist(); err != nil {
+			return nil, nil, 0, err
+		}
+	}
 
 	for _, group := range groups {
 		group := group
@@ -1373,73 +2412,189 @@ func validateFindingGroups(manifest localWorkManifest, codexArgs []string, itera
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			validated, rejected, err := validateFindingGroup(manifest, codexArgs, iterationDir, round, group)
+			progress <- localWorkValidationGroupProgress{
+				GroupID:   group.GroupID,
+				Rationale: group.Rationale,
+				Status:    "running",
+			}
+			validated, rejected, attempts, err := validateFindingGroup(manifest, codexArgs, iterationDir, round, group, progress)
 			results <- groupOutcome{
 				groupID:   group.GroupID,
+				attempts:  attempts,
 				validated: validated,
 				rejected:  rejected,
+				lastError: errorString(err),
 				err:       err,
 			}
 		}()
 	}
 
-	wg.Wait()
-	close(results)
-
 	outcomes := make([]groupOutcome, 0, len(groups))
-	for outcome := range results {
-		if outcome.err != nil {
-			return nil, nil, outcome.err
+	go func() {
+		wg.Wait()
+		close(progress)
+		close(results)
+	}()
+
+	for progress != nil || results != nil {
+		select {
+		case update, ok := <-progress:
+			if !ok {
+				progress = nil
+				continue
+			}
+			applyValidationGroupProgress(context, update)
+			if persist != nil {
+				if err := persist(); err != nil {
+					return nil, nil, 0, err
+				}
+			}
+		case outcome, ok := <-results:
+			if !ok {
+				results = nil
+				continue
+			}
+			if outcome.err != nil {
+				applyValidationGroupProgress(context, localWorkValidationGroupProgress{
+					GroupID:   outcome.groupID,
+					Status:    "failed",
+					Attempts:  outcome.attempts,
+					LastError: outcome.lastError,
+				})
+				if persist != nil {
+					if err := persist(); err != nil {
+						return nil, nil, 0, err
+					}
+				}
+				return nil, nil, 0, outcome.err
+			}
+			outcomes = append(outcomes, outcome)
 		}
-		outcomes = append(outcomes, outcome)
 	}
 	sort.Slice(outcomes, func(i, j int) bool { return outcomes[i].groupID < outcomes[j].groupID })
 
 	validated := []localWorkValidatedFinding{}
 	rejected := []string{}
+	totalAttempts := 0
 	for _, outcome := range outcomes {
 		validated = append(validated, outcome.validated...)
 		rejected = append(rejected, outcome.rejected...)
+		totalAttempts += outcome.attempts
 	}
-	return validated, uniqueStrings(rejected), nil
+	return validated, uniqueStrings(rejected), totalAttempts, nil
 }
 
-func validateFindingGroup(manifest localWorkManifest, codexArgs []string, iterationDir string, round int, group localWorkFindingGroup) ([]localWorkValidatedFinding, []string, error) {
+func validateFindingGroup(manifest localWorkManifest, codexArgs []string, iterationDir string, round int, group localWorkFindingGroup, progress chan<- localWorkValidationGroupProgress) ([]localWorkValidatedFinding, []string, int, error) {
 	groupDir := filepath.Join(iterationDir, "validation-groups", sanitizePathToken(group.GroupID))
 	if err := os.MkdirAll(groupDir, 0o755); err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
-	prompt, err := buildLocalWorkValidationPrompt(manifest, group)
-	if err != nil {
-		return nil, nil, err
+	resultPath := filepath.Join(groupDir, fmt.Sprintf("round-%d-validator-result.json", round))
+	if _, err := os.Stat(resultPath); err == nil {
+		var groupResult localWorkValidationGroupResult
+		if err := readGithubJSON(resultPath, &groupResult); err == nil {
+			validated, rejected := validatedFindingsFromGroupDecision(group, groupResult)
+			progress <- localWorkValidationGroupProgress{
+				GroupID:    group.GroupID,
+				Rationale:  group.Rationale,
+				Status:     "completed",
+				ResultPath: resultPath,
+			}
+			return validated, rejected, 0, nil
+		}
 	}
-	promptPath := filepath.Join(groupDir, fmt.Sprintf("round-%d-validator-prompt.md", round))
-	if err := os.WriteFile(promptPath, []byte(prompt), 0o644); err != nil {
-		return nil, nil, err
+	var lastErr error
+	for attempt := 1; attempt <= localWorkMaxValidatorAttempts; attempt++ {
+		prompt, err := buildLocalWorkValidationPrompt(manifest, group)
+		if err != nil {
+			return nil, nil, attempt - 1, err
+		}
+		attemptBase := filepath.Join(groupDir, fmt.Sprintf("round-%d-validator-attempt-%d", round, attempt))
+		if err := os.WriteFile(attemptBase+"-prompt.md", []byte(prompt), 0o644); err != nil {
+			return nil, nil, attempt - 1, err
+		}
+		result, err := runLocalWorkCodexPrompt(manifest, codexArgs, prompt, fmt.Sprintf("validator-%s-round-%d", sanitizePathToken(group.GroupID), round))
+		if err := os.WriteFile(attemptBase+"-stdout.log", []byte(result.Stdout), 0o644); err != nil {
+			return nil, nil, attempt - 1, err
+		}
+		if err := os.WriteFile(attemptBase+"-stderr.log", []byte(result.Stderr), 0o644); err != nil {
+			return nil, nil, attempt - 1, err
+		}
+		if err != nil {
+			lastErr = err
+			progress <- localWorkValidationGroupProgress{
+				GroupID:   group.GroupID,
+				Rationale: group.Rationale,
+				Status:    "retrying",
+				Attempts:  attempt,
+				LastError: err.Error(),
+			}
+			continue
+		}
+		groupResult, err := parseLocalWorkValidationGroupResult(result.Stdout, group)
+		if err != nil {
+			lastErr = err
+			progress <- localWorkValidationGroupProgress{
+				GroupID:   group.GroupID,
+				Rationale: group.Rationale,
+				Status:    "retrying",
+				Attempts:  attempt,
+				LastError: err.Error(),
+			}
+			continue
+		}
+		if err := writeJSONArtifact(resultPath, groupResult); err != nil {
+			return nil, nil, attempt - 1, err
+		}
+		progress <- localWorkValidationGroupProgress{
+			GroupID:    group.GroupID,
+			Rationale:  group.Rationale,
+			Status:     "completed",
+			Attempts:   attempt,
+			ResultPath: resultPath,
+		}
+		validated, rejected := validatedFindingsFromGroupDecision(group, groupResult)
+		return validated, uniqueStrings(rejected), attempt, nil
 	}
-	result, err := runLocalWorkCodexPrompt(manifest, codexArgs, prompt, fmt.Sprintf("validator-%s-round-%d", sanitizePathToken(group.GroupID), round))
-	if err := os.WriteFile(filepath.Join(groupDir, fmt.Sprintf("round-%d-validator-stdout.log", round)), []byte(result.Stdout), 0o644); err != nil {
-		return nil, nil, err
+	progress <- localWorkValidationGroupProgress{
+		GroupID:   group.GroupID,
+		Rationale: group.Rationale,
+		Status:    "failed",
+		Attempts:  localWorkMaxValidatorAttempts,
+		LastError: errorString(lastErr),
 	}
-	if err := os.WriteFile(filepath.Join(groupDir, fmt.Sprintf("round-%d-validator-stderr.log", round)), []byte(result.Stderr), 0o644); err != nil {
-		return nil, nil, err
-	}
-	if err != nil {
-		return nil, nil, err
-	}
-	groupResult, err := parseLocalWorkValidationGroupResult(result.Stdout, group)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := writeJSONArtifact(filepath.Join(groupDir, fmt.Sprintf("round-%d-validator-result.json", round)), groupResult); err != nil {
-		return nil, nil, err
-	}
+	return nil, nil, localWorkMaxValidatorAttempts, fmt.Errorf("validator group %s failed after %d attempt(s): %w", group.GroupID, localWorkMaxValidatorAttempts, lastErr)
+}
 
+func applyValidationGroupProgress(context *localWorkValidationContextState, update localWorkValidationGroupProgress) {
+	state := findValidationGroupState(context, update.GroupID)
+	if state == nil {
+		return
+	}
+	if strings.TrimSpace(update.Rationale) != "" {
+		state.Rationale = update.Rationale
+	}
+	if strings.TrimSpace(update.Status) != "" {
+		state.Status = update.Status
+	}
+	if update.Attempts > 0 || update.Status == "running" || update.Status == "queued" {
+		state.Attempts = update.Attempts
+	}
+	if strings.TrimSpace(update.ResultPath) != "" {
+		state.ResultPath = update.ResultPath
+	}
+	if update.Status == "completed" {
+		state.LastError = ""
+	} else if strings.TrimSpace(update.LastError) != "" {
+		state.LastError = update.LastError
+	}
+}
+
+func validatedFindingsFromGroupDecision(group localWorkFindingGroup, groupResult localWorkValidationGroupResult) ([]localWorkValidatedFinding, []string) {
 	decisionsByFingerprint := map[string]localWorkValidationDecision{}
 	for _, decision := range groupResult.Decisions {
 		decisionsByFingerprint[decision.Fingerprint] = decision
 	}
-
 	validated := []localWorkValidatedFinding{}
 	rejected := []string{}
 	for _, finding := range group.Findings {
@@ -1447,6 +2602,7 @@ func validateFindingGroup(manifest localWorkManifest, codexArgs []string, iterat
 		if !ok {
 			validated = append(validated, localWorkValidatedFinding{
 				GroupID:             group.GroupID,
+				GroupRationale:      group.Rationale,
 				OriginalFingerprint: finding.Fingerprint,
 				CurrentFingerprint:  finding.Fingerprint,
 				Status:              localWorkFindingConfirmed,
@@ -1459,6 +2615,7 @@ func validateFindingGroup(manifest localWorkManifest, codexArgs []string, iterat
 		case localWorkFindingRejected:
 			validated = append(validated, localWorkValidatedFinding{
 				GroupID:             group.GroupID,
+				GroupRationale:      group.Rationale,
 				OriginalFingerprint: finding.Fingerprint,
 				CurrentFingerprint:  finding.Fingerprint,
 				Status:              localWorkFindingRejected,
@@ -1472,6 +2629,7 @@ func validateFindingGroup(manifest localWorkManifest, codexArgs []string, iterat
 			validated = append(validated,
 				localWorkValidatedFinding{
 					GroupID:               group.GroupID,
+					GroupRationale:        group.Rationale,
 					OriginalFingerprint:   finding.Fingerprint,
 					CurrentFingerprint:    finding.Fingerprint,
 					Status:                localWorkFindingSuperseded,
@@ -1481,6 +2639,7 @@ func validateFindingGroup(manifest localWorkManifest, codexArgs []string, iterat
 				},
 				localWorkValidatedFinding{
 					GroupID:               group.GroupID,
+					GroupRationale:        group.Rationale,
 					OriginalFingerprint:   finding.Fingerprint,
 					CurrentFingerprint:    replacementFingerprint,
 					Status:                localWorkFindingModified,
@@ -1492,6 +2651,7 @@ func validateFindingGroup(manifest localWorkManifest, codexArgs []string, iterat
 		default:
 			validated = append(validated, localWorkValidatedFinding{
 				GroupID:             group.GroupID,
+				GroupRationale:      group.Rationale,
 				OriginalFingerprint: finding.Fingerprint,
 				CurrentFingerprint:  finding.Fingerprint,
 				Status:              localWorkFindingConfirmed,
@@ -1500,8 +2660,51 @@ func validateFindingGroup(manifest localWorkManifest, codexArgs []string, iterat
 			})
 		}
 	}
+	return validated, rejected
+}
 
-	return validated, uniqueStrings(rejected), nil
+func findValidationGroupState(context *localWorkValidationContextState, groupID string) *localWorkRuntimeGroupState {
+	if context == nil {
+		return nil
+	}
+	for i := range context.GroupStates {
+		if context.GroupStates[i].GroupID == groupID {
+			return &context.GroupStates[i]
+		}
+	}
+	context.GroupStates = append(context.GroupStates, localWorkRuntimeGroupState{GroupID: groupID})
+	return &context.GroupStates[len(context.GroupStates)-1]
+}
+
+func groupingGroupsFromFindingGroups(groups []localWorkFindingGroup) []localWorkGroupingGroup {
+	out := make([]localWorkGroupingGroup, 0, len(groups))
+	for _, group := range groups {
+		fingerprints := make([]string, 0, len(group.Findings))
+		for _, finding := range group.Findings {
+			fingerprints = append(fingerprints, finding.Fingerprint)
+		}
+		out = append(out, localWorkGroupingGroup{
+			GroupID:   group.GroupID,
+			Rationale: group.Rationale,
+			Findings:  fingerprints,
+		})
+	}
+	return out
+}
+
+func groupFindingsAsSingletons(findings []githubPullReviewFinding) []localWorkFindingGroup {
+	out := make([]localWorkFindingGroup, 0, len(findings))
+	findings = append([]githubPullReviewFinding{}, findings...)
+	sort.Slice(findings, func(i, j int) bool { return findings[i].Fingerprint < findings[j].Fingerprint })
+	for _, finding := range findings {
+		label := defaultString(strings.TrimSpace(finding.Title), finding.Fingerprint)
+		out = append(out, localWorkFindingGroup{
+			GroupID:   sanitizePathToken(label) + "-" + shortHash(finding.Fingerprint),
+			Rationale: "singleton fallback grouping",
+			Findings:  []githubPullReviewFinding{finding},
+		})
+	}
+	return out
 }
 
 func cloneFindingOrOriginal(candidate *githubPullReviewFinding, original githubPullReviewFinding) githubPullReviewFinding {
@@ -1605,11 +2808,11 @@ func buildLocalWorkGroupingPrompt(manifest localWorkManifest, findings []githubP
 			fmt.Sprintf("- fingerprint: %s", finding.Fingerprint),
 			fmt.Sprintf("  path: %s", finding.Path),
 			fmt.Sprintf("  title: %s", finding.Title),
-			fmt.Sprintf("  summary: %s", promptSnippet(finding.Summary)),
-			fmt.Sprintf("  detail: %s", promptSnippet(finding.Detail)),
+			fmt.Sprintf("  summary: %s", promptSnippetLimit(finding.Summary, 500)),
+			fmt.Sprintf("  detail: %s", promptSnippetLimit(finding.Detail, 700)),
 		)
 	}
-	return capPromptSize(strings.Join(lines, "\n")+"\n", localWorkPromptCharLimit), nil
+	return capPromptSize(strings.Join(lines, "\n")+"\n", localWorkGroupingPromptLimit), nil
 }
 
 func parseLocalWorkGroupingResult(raw string) (localWorkGroupingResult, error) {
@@ -1667,8 +2870,9 @@ func buildFindingGroupsFromGroupingResult(findings []githubPullReviewFinding, gr
 		}
 		sort.Slice(items, func(i, j int) bool { return items[i].Fingerprint < items[j].Fingerprint })
 		grouped = append(grouped, localWorkFindingGroup{
-			GroupID:  sanitizePathToken(groupID),
-			Findings: items,
+			GroupID:   sanitizePathToken(groupID),
+			Rationale: strings.TrimSpace(group.Rationale),
+			Findings:  items,
 		})
 	}
 	for fingerprint := range byFingerprint {
@@ -1688,6 +2892,7 @@ func buildLocalWorkValidationPrompt(manifest localWorkManifest, group localWorkF
 		fmt.Sprintf("Repo root: %s", manifest.RepoRoot),
 		fmt.Sprintf("Sandbox repo path: %s", manifest.SandboxRepoPath),
 		fmt.Sprintf("Group: %s", group.GroupID),
+		fmt.Sprintf("Group rationale: %s", defaultString(strings.TrimSpace(group.Rationale), "(none provided)")),
 		"",
 		"Decide each finding as one of: confirmed, rejected, modified.",
 		"- confirmed: the finding is valid as written",
@@ -1700,6 +2905,7 @@ func buildLocalWorkValidationPrompt(manifest localWorkManifest, group localWorkF
 		"",
 		"Findings:",
 	}
+	seenSnippets := map[string]bool{}
 	for _, finding := range group.Findings {
 		lines = append(lines,
 			fmt.Sprintf("- fingerprint: %s", finding.Fingerprint),
@@ -1707,17 +2913,23 @@ func buildLocalWorkValidationPrompt(manifest localWorkManifest, group localWorkF
 			fmt.Sprintf("  line: %d", finding.Line),
 			fmt.Sprintf("  severity: %s", finding.Severity),
 			fmt.Sprintf("  title: %s", finding.Title),
-			fmt.Sprintf("  summary: %s", promptSnippet(finding.Summary)),
-			fmt.Sprintf("  detail: %s", promptSnippet(finding.Detail)),
+			fmt.Sprintf("  summary: %s", promptSnippetLimit(finding.Summary, 600)),
+			fmt.Sprintf("  detail: %s", promptSnippetLimit(finding.Detail, 800)),
 		)
 		if strings.TrimSpace(finding.Fix) != "" {
-			lines = append(lines, fmt.Sprintf("  fix: %s", promptSnippet(finding.Fix)))
+			lines = append(lines, fmt.Sprintf("  fix: %s", promptSnippetLimit(finding.Fix, 600)))
 		}
-		if snippet := localWorkFindingSnippet(manifest.SandboxRepoPath, finding); strings.TrimSpace(snippet) != "" {
-			lines = append(lines, fmt.Sprintf("  code: %s", promptSnippet(snippet)))
+		if !seenSnippets[finding.Path] {
+			seenSnippets[finding.Path] = true
+			if snippet := localWorkFindingSnippet(manifest.SandboxRepoPath, finding); strings.TrimSpace(snippet) != "" {
+				lines = append(lines, fmt.Sprintf("  code: %s", promptSnippetLimit(snippet, 1200)))
+			}
+			if diff := localWorkFindingDiffSnippet(manifest, finding.Path); strings.TrimSpace(diff) != "" {
+				lines = append(lines, fmt.Sprintf("  diff: %s", promptSnippetLimit(diff, 1800)))
+			}
 		}
 	}
-	return capPromptSize(strings.Join(lines, "\n")+"\n", localWorkPromptCharLimit), nil
+	return capPromptSize(strings.Join(lines, "\n")+"\n", localWorkValidationPromptLimit), nil
 }
 
 func parseLocalWorkValidationGroupResult(raw string, group localWorkFindingGroup) (localWorkValidationGroupResult, error) {
@@ -1789,7 +3001,7 @@ func groupFindingsByModule(findings []githubPullReviewFinding) []localWorkFindin
 		sort.Slice(findings, func(i, j int) bool {
 			return findings[i].Fingerprint < findings[j].Fingerprint
 		})
-		out = append(out, localWorkFindingGroup{GroupID: groupID, Findings: findings})
+		out = append(out, localWorkFindingGroup{GroupID: groupID, Rationale: "shared path/module context", Findings: findings})
 	}
 	return out
 }
@@ -1854,6 +3066,163 @@ func groupIDs(groups []localWorkFindingGroup) []string {
 
 func writeJSONArtifact(path string, value interface{}) error {
 	return os.WriteFile(path, mustMarshalJSON(value), 0o644)
+}
+
+func writeLocalWorkJSONAtomically(path string, value interface{}) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	content := mustMarshalJSON(value)
+	tempPath := path + fmt.Sprintf(".tmp-%d", time.Now().UnixNano())
+	if err := os.WriteFile(tempPath, content, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+	return nil
+}
+
+func readLocalWorkRuntimeState(runID string, iteration int) (localWorkIterationRuntimeState, error) {
+	store, err := openLocalWorkDB()
+	if err != nil {
+		return localWorkIterationRuntimeState{}, err
+	}
+	defer store.Close()
+	row := store.db.QueryRow(`SELECT state_json FROM runtime_states WHERE run_id = ? AND iteration = ?`, runID, iteration)
+	var raw string
+	if err := row.Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return localWorkIterationRuntimeState{}, os.ErrNotExist
+		}
+		return localWorkIterationRuntimeState{}, err
+	}
+	var state localWorkIterationRuntimeState
+	if err := json.Unmarshal([]byte(raw), &state); err != nil {
+		return localWorkIterationRuntimeState{}, err
+	}
+	if state.Version == 0 {
+		state.Version = 1
+	}
+	return state, nil
+}
+
+func writeLocalWorkRuntimeState(runID string, state localWorkIterationRuntimeState) error {
+	store, err := openLocalWorkDB()
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if state.Version == 0 {
+		state.Version = 1
+	}
+	content, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	_, err = store.db.Exec(
+		`INSERT INTO runtime_states(run_id, iteration, state_json)
+		 VALUES(?, ?, ?)
+		 ON CONFLICT(run_id, iteration) DO UPDATE SET state_json=excluded.state_json`,
+		runID, state.Iteration, string(content),
+	)
+	return err
+}
+
+func removeLocalWorkRuntimeState(runID string, iteration int) error {
+	store, err := openLocalWorkDB()
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	_, err = store.db.Exec(`DELETE FROM runtime_states WHERE run_id = ? AND iteration = ?`, runID, iteration)
+	return err
+}
+
+func appendLocalWorkFindingHistory(runID string, events []localWorkFindingHistoryEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	store, err := openLocalWorkDB()
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	tx, err := store.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, event := range events {
+		content, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO finding_history(run_id, event_json) VALUES(?, ?)`, runID, string(content)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func findLocalWorkValidationContext(state *localWorkIterationRuntimeState, name string, round int) *localWorkValidationContextState {
+	for i := range state.ValidationContexts {
+		if state.ValidationContexts[i].Name == name && state.ValidationContexts[i].Round == round {
+			return &state.ValidationContexts[i]
+		}
+	}
+	state.ValidationContexts = append(state.ValidationContexts, localWorkValidationContextState{Name: name, Round: round})
+	return &state.ValidationContexts[len(state.ValidationContexts)-1]
+}
+
+func findLocalWorkRoundState(state *localWorkIterationRuntimeState, round int) *localWorkRoundRuntimeState {
+	for i := range state.Rounds {
+		if state.Rounds[i].Round == round {
+			return &state.Rounds[i]
+		}
+	}
+	state.Rounds = append(state.Rounds, localWorkRoundRuntimeState{Round: round})
+	return &state.Rounds[len(state.Rounds)-1]
+}
+
+func setLocalWorkProgress(manifest *localWorkManifest, state *localWorkIterationRuntimeState, phase string, subphase string, round int) {
+	manifest.CurrentPhase = phase
+	manifest.CurrentSubphase = subphase
+	manifest.CurrentRound = round
+	manifest.UpdatedAt = ISOTimeNow()
+	if state != nil {
+		state.CurrentPhase = phase
+		state.CurrentSubphase = subphase
+		state.CurrentRound = round
+	}
+}
+
+func writeLocalWorkActiveState(runDir string, manifest *localWorkManifest, state *localWorkIterationRuntimeState) error {
+	if manifest == nil {
+		return nil
+	}
+	store, err := openLocalWorkDB()
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if state != nil {
+		if state.Iteration == 0 {
+			state.Iteration = manifest.CurrentIteration
+		}
+		if manifest.CurrentIteration == 0 {
+			manifest.CurrentIteration = state.Iteration
+		}
+	}
+	return store.writeActiveState(*manifest, state)
+}
+
+func latestCompletedLocalWorkIteration(manifest localWorkManifest) int {
+	if len(manifest.Iterations) == 0 {
+		return 0
+	}
+	return manifest.Iterations[len(manifest.Iterations)-1].Iteration
 }
 
 func localWorkFindingSnippet(repoPath string, finding githubPullReviewFinding) string {
@@ -2092,45 +3461,6 @@ func readLocalWorkInput(cwd string, options localWorkStartOptions) (string, stri
 	return trimmed, "plan-file", nil
 }
 
-func resolveLocalWorkManifestPath(cwd string, selection localWorkRunSelection) (string, error) {
-	if selection.RunID != "" {
-		if entry, err := lookupLocalWorkRunIndexEntry(selection.RunID); err == nil {
-			return entry.ManifestPath, nil
-		}
-		return "", fmt.Errorf("work-local run %s was not found in the global index", selection.RunID)
-	}
-
-	if selection.GlobalLast {
-		index, err := readLocalWorkRunIndex()
-		if err != nil || strings.TrimSpace(index.GlobalLastRunID) == "" {
-			return "", fmt.Errorf("no global work-local run found under %s", localWorkHomeRoot())
-		}
-		entry, ok := index.Entries[index.GlobalLastRunID]
-		if !ok {
-			return "", fmt.Errorf("global work-local run %s is missing from the index", index.GlobalLastRunID)
-		}
-		return entry.ManifestPath, nil
-	}
-
-	repoRoot, err := resolveLocalWorkRepoRootForSelection(cwd, selection.RepoPath)
-	if err != nil {
-		return "", err
-	}
-
-	var latest localWorkLatestRunPointer
-	if err := readGithubJSON(localWorkLatestRunPath(repoRoot), &latest); err != nil {
-		return "", fmt.Errorf("no work-local run found for repo %s", repoRoot)
-	}
-	if strings.TrimSpace(latest.RunID) == "" {
-		return "", fmt.Errorf("no work-local run found for repo %s", repoRoot)
-	}
-	repoID := latest.RepoID
-	if strings.TrimSpace(repoID) == "" {
-		repoID = localWorkRepoID(repoRoot)
-	}
-	return localWorkManifestPathByID(repoID, latest.RunID), nil
-}
-
 func resolveLocalWorkRepoRootForSelection(cwd string, repoPath string) (string, error) {
 	repoRoot, err := resolveLocalWorkRepoRoot(cwd, repoPath)
 	if err == nil {
@@ -2169,14 +3499,6 @@ func localWorkRepoDir(repoRoot string) string {
 	return localWorkRepoDirByID(localWorkRepoID(repoRoot))
 }
 
-func localWorkRepoMetadataPath(repoRoot string) string {
-	return filepath.Join(localWorkRepoDir(repoRoot), "repo.json")
-}
-
-func localWorkRepoMetadataPathByID(repoID string) string {
-	return filepath.Join(localWorkRepoDirByID(repoID), "repo.json")
-}
-
 func localWorkRunsDir(repoRoot string) string {
 	return filepath.Join(localWorkRepoDir(repoRoot), "runs")
 }
@@ -2185,20 +3507,8 @@ func localWorkRunsDirByID(repoID string) string {
 	return filepath.Join(localWorkRepoDirByID(repoID), "runs")
 }
 
-func localWorkLatestRunPath(repoRoot string) string {
-	return filepath.Join(localWorkRepoDir(repoRoot), "latest-run.json")
-}
-
-func localWorkLatestRunPathByID(repoID string) string {
-	return filepath.Join(localWorkRepoDirByID(repoID), "latest-run.json")
-}
-
-func localWorkManifestPath(repoRoot string, runID string) string {
-	return filepath.Join(localWorkRunsDir(repoRoot), runID, "manifest.json")
-}
-
-func localWorkManifestPathByID(repoID string, runID string) string {
-	return filepath.Join(localWorkRunsDirByID(repoID), runID, "manifest.json")
+func localWorkRunDirByID(repoID string, runID string) string {
+	return filepath.Join(localWorkRunsDirByID(repoID), runID)
 }
 
 func localWorkIterationDir(runDir string, iteration int) string {
@@ -2207,10 +3517,6 @@ func localWorkIterationDir(runDir string, iteration int) string {
 
 func localWorkSandboxesDir() string {
 	return filepath.Join(localWorkHomeRoot(), "sandboxes")
-}
-
-func localWorkIndexPath() string {
-	return filepath.Join(localWorkHomeRoot(), "index", "runs.json")
 }
 
 func localWorkRepoID(repoRoot string) string {
@@ -2222,97 +3528,12 @@ func localWorkRepoID(repoRoot string) string {
 }
 
 func writeLocalWorkManifest(manifest localWorkManifest) error {
-	if strings.TrimSpace(manifest.RepoID) == "" {
-		manifest.RepoID = localWorkRepoID(manifest.RepoRoot)
-	}
-	if strings.TrimSpace(manifest.RepoName) == "" {
-		manifest.RepoName = filepath.Base(manifest.RepoRoot)
-	}
-	manifestPath := localWorkManifestPathByID(manifest.RepoID, manifest.RunID)
-	if err := writeGithubJSON(manifestPath, manifest); err != nil {
-		return err
-	}
-	if err := writeGithubJSON(localWorkRepoMetadataPathByID(manifest.RepoID), localWorkRepoMetadata{
-		Version:   1,
-		RepoID:    manifest.RepoID,
-		RepoRoot:  manifest.RepoRoot,
-		RepoName:  manifest.RepoName,
-		UpdatedAt: manifest.UpdatedAt,
-	}); err != nil {
-		return err
-	}
-	if err := writeGithubJSON(localWorkLatestRunPathByID(manifest.RepoID), localWorkLatestRunPointer{
-		RepoID:   manifest.RepoID,
-		RepoRoot: manifest.RepoRoot,
-		RunID:    manifest.RunID,
-	}); err != nil {
-		return err
-	}
-	return upsertLocalWorkRunIndex(manifest, manifestPath)
-}
-
-func upsertLocalWorkRunIndex(manifest localWorkManifest, manifestPath string) error {
-	index, err := readLocalWorkRunIndex()
+	store, err := openLocalWorkDB()
 	if err != nil {
 		return err
 	}
-	if index.Entries == nil {
-		index.Entries = map[string]localWorkRunIndexEntry{}
-	}
-	index.Entries[manifest.RunID] = localWorkRunIndexEntry{
-		RunID:        manifest.RunID,
-		RepoID:       manifest.RepoID,
-		RepoRoot:     manifest.RepoRoot,
-		RepoName:     manifest.RepoName,
-		ManifestPath: manifestPath,
-		Status:       manifest.Status,
-		CreatedAt:    manifest.CreatedAt,
-		UpdatedAt:    manifest.UpdatedAt,
-	}
-	index.GlobalLastRunID = newestLocalWorkRunID(index.Entries)
-	return writeGithubJSON(localWorkIndexPath(), index)
-}
-
-func readLocalWorkRunIndex() (localWorkRunIndex, error) {
-	index := localWorkRunIndex{Version: 1, Entries: map[string]localWorkRunIndexEntry{}}
-	if err := readGithubJSON(localWorkIndexPath(), &index); err != nil {
-		if os.IsNotExist(err) {
-			return index, nil
-		}
-		return localWorkRunIndex{}, err
-	}
-	if index.Entries == nil {
-		index.Entries = map[string]localWorkRunIndexEntry{}
-	}
-	return index, nil
-}
-
-func lookupLocalWorkRunIndexEntry(runID string) (localWorkRunIndexEntry, error) {
-	index, err := readLocalWorkRunIndex()
-	if err != nil {
-		return localWorkRunIndexEntry{}, err
-	}
-	entry, ok := index.Entries[runID]
-	if !ok {
-		return localWorkRunIndexEntry{}, fmt.Errorf("run %s not found", runID)
-	}
-	return entry, nil
-}
-
-func newestLocalWorkRunID(entries map[string]localWorkRunIndexEntry) string {
-	bestID := ""
-	bestAt := time.Time{}
-	for runID, entry := range entries {
-		parsed, err := time.Parse(time.RFC3339Nano, entry.UpdatedAt)
-		if err != nil {
-			parsed = time.Time{}
-		}
-		if bestID == "" || parsed.After(bestAt) {
-			bestID = runID
-			bestAt = parsed
-		}
-	}
-	return bestID
+	defer store.Close()
+	return store.writeManifest(manifest)
 }
 
 func detectLocalWorkStall(iterations []localWorkIterationSummary) string {
@@ -2374,15 +3595,19 @@ func reviewFindingFingerprints(findings []githubPullReviewFinding) []string {
 }
 
 func promptSnippet(value string) string {
+	return promptSnippetLimit(value, localWorkPromptSnippetChars)
+}
+
+func promptSnippetLimit(value string, charLimit int) string {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
 		return ""
 	}
 	trimmed = tailLines(trimmed, localWorkPromptSnippetLines)
-	if len(trimmed) <= localWorkPromptSnippetChars {
+	if charLimit <= 0 || len(trimmed) <= charLimit {
 		return trimmed
 	}
-	return strings.TrimSpace(trimmed[:localWorkPromptSnippetChars]) + "... [truncated]"
+	return strings.TrimSpace(trimmed[:charLimit]) + "... [truncated]"
 }
 
 func capPromptSize(value string, limit int) string {
@@ -2406,6 +3631,25 @@ func tailLines(content string, limit int) string {
 	}
 	start := len(lines) - limit
 	return strings.Join(lines[start:], "\n")
+}
+
+func localWorkFindingDiffSnippet(manifest localWorkManifest, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	output, err := githubGitOutput(manifest.SandboxRepoPath, "diff", manifest.BaselineSHA, "--", path)
+	if err != nil {
+		return ""
+	}
+	return output
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func intSlicesEqual(left []int, right []int) bool {
@@ -2435,28 +3679,93 @@ func mustMarshalJSON(value interface{}) []byte {
 
 func writeLocalWorkRetrospective(manifest localWorkManifest) (string, error) {
 	diffShortstat, _ := githubGitOutput(manifest.SandboxRepoPath, "diff", "--shortstat", manifest.BaselineSHA)
+	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
+	history := []localWorkFindingHistoryEvent{}
+	store, err := openLocalWorkDB()
+	if err == nil {
+		rows, queryErr := store.db.Query(`SELECT event_json FROM finding_history WHERE run_id = ? ORDER BY id`, manifest.RunID)
+		if queryErr == nil {
+			for rows.Next() {
+				var raw string
+				if err := rows.Scan(&raw); err != nil {
+					continue
+				}
+				var event localWorkFindingHistoryEvent
+				if err := json.Unmarshal([]byte(raw), &event); err == nil {
+					history = append(history, event)
+				}
+			}
+			rows.Close()
+		}
+		store.Close()
+	}
 	lines := []string{
 		"# NANA Work-local Retrospective",
 		"",
 		fmt.Sprintf("- Run id: %s", manifest.RunID),
 		fmt.Sprintf("- Repo root: %s", manifest.RepoRoot),
-		fmt.Sprintf("- Run artifacts: %s", filepath.Dir(localWorkManifestPathByID(manifest.RepoID, manifest.RunID))),
+		fmt.Sprintf("- Run artifacts: %s", runDir),
 		fmt.Sprintf("- Sandbox: %s", manifest.SandboxPath),
 		fmt.Sprintf("- Status: %s", manifest.Status),
 		fmt.Sprintf("- Iterations: %d/%d", len(manifest.Iterations), manifest.MaxIterations),
 		fmt.Sprintf("- Integration policy: %s", manifest.IntegrationPolicy),
+		fmt.Sprintf("- Grouping policy: %s", manifest.GroupingPolicy),
+		fmt.Sprintf("- Validation parallelism: %d", manifest.ValidationParallelism),
+		fmt.Sprintf("- Stored rejected findings: %d", len(manifest.RejectedFindingFingerprints)),
+		fmt.Sprintf("- Finding history events: %d", len(history)),
 		fmt.Sprintf("- Final diff: %s", defaultString(strings.TrimSpace(diffShortstat), "(no diff)")),
 		"",
 		"## Iterations",
 	}
 	for _, iteration := range manifest.Iterations {
-		lines = append(lines, fmt.Sprintf("- %d: %s; initial review=%d; final review=%d; integration=%t", iteration.Iteration, iteration.VerificationSummary, iteration.InitialReviewFindings, iteration.ReviewFindings, iteration.IntegrationRan))
+		lines = append(lines, fmt.Sprintf("- %d: %s; initial review=%d; validated=%d; confirmed=%d; rejected=%d; modified=%d; final review=%d; groups=%d; policy=%s; integration=%t",
+			iteration.Iteration,
+			iteration.VerificationSummary,
+			iteration.InitialReviewFindings,
+			iteration.ValidatedFindings,
+			iteration.ConfirmedFindings,
+			iteration.RejectedFindings,
+			iteration.ModifiedFindings,
+			iteration.ReviewFindings,
+			len(iteration.ValidationGroups),
+			defaultString(iteration.EffectiveGroupingPolicy, iteration.RequestedGroupingPolicy),
+			iteration.IntegrationRan))
+		if len(iteration.ValidationGroupRationales) > 0 {
+			lines = append(lines, "  Group rationales:")
+			for _, rationale := range iteration.ValidationGroupRationales {
+				lines = append(lines, "  - "+rationale)
+			}
+		}
+		if strings.TrimSpace(iteration.GroupingFallbackReason) != "" {
+			lines = append(lines, "  - grouping fallback: "+iteration.GroupingFallbackReason)
+		}
 	}
 	if strings.TrimSpace(manifest.LastError) != "" {
 		lines = append(lines, "", "## Failure", "- "+manifest.LastError)
+		if active := loadLocalWorkActiveValidationContext(manifest.RunID, manifest.CurrentIteration, manifest.CurrentRound); active != nil {
+			lines = append(lines, fmt.Sprintf("- validation context: %s", active.Name))
+			lines = append(lines, fmt.Sprintf("- effective policy: %s", defaultString(active.EffectivePolicy, active.RequestedPolicy)))
+			if strings.TrimSpace(active.FallbackReason) != "" {
+				lines = append(lines, "- grouping fallback: "+active.FallbackReason)
+			}
+			for _, group := range active.GroupStates {
+				if group.Status != "failed" {
+					continue
+				}
+				lines = append(lines, fmt.Sprintf("- failing group: %s", group.GroupID))
+				if strings.TrimSpace(group.Rationale) != "" {
+					lines = append(lines, "- group rationale: "+group.Rationale)
+				}
+				lines = append(lines, fmt.Sprintf("- attempts exhausted: %d", group.Attempts))
+				if strings.TrimSpace(group.LastError) != "" {
+					lines = append(lines, "- validator error: "+group.LastError)
+				}
+				break
+			}
+		}
 	}
 	content := strings.Join(lines, "\n") + "\n"
-	retrospectivePath := filepath.Join(filepath.Dir(localWorkManifestPathByID(manifest.RepoID, manifest.RunID)), "retrospective.md")
+	retrospectivePath := filepath.Join(runDir, "retrospective.md")
 	if err := os.WriteFile(retrospectivePath, []byte(content), 0o644); err != nil {
 		return "", err
 	}

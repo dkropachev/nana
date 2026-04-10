@@ -7,7 +7,7 @@
 </p>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Go](https://img.shields.io/badge/go-1.24%2B-00ADD8)](https://go.dev)
+[![Go](https://img.shields.io/badge/go-1.25%2B-00ADD8)](https://go.dev)
 [![Discord](https://img.shields.io/discord/1452487457085063218?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/PUwSMR9XNk)
 
 **Website:** https://yeachan-heo.github.io/nana-website/  
@@ -139,12 +139,14 @@ Most users should think of NANA as **better task routing + better workflow + bet
 | `$deep-interview "..."` | clarifying intent, boundaries, and non-goals |
 | `$ralplan "..."` | approving the implementation plan and tradeoffs |
 | `nana work-local start --task "..."` | long-running local plan execution in a managed sandbox with iterative verify/review/hardening |
+| `nana work-local start --task "..." --grouping-policy path` | force deterministic path-based validation grouping |
 | `nana work-local logs --last` | inspect the current iteration logs and verification artifacts in one view |
+| `nana work-local status --last --json` | inspect machine-readable run and validation state from SQLite |
 | `nana review <pr-url>` | reviewing external pull requests with persisted findings |
 | `nana work-on start <issue-or-pr-url>` | GitHub-targeted implementation and review-sync workflows |
 | `/skills` | browsing installed skills and supporting helpers |
 
-`nana work-local` stores its runtime state under `~/.nana/local-work/`, not inside the source repo. See [docs/work-local.md](./docs/work-local.md) for storage, resume, and troubleshooting details.
+`nana work-local` stores its authoritative runtime state in `~/.nana/local-work/state.db`, not inside the source repo. Run artifacts still live under `~/.nana/local-work/repos/<repo-id>/runs/<run-id>/...`, but old JSON state files such as `manifest.json`, `runtime-state.json`, `finding-history.json`, `repo.json`, `latest-run.json`, and `index/runs.json` are not part of the current state model and are ignored. This SQLite-backed state layer currently assumes the repo’s Go 1.25 baseline. See [docs/work-local.md](./docs/work-local.md) for storage, resume, validation grouping controls, and troubleshooting details.
 
 ## GitHub Work-on Overrides
 

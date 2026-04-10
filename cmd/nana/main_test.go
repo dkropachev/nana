@@ -208,7 +208,12 @@ func TestBinaryHelpTopicRoutesToWorkLocalHelp(t *testing.T) {
 	if !strings.Contains(string(output), "nana work-local - Autonomous local plan execution for git-backed local repos") {
 		t.Fatalf("expected work-local help output, got %q", output)
 	}
-	if !strings.Contains(string(output), "nana work-local start") || !strings.Contains(string(output), "nana work-local logs") || !strings.Contains(string(output), "--global-last") {
+	if !strings.Contains(string(output), "nana work-local start") ||
+		!strings.Contains(string(output), "nana work-local logs") ||
+		!strings.Contains(string(output), "--global-last") ||
+		!strings.Contains(string(output), "--grouping-policy <ai|path|singleton>") ||
+		!strings.Contains(string(output), "--validation-parallelism <1-8>") ||
+		!strings.Contains(string(output), "[--json]") {
 		t.Fatalf("expected work-local usage lines in output, got %q", output)
 	}
 }

@@ -1,9 +1,11 @@
 package gocli
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -370,23 +372,14 @@ func TestWorkLocalStartStatusRetrospectiveAndGlobalRunLookup(t *testing.T) {
 		t.Fatalf("expected source repo to stay free of work-local artifacts, got err=%v", err)
 	}
 
-	var latest localWorkLatestRunPointer
-	if err := readGithubJSON(localWorkLatestRunPath(repo), &latest); err != nil {
-		t.Fatalf("read latest run: %v", err)
-	}
-	repoDir := localWorkRepoDir(repo)
-	manifestPath := localWorkManifestPath(repo, latest.RunID)
-	var manifest localWorkManifest
-	if err := readGithubJSON(manifestPath, &manifest); err != nil {
-		t.Fatalf("read manifest: %v", err)
-	}
+	manifest, runDir := mustLatestLocalWorkRun(t, repo)
 	if manifest.Status != "completed" {
 		t.Fatalf("expected completed manifest, got %#v", manifest)
 	}
 	if len(manifest.Iterations) != 1 {
 		t.Fatalf("expected single iteration, got %#v", manifest.Iterations)
 	}
-	if _, err := os.Stat(filepath.Join(repoDir, "retrospective.md")); err == nil {
+	if _, err := os.Stat(filepath.Join(localWorkRepoDir(repo), "retrospective.md")); err == nil {
 		t.Fatalf("retrospective should live inside the run directory, not repo root")
 	}
 	logContent, err := os.ReadFile(filepath.Join(manifest.SandboxRepoPath, "verify.log"))
@@ -401,12 +394,12 @@ func TestWorkLocalStartStatusRetrospectiveAndGlobalRunLookup(t *testing.T) {
 
 	outside := t.TempDir()
 	statusOutput, err := captureStdout(t, func() error {
-		return WorkLocal(outside, []string{"status", "--run-id", latest.RunID})
+		return WorkLocal(outside, []string{"status", "--run-id", manifest.RunID})
 	})
 	if err != nil {
 		t.Fatalf("WorkLocal(status --run-id): %v", err)
 	}
-	if !strings.Contains(statusOutput, "Status: completed") || !strings.Contains(statusOutput, "Run artifacts: "+filepath.Dir(manifestPath)) {
+	if !strings.Contains(statusOutput, "Status: completed") || !strings.Contains(statusOutput, "Run artifacts: "+runDir) {
 		t.Fatalf("unexpected status output: %q", statusOutput)
 	}
 
@@ -416,7 +409,7 @@ func TestWorkLocalStartStatusRetrospectiveAndGlobalRunLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WorkLocal(status --repo --last): %v", err)
 	}
-	if !strings.Contains(repoScopedStatus, latest.RunID) {
+	if !strings.Contains(repoScopedStatus, manifest.RunID) {
 		t.Fatalf("expected repo-scoped last run in output, got %q", repoScopedStatus)
 	}
 
@@ -426,12 +419,12 @@ func TestWorkLocalStartStatusRetrospectiveAndGlobalRunLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WorkLocal(status --global-last): %v", err)
 	}
-	if !strings.Contains(globalStatus, latest.RunID) {
+	if !strings.Contains(globalStatus, manifest.RunID) {
 		t.Fatalf("expected global last run in output, got %q", globalStatus)
 	}
 
 	retroOutput, err := captureStdout(t, func() error {
-		return WorkLocal(outside, []string{"retrospective", "--run-id", latest.RunID})
+		return WorkLocal(outside, []string{"retrospective", "--run-id", manifest.RunID})
 	})
 	if err != nil {
 		t.Fatalf("WorkLocal(retrospective): %v", err)
@@ -439,12 +432,12 @@ func TestWorkLocalStartStatusRetrospectiveAndGlobalRunLookup(t *testing.T) {
 	if !strings.Contains(retroOutput, "# NANA Work-local Retrospective") {
 		t.Fatalf("unexpected retrospective output: %q", retroOutput)
 	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(manifestPath), "retrospective.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(runDir, "retrospective.md")); err != nil {
 		t.Fatalf("expected retrospective artifact: %v", err)
 	}
 
 	logsOutput, err := captureStdout(t, func() error {
-		return WorkLocal(outside, []string{"logs", "--run-id", latest.RunID, "--tail", "20"})
+		return WorkLocal(outside, []string{"logs", "--run-id", manifest.RunID, "--tail", "20"})
 	})
 	if err != nil {
 		t.Fatalf("WorkLocal(logs): %v", err)
@@ -502,11 +495,8 @@ func TestWorkLocalRunsHardeningPassWhenReviewFindingsRemain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WorkLocal(start): %v\n%s", err, output)
 	}
-	var latest localWorkLatestRunPointer
-	if err := readGithubJSON(localWorkLatestRunPath(repo), &latest); err != nil {
-		t.Fatalf("read latest run: %v", err)
-	}
-	iterationDir := localWorkIterationDir(filepath.Dir(localWorkManifestPath(repo, latest.RunID)), 1)
+	manifest, runDir := mustLatestLocalWorkRun(t, repo)
+	iterationDir := localWorkIterationDir(runDir, 1)
 	for _, path := range []string{
 		"review-initial-findings.json",
 		"hardening-round-1-prompt.md",
@@ -518,10 +508,6 @@ func TestWorkLocalRunsHardeningPassWhenReviewFindingsRemain(t *testing.T) {
 			t.Fatalf("expected hardening artifact %s: %v", path, err)
 		}
 	}
-	var manifest localWorkManifest
-	if err := readGithubJSON(localWorkManifestPath(repo, latest.RunID), &manifest); err != nil {
-		t.Fatalf("read manifest: %v", err)
-	}
 	if len(manifest.Iterations) != 1 {
 		t.Fatalf("unexpected hardening iteration summary: %#v", manifest.Iterations)
 	}
@@ -531,6 +517,978 @@ func TestWorkLocalRunsHardeningPassWhenReviewFindingsRemain(t *testing.T) {
 	}
 	if len(summary.ReviewFindingsByRound) != 1 || len(summary.HardeningRoundFingerprints) != 1 || len(summary.PostHardeningVerificationFingerprints) != 1 {
 		t.Fatalf("expected round metadata in summary: %#v", summary)
+	}
+}
+
+func TestWorkLocalStatusAndLogsJSON(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	markerPath := filepath.Join(home, "hardening.marker")
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`PAYLOAD="$(cat)"`,
+		`case "$PAYLOAD" in`,
+		`  *"# NANA Work-local Finding Validation"*)`,
+		`    printf '{"group":"readme-md","decisions":[{"fingerprint":"readme.md|need stronger regression coverage|1|add regression","status":"confirmed","reason":"valid finding"}]}\n'`,
+		`    ;;`,
+		`  *"# NANA Work-local Hardening Pass"*)`,
+		`    printf 'fixed\n' >> README.md`,
+		`    : > "${FAKE_CODEX_HARDENED_PATH}"`,
+		`    printf 'hardening-complete\n'`,
+		`    ;;`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    if [ -f "${FAKE_CODEX_HARDENED_PATH}" ]; then`,
+		`      printf '{"findings":[]}\n'`,
+		`    else`,
+		`      printf '{"findings":[{"title":"Need stronger regression coverage","severity":"medium","path":"README.md","line":1,"summary":"add regression","detail":"detail","fix":"fix","rationale":"why"}]}\n'`,
+		`    fi`,
+		`    ;;`,
+		`  *)`,
+		`    printf 'implemented\n' >> README.md`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_HARDENED_PATH", markerPath)
+
+	if err := WorkLocal(repo, []string{"start", "--task", "Trigger json status", "--grouping-policy", "singleton", "--validation-parallelism", "2"}); err != nil {
+		t.Fatalf("WorkLocal(start): %v", err)
+	}
+
+	statusOutput, err := captureStdout(t, func() error {
+		return WorkLocal(repo, []string{"status", "--last", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("WorkLocal(status --json): %v", err)
+	}
+	var status struct {
+		RunID         string                    `json:"run_id"`
+		RejectedCount int                       `json:"rejected_fingerprint_count"`
+		LastIteration localWorkIterationSummary `json:"last_iteration"`
+	}
+	if err := json.Unmarshal([]byte(statusOutput), &status); err != nil {
+		t.Fatalf("unmarshal status json: %v\n%s", err, statusOutput)
+	}
+	if status.RunID == "" || status.LastIteration.EffectiveGroupingPolicy != localWorkSingletonPolicy || status.LastIteration.ValidatedFindings == 0 {
+		t.Fatalf("unexpected status json: %+v", status)
+	}
+
+	logsOutput, err := captureStdout(t, func() error {
+		return WorkLocal(repo, []string{"logs", "--last", "--json", "--tail", "10"})
+	})
+	if err != nil {
+		t.Fatalf("WorkLocal(logs --json): %v", err)
+	}
+	var logs struct {
+		Grouping localWorkGroupingResult `json:"grouping"`
+		Files    []map[string]string     `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(logsOutput), &logs); err != nil {
+		t.Fatalf("unmarshal logs json: %v\n%s", err, logsOutput)
+	}
+	if logs.Grouping.EffectivePolicy != localWorkSingletonPolicy || len(logs.Files) == 0 {
+		t.Fatalf("unexpected logs json: %+v", logs)
+	}
+}
+
+func TestWorkLocalAIFallbacksToSingletonGrouping(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	markerPath := filepath.Join(home, "hardening.marker")
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`PAYLOAD="$(cat)"`,
+		`case "$PAYLOAD" in`,
+		`  *"# NANA Work-local Finding Grouping"*)`,
+		`    printf 'not-json\n'`,
+		`    ;;`,
+		`  *"# NANA Work-local Finding Validation"*)`,
+		`    printf '{"group":"need-stronger-regression-coverage","decisions":[{"fingerprint":"readme.md|need stronger regression coverage|1|add regression","status":"confirmed","reason":"valid finding"}]}\n'`,
+		`    ;;`,
+		`  *"# NANA Work-local Hardening Pass"*)`,
+		`    printf 'fixed\n' >> README.md`,
+		`    : > "${FAKE_CODEX_HARDENED_PATH}"`,
+		`    printf 'hardening-complete\n'`,
+		`    ;;`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    if [ -f "${FAKE_CODEX_HARDENED_PATH}" ]; then`,
+		`      printf '{"findings":[]}\n'`,
+		`    else`,
+		`      printf '{"findings":[{"title":"Need stronger regression coverage","severity":"medium","path":"README.md","line":1,"summary":"add regression","detail":"detail","fix":"fix","rationale":"why"}]}\n'`,
+		`    fi`,
+		`    ;;`,
+		`  *)`,
+		`    printf 'implemented\n' >> README.md`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_HARDENED_PATH", markerPath)
+
+	if err := WorkLocal(repo, []string{"start", "--task", "Fallback grouping"}); err != nil {
+		t.Fatalf("WorkLocal(start): %v", err)
+	}
+	manifest, _ := mustLatestLocalWorkRun(t, repo)
+	if len(manifest.Iterations) != 1 {
+		t.Fatalf("unexpected iterations: %#v", manifest.Iterations)
+	}
+	summary := manifest.Iterations[0]
+	if summary.EffectiveGroupingPolicy != localWorkSingletonPolicy || summary.GroupingAttempts != localWorkMaxGroupingAttempts || summary.GroupingFallbackReason == "" {
+		t.Fatalf("expected singleton fallback in summary, got %#v", summary)
+	}
+}
+
+func TestWorkLocalPathGroupingBypassesAIGrouper(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	markerPath := filepath.Join(home, "hardening.marker")
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`PAYLOAD="$(cat)"`,
+		`case "$PAYLOAD" in`,
+		`  *"# NANA Work-local Finding Grouping"*)`,
+		`    printf 'grouper should not be called for path policy\n' >&2`,
+		`    exit 99`,
+		`    ;;`,
+		`  *"# NANA Work-local Finding Validation"*)`,
+		`    printf '{"group":"README.md","decisions":[{"fingerprint":"readme.md|need stronger regression coverage|1|add regression","status":"confirmed","reason":"valid finding"}]}\n'`,
+		`    ;;`,
+		`  *"# NANA Work-local Hardening Pass"*)`,
+		`    printf 'fixed\n' >> README.md`,
+		`    : > "${FAKE_CODEX_HARDENED_PATH}"`,
+		`    printf 'hardening-complete\n'`,
+		`    ;;`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    if [ -f "${FAKE_CODEX_HARDENED_PATH}" ]; then`,
+		`      printf '{"findings":[]}\n'`,
+		`    else`,
+		`      printf '{"findings":[{"title":"Need stronger regression coverage","severity":"medium","path":"README.md","line":1,"summary":"add regression","detail":"detail","fix":"fix","rationale":"why"}]}\n'`,
+		`    fi`,
+		`    ;;`,
+		`  *)`,
+		`    printf 'implemented\n' >> README.md`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_HARDENED_PATH", markerPath)
+
+	if err := WorkLocal(repo, []string{"start", "--task", "Path grouping bypass", "--grouping-policy", "path"}); err != nil {
+		t.Fatalf("WorkLocal(start): %v", err)
+	}
+	manifest, _ := mustLatestLocalWorkRun(t, repo)
+	if got := manifest.Iterations[0].EffectiveGroupingPolicy; got != localWorkPathGroupingPolicy {
+		t.Fatalf("expected path grouping policy, got %q", got)
+	}
+}
+
+func TestWorkLocalValidationFailurePersistsRuntimeStateAndFailureDetails(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`PAYLOAD="$(cat)"`,
+		`case "$PAYLOAD" in`,
+		`  *"# NANA Work-local Finding Grouping"*)`,
+		`    printf '{"groups":[{"group_id":"readme-validation","rationale":"shared readme context","findings":["readme.md|need stronger regression coverage|1|add regression"]}]}\n'`,
+		`    ;;`,
+		`  *"# NANA Work-local Finding Validation"*)`,
+		`    printf 'not-json\n'`,
+		`    ;;`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    printf '{"findings":[{"title":"Need stronger regression coverage","severity":"medium","path":"README.md","line":1,"summary":"add regression","detail":"detail","fix":"fix","rationale":"why"}]}\n'`,
+		`    ;;`,
+		`  *)`,
+		`    printf 'implemented\n' >> README.md`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	err := WorkLocal(repo, []string{"start", "--task", "Fail validator"})
+	if err == nil || !strings.Contains(err.Error(), "validator group readme-validation failed after 3 attempt(s)") {
+		t.Fatalf("expected validator failure, got %v", err)
+	}
+	manifest, _ := mustLatestLocalWorkRun(t, repo)
+	if _, err := readLocalWorkRuntimeState(manifest.RunID, 1); err != nil {
+		t.Fatalf("expected runtime-state row: %v", err)
+	}
+
+	statusOutput, err := captureStdout(t, func() error {
+		return WorkLocal(repo, []string{"status", "--last", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("WorkLocal(status --json): %v", err)
+	}
+	var status struct {
+		LastError               string                           `json:"last_error"`
+		ActiveValidationContext *localWorkValidationContextState `json:"active_validation_context"`
+	}
+	if err := json.Unmarshal([]byte(statusOutput), &status); err != nil {
+		t.Fatalf("unmarshal status json: %v\n%s", err, statusOutput)
+	}
+	if status.ActiveValidationContext == nil || !strings.Contains(status.LastError, "validator group readme-validation failed") {
+		t.Fatalf("unexpected status snapshot: %+v", status)
+	}
+	if len(status.ActiveValidationContext.GroupStates) == 0 || status.ActiveValidationContext.GroupStates[0].Status != "failed" || status.ActiveValidationContext.GroupStates[0].Attempts != localWorkMaxValidatorAttempts {
+		t.Fatalf("expected failed group state, got %+v", status.ActiveValidationContext)
+	}
+
+	humanStatus, err := captureStdout(t, func() error {
+		return WorkLocal(repo, []string{"status", "--last"})
+	})
+	if err != nil {
+		t.Fatalf("WorkLocal(status): %v", err)
+	}
+	if !strings.Contains(humanStatus, "Validation group: readme-validation status=failed attempts=3") {
+		t.Fatalf("expected failed validation group in human status: %q", humanStatus)
+	}
+
+	logsOutput, err := captureStdout(t, func() error {
+		return WorkLocal(repo, []string{"logs", "--last", "--json", "--tail", "10"})
+	})
+	if err != nil {
+		t.Fatalf("WorkLocal(logs --json): %v", err)
+	}
+	var logs struct {
+		RuntimeState *localWorkIterationRuntimeState `json:"runtime_state"`
+	}
+	if err := json.Unmarshal([]byte(logsOutput), &logs); err != nil {
+		t.Fatalf("unmarshal logs json: %v\n%s", err, logsOutput)
+	}
+	if logs.RuntimeState == nil || len(logs.RuntimeState.ValidationContexts) == 0 {
+		t.Fatalf("expected runtime state in logs json: %+v", logs)
+	}
+
+	humanLogs, err := captureStdout(t, func() error {
+		return WorkLocal(repo, []string{"logs", "--last", "--tail", "5"})
+	})
+	if err != nil {
+		t.Fatalf("WorkLocal(logs): %v", err)
+	}
+	if !strings.Contains(humanLogs, "Validation group: readme-validation status=failed attempts=3") {
+		t.Fatalf("expected failed validation group in human logs: %q", humanLogs)
+	}
+
+	retroOutput, err := captureStdout(t, func() error {
+		return WorkLocal(repo, []string{"retrospective", "--last"})
+	})
+	if err != nil {
+		t.Fatalf("WorkLocal(retrospective): %v", err)
+	}
+	if !strings.Contains(retroOutput, "failing group: readme-validation") || !strings.Contains(retroOutput, "attempts exhausted: 3") {
+		t.Fatalf("expected validation failure details in retrospective: %q", retroOutput)
+	}
+}
+
+func TestWorkLocalResumeAfterValidatorFailureReusesGroupingAndCleansRuntimeState(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	fakeBin := filepath.Join(home, "bin")
+	groupCountPath := filepath.Join(home, "group-count")
+	validateCountPath := filepath.Join(home, "validate-count")
+	hardenedPath := filepath.Join(home, "hardened")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`PAYLOAD="$(cat)"`,
+		`inc() {`,
+		`  path="$1"`,
+		`  count=0`,
+		`  if [ -f "$path" ]; then count=$(cat "$path"); fi`,
+		`  count=$((count+1))`,
+		`  printf '%s' "$count" > "$path"`,
+		`}`,
+		`case "$PAYLOAD" in`,
+		`  *"# NANA Work-local Finding Grouping"*)`,
+		`    inc "$FAKE_GROUP_COUNT_PATH"`,
+		`    printf '{"groups":[{"group_id":"readme-validation","rationale":"shared readme context","findings":["readme.md|need stronger regression coverage|1|add regression"]}]}\n'`,
+		`    ;;`,
+		`  *"# NANA Work-local Finding Validation"*)`,
+		`    inc "$FAKE_VALIDATE_COUNT_PATH"`,
+		`    count=$(cat "$FAKE_VALIDATE_COUNT_PATH")`,
+		`    if [ "$count" -le 3 ]; then`,
+		`      printf 'not-json\n'`,
+		`    else`,
+		`      printf '{"group":"readme-validation","decisions":[{"fingerprint":"readme.md|need stronger regression coverage|1|add regression","status":"confirmed","reason":"valid finding"}]}\n'`,
+		`    fi`,
+		`    ;;`,
+		`  *"# NANA Work-local Hardening Pass"*)`,
+		`    : > "$FAKE_HARDENED_PATH"`,
+		`    printf 'fixed\n' >> README.md`,
+		`    printf 'hardening-complete\n'`,
+		`    ;;`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    if [ -f "$FAKE_HARDENED_PATH" ]; then`,
+		`      printf '{"findings":[]}\n'`,
+		`    else`,
+		`      printf '{"findings":[{"title":"Need stronger regression coverage","severity":"medium","path":"README.md","line":1,"summary":"add regression","detail":"detail","fix":"fix","rationale":"why"}]}\n'`,
+		`    fi`,
+		`    ;;`,
+		`  *)`,
+		`    printf 'implemented\n' >> README.md`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_GROUP_COUNT_PATH", groupCountPath)
+	t.Setenv("FAKE_VALIDATE_COUNT_PATH", validateCountPath)
+	t.Setenv("FAKE_HARDENED_PATH", hardenedPath)
+
+	startErr := WorkLocal(repo, []string{"start", "--task", "Resume validator failure"})
+	if startErr == nil {
+		t.Fatal("expected initial start to fail")
+	}
+	manifest, _ := mustLatestLocalWorkRun(t, repo)
+	if _, err := readLocalWorkRuntimeState(manifest.RunID, 1); err != nil {
+		t.Fatalf("expected runtime-state after failed run: %v", err)
+	}
+
+	outside := t.TempDir()
+	resumeOutput, err := captureStdout(t, func() error {
+		return WorkLocal(outside, []string{"resume", "--repo", repo, "--last"})
+	})
+	if err != nil {
+		t.Fatalf("WorkLocal(resume): %v\n%s", err, resumeOutput)
+	}
+	if !strings.Contains(resumeOutput, "Completed run lw-") {
+		t.Fatalf("unexpected resume output: %q", resumeOutput)
+	}
+	groupCount, err := os.ReadFile(groupCountPath)
+	if err != nil {
+		t.Fatalf("read group count: %v", err)
+	}
+	if strings.TrimSpace(string(groupCount)) != "1" {
+		t.Fatalf("expected grouping to be reused, got count %q", groupCount)
+	}
+	if _, err := readLocalWorkRuntimeState(manifest.RunID, 1); !os.IsNotExist(err) {
+		t.Fatalf("expected runtime-state cleanup after success, got err=%v", err)
+	}
+}
+
+func TestWorkLocalFindingHistoryRecordsLifecycle(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	hardenedPath := filepath.Join(home, "hardened")
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`PAYLOAD="$(cat)"`,
+		`case "$PAYLOAD" in`,
+		`  *"# NANA Work-local Finding Grouping"*)`,
+		`    printf '{"groups":[{"group_id":"readme-batch","rationale":"same file","findings":["readme.md|need stronger regression coverage|1|add regression","readme.md|drop outdated note|1|remove note"]}]}\n'`,
+		`    ;;`,
+		`  *"# NANA Work-local Finding Validation"*)`,
+		`    printf '{"group":"readme-batch","decisions":[{"fingerprint":"readme.md|need stronger regression coverage|1|add regression","status":"modified","reason":"narrower wording","replacement":{"title":"Need targeted regression coverage","severity":"medium","path":"README.md","line":1,"summary":"add targeted regression","detail":"detail2","fix":"fix2","rationale":"why2"}},{"fingerprint":"readme.md|drop outdated note|1|remove note","status":"rejected","reason":"not actionable"}]}\n'`,
+		`    ;;`,
+		`  *"# NANA Work-local Hardening Pass"*)`,
+		`    : > "$FAKE_HARDENED_PATH"`,
+		`    printf 'fixed\n' >> README.md`,
+		`    printf 'hardening-complete\n'`,
+		`    ;;`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    if [ -f "$FAKE_HARDENED_PATH" ]; then`,
+		`      printf '{"findings":[]}\n'`,
+		`    else`,
+		`      printf '{"findings":[{"title":"Need stronger regression coverage","severity":"medium","path":"README.md","line":1,"summary":"add regression","detail":"detail","fix":"fix","rationale":"why"},{"title":"Drop outdated note","severity":"low","path":"README.md","line":1,"summary":"remove note","detail":"detailb","fix":"fixb","rationale":"whyb"}]}\n'`,
+		`    fi`,
+		`    ;;`,
+		`  *)`,
+		`    printf 'implemented\n' >> README.md`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_HARDENED_PATH", hardenedPath)
+
+	if err := WorkLocal(repo, []string{"start", "--task", "Finding history"}); err != nil {
+		t.Fatalf("WorkLocal(start): %v", err)
+	}
+	manifest, _ := mustLatestLocalWorkRun(t, repo)
+	store, err := openLocalWorkDB()
+	if err != nil {
+		t.Fatalf("openLocalWorkDB: %v", err)
+	}
+	defer store.Close()
+	rows, err := store.db.Query(`SELECT event_json FROM finding_history WHERE run_id = ? ORDER BY id`, manifest.RunID)
+	if err != nil {
+		t.Fatalf("query finding history: %v", err)
+	}
+	defer rows.Close()
+	history := []localWorkFindingHistoryEvent{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatalf("scan finding history: %v", err)
+		}
+		var event localWorkFindingHistoryEvent
+		if err := json.Unmarshal([]byte(raw), &event); err != nil {
+			t.Fatalf("unmarshal finding history: %v", err)
+		}
+		history = append(history, event)
+	}
+	statuses := map[localWorkFindingDecisionStatus]int{}
+	for _, event := range history {
+		statuses[event.Status]++
+	}
+	if statuses[localWorkFindingRejected] == 0 || statuses[localWorkFindingModified] == 0 || statuses[localWorkFindingSuperseded] == 0 {
+		t.Fatalf("expected rejected/modified/superseded events in history, got %#v", history)
+	}
+}
+
+func TestWorkLocalDocsMentionRuntimeStateAndValidationControls(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	readme, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	workLocalDoc, err := os.ReadFile(filepath.Join(repoRoot, "docs", "work-local.md"))
+	if err != nil {
+		t.Fatalf("read docs/work-local.md: %v", err)
+	}
+	for _, needle := range []string{
+		"state.db",
+		"--grouping-policy",
+		"--validation-parallelism",
+		"status --last --json",
+		"go-1.25%2B",
+	} {
+		if !strings.Contains(string(readme), needle) && !strings.Contains(string(workLocalDoc), needle) {
+			t.Fatalf("expected docs to mention %q", needle)
+		}
+	}
+	for _, needle := range []string{
+		"validator groups retry up to 3 times",
+		"run fails and stays resumable",
+		"reuse completed grouping/validator work",
+		"ignored if they still exist on disk",
+		"Go 1.25 baseline",
+	} {
+		if !strings.Contains(string(workLocalDoc), needle) {
+			t.Fatalf("expected work-local doc to mention %q", needle)
+		}
+	}
+}
+
+func TestWorkLocalStatusPrefersNewerRuntimeState(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot, err := resolveLocalWorkRepoRoot(repo, "")
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	runID := "lw-stale"
+	repoID := localWorkRepoID(repoRoot)
+	manifest := localWorkManifest{
+		Version:               3,
+		RunID:                 runID,
+		CreatedAt:             ISOTimeNow(),
+		UpdatedAt:             ISOTimeNow(),
+		Status:                "running",
+		CurrentIteration:      1,
+		CurrentPhase:          "implement",
+		CurrentSubphase:       "implement",
+		RepoRoot:              repoRoot,
+		RepoName:              filepath.Base(repoRoot),
+		RepoID:                repoID,
+		SandboxPath:           filepath.Join(home, "sandbox"),
+		SandboxRepoPath:       repoRoot,
+		InputPath:             filepath.Join(home, "input.md"),
+		InputMode:             "task",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	state := localWorkIterationRuntimeState{
+		Version:         1,
+		Iteration:       1,
+		CurrentPhase:    "validation",
+		CurrentSubphase: "validation",
+		CurrentRound:    1,
+	}
+	if err := writeLocalWorkRuntimeState(runID, state); err != nil {
+		t.Fatalf("write runtime state: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error {
+		return WorkLocal(repo, []string{"status", "--last", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("WorkLocal(status --json): %v", err)
+	}
+	var snapshot struct {
+		Phase    string `json:"phase"`
+		Subphase string `json:"subphase"`
+		Round    int    `json:"round"`
+	}
+	if err := json.Unmarshal([]byte(output), &snapshot); err != nil {
+		t.Fatalf("unmarshal status json: %v\n%s", err, output)
+	}
+	if snapshot.Phase != "validation" || snapshot.Subphase != "validation" || snapshot.Round != 1 {
+		t.Fatalf("expected runtime-state to override stale manifest, got %+v", snapshot)
+	}
+}
+
+func TestWorkLocalStatusCleansOrphanedRuntimeStateAfterCompletion(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot, err := resolveLocalWorkRepoRoot(repo, "")
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	runID := "lw-complete"
+	repoID := localWorkRepoID(repoRoot)
+	manifest := localWorkManifest{
+		Version:               3,
+		RunID:                 runID,
+		CreatedAt:             ISOTimeNow(),
+		UpdatedAt:             ISOTimeNow(),
+		CompletedAt:           ISOTimeNow(),
+		Status:                "completed",
+		CurrentIteration:      1,
+		CurrentPhase:          "completed",
+		CurrentSubphase:       "completed",
+		RepoRoot:              repoRoot,
+		RepoName:              filepath.Base(repoRoot),
+		RepoID:                repoID,
+		SandboxPath:           filepath.Join(home, "sandbox"),
+		SandboxRepoPath:       repoRoot,
+		InputPath:             filepath.Join(home, "input.md"),
+		InputMode:             "task",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+		Iterations: []localWorkIterationSummary{{
+			Iteration:           1,
+			StartedAt:           ISOTimeNow(),
+			CompletedAt:         ISOTimeNow(),
+			Status:              "completed",
+			VerificationSummary: "verification passed (lint, compile, unit, integration)",
+		}},
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	state := localWorkIterationRuntimeState{
+		Version:         1,
+		Iteration:       1,
+		CurrentPhase:    "validation",
+		CurrentSubphase: "validation",
+	}
+	if err := writeLocalWorkRuntimeState(runID, state); err != nil {
+		t.Fatalf("write runtime state: %v", err)
+	}
+
+	if _, err := captureStdout(t, func() error {
+		return WorkLocal(repo, []string{"status", "--last"})
+	}); err != nil {
+		t.Fatalf("WorkLocal(status): %v", err)
+	}
+	if _, err := readLocalWorkRuntimeState(runID, 1); err != nil {
+		t.Fatalf("expected runtime-state row to remain readable, got err=%v", err)
+	}
+}
+
+func TestWorkLocalStatusUsesDBInsteadOfLatestRunFile(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot, err := resolveLocalWorkRepoRoot(repo, "")
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	manifest := localWorkManifest{
+		Version:               3,
+		RunID:                 "lw-latest-repair",
+		CreatedAt:             ISOTimeNow(),
+		UpdatedAt:             ISOTimeNow(),
+		Status:                "completed",
+		CurrentIteration:      1,
+		CurrentPhase:          "completed",
+		CurrentSubphase:       "completed",
+		RepoRoot:              repoRoot,
+		RepoName:              filepath.Base(repoRoot),
+		RepoID:                localWorkRepoID(repoRoot),
+		SandboxPath:           filepath.Join(home, "sandbox"),
+		SandboxRepoPath:       repoRoot,
+		InputPath:             filepath.Join(home, "input.md"),
+		InputMode:             "task",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+		Iterations:            []localWorkIterationSummary{{Iteration: 1, Status: "completed", VerificationSummary: "verification passed (lint, compile, unit, integration)"}},
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error {
+		return WorkLocal(repo, []string{"status", "--last"})
+	})
+	if err != nil {
+		t.Fatalf("WorkLocal(status --last): %v", err)
+	}
+	if !strings.Contains(output, manifest.RunID) {
+		t.Fatalf("expected DB-backed status output to mention run id, got %q", output)
+	}
+	if _, err := os.Stat(filepath.Join(localWorkRepoDir(repoRoot), "latest-run.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no latest-run state file, got err=%v", err)
+	}
+}
+
+func TestWorkLocalStatusRunIDUsesDBInsteadOfIndexFile(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot, err := resolveLocalWorkRepoRoot(repo, "")
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	manifest := localWorkManifest{
+		Version:               3,
+		RunID:                 "lw-index-repair",
+		CreatedAt:             ISOTimeNow(),
+		UpdatedAt:             ISOTimeNow(),
+		Status:                "completed",
+		CurrentIteration:      1,
+		CurrentPhase:          "completed",
+		CurrentSubphase:       "completed",
+		RepoRoot:              repoRoot,
+		RepoName:              filepath.Base(repoRoot),
+		RepoID:                localWorkRepoID(repoRoot),
+		SandboxPath:           filepath.Join(home, "sandbox"),
+		SandboxRepoPath:       repoRoot,
+		InputPath:             filepath.Join(home, "input.md"),
+		InputMode:             "task",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+		Iterations:            []localWorkIterationSummary{{Iteration: 1, Status: "completed", VerificationSummary: "verification passed (lint, compile, unit, integration)"}},
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	outside := t.TempDir()
+	output, err := captureStdout(t, func() error {
+		return WorkLocal(outside, []string{"status", "--run-id", manifest.RunID})
+	})
+	if err != nil {
+		t.Fatalf("WorkLocal(status --run-id): %v", err)
+	}
+	if !strings.Contains(output, manifest.RunID) {
+		t.Fatalf("expected DB-backed status output to mention run id, got %q", output)
+	}
+	if _, err := os.Stat(filepath.Join(localWorkHomeRoot(), "index", "runs.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no run-index state file, got err=%v", err)
+	}
+}
+
+func TestWorkLocalStatusUsesDBInsteadOfRepoMetadataFile(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot, err := resolveLocalWorkRepoRoot(repo, "")
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	manifest := localWorkManifest{
+		Version:               3,
+		RunID:                 "lw-repo-meta",
+		CreatedAt:             ISOTimeNow(),
+		UpdatedAt:             ISOTimeNow(),
+		Status:                "completed",
+		CurrentIteration:      1,
+		CurrentPhase:          "completed",
+		CurrentSubphase:       "completed",
+		RepoRoot:              repoRoot,
+		RepoName:              filepath.Base(repoRoot),
+		RepoID:                localWorkRepoID(repoRoot),
+		SandboxPath:           filepath.Join(home, "sandbox"),
+		SandboxRepoPath:       repoRoot,
+		InputPath:             filepath.Join(home, "input.md"),
+		InputMode:             "task",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+		Iterations:            []localWorkIterationSummary{{Iteration: 1, Status: "completed", VerificationSummary: "verification passed (lint, compile, unit, integration)"}},
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error {
+		return WorkLocal(repo, []string{"status", "--last"})
+	})
+	if err != nil {
+		t.Fatalf("WorkLocal(status --last): %v", err)
+	}
+	if !strings.Contains(output, repoRoot) {
+		t.Fatalf("expected DB-backed status output to mention repo root, got %q", output)
+	}
+	if _, err := os.Stat(filepath.Join(localWorkRepoDir(repoRoot), "repo.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no repo-metadata state file, got err=%v", err)
+	}
+}
+
+func TestWriteLocalWorkManifestAllowsDBStateWithoutIndexFile(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot, err := resolveLocalWorkRepoRoot(repo, "")
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	manifest := localWorkManifest{
+		Version:               3,
+		RunID:                 "lw-fresh-entry",
+		CreatedAt:             ISOTimeNow(),
+		UpdatedAt:             ISOTimeNow(),
+		Status:                "completed",
+		CurrentIteration:      1,
+		CurrentPhase:          "completed",
+		CurrentSubphase:       "completed",
+		RepoRoot:              repoRoot,
+		RepoName:              filepath.Base(repoRoot),
+		RepoID:                localWorkRepoID(repoRoot),
+		SandboxPath:           filepath.Join(home, "sandbox"),
+		SandboxRepoPath:       repoRoot,
+		InputPath:             filepath.Join(home, "input.md"),
+		InputMode:             "task",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+		Iterations:            []localWorkIterationSummary{{Iteration: 1, Status: "completed", VerificationSummary: "verification passed (lint, compile, unit, integration)"}},
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	loaded, err := readLocalWorkManifestByRunID(manifest.RunID)
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
+	}
+	if loaded.RunID != manifest.RunID {
+		t.Fatalf("expected stored run %s, got %#v", manifest.RunID, loaded)
+	}
+}
+
+func TestWorkLocalStatusIgnoresLegacyMalformedManifestDuringRunIDLookup(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot, err := resolveLocalWorkRepoRoot(repo, "")
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	validManifest := localWorkManifest{
+		Version:               3,
+		RunID:                 "lw-good-index",
+		CreatedAt:             ISOTimeNow(),
+		UpdatedAt:             ISOTimeNow(),
+		Status:                "completed",
+		CurrentIteration:      1,
+		CurrentPhase:          "completed",
+		CurrentSubphase:       "completed",
+		RepoRoot:              repoRoot,
+		RepoName:              filepath.Base(repoRoot),
+		RepoID:                localWorkRepoID(repoRoot),
+		SandboxPath:           filepath.Join(home, "sandbox"),
+		SandboxRepoPath:       repoRoot,
+		InputPath:             filepath.Join(home, "input.md"),
+		InputMode:             "task",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+		Iterations:            []localWorkIterationSummary{{Iteration: 1, Status: "completed", VerificationSummary: "verification passed (lint, compile, unit, integration)"}},
+	}
+	if err := writeLocalWorkManifest(validManifest); err != nil {
+		t.Fatalf("write valid manifest: %v", err)
+	}
+	badRunDir := filepath.Join(localWorkRunsDir(repoRoot), "lw-bad-index")
+	if err := os.MkdirAll(badRunDir, 0o755); err != nil {
+		t.Fatalf("mkdir bad run dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(badRunDir, "manifest.json"), []byte("{bad-json\n"), 0o644); err != nil {
+		t.Fatalf("write malformed manifest: %v", err)
+	}
+	outside := t.TempDir()
+	output, err := captureStdout(t, func() error {
+		return WorkLocal(outside, []string{"status", "--run-id", validManifest.RunID})
+	})
+	if err != nil {
+		t.Fatalf("WorkLocal(status --run-id): %v", err)
+	}
+	if !strings.Contains(output, validManifest.RunID) {
+		t.Fatalf("expected valid DB-backed run resolution, got %q", output)
+	}
+}
+
+func TestWorkLocalStatusIgnoresLegacyMalformedManifestDuringLastLookup(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot, err := resolveLocalWorkRepoRoot(repo, "")
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	validManifest := localWorkManifest{
+		Version:               3,
+		RunID:                 "lw-good-latest",
+		CreatedAt:             ISOTimeNow(),
+		UpdatedAt:             ISOTimeNow(),
+		Status:                "completed",
+		CurrentIteration:      1,
+		CurrentPhase:          "completed",
+		CurrentSubphase:       "completed",
+		RepoRoot:              repoRoot,
+		RepoName:              filepath.Base(repoRoot),
+		RepoID:                localWorkRepoID(repoRoot),
+		SandboxPath:           filepath.Join(home, "sandbox"),
+		SandboxRepoPath:       repoRoot,
+		InputPath:             filepath.Join(home, "input.md"),
+		InputMode:             "task",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+		Iterations:            []localWorkIterationSummary{{Iteration: 1, Status: "completed", VerificationSummary: "verification passed (lint, compile, unit, integration)"}},
+	}
+	if err := writeLocalWorkManifest(validManifest); err != nil {
+		t.Fatalf("write valid manifest: %v", err)
+	}
+	badRunDir := filepath.Join(localWorkRunsDir(repoRoot), "lw-bad-latest")
+	if err := os.MkdirAll(badRunDir, 0o755); err != nil {
+		t.Fatalf("mkdir bad run dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(badRunDir, "manifest.json"), []byte("{bad-json\n"), 0o644); err != nil {
+		t.Fatalf("write malformed manifest: %v", err)
+	}
+	output, err := captureStdout(t, func() error {
+		return WorkLocal(repo, []string{"status", "--last"})
+	})
+	if err != nil {
+		t.Fatalf("WorkLocal(status --last): %v", err)
+	}
+	if !strings.Contains(output, validManifest.RunID) {
+		t.Fatalf("expected valid DB-backed last-run resolution, got %q", output)
+	}
+}
+
+func TestWorkLocalStatusFailsOnMalformedRuntimeStateRow(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot, err := resolveLocalWorkRepoRoot(repo, "")
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	manifest := localWorkManifest{
+		Version:               3,
+		RunID:                 "lw-bad-runtime",
+		CreatedAt:             ISOTimeNow(),
+		UpdatedAt:             ISOTimeNow(),
+		Status:                "running",
+		CurrentIteration:      1,
+		CurrentPhase:          "review",
+		CurrentSubphase:       "review",
+		RepoRoot:              repoRoot,
+		RepoName:              filepath.Base(repoRoot),
+		RepoID:                localWorkRepoID(repoRoot),
+		SandboxPath:           filepath.Join(home, "sandbox"),
+		SandboxRepoPath:       repoRoot,
+		InputPath:             filepath.Join(home, "input.md"),
+		InputMode:             "task",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	store, err := openLocalWorkDB()
+	if err != nil {
+		t.Fatalf("openLocalWorkDB: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.db.Exec(`INSERT INTO runtime_states(run_id, iteration, state_json) VALUES(?, ?, ?)`, manifest.RunID, 1, "{bad-json"); err != nil {
+		t.Fatalf("insert malformed runtime-state row: %v", err)
+	}
+
+	if _, err := captureStdout(t, func() error {
+		return WorkLocal(repo, []string{"status", "--last"})
+	}); err == nil {
+		t.Fatal("expected malformed runtime-state row to fail status")
 	}
 }
 
@@ -585,17 +1543,28 @@ func TestWorkLocalResumeAfterFailedImplement(t *testing.T) {
 		t.Fatalf("unexpected resume output: %q", resumeOutput)
 	}
 
-	var latest localWorkLatestRunPointer
-	if err := readGithubJSON(localWorkLatestRunPath(repo), &latest); err != nil {
-		t.Fatalf("read latest run: %v", err)
-	}
-	var manifest localWorkManifest
-	if err := readGithubJSON(localWorkManifestPath(repo, latest.RunID), &manifest); err != nil {
-		t.Fatalf("read manifest: %v", err)
-	}
+	manifest, _ := mustLatestLocalWorkRun(t, repo)
 	if manifest.Status != "completed" || len(manifest.Iterations) != 1 {
 		t.Fatalf("unexpected resumed manifest: %#v", manifest)
 	}
+}
+
+func mustLatestLocalWorkRun(t *testing.T, repo string) (localWorkManifest, string) {
+	t.Helper()
+	manifest, runDir, err := resolveLocalWorkRun(repo, localWorkRunSelection{UseLast: true})
+	if err != nil {
+		t.Fatalf("resolveLocalWorkRun(--last): %v", err)
+	}
+	return manifest, runDir
+}
+
+func mustLocalWorkManifestByRunID(t *testing.T, runID string) localWorkManifest {
+	t.Helper()
+	manifest, err := readLocalWorkManifestByRunID(runID)
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID(%s): %v", runID, err)
+	}
+	return manifest
 }
 
 func createLocalWorkRepo(t *testing.T) string {
