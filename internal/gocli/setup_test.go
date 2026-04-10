@@ -81,6 +81,15 @@ func TestSetupProjectWritesLocalAssets(t *testing.T) {
 	if !fileExists(filepath.Join(cwd, ".codex", "agents", "executor.toml")) {
 		t.Fatalf("project agent config not installed")
 	}
+	if !fileExists(filepath.Join(cwd, ".codex-investigate", "prompts", "executor.md")) {
+		t.Fatalf("project investigate prompt not installed")
+	}
+	if !fileExists(filepath.Join(cwd, ".codex-investigate", "skills", "nana-setup", "SKILL.md")) {
+		t.Fatalf("project investigate skill not installed")
+	}
+	if !fileExists(filepath.Join(cwd, ".codex-investigate", "agents", "executor.toml")) {
+		t.Fatalf("project investigate agent config not installed")
+	}
 	config, err := os.ReadFile(filepath.Join(cwd, ".codex", "config.toml"))
 	if err != nil {
 		t.Fatalf("read config: %v", err)
@@ -94,6 +103,9 @@ func TestSetupProjectWritesLocalAssets(t *testing.T) {
 	}
 	if !strings.Contains(string(agentsMd), "./.codex") {
 		t.Fatalf("expected project AGENTS.md rewrite, got %q", string(agentsMd))
+	}
+	if !fileExists(filepath.Join(cwd, ".codex-investigate", "AGENTS.md")) {
+		t.Fatalf("project investigate AGENTS.md not installed")
 	}
 }
 
@@ -110,8 +122,14 @@ func TestSetupProjectFallsBackToEmbeddedAssets(t *testing.T) {
 	if !fileExists(filepath.Join(cwd, ".codex", "prompts", "executor.md")) {
 		t.Fatalf("embedded project prompt not installed")
 	}
+	if !fileExists(filepath.Join(cwd, ".codex-investigate", "prompts", "executor.md")) {
+		t.Fatalf("embedded project investigate prompt not installed")
+	}
 	if !fileExists(filepath.Join(cwd, ".codex", "skills", "deep-interview", "SKILL.md")) {
 		t.Fatalf("embedded project skill not installed")
+	}
+	if !fileExists(filepath.Join(cwd, ".codex-investigate", "skills", "deep-interview", "SKILL.md")) {
+		t.Fatalf("embedded project investigate skill not installed")
 	}
 	agentsMd, err := os.ReadFile(filepath.Join(cwd, "AGENTS.md"))
 	if err != nil {
@@ -119,5 +137,8 @@ func TestSetupProjectFallsBackToEmbeddedAssets(t *testing.T) {
 	}
 	if !strings.Contains(string(agentsMd), "./.codex") {
 		t.Fatalf("expected embedded AGENTS template rewrite, got %q", string(agentsMd))
+	}
+	if !fileExists(filepath.Join(cwd, ".codex-investigate", "AGENTS.md")) {
+		t.Fatalf("embedded investigate AGENTS.md not installed")
 	}
 }

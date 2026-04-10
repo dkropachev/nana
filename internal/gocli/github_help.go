@@ -97,7 +97,7 @@ Auth:
 
 func MaybeHandleGithubHelp(command string, args []string) bool {
 	switch command {
-	case "implement", "investigate", "sync", "issue":
+	case "implement", "sync", "issue":
 		if wantsIssueHelp(command, args) {
 			fmt.Fprint(os.Stdout, IssueHelp)
 			return true
@@ -122,7 +122,7 @@ func MaybeHandleGithubHelp(command string, args []string) bool {
 }
 
 func wantsIssueHelp(command string, args []string) bool {
-	if command == "implement" || command == "investigate" || command == "sync" {
+	if command == "implement" || command == "sync" {
 		return len(args) > 1 && isHelpToken(args[1])
 	}
 	if command == "issue" {

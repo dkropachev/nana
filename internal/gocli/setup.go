@@ -64,6 +64,9 @@ func Setup(repoRoot string, cwd string, args []string) error {
 	if err := writeSetupAgentsMd(repoRoot, cwd, scopeDirs.codexHomeDir, options); err != nil {
 		return err
 	}
+	if err := installInvestigateCodexHome(repoRoot, cwd, options.Scope, options, scopeDirs.codexHomeDir); err != nil {
+		return err
+	}
 	if !options.DryRun {
 		if err := os.MkdirAll(filepath.Join(cwd, ".nana"), 0o755); err != nil {
 			return err
@@ -144,6 +147,69 @@ func resolveSetupScopeDirectories(cwd string, scope string) setupScopeDirectorie
 		promptsDir:      filepath.Join(CodexHome(), "prompts"),
 		skillsDir:       filepath.Join(CodexHome(), "skills"),
 	}
+}
+
+func resolveInvestigateScopeDirectories(cwd string, scope string) setupScopeDirectories {
+	if scope == "project" {
+		codexHomeDir := filepath.Join(cwd, ".codex-investigate")
+		return setupScopeDirectories{
+			codexConfigFile: filepath.Join(codexHomeDir, "config.toml"),
+			codexHomeDir:    codexHomeDir,
+			nativeAgentsDir: filepath.Join(codexHomeDir, "agents"),
+			promptsDir:      filepath.Join(codexHomeDir, "prompts"),
+			skillsDir:       filepath.Join(codexHomeDir, "skills"),
+		}
+	}
+	codexHomeDir := DefaultUserInvestigateCodexHome(os.Getenv("HOME"))
+	return setupScopeDirectories{
+		codexConfigFile: filepath.Join(codexHomeDir, "config.toml"),
+		codexHomeDir:    codexHomeDir,
+		nativeAgentsDir: filepath.Join(codexHomeDir, "agents"),
+		promptsDir:      filepath.Join(codexHomeDir, "prompts"),
+		skillsDir:       filepath.Join(codexHomeDir, "skills"),
+	}
+}
+
+func installInvestigateCodexHome(repoRoot string, cwd string, scope string, options SetupOptions, sourceCodexHome string) error {
+	investigateDirs := resolveInvestigateScopeDirectories(cwd, scope)
+	if err := installPrompts(repoRoot, investigateDirs.promptsDir, options); err != nil {
+		return err
+	}
+	if err := installSkills(repoRoot, investigateDirs.skillsDir, options); err != nil {
+		return err
+	}
+	if err := installAgents(investigateDirs.nativeAgentsDir, options); err != nil {
+		return err
+	}
+	if err := writeSetupConfig(investigateDirs.codexConfigFile, options); err != nil {
+		return err
+	}
+	if err := writeSetupAgentsMd(repoRoot, cwd, investigateDirs.codexHomeDir, options); err != nil {
+		return err
+	}
+	return bootstrapInvestigateAuth(sourceCodexHome, investigateDirs.codexHomeDir, options)
+}
+
+func bootstrapInvestigateAuth(sourceCodexHome string, investigateCodexHome string, options SetupOptions) error {
+	source := filepath.Join(sourceCodexHome, "auth.json")
+	target := filepath.Join(investigateCodexHome, "auth.json")
+	if _, err := os.Stat(target); err == nil {
+		return nil
+	}
+	content, err := os.ReadFile(source)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if options.DryRun {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(target, content, 0o644)
 }
 
 func installPrompts(repoRoot string, promptsDir string, options SetupOptions) error {
@@ -306,6 +372,12 @@ func writeSetupAgentsMd(repoRoot string, cwd string, codexHomeDir string, option
 	}
 	content := string(templateBytes)
 	targetPath := filepath.Join(cwd, "AGENTS.md")
+	if strings.Contains(codexHomeDir, filepath.Join(cwd, ".codex-investigate")) {
+		targetPath = filepath.Join(codexHomeDir, "AGENTS.md")
+		content = strings.ReplaceAll(content, "~/.codex", "./.codex-investigate")
+		content = addGeneratedAgentsMarker(content)
+		return writeFileIfChanged(targetPath, content, options)
+	}
 	if strings.Contains(codexHomeDir, filepath.Join(cwd, ".codex")) {
 		content = strings.ReplaceAll(content, "~/.codex", "./.codex")
 		if fileExists(targetPath) && !options.Force {

@@ -63,6 +63,7 @@ Then work normally inside Codex:
 ```text
 $deep-interview "clarify the authentication change"
 $ralplan "approve the auth plan and review tradeoffs"
+nana investigate "why is CI failing?"
 nana review https://github.com/acme/widget/pull/77
 nana work-on start https://github.com/acme/widget/issues/42
 ```
@@ -138,6 +139,9 @@ Most users should think of NANA as **better task routing + better workflow + bet
 | --- | --- |
 | `$deep-interview "..."` | clarifying intent, boundaries, and non-goals |
 | `$ralplan "..."` | approving the implementation plan and tradeoffs |
+| `nana investigate "..."` | source-backed investigation with proof-linked JSON reports and validator enforcement |
+| `nana investigate onboard` | bootstrap the dedicated investigate Codex config |
+| `nana investigate doctor` | ask Codex to probe the MCPs configured in the investigate config |
 | `nana work-local start --task "..."` | long-running local plan execution in a managed sandbox with iterative verify/review/hardening |
 | `nana work-local start --task "..." --grouping-policy path` | force deterministic path-based validation grouping |
 | `nana work-local logs --last` | inspect the current iteration logs and verification artifacts in one view |
@@ -147,6 +151,40 @@ Most users should think of NANA as **better task routing + better workflow + bet
 | `/skills` | browsing installed skills and supporting helpers |
 
 `nana work-local` stores its authoritative runtime state in `~/.nana/local-work/state.db`, not inside the source repo. Run artifacts still live under `~/.nana/local-work/repos/<repo-id>/runs/<run-id>/...`, but old JSON state files such as `manifest.json`, `runtime-state.json`, `finding-history.json`, `repo.json`, `latest-run.json`, and `index/runs.json` are not part of the current state model and are ignored. This SQLite-backed state layer currently assumes the repo’s Go 1.25 baseline. See [docs/work-local.md](./docs/work-local.md) for storage, resume, validation grouping controls, and troubleshooting details.
+
+## Investigate
+
+Use `nana investigate "<question>"` when you need a source-backed answer rather than a code change or a PR review.
+
+The runtime:
+- blocks until required investigation sources are ready
+- runs an investigator agent first, then a validator agent
+- persists run artifacts under `.nana/logs/investigate/<run-id>/`
+- accepts only JSON reports with proof links
+
+Status values:
+- `REFUTED`
+- `CONFIRMED`
+- `PARTIALLY_CONFIRMED`
+
+Evidence precedence:
+- source code, logs, and source-system outputs are primary
+- documentation is supplementary only and is rejected as a primary proof when source evidence is available
+
+Setup flow:
+
+```bash
+nana investigate onboard
+# configure whichever MCPs you want in the dedicated investigate config
+nana investigate doctor
+nana investigate "why is CI failing?"
+```
+
+GitHub issue preflight still exists separately:
+
+```bash
+nana issue investigate https://github.com/acme/widget/issues/42
+```
 
 ## GitHub Work-on Overrides
 
@@ -217,7 +255,7 @@ Behavior:
 - per-repo mode is set with `nana work-on defaults set <owner/repo> --review-rules-mode <manual|automatic>`
 - per-repo reviewer policy is set with `nana work-on defaults set <owner/repo> --review-rules-trusted-reviewers <a,b>|none --review-rules-blocked-reviewers <a,b>|none --review-rules-min-distinct-reviewers <n>`
 - `manual` mode keeps extracted rules as pending candidates until you approve them
-- `automatic` mode auto-approves extracted rules and refreshes them during `investigate`, `work-on start`, and `work-on sync`
+- `automatic` mode auto-approves extracted rules and refreshes them during `issue investigate`, `work-on start`, and `work-on sync`
 - only repeated high-signal guidance becomes a pending candidate
 - extracted rules persist an origin/reason summary plus code-context provenance (`pr_head_sha`, `current_checkout`, or `unknown`)
 - `approve` promotes candidates into approved rules

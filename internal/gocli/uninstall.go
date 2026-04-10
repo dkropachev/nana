@@ -20,17 +20,18 @@ type UninstallOptions struct {
 }
 
 type uninstallSummary struct {
-	ConfigCleaned         bool
-	McpServersRemoved     []string
-	AgentEntriesRemoved   int
-	TuiSectionRemoved     bool
-	TopLevelKeysRemoved   bool
-	FeatureFlagsRemoved   bool
-	PromptsRemoved        int
-	SkillsRemoved         int
-	AgentConfigsRemoved   int
-	AgentsMdRemoved       bool
-	CacheDirectoryRemoved bool
+	ConfigCleaned          bool
+	McpServersRemoved      []string
+	AgentEntriesRemoved    int
+	TuiSectionRemoved      bool
+	TopLevelKeysRemoved    bool
+	FeatureFlagsRemoved    bool
+	PromptsRemoved         int
+	SkillsRemoved          int
+	AgentConfigsRemoved    int
+	AgentsMdRemoved        bool
+	InvestigateHomeRemoved bool
+	CacheDirectoryRemoved  bool
 }
 
 var nanaMcpServers = []string{"nana_state", "nana_memory", "nana_code_intel", "nana_trace"}
@@ -106,6 +107,11 @@ func Uninstall(repoRoot string, cwd string, args []string) error {
 		agentsMdPath = filepath.Join(cwd, "AGENTS.md")
 	}
 	summary.AgentsMdRemoved, err = removeAgentsMd(agentsMdPath, options)
+	if err != nil {
+		return err
+	}
+	investigateHome := ResolveInvestigateCodexHome(cwd)
+	summary.InvestigateHomeRemoved, err = removeCacheDirectory(investigateHome, options)
 	if err != nil {
 		return err
 	}
@@ -499,6 +505,9 @@ func printUninstallSummary(summary uninstallSummary, options UninstallOptions) {
 	if summary.AgentsMdRemoved {
 		fmt.Fprintf(os.Stdout, "  %s AGENTS.md\n", prefix)
 	}
+	if summary.InvestigateHomeRemoved {
+		fmt.Fprintf(os.Stdout, "  %s investigate Codex home\n", prefix)
+	}
 	if summary.CacheDirectoryRemoved {
 		fmt.Fprintf(os.Stdout, "  %s .nana/ cache directory\n", prefix)
 	}
@@ -508,6 +517,9 @@ func printUninstallSummary(summary uninstallSummary, options UninstallOptions) {
 	}
 	totalActions += summary.PromptsRemoved + summary.SkillsRemoved + summary.AgentConfigsRemoved
 	if summary.AgentsMdRemoved {
+		totalActions++
+	}
+	if summary.InvestigateHomeRemoved {
 		totalActions++
 	}
 	if summary.CacheDirectoryRemoved {

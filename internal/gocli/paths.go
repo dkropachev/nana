@@ -13,6 +13,13 @@ func DefaultUserCodexHome(home string) string {
 	return filepath.Join(home, ".nana", "codex-home")
 }
 
+func DefaultUserInvestigateCodexHome(home string) string {
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+	return filepath.Join(home, ".nana", "codex-home-investigate")
+}
+
 func CodexHome() string {
 	if value := os.Getenv("CODEX_HOME"); value != "" {
 		return value
@@ -30,8 +37,19 @@ func ResolveCodexHomeForLaunch(cwd string) string {
 	return DefaultUserCodexHome(os.Getenv("HOME"))
 }
 
+func ResolveInvestigateCodexHome(cwd string) string {
+	if scope, _ := resolveDoctorScope(cwd); scope == "project" {
+		return filepath.Join(cwd, ".codex-investigate")
+	}
+	return DefaultUserInvestigateCodexHome(os.Getenv("HOME"))
+}
+
 func CodexConfigPath() string {
 	return filepath.Join(CodexHome(), "config.toml")
+}
+
+func InvestigateCodexConfigPath(cwd string) string {
+	return filepath.Join(ResolveInvestigateCodexHome(cwd), "config.toml")
 }
 
 func BaseStateDir(cwd string) string {

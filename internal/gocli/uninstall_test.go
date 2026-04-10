@@ -55,6 +55,12 @@ func TestUninstallConfigCleanup(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(buildTestNanaConfig()), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(home, ".nana", "codex-home-investigate"), 0o755); err != nil {
+		t.Fatalf("mkdir investigate home: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".nana", "codex-home-investigate", "config.toml"), []byte("[agents]\n"), 0o644); err != nil {
+		t.Fatalf("write investigate config: %v", err)
+	}
 
 	output, err := captureStdout(t, func() error { return Uninstall(repoRoot, cwd, nil) })
 	if err != nil {
@@ -67,6 +73,9 @@ func TestUninstallConfigCleanup(t *testing.T) {
 	text := string(config)
 	if strings.Contains(text, "nana (NANA) Configuration") || strings.Contains(text, "nana_state") || strings.Contains(text, "notify =") {
 		t.Fatalf("unexpected cleaned config: %q", text)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".nana", "codex-home-investigate")); !os.IsNotExist(err) {
+		t.Fatalf("investigate home should be removed, got err=%v", err)
 	}
 	if !strings.Contains(output, "Removed NANA configuration block") {
 		t.Fatalf("unexpected uninstall output: %q", output)

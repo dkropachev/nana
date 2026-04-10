@@ -139,7 +139,7 @@ func TestBinaryNestedGithubHelpRoutesLocally(t *testing.T) {
 		expected string
 	}{
 		{args: []string{"implement", "--help"}, expected: "nana issue - GitHub issue-oriented aliases"},
-		{args: []string{"investigate", "--help"}, expected: "nana issue - GitHub issue-oriented aliases"},
+		{args: []string{"investigate", "--help"}, expected: "nana investigate - Source-backed investigation with validator enforcement"},
 		{args: []string{"sync", "--help"}, expected: "nana issue - GitHub issue-oriented aliases"},
 		{args: []string{"issue", "--help"}, expected: "nana issue - GitHub issue-oriented aliases"},
 		{args: []string{"review", "--help"}, expected: "nana review - Review an external GitHub PR with deterministic persistence"},
@@ -248,6 +248,24 @@ func TestBinaryHelpTopicRoutesToRepoHelp(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "nana repo onboard") {
 		t.Fatalf("expected repo usage lines in output, got %q", output)
+	}
+}
+
+func TestBinaryHelpTopicRoutesToInvestigateHelp(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cwd := t.TempDir()
+
+	cmd := runCommand(t, binaryPath, "help", "investigate")
+	cmd.Dir = cwd
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("binary help investigate failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "nana investigate - Source-backed investigation with validator enforcement") {
+		t.Fatalf("expected investigate help output, got %q", output)
+	}
+	if !strings.Contains(string(output), "nana investigate onboard") {
+		t.Fatalf("expected investigate usage lines in output, got %q", output)
 	}
 }
 
@@ -538,7 +556,7 @@ func TestBinaryIssueInvestigateRunsNativelyWithoutLegacyBridge(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cmd := runCommand(t, binaryPath, "investigate", "https://github.com/acme/widget/issues/42")
+	cmd := runCommand(t, binaryPath, "issue", "investigate", "https://github.com/acme/widget/issues/42")
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),
@@ -551,10 +569,70 @@ func TestBinaryIssueInvestigateRunsNativelyWithoutLegacyBridge(t *testing.T) {
 		t.Fatalf("binary investigate failed: %v\n%s", err, output)
 	}
 	if strings.Contains(string(output), "fake-node:") {
-		t.Fatalf("investigate should not bridge through node, got %q", output)
+		t.Fatalf("issue investigate should not bridge through node, got %q", output)
 	}
 	if !strings.Contains(string(output), "Investigated acme/widget issue #42") {
-		t.Fatalf("missing investigate output: %q", output)
+		t.Fatalf("missing issue investigate output: %q", output)
+	}
+}
+
+func TestBinaryInvestigateRunsNativeRuntimeWithoutLegacyBridge(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cwd := t.TempDir()
+	home := filepath.Join(cwd, "home")
+	fakeBin := filepath.Join(cwd, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+	reportLink := filepath.Join(cwd, "main.go") + "#L1"
+	writeExecutable(t, filepath.Join(fakeBin, "node"), "#!/bin/sh\nprintf 'fake-node:%s\\n' \"$*\"\n")
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"list\" ]; then",
+		"  printf 'Name Status\\ngithub enabled\\njenkins enabled\\n\\njira enabled\\n'",
+		"  exit 0",
+		"fi",
+		"if [ \"$1\" = \"exec\" ]; then",
+		"  prompt=$(cat)",
+		"  case \"$prompt\" in",
+		"    *\"Configured MCP server names:\"*) printf '{\"all_ok\":true,\"probe_summary\":\"all MCPs healthy\",\"servers\":[{\"server_name\":\"github\",\"ok\":true,\"summary\":\"reachable\"},{\"server_name\":\"jenkins\",\"ok\":true,\"summary\":\"reachable\"},{\"server_name\":\"jira\",\"ok\":true,\"summary\":\"reachable\"}]}'; exit 0 ;;",
+		"    *\"# NANA Investigation Validator\"*) printf '{\"accepted\":true,\"summary\":\"validated\",\"violations\":[]}'; exit 0 ;;",
+		"    *\"# NANA Investigate\"*) printf '{\"overall_status\":\"CONFIRMED\",\"overall_short_explanation\":\"summary\",\"overall_detailed_explanation\":\"details\",\"overall_proofs\":[{\"kind\":\"source_code\",\"title\":\"main\",\"link\":\"" + reportLink + "\",\"why_it_proves\":\"source exists\",\"is_primary\":true,\"path\":\"" + filepath.Join(cwd, "main.go") + "\",\"line\":1}],\"issues\":[]}'; exit 0 ;;",
+		"  esac",
+		"fi",
+		"printf 'unexpected codex args: %s\\n' \"$*\" >&2",
+		"exit 1",
+		"",
+	}, "\n"))
+
+	onboard := runCommand(t, binaryPath, "investigate", "onboard")
+	onboard.Dir = cwd
+	onboard.Env = append(os.Environ(),
+		"PATH="+fakeBin+":"+os.Getenv("PATH"),
+		"HOME="+home,
+	)
+	if output, err := onboard.CombinedOutput(); err != nil {
+		t.Fatalf("binary investigate onboard failed: %v\n%s", err, output)
+	}
+
+	cmd := runCommand(t, binaryPath, "investigate", "why is CI failing?")
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(),
+		"PATH="+fakeBin+":"+os.Getenv("PATH"),
+		"HOME="+home,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("binary investigate failed: %v\n%s", err, output)
+	}
+	if strings.Contains(string(output), "fake-node:") {
+		t.Fatalf("investigate should not bridge through node, got %q", output)
+	}
+	if !strings.Contains(string(output), "[investigate] Status: CONFIRMED") {
+		t.Fatalf("missing investigate runtime output: %q", output)
 	}
 }
 

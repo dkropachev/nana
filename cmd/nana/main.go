@@ -34,6 +34,7 @@ Go-native commands:
   nana session
   nana hooks
   nana doctor
+  nana investigate
   nana repo onboard
   nana work-on
   nana work-local
@@ -50,6 +51,9 @@ func main() {
 		return
 	}
 	if gocli.MaybeHandleGithubHelp(invocation.Command, args) {
+		return
+	}
+	if gocli.MaybeHandleInvestigateHelp(invocation.Command, args) {
 		return
 	}
 	if invocation.Command == "version" {
@@ -190,6 +194,11 @@ func main() {
 			exitWithError(err)
 		}
 		return
+	case "investigate":
+		if err := gocli.Investigate(mustGetwd(), args[1:]); err != nil {
+			exitWithError(err)
+		}
+		return
 	case "work-on":
 		if _, err := gocli.GithubWorkOnCommand(mustGetwd(), args[1:]); err != nil {
 			exitWithError(err)
@@ -205,7 +214,7 @@ func main() {
 			exitWithError(err)
 		}
 		return
-	case "implement", "investigate", "sync", "issue":
+	case "implement", "sync", "issue":
 		if _, err := gocli.GithubIssue(mustGetwd(), args); err != nil {
 			exitWithError(err)
 		}
@@ -227,6 +236,10 @@ func handleNestedHelp(args []string) bool {
 	}
 
 	command := args[0]
+	if command == "investigate" {
+		fmt.Fprint(os.Stdout, gocli.InvestigateHelp)
+		return true
+	}
 	if gocli.MaybeHandleGithubHelp(command, []string{command, "help"}) {
 		return true
 	}

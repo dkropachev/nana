@@ -49,6 +49,9 @@ func Doctor(cwd string, repoRoot string) error {
 		checkAgentsMD(scope, cwd, paths.codexHomeDir),
 		checkDirectory("State dir", BaseStateDir(cwd)),
 		checkMcpServers(paths.configPath),
+		checkDirectory("Investigate Codex home", ResolveInvestigateCodexHome(cwd)),
+		checkInvestigateConfig(cwd),
+		checkInvestigateMCPStatus(cwd),
 	)
 
 	passCount, warnCount, failCount := 0, 0, 0
@@ -469,6 +472,37 @@ func checkMcpServers(configPath string) doctorCheck {
 		return doctorCheck{Name: "MCP Servers", Status: "pass", Message: fmt.Sprintf("%d servers configured (NANA present)", mcpCount)}
 	}
 	return doctorCheck{Name: "MCP Servers", Status: "pass", Message: fmt.Sprintf("%d servers configured", mcpCount)}
+}
+
+func checkInvestigateConfig(cwd string) doctorCheck {
+	configPath := InvestigateCodexConfigPath(cwd)
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		return doctorCheck{Name: "Investigate config", Status: "warn", Message: fmt.Sprintf("config.toml not found at %s (run `nana investigate onboard`)", configPath)}
+	}
+	text := string(content)
+	if strings.Contains(text, investigateConfigBlockHeader) {
+		return doctorCheck{Name: "Investigate config", Status: "pass", Message: fmt.Sprintf("config present at %s", configPath)}
+	}
+	return doctorCheck{Name: "Investigate config", Status: "warn", Message: fmt.Sprintf("config present at %s but missing the investigate managed block", configPath)}
+}
+
+func checkInvestigateMCPStatus(cwd string) doctorCheck {
+	statusPath := investigateMCPStatusPath(ResolveInvestigateCodexHome(cwd))
+	var status investigateMCPStatus
+	if err := readGithubJSON(statusPath, &status); err != nil {
+		if os.IsNotExist(err) {
+			return doctorCheck{Name: "Investigate MCP status", Status: "warn", Message: fmt.Sprintf("no cached investigate MCP status at %s (run `nana investigate doctor`)", statusPath)}
+		}
+		return doctorCheck{Name: "Investigate MCP status", Status: "warn", Message: fmt.Sprintf("failed to read cached investigate MCP status: %v", err)}
+	}
+	if len(status.ConfiguredServers) == 0 {
+		return doctorCheck{Name: "Investigate MCP status", Status: "pass", Message: "no MCPs configured for investigate (local-source-only mode)"}
+	}
+	if status.AllOK {
+		return doctorCheck{Name: "Investigate MCP status", Status: "pass", Message: fmt.Sprintf("%d configured MCP(s) healthy from last probe", len(status.ConfiguredServers))}
+	}
+	return doctorCheck{Name: "Investigate MCP status", Status: "warn", Message: fmt.Sprintf("one or more configured investigate MCPs failed last probe (run `nana investigate doctor`)")}
 }
 
 func homeDir() string {

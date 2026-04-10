@@ -121,6 +121,27 @@ func TestResolveCodexHomeForLaunch(t *testing.T) {
 	}
 }
 
+func TestResolveInvestigateCodexHome(t *testing.T) {
+	cwd := t.TempDir()
+	home := filepath.Join(cwd, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(cwd, "main-codex-home"))
+
+	if got := ResolveInvestigateCodexHome(cwd); got != DefaultUserInvestigateCodexHome(home) {
+		t.Fatalf("ResolveInvestigateCodexHome(default) = %q", got)
+	}
+
+	if err := os.MkdirAll(filepath.Join(cwd, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir .nana: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, ".nana", "setup-scope.json"), []byte(`{"scope":"project"}`), 0o644); err != nil {
+		t.Fatalf("write setup-scope: %v", err)
+	}
+	if got := ResolveInvestigateCodexHome(cwd); got != filepath.Join(cwd, ".codex-investigate") {
+		t.Fatalf("ResolveInvestigateCodexHome(project) = %q", got)
+	}
+}
+
 func TestAccountPull(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
