@@ -228,10 +228,16 @@ func buildGithubLaneExecutionInstructions(manifest githubWorkonManifest, lane gi
 		fmt.Sprintf("Lane owner: %s", lane.Owner),
 		fmt.Sprintf("Lane purpose: %s", lane.Purpose),
 		"",
+	}
+	lines = append(lines, buildGithubRuntimeContextLines(manifest)...)
+	if len(lines) > 0 && lines[len(lines)-1] != "" {
+		lines = append(lines, "")
+	}
+	lines = append(lines,
 		"Operating contract:",
 		"- This lane runs in a separate Codex process with its own CODEX_HOME and MCP profile.",
 		"- Stay inside this lane concern and do not broaden scope.",
-	}
+	)
 	if lane.Mode == "review" {
 		lines = append(lines, "- Review only. Do not edit files. Return concrete findings with file references.")
 	} else {

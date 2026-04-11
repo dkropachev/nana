@@ -254,6 +254,9 @@ func GithubWorkOn(cwd string, args []string) error {
 		if args[0] == "retrospective" {
 			return githubWorkOnRetrospective(args[1:])
 		}
+		if args[0] == "explain" {
+			return githubWorkOnExplain(args[1:])
+		}
 		return fmt.Errorf("Unknown work-on subcommand: %s\n\n%s", args[0], GithubWorkOnHelp)
 	}
 
@@ -565,6 +568,108 @@ func githubWorkOnRetrospective(args []string) error {
 		fmt.Fprintln(os.Stdout, line)
 	}
 	_ = repoRoot
+	return nil
+}
+
+func githubWorkOnExplain(args []string) error {
+	runID := ""
+	useLast := true
+	jsonOutput := false
+	for index := 0; index < len(args); index++ {
+		token := args[index]
+		switch {
+		case token == "--run-id":
+			value, err := requireFlagValue(args, index, token)
+			if err != nil {
+				return err
+			}
+			runID = strings.TrimSpace(value)
+			useLast = false
+			index++
+		case strings.HasPrefix(token, "--run-id="):
+			runID = strings.TrimSpace(strings.TrimPrefix(token, "--run-id="))
+			useLast = false
+		case token == "--last":
+			useLast = true
+		case token == "--json":
+			jsonOutput = true
+		default:
+			return fmt.Errorf("Unknown work-on explain option: %s\n\n%s", token, GithubWorkOnHelp)
+		}
+	}
+	manifestPath, _, err := resolveGithubRunManifestPath(runID, useLast)
+	if err != nil {
+		return err
+	}
+	manifest, err := readGithubWorkonManifest(manifestPath)
+	if err != nil {
+		return err
+	}
+	if manifest.RepoProfile == nil && strings.TrimSpace(manifest.RepoProfilePath) != "" {
+		profile, err := readGithubRepoProfile(manifest.RepoProfilePath)
+		if err == nil {
+			manifest.RepoProfile = profile
+		}
+	}
+	payload := buildGithubExplainPayload(manifest)
+	if jsonOutput {
+		content, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stdout, "%s\n", string(content))
+		return nil
+	}
+	lines := []string{
+		"# NANA Work-on Explain",
+		"",
+		fmt.Sprintf("Run id: %s", manifest.RunID),
+		fmt.Sprintf("Repo: %s", manifest.RepoSlug),
+		fmt.Sprintf("Target: %s", manifest.TargetURL),
+		"",
+	}
+	if manifest.Policy != nil {
+		lines = append(lines,
+			fmt.Sprintf("Policy: experimental=%t feedback_source=%s repo_native=%s human_gate=%s", manifest.Policy.Experimental, manifest.Policy.FeedbackSource, manifest.Policy.RepoNativeStrictness, manifest.Policy.HumanGate),
+			fmt.Sprintf("Policy sources: experimental=%s feedback_source=%s repo_native=%s human_gate=%s", manifest.Policy.SourceMap["experimental"], manifest.Policy.SourceMap["feedback_source"], manifest.Policy.SourceMap["repo_native_strictness"], manifest.Policy.SourceMap["human_gate"]),
+			"",
+		)
+	}
+	if manifest.RepoProfile != nil {
+		lines = append(lines,
+			fmt.Sprintf("Repo profile fingerprint: %s", manifest.RepoProfile.Fingerprint),
+			fmt.Sprintf("Repo profile path: %s", defaultString(manifest.RepoProfilePath, "(none)")),
+		)
+		if manifest.RepoProfile.CommitStyle != nil {
+			lines = append(lines, fmt.Sprintf("Repo commit style: %s (confidence %.2f)", manifest.RepoProfile.CommitStyle.Kind, manifest.RepoProfile.CommitStyle.Confidence))
+		}
+		if manifest.RepoProfile.PullRequestTemplate != nil {
+			lines = append(lines, fmt.Sprintf("Repo PR template: %s", manifest.RepoProfile.PullRequestTemplate.Path))
+		}
+		if manifest.RepoProfile.ReviewRules != nil {
+			lines = append(lines, fmt.Sprintf("Repo review rules: approved=%d pending=%d disabled=%d archived=%d", manifest.RepoProfile.ReviewRules.ApprovedCount, manifest.RepoProfile.ReviewRules.PendingCount, manifest.RepoProfile.ReviewRules.DisabledCount, manifest.RepoProfile.ReviewRules.ArchivedCount))
+		}
+		for _, warning := range manifest.RepoProfile.Warnings {
+			lines = append(lines, fmt.Sprintf("Repo profile warning: %s", warning))
+		}
+		lines = append(lines, "")
+	}
+	lines = append(lines,
+		fmt.Sprintf("GitHub control plane: %s", formatGithubActorSet(manifest.ControlPlaneReviewers)),
+		fmt.Sprintf("Ignored feedback actors: %s", formatGithubIgnoredActorReasons(manifest.IgnoredFeedbackActors)),
+		fmt.Sprintf("Review request state: %s", defaultString(manifest.ReviewRequestState, "not_requested")),
+		fmt.Sprintf("Requested reviewers: %s", formatGithubActorSet(manifest.RequestedReviewers)),
+		fmt.Sprintf("Review request error: %s", defaultString(manifest.ReviewRequestError, "(none)")),
+		fmt.Sprintf("Merge state: %s", defaultString(manifest.MergeState, "not_attempted")),
+		fmt.Sprintf("Merge method: %s", defaultString(manifest.MergeMethod, "squash")),
+		fmt.Sprintf("Merge error: %s", defaultString(manifest.MergeError, "(none)")),
+		fmt.Sprintf("Needs human: %t", manifest.NeedsHuman),
+		fmt.Sprintf("Needs human reason: %s", defaultString(manifest.NeedsHumanReason, "(none)")),
+		fmt.Sprintf("Next action: %s", defaultString(manifest.NextAction, "continue")),
+	)
+	for _, line := range lines {
+		fmt.Fprintln(os.Stdout, line)
+	}
 	return nil
 }
 
