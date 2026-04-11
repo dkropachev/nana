@@ -146,11 +146,27 @@ func executeGithubPublisherLane(runID string, useLast bool) error {
 	if ciState == "blocked" {
 		manifest.PublicationError = "External CI has failing checks"
 	}
+	mergeState, mergeSHA, mergeError, err := ensureGithubMerge(manifest, pr, ciState, apiBaseURL, token)
+	if err != nil {
+		return err
+	}
+	manifest.MergeState = mergeState
+	manifest.MergeError = mergeError
+	manifest.MergeMethod = githubEffectiveMergeMethod(manifest.Policy)
+	manifest.MergeUpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if mergeState == "merged" {
+		manifest.MergedPRNumber = pr.Number
+		manifest.MergedSHA = mergeSHA
+		manifest.NeedsHuman = false
+		manifest.NeedsHumanReason = ""
+		manifest.NextAction = "merged"
+		fmt.Fprintf(os.Stdout, "[github] Merged PR #%d with %s.\n", pr.Number, manifest.MergeMethod)
+	}
 	if err := writeGithubJSON(manifestPath, manifest); err != nil {
 		return err
 	}
 	resultPath := laneResultPathForRun(manifestPath, "publisher")
-	_ = writeLaneResult(resultPath, fmt.Sprintf("published_pr=%d\nurl=%s\nstate=%s\nreview_request_state=%s\nrequested_reviewers=%s\n", pr.Number, pr.HTMLURL, ciState, manifest.ReviewRequestState, strings.Join(manifest.RequestedReviewers, ",")))
+	_ = writeLaneResult(resultPath, fmt.Sprintf("published_pr=%d\nurl=%s\nstate=%s\nreview_request_state=%s\nrequested_reviewers=%s\nmerge_state=%s\nmerge_sha=%s\nmerge_error=%s\n", pr.Number, pr.HTMLURL, ciState, manifest.ReviewRequestState, strings.Join(manifest.RequestedReviewers, ","), manifest.MergeState, manifest.MergedSHA, manifest.MergeError))
 	fmt.Fprintf(os.Stdout, "[github] Lane publisher completed via native publication flow.\n")
 	fmt.Fprintf(os.Stdout, "[github] Lane result: %s\n", resultPath)
 	return nil
@@ -342,6 +358,90 @@ func fetchGithubExistingRequestedReviewers(repoSlug string, prNumber int, apiBas
 		logins = append(logins, user.Login)
 	}
 	return uniqueStrings(cleanLogins(logins)), nil
+}
+
+// ensureGithubMerge is intentionally conservative: merge is experimental, policy-gated,
+// and requires both green CI and a current control-plane approval.
+func ensureGithubMerge(manifest githubWorkonManifest, pr githubPullRequestResponse, ciState string, apiBaseURL string, token string) (string, string, string, error) {
+	if manifest.Policy == nil || !manifest.Policy.Experimental || !manifest.Policy.AllowedActions.Merge {
+		return "not_attempted", "", "", nil
+	}
+	if pr.Number <= 0 {
+		return "blocked", "", "no pull request available for merge", nil
+	}
+	if pr.Draft {
+		return "blocked", "", "pull request is draft", nil
+	}
+	if ciState != "ci_green" {
+		return "blocked", "", "GitHub CI is not green", nil
+	}
+	approved, reason, err := githubControlPlaneApprovalSatisfied(manifest, pr.Number, apiBaseURL, token)
+	if err != nil {
+		return "blocked", "", err.Error(), nil
+	}
+	if !approved {
+		return "blocked", "", reason, nil
+	}
+	method := githubEffectiveMergeMethod(manifest.Policy)
+	payload := map[string]any{"merge_method": method}
+	var response githubMergeResponse
+	if err := githubAPIRequestJSON("PUT", apiBaseURL, token, fmt.Sprintf("/repos/%s/pulls/%d/merge", manifest.RepoSlug, pr.Number), payload, &response); err != nil {
+		return "blocked", "", err.Error(), nil
+	}
+	if response.SHA == "" {
+		response.SHA = pr.Head.SHA
+	}
+	return "merged", response.SHA, "", nil
+}
+
+func githubControlPlaneApprovalSatisfied(manifest githubWorkonManifest, prNumber int, apiBaseURL string, token string) (bool, string, error) {
+	reviewers := eligibleGithubControlPlaneReviewers(manifest)
+	if len(reviewers) == 0 {
+		return false, "no eligible control-plane reviewers resolved", nil
+	}
+	var reviews []githubPullReviewPayload
+	if err := githubAPIGetJSON(apiBaseURL, token, fmt.Sprintf("/repos/%s/pulls/%d/reviews?per_page=100", manifest.RepoSlug, prNumber), &reviews); err != nil {
+		return false, "", err
+	}
+	eligible := map[string]bool{}
+	for _, reviewer := range reviewers {
+		eligible[strings.ToLower(reviewer)] = true
+	}
+	latest := map[string]githubPullReviewPayload{}
+	for _, review := range reviews {
+		login := strings.ToLower(strings.TrimSpace(review.User.Login))
+		if !eligible[login] {
+			continue
+		}
+		current, ok := latest[login]
+		if !ok || review.ID > current.ID {
+			latest[login] = review
+		}
+	}
+	hasApproval := false
+	for _, review := range latest {
+		switch strings.ToUpper(strings.TrimSpace(review.State)) {
+		case "CHANGES_REQUESTED":
+			return false, fmt.Sprintf("latest control-plane review by @%s requests changes", review.User.Login), nil
+		case "APPROVED":
+			hasApproval = true
+		}
+	}
+	if !hasApproval {
+		return false, "no approval from control-plane reviewers", nil
+	}
+	return true, "", nil
+}
+
+func eligibleGithubControlPlaneReviewers(manifest githubWorkonManifest) []string {
+	reviewers := []string{}
+	for _, reviewer := range cleanLogins(manifest.ControlPlaneReviewers) {
+		if reviewer == "" || reviewer == "*" {
+			continue
+		}
+		reviewers = append(reviewers, reviewer)
+	}
+	return uniqueStrings(reviewers)
 }
 
 func readGithubCIState(repoSlug string, headSHA string, apiBaseURL string, token string) (string, error) {
