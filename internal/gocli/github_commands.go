@@ -45,12 +45,33 @@ type githubWorkManifest struct {
 	TargetNumber            int                        `json:"target_number,omitempty"`
 	TargetTitle             string                     `json:"target_title,omitempty"`
 	TargetState             string                     `json:"target_state,omitempty"`
+	TargetAuthor            string                     `json:"target_author,omitempty"`
 	ReviewReviewer          string                     `json:"review_reviewer,omitempty"`
+	EffectiveReviewerPolicy *githubReviewerPolicy      `json:"effective_reviewer_policy,omitempty"`
 	APIBaseURL              string                     `json:"api_base_url,omitempty"`
 	DefaultBranch           string                     `json:"default_branch,omitempty"`
 	LastSeenIssueCommentID  int                        `json:"last_seen_issue_comment_id,omitempty"`
 	LastSeenReviewID        int                        `json:"last_seen_review_id,omitempty"`
 	LastSeenReviewCommentID int                        `json:"last_seen_review_comment_id,omitempty"`
+	Policy                  *githubResolvedWorkPolicy  `json:"policy,omitempty"`
+	RepoProfilePath         string                     `json:"repo_profile_path,omitempty"`
+	RepoProfileFingerprint  string                     `json:"repo_profile_fingerprint,omitempty"`
+	RepoProfile             *githubRepoProfile         `json:"repo_profile,omitempty"`
+	ControlPlaneReviewers   []string                   `json:"control_plane_reviewers,omitempty"`
+	IgnoredFeedbackActors   map[string]int             `json:"ignored_feedback_actors,omitempty"`
+	RequestedReviewers      []string                   `json:"requested_reviewers,omitempty"`
+	ReviewRequestState      string                     `json:"review_request_state,omitempty"`
+	ReviewRequestError      string                     `json:"review_request_error,omitempty"`
+	ReviewRequestUpdatedAt  string                     `json:"review_request_updated_at,omitempty"`
+	MergeState              string                     `json:"merge_state,omitempty"`
+	MergeError              string                     `json:"merge_error,omitempty"`
+	MergeUpdatedAt          string                     `json:"merge_updated_at,omitempty"`
+	MergedPRNumber          int                        `json:"merged_pr_number,omitempty"`
+	MergedSHA               string                     `json:"merged_sha,omitempty"`
+	MergeMethod             string                     `json:"merge_method,omitempty"`
+	NeedsHuman              bool                       `json:"needs_human,omitempty"`
+	NeedsHumanReason        string                     `json:"needs_human_reason,omitempty"`
+	NextAction              string                     `json:"next_action,omitempty"`
 }
 
 type githubPipelineLane struct {
@@ -120,7 +141,7 @@ func GithubWorkCommand(cwd string, args []string) (githubCommandResult, error) {
 	}
 
 	switch args[0] {
-	case "defaults", "stats", "retrospective":
+	case "defaults", "stats", "retrospective", "explain":
 		if err := GithubWork(cwd, args); err != nil {
 			return githubCommandResult{}, err
 		}
@@ -957,5 +978,6 @@ func readGithubWorkManifest(path string) (githubWorkManifest, error) {
 	if err := readGithubJSON(path, &manifest); err != nil {
 		return githubWorkManifest{}, err
 	}
+	hydrateGithubWorkManifestDefaults(&manifest)
 	return manifest, nil
 }

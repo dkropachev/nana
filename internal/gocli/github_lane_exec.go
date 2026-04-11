@@ -215,7 +215,7 @@ func buildGithubLaneExecutionInstructions(manifest githubWorkManifest, lane gith
 		promptBody = strings.Join(parts, "\n\n")
 	}
 	lines := []string{
-		"# NANA Work-on Lane",
+		"# NANA Work Lane",
 		"",
 		fmt.Sprintf("Run id: %s", manifest.RunID),
 		fmt.Sprintf("Repo: %s", manifest.RepoSlug),
@@ -228,10 +228,16 @@ func buildGithubLaneExecutionInstructions(manifest githubWorkManifest, lane gith
 		fmt.Sprintf("Lane owner: %s", lane.Owner),
 		fmt.Sprintf("Lane purpose: %s", lane.Purpose),
 		"",
+	}
+	lines = append(lines, buildGithubRuntimeContextLines(manifest)...)
+	if len(lines) > 0 && lines[len(lines)-1] != "" {
+		lines = append(lines, "")
+	}
+	lines = append(lines,
 		"Operating contract:",
 		"- This lane runs in a separate Codex process with its own CODEX_HOME and MCP profile.",
 		"- Stay inside this lane concern and do not broaden scope.",
-	}
+	)
 	if lane.Mode == "review" {
 		lines = append(lines, "- Review only. Do not edit files. Return concrete findings with file references.")
 	} else {

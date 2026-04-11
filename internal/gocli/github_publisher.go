@@ -21,9 +21,16 @@ type githubCheckRunPayload struct {
 type githubPullRequestResponse struct {
 	Number  int    `json:"number"`
 	HTMLURL string `json:"html_url"`
+	Draft   bool   `json:"draft"`
 	Head    struct {
 		SHA string `json:"sha"`
 	} `json:"head"`
+}
+
+type githubMergeResponse struct {
+	SHA     string `json:"sha"`
+	Merged  bool   `json:"merged"`
+	Message string `json:"message"`
 }
 
 type githubCheckRunsResponse struct {
@@ -49,6 +56,17 @@ func executeGithubPublisherLane(runID string, useLast bool) error {
 	}
 	if strings.TrimSpace(manifest.SandboxRepoPath) == "" {
 		return fmt.Errorf("run %s is missing sandbox repo path", manifest.RunID)
+	}
+	if manifest.Policy != nil {
+		if !manifest.Policy.AllowedActions.Commit {
+			return fmt.Errorf("publication blocked by policy: commit action is disabled")
+		}
+		if !manifest.Policy.AllowedActions.Push {
+			return fmt.Errorf("publication blocked by policy: push action is disabled")
+		}
+		if !manifest.Policy.AllowedActions.OpenDraftPR {
+			return fmt.Errorf("publication blocked by policy: open_draft_pr action is disabled")
+		}
 	}
 	if manifest.VerificationScriptsDir != "" {
 		if err := runPublisherVerificationGate(manifest.VerificationScriptsDir, manifest.SandboxPath); err != nil {
@@ -109,11 +127,41 @@ func executeGithubPublisherLane(runID string, useLast bool) error {
 	manifest.PublishedPRNumber = pr.Number
 	manifest.PublishedPRURL = pr.HTMLURL
 	manifest.PublishedPRHeadRef = branchName
+	requestedReviewers, reviewRequestState, reviewRequestError, err := ensureGithubRequestedReviews(manifest, pr.Number, apiBaseURL, token)
+	if err != nil {
+		return err
+	}
+	manifest.RequestedReviewers = requestedReviewers
+	manifest.ReviewRequestState = reviewRequestState
+	manifest.ReviewRequestError = reviewRequestError
+	manifest.ReviewRequestUpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if manifest.ReviewRequestState == "requested" {
+		fmt.Fprintf(os.Stdout, "[github] Requested review from %s.\n", formatGithubActorSet(manifest.RequestedReviewers))
+	} else if manifest.ReviewRequestState == "already_requested" {
+		fmt.Fprintf(os.Stdout, "[github] Review request already satisfied for %s.\n", formatGithubActorSet(manifest.RequestedReviewers))
+	}
 	manifest.PublicationState = ciState
 	manifest.PublicationUpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	manifest.PublicationError = ""
+	manifest.NeedsHuman, manifest.NeedsHumanReason, manifest.NextAction = determineGithubHumanGateState(manifest.Policy, true)
 	if ciState == "blocked" {
 		manifest.PublicationError = "External CI has failing checks"
+	}
+	mergeState, mergeSHA, mergeError, err := ensureGithubMerge(manifest, pr, ciState, apiBaseURL, token)
+	if err != nil {
+		return err
+	}
+	manifest.MergeState = mergeState
+	manifest.MergeError = mergeError
+	manifest.MergeMethod = githubEffectiveMergeMethod(manifest.Policy)
+	manifest.MergeUpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if mergeState == "merged" {
+		manifest.MergedPRNumber = pr.Number
+		manifest.MergedSHA = mergeSHA
+		manifest.NeedsHuman = false
+		manifest.NeedsHumanReason = ""
+		manifest.NextAction = "merged"
+		fmt.Fprintf(os.Stdout, "[github] Merged PR #%d with %s.\n", pr.Number, manifest.MergeMethod)
 	}
 	if err := writeGithubJSON(manifestPath, manifest); err != nil {
 		return err
@@ -122,7 +170,7 @@ func executeGithubPublisherLane(runID string, useLast bool) error {
 		return err
 	}
 	resultPath := laneResultPathForRun(manifestPath, "publisher")
-	_ = writeLaneResult(resultPath, fmt.Sprintf("published_pr=%d\nurl=%s\nstate=%s\n", pr.Number, pr.HTMLURL, ciState))
+	_ = writeLaneResult(resultPath, fmt.Sprintf("published_pr=%d\nurl=%s\nstate=%s\nreview_request_state=%s\nrequested_reviewers=%s\nmerge_state=%s\nmerge_sha=%s\nmerge_error=%s\n", pr.Number, pr.HTMLURL, ciState, manifest.ReviewRequestState, strings.Join(manifest.RequestedReviewers, ","), manifest.MergeState, manifest.MergedSHA, manifest.MergeError))
 	fmt.Fprintf(os.Stdout, "[github] Lane publisher completed via native publication flow.\n")
 	fmt.Fprintf(os.Stdout, "[github] Lane result: %s\n", resultPath)
 	return nil
@@ -150,7 +198,7 @@ func ensureGithubPublicationCommit(repoPath string, manifest githubWorkManifest)
 	if err := githubRunGit(repoPath, "add", "-A"); err != nil {
 		return err
 	}
-	message := fmt.Sprintf("nana: publish %s #%d", manifest.TargetKind, manifest.TargetNumber)
+	message := buildGithubPublicationCommitMessage(manifest)
 	return githubRunGit(repoPath, "commit", "-m", message)
 }
 
@@ -185,6 +233,11 @@ func ensureGithubDraftPR(manifest githubWorkManifest, apiBaseURL string, token s
 }
 
 func buildDraftPullRequestBody(manifest githubWorkManifest, branchName string) string {
+	if githubRepoNativeEnabled(manifest.Policy) && manifest.RepoProfile != nil && manifest.RepoProfile.PullRequestTemplate != nil && githubPullRequestTemplateSupported(manifest.RepoProfile.PullRequestTemplate) {
+		if body := buildRepoNativePullRequestBody(manifest, branchName); strings.TrimSpace(body) != "" {
+			return body
+		}
+	}
 	return strings.Join([]string{
 		fmt.Sprintf("Closes %s", manifest.TargetURL),
 		"",
@@ -196,6 +249,203 @@ func buildDraftPullRequestBody(manifest githubWorkManifest, branchName string) s
 		fmt.Sprintf("- Considerations: %s", joinOrNone(manifest.ConsiderationsActive)),
 		"",
 	}, "\n")
+}
+
+func buildGithubPublicationCommitMessage(manifest githubWorkManifest) string {
+	if githubRepoNativeEnabled(manifest.Policy) && manifest.RepoProfile != nil && manifest.RepoProfile.CommitStyle != nil {
+		if manifest.RepoProfile.CommitStyle.Kind == "conventional" && manifest.RepoProfile.CommitStyle.Confidence >= 0.6 {
+			return fmt.Sprintf("chore: publish %s #%d", manifest.TargetKind, manifest.TargetNumber)
+		}
+	}
+	return fmt.Sprintf("nana: publish %s #%d", manifest.TargetKind, manifest.TargetNumber)
+}
+
+func buildRepoNativePullRequestBody(manifest githubWorkManifest, branchName string) string {
+	sections := []string{}
+	templateSections := []string{}
+	hasRelated := false
+	if manifest.RepoProfile != nil && manifest.RepoProfile.PullRequestTemplate != nil {
+		templateSections = manifest.RepoProfile.PullRequestTemplate.Sections
+	}
+	validationCommands := []string{}
+	if manifest.VerificationPlan != nil {
+		validationCommands = append(validationCommands, manifest.VerificationPlan.Lint...)
+		validationCommands = append(validationCommands, manifest.VerificationPlan.Unit...)
+		validationCommands = append(validationCommands, manifest.VerificationPlan.Integration...)
+	}
+	for _, section := range templateSections {
+		switch strings.ToLower(strings.TrimSpace(section)) {
+		case "summary":
+			sections = append(sections, "## Summary", "", fmt.Sprintf("Address %s by landing the work tracked from %s.", manifest.TargetTitle, manifest.TargetURL), "")
+		case "changes":
+			sections = append(sections, "## Changes", "", "- Autogenerated by NANA work using repo-native PR shaping", fmt.Sprintf("- Branch: %s", branchName), fmt.Sprintf("- Considerations: %s", joinOrNone(manifest.ConsiderationsActive)), "")
+		case "validation":
+			sections = append(sections, "## Validation", "")
+			if len(validationCommands) == 0 {
+				sections = append(sections, "- [x] Verification gate passed before publication")
+			} else {
+				for _, command := range uniqueStrings(validationCommands) {
+					sections = append(sections, fmt.Sprintf("- [x] `%s`", command))
+				}
+			}
+			sections = append(sections, "")
+		case "checklist":
+			sections = append(sections, "## Checklist", "", "- [x] PR is focused and avoids unrelated changes", "- [ ] Docs updated when needed", "- [x] Backward-compatibility impact considered", "")
+		case "related":
+			hasRelated = true
+			sections = append(sections, "## Related", "", fmt.Sprintf("Closes %s", manifest.TargetURL), "")
+		}
+	}
+	if len(sections) == 0 {
+		return ""
+	}
+	if !hasRelated {
+		sections = append(sections, "## Related", "", fmt.Sprintf("Closes %s", manifest.TargetURL), "")
+	}
+	return strings.Join(sections, "\n")
+}
+
+func ensureGithubRequestedReviews(manifest githubWorkManifest, prNumber int, apiBaseURL string, token string) ([]string, string, string, error) {
+	if manifest.Policy == nil || !manifest.Policy.AllowedActions.RequestReview {
+		return nil, "not_requested", "", nil
+	}
+	if prNumber <= 0 {
+		return nil, "blocked", "no pull request available for review requests", nil
+	}
+	reviewers := []string{}
+	for _, reviewer := range cleanLogins(manifest.ControlPlaneReviewers) {
+		if reviewer == "" || reviewer == "*" {
+			continue
+		}
+		reviewers = append(reviewers, reviewer)
+	}
+	reviewers = uniqueStrings(reviewers)
+	if len(reviewers) == 0 {
+		return nil, "blocked", "no eligible control-plane reviewers resolved", nil
+	}
+	existing, err := fetchGithubExistingRequestedReviewers(manifest.RepoSlug, prNumber, apiBaseURL, token)
+	if err != nil {
+		return nil, "blocked", err.Error(), nil
+	}
+	existingSet := map[string]bool{}
+	for _, reviewer := range existing {
+		existingSet[strings.ToLower(reviewer)] = true
+	}
+	toRequest := []string{}
+	for _, reviewer := range reviewers {
+		if !existingSet[strings.ToLower(reviewer)] {
+			toRequest = append(toRequest, reviewer)
+		}
+	}
+	if len(toRequest) == 0 {
+		return existing, "already_requested", "", nil
+	}
+	payload := map[string]any{"reviewers": toRequest}
+	if err := githubAPIRequestJSON("POST", apiBaseURL, token, fmt.Sprintf("/repos/%s/pulls/%d/requested_reviewers", manifest.RepoSlug, prNumber), payload, &struct{}{}); err != nil {
+		return nil, "blocked", err.Error(), nil
+	}
+	return uniqueStrings(append(existing, toRequest...)), "requested", "", nil
+}
+
+func fetchGithubExistingRequestedReviewers(repoSlug string, prNumber int, apiBaseURL string, token string) ([]string, error) {
+	if prNumber <= 0 {
+		return nil, nil
+	}
+	var requested struct {
+		Users []githubActor `json:"users"`
+	}
+	if err := githubAPIGetJSON(apiBaseURL, token, fmt.Sprintf("/repos/%s/pulls/%d/requested_reviewers", repoSlug, prNumber), &requested); err != nil {
+		return nil, err
+	}
+	logins := make([]string, 0, len(requested.Users))
+	for _, user := range requested.Users {
+		logins = append(logins, user.Login)
+	}
+	return uniqueStrings(cleanLogins(logins)), nil
+}
+
+// ensureGithubMerge is intentionally conservative: merge is experimental, policy-gated,
+// and requires both green CI and a current control-plane approval.
+func ensureGithubMerge(manifest githubWorkManifest, pr githubPullRequestResponse, ciState string, apiBaseURL string, token string) (string, string, string, error) {
+	if manifest.Policy == nil || !manifest.Policy.Experimental || !manifest.Policy.AllowedActions.Merge {
+		return "not_attempted", "", "", nil
+	}
+	if pr.Number <= 0 {
+		return "blocked", "", "no pull request available for merge", nil
+	}
+	if pr.Draft {
+		return "blocked", "", "pull request is draft", nil
+	}
+	if ciState != "ci_green" {
+		return "blocked", "", "GitHub CI is not green", nil
+	}
+	approved, reason, err := githubControlPlaneApprovalSatisfied(manifest, pr.Number, apiBaseURL, token)
+	if err != nil {
+		return "blocked", "", err.Error(), nil
+	}
+	if !approved {
+		return "blocked", "", reason, nil
+	}
+	method := githubEffectiveMergeMethod(manifest.Policy)
+	payload := map[string]any{"merge_method": method}
+	var response githubMergeResponse
+	if err := githubAPIRequestJSON("PUT", apiBaseURL, token, fmt.Sprintf("/repos/%s/pulls/%d/merge", manifest.RepoSlug, pr.Number), payload, &response); err != nil {
+		return "blocked", "", err.Error(), nil
+	}
+	if response.SHA == "" {
+		response.SHA = pr.Head.SHA
+	}
+	return "merged", response.SHA, "", nil
+}
+
+func githubControlPlaneApprovalSatisfied(manifest githubWorkManifest, prNumber int, apiBaseURL string, token string) (bool, string, error) {
+	reviewers := eligibleGithubControlPlaneReviewers(manifest)
+	if len(reviewers) == 0 {
+		return false, "no eligible control-plane reviewers resolved", nil
+	}
+	var reviews []githubPullReviewPayload
+	if err := githubAPIGetJSON(apiBaseURL, token, fmt.Sprintf("/repos/%s/pulls/%d/reviews?per_page=100", manifest.RepoSlug, prNumber), &reviews); err != nil {
+		return false, "", err
+	}
+	eligible := map[string]bool{}
+	for _, reviewer := range reviewers {
+		eligible[strings.ToLower(reviewer)] = true
+	}
+	latest := map[string]githubPullReviewPayload{}
+	for _, review := range reviews {
+		login := strings.ToLower(strings.TrimSpace(review.User.Login))
+		if !eligible[login] {
+			continue
+		}
+		current, ok := latest[login]
+		if !ok || review.ID > current.ID {
+			latest[login] = review
+		}
+	}
+	hasApproval := false
+	for _, review := range latest {
+		switch strings.ToUpper(strings.TrimSpace(review.State)) {
+		case "CHANGES_REQUESTED":
+			return false, fmt.Sprintf("latest control-plane review by @%s requests changes", review.User.Login), nil
+		case "APPROVED":
+			hasApproval = true
+		}
+	}
+	if !hasApproval {
+		return false, "no approval from control-plane reviewers", nil
+	}
+	return true, "", nil
+}
+
+func eligibleGithubControlPlaneReviewers(manifest githubWorkManifest) []string {
+	reviewers := []string{}
+	for _, reviewer := range cleanLogins(manifest.ControlPlaneReviewers) {
+		if reviewer == "" || reviewer == "*" {
+			continue
+		}
+		reviewers = append(reviewers, reviewer)
+	}
+	return uniqueStrings(reviewers)
 }
 
 func readGithubCIState(repoSlug string, headSHA string, apiBaseURL string, token string) (string, error) {

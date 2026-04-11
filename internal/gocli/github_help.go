@@ -68,6 +68,7 @@ Usage:
   nana work defaults show <owner/repo>
   nana work stats <github-issue-or-pr-url>
   nana work retrospective [--run-id <id> | --last]
+  nana work explain [--run-id <id> | --last] [--json]
   nana work help
 
 Examples:
@@ -79,6 +80,7 @@ Examples:
   nana work defaults set dkropachev/alternator-client-java --considerations arch,perf,api --role-layout split
   nana work stats https://github.com/dkropachev/alternator-client-java/issues/1
   nana work retrospective --last
+  nana work explain --last --json
   nana work sync --last --resume-last
 
 Storage:
@@ -86,10 +88,17 @@ Storage:
   - managed sandboxes: ~/.nana/work/repos/<owner>/<repo-name>/sandboxes/issue-<n> or pr-<n>
   - repo concern overrides: .nana/work-on-concerns.json or .github/nana-work-on-concerns.json
   - repo hot-path API overrides: .nana/work-on-hot-path-apis.json or .github/nana-work-on-hot-path-apis.json
+  - repo policy overrides: .nana/work-on-policy.json or .github/nana-work-on-policy.json
+  - repo profile: ~/.nana/repos/<owner>/<repo-name>/repo-profile.json
 
 Override shapes:
   - concerns: {"version":1,"lanes":{"security-reviewer":{"pathPrefixes":["policies/"]}}}
   - hot-path apis: {"version":1,"hot_path_api_files":["docs/openapi/search.yaml"],"api_identifier_tokens":["searchDocuments"]}
+  - policy: {"version":1,"experimental":true,"allowed_actions":{"commit":true,"push":true,"open_draft_pr":true,"request_review":true,"merge":false},"feedback_source":"assigned_trusted","human_gate":"publish_time","merge_method":"squash"}
+
+Policy notes:
+  - merge automation is experimental and requires allowed_actions.merge, local verification, green GitHub CI, and control-plane approval.
+  - any_human feedback mode excludes bots, target authors, and blocked reviewers.
 
 Auth:
   Uses GH_TOKEN / GITHUB_TOKEN when set, otherwise falls back to ` + "`gh auth token`" + `.

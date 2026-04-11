@@ -19,6 +19,15 @@ func startGithubWork(options githubWorkStartOptions) error {
 	if err != nil {
 		return err
 	}
+	reviewer := strings.TrimSpace(options.Reviewer)
+	if reviewer == "@me" {
+		var viewer struct {
+			Login string `json:"login"`
+		}
+		if err := githubAPIGetJSON(apiBaseURL, token, "/user", &viewer); err == nil && strings.TrimSpace(viewer.Login) != "" {
+			reviewer = viewer.Login
+		}
+	}
 	target, err := githubFetchTargetContext(options.Target, apiBaseURL, token)
 	if err != nil {
 		return err
@@ -58,6 +67,15 @@ func startGithubWork(options githubWorkStartOptions) error {
 	if err := writeGithubJSON(paths.RepoSettingsPath, settings); err != nil {
 		return err
 	}
+	profile, profilePath, err := refreshGithubRepoProfile(repoMeta.RepoSlug, paths.SourcePath, repoVerificationPlan, settings.DefaultConsiderations, now)
+	if err != nil {
+		return err
+	}
+	policy, err := resolveGithubWorkPolicy(paths.SourcePath)
+	if err != nil {
+		return err
+	}
+	effectiveReviewerPolicy := resolveGithubEffectiveReviewerPolicy(repoMeta.RepoSlug)
 
 	activeConsiderations := uniqueStrings(append(append([]string{}, settings.DefaultConsiderations...), options.RequestedConsiderations...))
 	roleLayout := options.RoleLayout
@@ -86,7 +104,7 @@ func startGithubWork(options githubWorkStartOptions) error {
 	pipeline := buildGithubPipeline(activeConsiderations, roleLayout)
 	convertedPipeline := convertGithubLanes(pipeline)
 	manifest := githubWorkManifest{
-		Version:                 3,
+		Version:                 4,
 		RunID:                   runID,
 		CreatedAt:               now.Format(time.RFC3339),
 		UpdatedAt:               now.Format(time.RFC3339),
@@ -110,13 +128,30 @@ func startGithubWork(options githubWorkStartOptions) error {
 		TargetTitle:             target.Issue.Title,
 		TargetURL:               githubCanonicalTargetURL(options.Target),
 		TargetState:             target.Issue.State,
-		ReviewReviewer:          options.Reviewer,
+		TargetAuthor:            target.Issue.User.Login,
+		ReviewReviewer:          reviewer,
+		EffectiveReviewerPolicy: effectiveReviewerPolicy,
 		APIBaseURL:              apiBaseURL,
 		DefaultBranch:           repoMeta.DefaultBranch,
 		LastSeenIssueCommentID:  0,
 		LastSeenReviewID:        0,
 		LastSeenReviewCommentID: 0,
+		Policy:                  &policy,
+		RepoProfilePath:         profilePath,
+		RepoProfile:             profile,
+		RepoProfileFingerprint:  profileFingerprint(profile),
+		MergeMethod:             githubEffectiveMergeMethod(&policy),
+		MergeState:              "not_attempted",
 	}
+	reviewerOverride := ""
+	if raw := strings.TrimSpace(options.Reviewer); raw != "" && raw != "@me" {
+		reviewerOverride = reviewer
+	}
+	manifest.ControlPlaneReviewers, err = buildGithubControlPlaneReviewers(manifest, reviewerOverride, apiBaseURL, token)
+	if err != nil {
+		return err
+	}
+	manifest.NeedsHuman, manifest.NeedsHumanReason, manifest.NextAction = determineGithubHumanGateState(manifest.Policy, manifest.CreatePROnComplete)
 	manifestPath := filepath.Join(runDir, "manifest.json")
 	if err := writeGithubJSON(manifestPath, manifest); err != nil {
 		return err
@@ -215,7 +250,7 @@ func convertGithubLanes(lanes []githubLane) []githubPipelineLane {
 
 func buildGithubStartInstructions(manifest githubWorkManifest) string {
 	lines := []string{
-		"# NANA Work-on Start",
+		"# NANA Work Start",
 		"",
 		fmt.Sprintf("Run id: %s", manifest.RunID),
 		fmt.Sprintf("Repo: %s", manifest.RepoSlug),
@@ -224,6 +259,10 @@ func buildGithubStartInstructions(manifest githubWorkManifest) string {
 		fmt.Sprintf("Repo checkout path: %s", manifest.SandboxRepoPath),
 		fmt.Sprintf("Reviewer sync user: %s", manifest.ReviewReviewer),
 		"",
+	}
+	lines = append(lines, buildGithubRuntimeContextLines(manifest)...)
+	if len(lines) > 0 && lines[len(lines)-1] != "" {
+		lines = append(lines, "")
 	}
 	lines = append(lines, buildGithubConsiderationInstructionLines(manifest.ConsiderationsActive, manifest.RoleLayout)...)
 	return strings.Join(lines, "\n") + "\n"

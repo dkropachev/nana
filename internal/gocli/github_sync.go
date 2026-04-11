@@ -23,6 +23,8 @@ type githubIssueCommentPayload struct {
 }
 
 type githubFeedbackSnapshot struct {
+	Actors         []string
+	IgnoredActors  map[string]int
 	IssueComments  []githubIssueCommentPayload
 	Reviews        []githubPullReviewPayload
 	ReviewComments []githubPullReviewCommentPayload
@@ -49,10 +51,10 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 		return err
 	}
 	reviewer := strings.TrimSpace(options.Reviewer)
-	if reviewer == "" {
+	if reviewer == "" && manifest.Policy == nil && len(manifest.ControlPlaneReviewers) == 0 {
 		reviewer = strings.TrimSpace(manifest.ReviewReviewer)
 	}
-	if reviewer == "" {
+	if reviewer == "" && manifest.Policy == nil && len(manifest.ControlPlaneReviewers) == 0 {
 		reviewer = "@me"
 	}
 	if reviewer == "@me" {
@@ -64,14 +66,28 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 		}
 	}
 	reviewer = strings.TrimPrefix(strings.TrimSpace(reviewer), "@")
-
-	snapshot, err := fetchGithubFeedbackSnapshot(manifest, reviewer, apiBaseURL, token, options.FeedbackTargetURL)
+	actors, err := buildGithubControlPlaneReviewers(manifest, reviewer, apiBaseURL, token)
 	if err != nil {
 		return err
 	}
+	if len(actors) == 0 && reviewer != "" {
+		actors = []string{strings.ToLower(reviewer)}
+	}
+	manifest.ControlPlaneReviewers = append([]string{}, actors...)
+
+	snapshot, err := fetchGithubFeedbackSnapshot(manifest, actors, apiBaseURL, token, options.FeedbackTargetURL)
+	if err != nil {
+		return err
+	}
+	manifest.IgnoredFeedbackActors = cloneGithubIgnoredActorMap(snapshot.IgnoredActors)
 	newFeedback := filterGithubNewFeedback(snapshot, manifest)
 	if len(newFeedback.IssueComments) == 0 && len(newFeedback.Reviews) == 0 && len(newFeedback.ReviewComments) == 0 {
-		fmt.Fprintf(os.Stdout, "[github] No new feedback from @%s for %s %s #%d.\n", reviewer, manifest.RepoSlug, manifest.TargetKind, manifest.TargetNumber)
+		manifest.NextAction = defaultString(manifest.NextAction, "continue")
+		if manifest.NeedsHuman {
+			manifest.NextAction = "wait_for_github_feedback"
+		}
+		_ = writeGithubJSON(manifestPath, manifest)
+		fmt.Fprintf(os.Stdout, "[github] No new feedback from %s for %s %s #%d.\n", formatGithubActorSet(actors), manifest.RepoSlug, manifest.TargetKind, manifest.TargetNumber)
 		return nil
 	}
 	cursor := advanceGithubFeedbackCursor(snapshot, manifest)
@@ -79,6 +95,9 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 	manifest.LastSeenReviewID = cursor.reviewID
 	manifest.LastSeenReviewCommentID = cursor.reviewCommentID
 	manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	manifest.NeedsHuman = false
+	manifest.NeedsHumanReason = ""
+	manifest.NextAction = "continue_after_feedback"
 	if err := writeGithubJSON(manifestPath, manifest); err != nil {
 		return err
 	}
@@ -87,7 +106,22 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 	}
 	runDir := filepath.Dir(manifestPath)
 	feedbackInstructionsPath := filepath.Join(runDir, "feedback-instructions.md")
-	if err := os.WriteFile(feedbackInstructionsPath, []byte(buildGithubFeedbackInstructions(manifest, reviewer, newFeedback)), 0o644); err != nil {
+	if err := os.WriteFile(feedbackInstructionsPath, []byte(buildGithubFeedbackInstructions(manifest, actors, newFeedback)), 0o644); err != nil {
+		return err
+	}
+	if err := writeGithubJSON(filepath.Join(runDir, "feedback-snapshot.json"), snapshot); err != nil {
+		return err
+	}
+	if err := writeGithubJSON(filepath.Join(runDir, "feedback-summary.json"), map[string]any{
+		"actors":                actors,
+		"ignored_actors":        snapshot.IgnoredActors,
+		"new_issue_comments":    len(newFeedback.IssueComments),
+		"new_reviews":           len(newFeedback.Reviews),
+		"new_review_comments":   len(newFeedback.ReviewComments),
+		"issue_comment_cursor":  manifest.LastSeenIssueCommentID,
+		"review_cursor":         manifest.LastSeenReviewID,
+		"review_comment_cursor": manifest.LastSeenReviewCommentID,
+	}); err != nil {
 		return err
 	}
 
@@ -103,7 +137,7 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 	defer removeSessionInstructionsFile(manifest.SandboxPath, sessionID)
 
 	prompt := fmt.Sprintf("Continue GitHub %s #%d for %s after new reviewer feedback", manifest.TargetKind, manifest.TargetNumber, manifest.RepoSlug)
-	finalPrompt := buildGithubFeedbackInstructions(manifest, reviewer, newFeedback) + "\n\nTask:\n" + prompt
+	finalPrompt := buildGithubFeedbackInstructions(manifest, actors, newFeedback) + "\n\nTask:\n" + prompt
 	execArgs := append([]string{"exec", "-C", manifest.SandboxRepoPath}, options.CodexArgs...)
 	execArgs = append(execArgs, finalPrompt)
 	execArgs = injectModelInstructionsArgs(execArgs, sessionInstructionsPath)
@@ -118,6 +152,7 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 
 	fmt.Fprintf(os.Stdout, "[github] Stored new feedback for run %s.\n", manifest.RunID)
 	fmt.Fprintf(os.Stdout, "[github] Feedback file: %s\n", feedbackInstructionsPath)
+	fmt.Fprintf(os.Stdout, "[github] Feedback actors: %s\n", formatGithubActorSet(actors))
 	if stdout.Len() > 0 {
 		fmt.Fprint(os.Stdout, stdout.String())
 	}
@@ -127,7 +162,7 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 	return runErr
 }
 
-func fetchGithubFeedbackSnapshot(manifest githubWorkManifest, reviewer string, apiBaseURL string, token string, targetOverrideURL string) (githubFeedbackSnapshot, error) {
+func fetchGithubFeedbackSnapshot(manifest githubWorkManifest, reviewers []string, apiBaseURL string, token string, targetOverrideURL string) (githubFeedbackSnapshot, error) {
 	effectiveIssueNumber := manifest.TargetNumber
 	effectivePRNumber := 0
 	if manifest.TargetKind == "pr" {
@@ -151,13 +186,16 @@ func fetchGithubFeedbackSnapshot(manifest githubWorkManifest, reviewer string, a
 		return githubFeedbackSnapshot{}, err
 	}
 	filteredIssueComments := []githubIssueCommentPayload{}
+	ignoredActors := map[string]int{}
 	for _, comment := range issueComments {
-		if strings.EqualFold(strings.TrimSpace(comment.User.Login), reviewer) {
+		if ok, reason := githubFeedbackActorAllowed(manifest, comment.User.Login, reviewers); ok {
 			filteredIssueComments = append(filteredIssueComments, comment)
+		} else if reason != "" {
+			ignoredActors[reason]++
 		}
 	}
 	if effectivePRNumber == 0 {
-		return githubFeedbackSnapshot{IssueComments: filteredIssueComments}, nil
+		return githubFeedbackSnapshot{Actors: append([]string{}, reviewers...), IgnoredActors: ignoredActors, IssueComments: filteredIssueComments}, nil
 	}
 	var reviews []githubPullReviewPayload
 	if err := githubAPIGetJSON(apiBaseURL, token, fmt.Sprintf("/repos/%s/pulls/%d/reviews?per_page=100", manifest.RepoSlug, effectivePRNumber), &reviews); err != nil {
@@ -169,17 +207,23 @@ func fetchGithubFeedbackSnapshot(manifest githubWorkManifest, reviewer string, a
 	}
 	filteredReviews := []githubPullReviewPayload{}
 	for _, review := range reviews {
-		if strings.EqualFold(strings.TrimSpace(review.User.Login), reviewer) {
+		if ok, reason := githubFeedbackActorAllowed(manifest, review.User.Login, reviewers); ok {
 			filteredReviews = append(filteredReviews, review)
+		} else if reason != "" {
+			ignoredActors[reason]++
 		}
 	}
 	filteredReviewComments := []githubPullReviewCommentPayload{}
 	for _, comment := range reviewComments {
-		if strings.EqualFold(strings.TrimSpace(comment.User.Login), reviewer) {
+		if ok, reason := githubFeedbackActorAllowed(manifest, comment.User.Login, reviewers); ok {
 			filteredReviewComments = append(filteredReviewComments, comment)
+		} else if reason != "" {
+			ignoredActors[reason]++
 		}
 	}
 	return githubFeedbackSnapshot{
+		Actors:         append([]string{}, reviewers...),
+		IgnoredActors:  ignoredActors,
 		IssueComments:  filteredIssueComments,
 		Reviews:        filteredReviews,
 		ReviewComments: filteredReviewComments,
@@ -236,9 +280,9 @@ func advanceGithubFeedbackCursor(snapshot githubFeedbackSnapshot, manifest githu
 	return cursor
 }
 
-func buildGithubFeedbackInstructions(manifest githubWorkManifest, reviewer string, feedback githubFeedbackSnapshot) string {
+func buildGithubFeedbackInstructions(manifest githubWorkManifest, reviewers []string, feedback githubFeedbackSnapshot) string {
 	lines := []string{
-		"# NANA Work-on Feedback",
+		"# NANA Work Feedback",
 		"",
 		fmt.Sprintf("Run id: %s", manifest.RunID),
 		fmt.Sprintf("Repo: %s", manifest.RepoSlug),
@@ -246,8 +290,12 @@ func buildGithubFeedbackInstructions(manifest githubWorkManifest, reviewer strin
 		fmt.Sprintf("Repo checkout path: %s", manifest.SandboxRepoPath),
 		fmt.Sprintf("Target: %s #%d", manifest.TargetKind, manifest.TargetNumber),
 		fmt.Sprintf("URL: %s", manifest.TargetURL),
-		fmt.Sprintf("Reviewer: @%s", reviewer),
+		fmt.Sprintf("Reviewers: %s", formatGithubActorSet(reviewers)),
 		"",
+	}
+	lines = append(lines, buildGithubRuntimeContextLines(manifest)...)
+	if len(lines) > 0 && lines[len(lines)-1] != "" {
+		lines = append(lines, "")
 	}
 	renderIssueComment := func(comment githubIssueCommentPayload) {
 		lines = append(lines,
@@ -288,4 +336,34 @@ func buildGithubFeedbackInstructions(manifest githubWorkManifest, reviewer strin
 		)
 	}
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// githubFeedbackActorAllowed keeps wildcard feedback useful without letting authors,
+// bots, or explicitly blocked reviewers become the human control plane.
+func githubFeedbackActorAllowed(manifest githubWorkManifest, login string, reviewers []string) (bool, string) {
+	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(login, "@")))
+	if normalized == "" {
+		return false, "empty"
+	}
+	reviewerPolicy := normalizeGithubReviewerPolicy(manifest.EffectiveReviewerPolicy)
+	for _, blocked := range reviewerPolicy.GetBlocked() {
+		if strings.EqualFold(normalized, blocked) {
+			return false, "blocked"
+		}
+	}
+	for _, reviewer := range reviewers {
+		if reviewer == "*" {
+			if strings.Contains(normalized, "[bot]") || strings.HasSuffix(normalized, "-bot") || normalized == "dependabot" {
+				return false, "bot"
+			}
+			if author := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(manifest.TargetAuthor, "@"))); author != "" && normalized == author {
+				return false, "author"
+			}
+			return true, ""
+		}
+		if strings.EqualFold(normalized, strings.TrimSpace(strings.TrimPrefix(reviewer, "@"))) {
+			return true, ""
+		}
+	}
+	return false, "not_in_control_plane"
 }

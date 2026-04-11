@@ -1,16 +1,18 @@
 package gocli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const RepoHelp = `nana repo - Repository onboarding and verification-plan inspection
 
 Usage:
-  nana repo onboard [--repo <path>]
+  nana repo onboard [--repo <path>] [--json]
   nana repo help
 
 Notes:
@@ -27,6 +29,7 @@ func Repo(cwd string, args []string) error {
 	switch args[0] {
 	case "onboard":
 		repoPath := ""
+		jsonOutput := false
 		for index := 1; index < len(args); index++ {
 			token := args[index]
 			switch {
@@ -38,25 +41,54 @@ func Repo(cwd string, args []string) error {
 				index++
 			case strings.HasPrefix(token, "--repo="):
 				repoPath = strings.TrimSpace(strings.TrimPrefix(token, "--repo="))
+			case token == "--json":
+				jsonOutput = true
 			default:
 				return fmt.Errorf("Unknown repo onboard option: %s\n\n%s", token, RepoHelp)
 			}
 		}
-		return repoOnboard(cwd, repoPath)
+		return repoOnboard(cwd, repoPath, jsonOutput)
 	default:
 		return fmt.Errorf("Unknown repo subcommand: %s\n\n%s", args[0], RepoHelp)
 	}
 }
 
-func repoOnboard(cwd string, repoPath string) error {
+func repoOnboard(cwd string, repoPath string, jsonOutput bool) error {
 	repoRoot, err := resolveLocalWorkRepoRoot(cwd, repoPath)
 	if err != nil {
 		return err
 	}
 	plan := detectGithubVerificationPlan(repoRoot)
 	considerations := inferGithubInitialRepoConsiderations(repoRoot, filepath.Base(repoRoot), plan)
+	repoSlug := inferGithubRepoSlugFromRepo(repoRoot)
+	profile, profilePath, err := refreshGithubRepoProfile(repoSlug, repoRoot, plan, considerations.Considerations, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		payload := map[string]any{
+			"repo_root":                repoRoot,
+			"repo_slug":                repoSlug,
+			"verification_plan":        plan,
+			"suggested_considerations": considerations.Considerations,
+			"repo_profile_path":        profilePath,
+			"repo_profile":             profile,
+		}
+		content, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stdout, "%s\n", string(content))
+		return nil
+	}
 
 	fmt.Fprintf(os.Stdout, "[repo] Onboarding %s\n", repoRoot)
+	if profile != nil {
+		fmt.Fprintf(os.Stdout, "[repo] Repo profile fingerprint: %s\n", profile.Fingerprint)
+		if profilePath != "" {
+			fmt.Fprintf(os.Stdout, "[repo] Repo profile path: %s\n", profilePath)
+		}
+	}
 	fmt.Fprintf(
 		os.Stdout,
 		"[repo] Verification plan: lint=%d compile=%d unit=%d integration=%d benchmark=%d\n",
@@ -77,6 +109,11 @@ func repoOnboard(cwd string, repoPath string) error {
 	} else {
 		for _, warning := range plan.Warnings {
 			fmt.Fprintf(os.Stdout, "[repo] Warning: %s\n", warning)
+		}
+	}
+	if profile != nil {
+		for _, warning := range profile.Warnings {
+			fmt.Fprintf(os.Stdout, "[repo] Profile warning: %s\n", warning)
 		}
 	}
 	return nil

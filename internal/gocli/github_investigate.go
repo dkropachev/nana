@@ -44,8 +44,9 @@ type githubRepositoryPayload struct {
 }
 
 type githubIssuePayload struct {
-	Title       string `json:"title"`
-	State       string `json:"state"`
+	Title       string      `json:"title"`
+	State       string      `json:"state"`
+	User        githubActor `json:"user"`
 	PullRequest *struct {
 		URL string `json:"url"`
 	} `json:"pull_request,omitempty"`
@@ -138,6 +139,14 @@ func githubInvestigateTarget(targetURL string) error {
 	if err := writeGithubJSON(paths.RepoSettingsPath, settings); err != nil {
 		return err
 	}
+	profile, profilePath, err := refreshGithubRepoProfile(repoMeta.RepoSlug, paths.SourcePath, verificationPlan, settings.DefaultConsiderations, now)
+	if err != nil {
+		return err
+	}
+	policy, err := resolveGithubWorkPolicy(paths.SourcePath)
+	if err != nil {
+		return err
+	}
 
 	considerations := settings.DefaultConsiderations
 	roleLayout := settings.DefaultRoleLayout
@@ -159,6 +168,19 @@ func githubInvestigateTarget(targetURL string) error {
 	fmt.Fprintf(os.Stdout, "[github] Suggested considerations: %s\n", joinOrNone(considerations))
 	fmt.Fprintf(os.Stdout, "[github] Suggested role layout: %s\n", defaultString(roleLayout, "split"))
 	fmt.Fprintf(os.Stdout, "[github] Review-rules mode: %s\n", reviewRulesMode)
+	fmt.Fprintf(os.Stdout, "[github] Work-on policy: experimental=%t feedback_source=%s repo_native=%s human_gate=%s\n", policy.Experimental, policy.FeedbackSource, policy.RepoNativeStrictness, policy.HumanGate)
+	if profile != nil {
+		fmt.Fprintf(os.Stdout, "[github] Repo profile fingerprint: %s\n", profile.Fingerprint)
+		if profilePath != "" {
+			fmt.Fprintf(os.Stdout, "[github] Repo profile path: %s\n", profilePath)
+		}
+		if profile.CommitStyle != nil {
+			fmt.Fprintf(os.Stdout, "[github] Repo commit style: %s (confidence %.2f)\n", profile.CommitStyle.Kind, profile.CommitStyle.Confidence)
+		}
+		if profile.PullRequestTemplate != nil {
+			fmt.Fprintf(os.Stdout, "[github] Repo PR template: %s\n", profile.PullRequestTemplate.Path)
+		}
+	}
 	fmt.Fprintf(
 		os.Stdout,
 		"[github] Verification plan: lint=%d compile=%d unit=%d integration=%d benchmark=%d\n",
