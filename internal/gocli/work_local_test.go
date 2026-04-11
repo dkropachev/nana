@@ -156,6 +156,39 @@ func TestRepoOnboardPrintsWarningsForMixedTargets(t *testing.T) {
 	}
 }
 
+func TestRepoOnboardJSONIncludesRepoProfile(t *testing.T) {
+	repo := createLocalWorkRepoAt(t, t.TempDir())
+	if err := os.MkdirAll(filepath.Join(repo, ".github"), 0o755); err != nil {
+		t.Fatalf("mkdir .github: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".github", "PULL_REQUEST_TEMPLATE.md"), []byte("## Summary\n\n## Validation\n"), 0o644); err != nil {
+		t.Fatalf("write pr template: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error {
+		return Repo(repo, []string{"onboard", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("Repo(onboard --json): %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("unmarshal onboard json: %v\n%s", err, output)
+	}
+	repoProfile, ok := payload["repo_profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected repo_profile in payload: %#v", payload)
+	}
+	if strings.TrimSpace(repoProfile["fingerprint"].(string)) == "" {
+		t.Fatalf("expected repo profile fingerprint: %#v", repoProfile)
+	}
+	template, ok := repoProfile["pull_request_template"].(map[string]any)
+	if !ok || template["path"] != ".github/PULL_REQUEST_TEMPLATE.md" {
+		t.Fatalf("expected pr template profile, got %#v", repoProfile["pull_request_template"])
+	}
+}
+
 func TestBuildFindingGroupsFromGroupingResultAcceptsAISplit(t *testing.T) {
 	findings := []githubPullReviewFinding{
 		{Fingerprint: "a", Path: "migrator/src/main/Foo.scala"},
