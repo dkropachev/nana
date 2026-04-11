@@ -145,8 +145,9 @@ func TestBinaryNestedGithubHelpRoutesLocally(t *testing.T) {
 		{args: []string{"review", "--help"}, expected: "nana review - Review an external GitHub PR with deterministic persistence"},
 		{args: []string{"review-rules", "--help"}, expected: "nana review-rules - Persistent repo rules mined from PR review history"},
 		{args: []string{"repo", "--help"}, expected: "nana repo - Repository onboarding and verification-plan inspection"},
-		{args: []string{"work-on", "--help"}, expected: "nana work-on - GitHub-targeted issue/PR implementation helper"},
-		{args: []string{"work-local", "--help"}, expected: "nana work-local - Autonomous local plan execution for git-backed local repos"},
+		{args: []string{"work", "--help"}, expected: "nana work - Unified local and GitHub-backed implementation runtime"},
+		{args: []string{"work-on", "--help"}, expected: "has been replaced by `nana work`"},
+		{args: []string{"work-local", "--help"}, expected: "has been replaced by `nana work`"},
 	}
 
 	for _, tc := range testCases {
@@ -172,7 +173,7 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("binary help failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "nana repo onboard") || !strings.Contains(string(output), "nana work-on") || !strings.Contains(string(output), "nana work-local") || !strings.Contains(string(output), "nana account <subcommand>") {
+	if !strings.Contains(string(output), "nana repo onboard") || !strings.Contains(string(output), "nana work") || !strings.Contains(string(output), "nana account <subcommand>") {
 		t.Fatalf("expected work surfaces in top-level help, got %q", output)
 	}
 }
@@ -192,25 +193,25 @@ func TestBinaryAuthCommandIsUnknown(t *testing.T) {
 	}
 }
 
-func TestBinaryHelpTopicRoutesToWorkOnHelp(t *testing.T) {
+func TestBinaryHelpTopicRoutesToWorkHelp(t *testing.T) {
 	binaryPath := buildNanaBinary(t)
 	cwd := t.TempDir()
 
-	cmd := runCommand(t, binaryPath, "help", "work-on")
+	cmd := runCommand(t, binaryPath, "help", "work")
 	cmd.Dir = cwd
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("binary help work-on failed: %v\n%s", err, output)
+		t.Fatalf("binary help work failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "nana work-on - GitHub-targeted issue/PR implementation helper") {
-		t.Fatalf("expected work-on help output, got %q", output)
+	if !strings.Contains(string(output), "nana work - Unified local and GitHub-backed implementation runtime") {
+		t.Fatalf("expected work help output, got %q", output)
 	}
-	if !strings.Contains(string(output), "nana work-on start <github-issue-or-pr-url>") {
-		t.Fatalf("expected work-on usage lines in output, got %q", output)
+	if !strings.Contains(string(output), "nana work start") || !strings.Contains(string(output), "nana work sync") {
+		t.Fatalf("expected work usage lines in output, got %q", output)
 	}
 }
 
-func TestBinaryHelpTopicRoutesToWorkLocalHelp(t *testing.T) {
+func TestBinaryHelpTopicRoutesLegacyWorkHelpToMigration(t *testing.T) {
 	binaryPath := buildNanaBinary(t)
 	cwd := t.TempDir()
 
@@ -220,16 +221,8 @@ func TestBinaryHelpTopicRoutesToWorkLocalHelp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("binary help work-local failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "nana work-local - Autonomous local plan execution for git-backed local repos") {
-		t.Fatalf("expected work-local help output, got %q", output)
-	}
-	if !strings.Contains(string(output), "nana work-local start") ||
-		!strings.Contains(string(output), "nana work-local logs") ||
-		!strings.Contains(string(output), "--global-last") ||
-		!strings.Contains(string(output), "--grouping-policy <ai|path|singleton>") ||
-		!strings.Contains(string(output), "--validation-parallelism <1-8>") ||
-		!strings.Contains(string(output), "[--json]") {
-		t.Fatalf("expected work-local usage lines in output, got %q", output)
+	if !strings.Contains(string(output), "has been replaced by `nana work`") || !strings.Contains(string(output), "nana work start") {
+		t.Fatalf("expected migration help output, got %q", output)
 	}
 }
 
@@ -348,7 +341,7 @@ func writeExecutable(t *testing.T, path string, content string) {
 	}
 }
 
-func TestBinaryWorkOnStartRunsNatively(t *testing.T) {
+func TestBinaryGithubWorkStartRunsNatively(t *testing.T) {
 	binaryPath := buildNanaBinary(t)
 	cwd := t.TempDir()
 	fakeBin := filepath.Join(cwd, "bin")
@@ -393,7 +386,7 @@ func TestBinaryWorkOnStartRunsNatively(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cmd := runCommand(t, binaryPath, "work-on", "start", "https://github.com/acme/widget/issues/42", "--reviewer", "@me")
+	cmd := runCommand(t, binaryPath, "work", "start", "https://github.com/acme/widget/issues/42", "--reviewer", "@me")
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),
@@ -403,7 +396,7 @@ func TestBinaryWorkOnStartRunsNatively(t *testing.T) {
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("work-on start native run failed: %v\n%s", err, output)
+		t.Fatalf("work start native run failed: %v\n%s", err, output)
 	}
 	if !strings.Contains(string(output), "Starting run gh-") {
 		t.Fatalf("missing start output: %q", output)
@@ -716,7 +709,7 @@ func TestBinaryIssueSyncRunsNativelyWithoutLegacyBridge(t *testing.T) {
 	binaryPath := buildNanaBinary(t)
 	cwd := t.TempDir()
 	fakeBin := filepath.Join(cwd, "bin")
-	managedRepoRoot := filepath.Join(cwd, "home", ".nana", "repos", "acme", "widget")
+	managedRepoRoot := filepath.Join(cwd, "home", ".nana", "work", "repos", "acme", "widget")
 	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42")
 	repoCheckoutPath := filepath.Join(sandboxPath, "repo")
 	runID := "gh-run-issue-sync-bin"
@@ -780,11 +773,11 @@ func TestBinaryIssueSyncRunsNativelyWithoutLegacyBridge(t *testing.T) {
 	}
 }
 
-func TestBinaryWorkOnVerifyRefreshRunsNativelyWithoutLegacyBridge(t *testing.T) {
+func TestBinaryGithubWorkVerifyRefreshRunsNativelyWithoutLegacyBridge(t *testing.T) {
 	binaryPath := buildNanaBinary(t)
 	cwd := t.TempDir()
 	fakeBin := filepath.Join(cwd, "bin")
-	managedRepoRoot := filepath.Join(cwd, "home", ".nana", "repos", "acme", "widget")
+	managedRepoRoot := filepath.Join(cwd, "home", ".nana", "work", "repos", "acme", "widget")
 	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42")
 	repoCheckoutPath := filepath.Join(sandboxPath, "repo")
 	runID := "gh-run-refresh-bin"
@@ -814,7 +807,7 @@ func TestBinaryWorkOnVerifyRefreshRunsNativelyWithoutLegacyBridge(t *testing.T) 
 		t.Fatalf("write manifest: %v", err)
 	}
 
-	cmd := runCommand(t, binaryPath, "work-on", "verify-refresh", "--run-id", runID)
+	cmd := runCommand(t, binaryPath, "work", "verify-refresh", "--run-id", runID)
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),
@@ -832,11 +825,11 @@ func TestBinaryWorkOnVerifyRefreshRunsNativelyWithoutLegacyBridge(t *testing.T) 
 	}
 }
 
-func TestBinaryWorkOnSyncRunsNatively(t *testing.T) {
+func TestBinaryGithubWorkSyncRunsNatively(t *testing.T) {
 	binaryPath := buildNanaBinary(t)
 	cwd := t.TempDir()
 	fakeBin := filepath.Join(cwd, "bin")
-	managedRepoRoot := filepath.Join(cwd, "home", ".nana", "repos", "acme", "widget")
+	managedRepoRoot := filepath.Join(cwd, "home", ".nana", "work", "repos", "acme", "widget")
 	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42")
 	repoCheckoutPath := filepath.Join(sandboxPath, "repo")
 	runID := "gh-run-sync-bin"
@@ -879,7 +872,7 @@ func TestBinaryWorkOnSyncRunsNatively(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cmd := runCommand(t, binaryPath, "work-on", "sync", "--run-id", runID)
+	cmd := runCommand(t, binaryPath, "work", "sync", "--run-id", runID)
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),
@@ -889,7 +882,7 @@ func TestBinaryWorkOnSyncRunsNatively(t *testing.T) {
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("work-on sync native run failed: %v\n%s", err, output)
+		t.Fatalf("work sync native run failed: %v\n%s", err, output)
 	}
 	if !strings.Contains(string(output), "Stored new feedback for run "+runID) {
 		t.Fatalf("missing sync output: %q", output)
@@ -904,7 +897,7 @@ func TestBinaryPublisherLaneRunsNatively(t *testing.T) {
 	cwd := t.TempDir()
 	originBare := filepath.Join(cwd, "origin.git")
 	seedRepo := filepath.Join(cwd, "seed")
-	managedRepoRoot := filepath.Join(cwd, "home", ".nana", "repos", "acme", "widget")
+	managedRepoRoot := filepath.Join(cwd, "home", ".nana", "work", "repos", "acme", "widget")
 	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42")
 	repoCheckoutPath := filepath.Join(sandboxPath, "repo")
 	runID := "gh-run-publisher-bin"
@@ -979,7 +972,7 @@ func TestBinaryPublisherLaneRunsNatively(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cmd := runCommand(t, binaryPath, "work-on", "lane-exec", "--run-id", runID, "--lane", "publisher")
+	cmd := runCommand(t, binaryPath, "work", "lane-exec", "--run-id", runID, "--lane", "publisher")
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(),
 		"HOME="+filepath.Join(cwd, "home"),
@@ -1006,7 +999,7 @@ func TestBinaryLaneExecRunsNativelyForNonPublisherLane(t *testing.T) {
 		t.Fatalf("mkdir fake bin: %v", err)
 	}
 	writeExecutable(t, filepath.Join(fakeBin, "codex"), "#!/bin/sh\nprintf 'fake-codex:%s\\n' \"$*\"\n")
-	managedRepoRoot := filepath.Join(cwd, "home", ".nana", "repos", "acme", "widget")
+	managedRepoRoot := filepath.Join(cwd, "home", ".nana", "work", "repos", "acme", "widget")
 	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42")
 	repoCheckoutPath := filepath.Join(sandboxPath, "repo")
 	runID := "gh-run-lane-bin"
@@ -1044,7 +1037,7 @@ func TestBinaryLaneExecRunsNativelyForNonPublisherLane(t *testing.T) {
 		t.Fatalf("write manifest: %v", err)
 	}
 
-	cmd := runCommand(t, binaryPath, "work-on", "lane-exec", "--run-id", runID, "--lane", "coder")
+	cmd := runCommand(t, binaryPath, "work", "lane-exec", "--run-id", runID, "--lane", "coder")
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),

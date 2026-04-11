@@ -187,7 +187,7 @@ func githubInvestigateTarget(targetURL string) error {
 }
 
 func githubManagedPaths(repoSlug string) githubManagedRepoPaths {
-	repoRoot := filepath.Join(githubNanaHome(), "repos", filepath.FromSlash(repoSlug))
+	repoRoot := githubWorkRepoRoot(repoSlug)
 	return githubManagedRepoPaths{
 		RepoRoot:                 repoRoot,
 		SourcePath:               filepath.Join(repoRoot, "source"),
@@ -459,7 +459,7 @@ func refreshGithubVerificationArtifacts(runID string, useLast bool) error {
 	if err != nil {
 		return err
 	}
-	manifest, err := readGithubWorkonManifest(manifestPath)
+	manifest, err := readGithubWorkManifest(manifestPath)
 	if err != nil {
 		return err
 	}
@@ -483,6 +483,9 @@ func refreshGithubVerificationArtifacts(runID string, useLast bool) error {
 	if err := writeGithubJSON(manifestPath, manifest); err != nil {
 		return err
 	}
+	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+		return err
+	}
 	status := "already current"
 	if beforePlan != plan.PlanFingerprint || beforePlan == "" {
 		status = "refreshed"
@@ -502,7 +505,7 @@ func refreshGithubVerificationArtifacts(runID string, useLast bool) error {
 }
 
 func writeGithubVerificationScripts(sandboxPath string, repoCheckoutPath string, plan githubVerificationPlan, runID string) (string, error) {
-	return writeVerificationScripts("work-on", sandboxPath, repoCheckoutPath, plan, []string{"nana", "work-on", "verify-refresh", "--run-id", runID})
+	return writeVerificationScripts("work", sandboxPath, repoCheckoutPath, plan, []string{"nana", "work", "verify-refresh", "--run-id", runID})
 }
 
 func detectGithubVerificationPlan(repoCheckoutPath string) githubVerificationPlan {

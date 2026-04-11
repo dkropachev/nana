@@ -39,7 +39,7 @@ func executeGithubLane(runID string, useLast bool, laneAlias string, task string
 	if err != nil {
 		return err
 	}
-	manifest, err := readGithubWorkonManifest(manifestPath)
+	manifest, err := readGithubWorkManifest(manifestPath)
 	if err != nil {
 		return err
 	}
@@ -193,7 +193,7 @@ func findGithubPipelineLane(lanes []githubPipelineLane, alias string) *githubPip
 	return nil
 }
 
-func buildGithubLaneExecutionInstructions(manifest githubWorkonManifest, lane githubPipelineLane, task string) (string, error) {
+func buildGithubLaneExecutionInstructions(manifest githubWorkManifest, lane githubPipelineLane, task string) (string, error) {
 	promptBody := ""
 	for _, artifact := range manifest.LanePromptArtifacts {
 		if artifact.Alias == lane.Alias && artifact.Role == lane.Role && strings.TrimSpace(artifact.PromptPath) != "" {
@@ -261,7 +261,7 @@ func readGithubPromptSurface(role string) (string, error) {
 
 func ensureGithubLaneCodexHome(sandboxPath string, laneAlias string) (string, error) {
 	sourceCodexHome := ResolveCodexHomeForLaunch(sandboxPath)
-	laneCodexHome := filepath.Join(sandboxPath, ".nana", "work-on", "codex-home", sanitizeLanePathToken(laneAlias))
+	laneCodexHome := filepath.Join(sandboxPath, ".nana", "work", "codex-home", sanitizeLanePathToken(laneAlias))
 	return ensureScopedCodexHome(sourceCodexHome, laneCodexHome)
 }
 

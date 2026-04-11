@@ -334,19 +334,19 @@ func TestBuildLocalWorkHardeningPromptTruncatesLargeFailureOutput(t *testing.T) 
 	}
 }
 
-func TestWorkLocalRejectsDirtyRepo(t *testing.T) {
+func TestLocalWorkRejectsDirtyRepo(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	if err := os.WriteFile(filepath.Join(repo, "dirty.txt"), []byte("x\n"), 0o644); err != nil {
 		t.Fatalf("write dirty file: %v", err)
 	}
 
-	err := WorkLocal(repo, []string{"start", "--task", "do it"})
+	err := runLocalWorkCommand(repo, []string{"start", "--task", "do it"})
 	if err == nil || !strings.Contains(err.Error(), "clean repo") {
 		t.Fatalf("expected clean repo error, got %v", err)
 	}
 }
 
-func TestWorkLocalStartStatusRetrospectiveAndGlobalRunLookup(t *testing.T) {
+func TestLocalWorkStartStatusRetrospectiveAndGlobalRunLookup(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	fakeBin := filepath.Join(home, "bin")
@@ -372,10 +372,10 @@ func TestWorkLocalStartStatusRetrospectiveAndGlobalRunLookup(t *testing.T) {
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 
 	startOutput, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"start", "--task", "Update the local docs flow"})
+		return runLocalWorkCommand(repo, []string{"start", "--task", "Update the local docs flow"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(start): %v\n%s", err, startOutput)
+		t.Fatalf("runLocalWorkCommand(start): %v\n%s", err, startOutput)
 	}
 	if !strings.Contains(startOutput, "Starting run lw-") || !strings.Contains(startOutput, "Completed run lw-") {
 		t.Fatalf("unexpected start output: %q", startOutput)
@@ -383,8 +383,8 @@ func TestWorkLocalStartStatusRetrospectiveAndGlobalRunLookup(t *testing.T) {
 	if !strings.Contains(startOutput, "benchmark=0") {
 		t.Fatalf("expected benchmark count in onboarding output, got %q", startOutput)
 	}
-	if _, err := os.Stat(filepath.Join(repo, ".nana", "work-local")); !os.IsNotExist(err) {
-		t.Fatalf("expected source repo to stay free of work-local artifacts, got err=%v", err)
+	if _, err := os.Stat(filepath.Join(repo, ".nana", "work")); !os.IsNotExist(err) {
+		t.Fatalf("expected source repo to stay free of work runtime artifacts, got err=%v", err)
 	}
 
 	manifest, runDir := mustLatestLocalWorkRun(t, repo)
@@ -409,40 +409,40 @@ func TestWorkLocalStartStatusRetrospectiveAndGlobalRunLookup(t *testing.T) {
 
 	outside := t.TempDir()
 	statusOutput, err := captureStdout(t, func() error {
-		return WorkLocal(outside, []string{"status", "--run-id", manifest.RunID})
+		return runLocalWorkCommand(outside, []string{"status", "--run-id", manifest.RunID})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(status --run-id): %v", err)
+		t.Fatalf("runLocalWorkCommand(status --run-id): %v", err)
 	}
 	if !strings.Contains(statusOutput, "Status: completed") || !strings.Contains(statusOutput, "Run artifacts: "+runDir) {
 		t.Fatalf("unexpected status output: %q", statusOutput)
 	}
 
 	repoScopedStatus, err := captureStdout(t, func() error {
-		return WorkLocal(outside, []string{"status", "--repo", repo, "--last"})
+		return runLocalWorkCommand(outside, []string{"status", "--repo", repo, "--last"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(status --repo --last): %v", err)
+		t.Fatalf("runLocalWorkCommand(status --repo --last): %v", err)
 	}
 	if !strings.Contains(repoScopedStatus, manifest.RunID) {
 		t.Fatalf("expected repo-scoped last run in output, got %q", repoScopedStatus)
 	}
 
 	globalStatus, err := captureStdout(t, func() error {
-		return WorkLocal(outside, []string{"status", "--global-last"})
+		return runLocalWorkCommand(outside, []string{"status", "--global-last"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(status --global-last): %v", err)
+		t.Fatalf("runLocalWorkCommand(status --global-last): %v", err)
 	}
 	if !strings.Contains(globalStatus, manifest.RunID) {
 		t.Fatalf("expected global last run in output, got %q", globalStatus)
 	}
 
 	retroOutput, err := captureStdout(t, func() error {
-		return WorkLocal(outside, []string{"retrospective", "--run-id", manifest.RunID})
+		return runLocalWorkCommand(outside, []string{"retrospective", "--run-id", manifest.RunID})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(retrospective): %v", err)
+		t.Fatalf("runLocalWorkCommand(retrospective): %v", err)
 	}
 	if !strings.Contains(retroOutput, "# NANA Work-local Retrospective") {
 		t.Fatalf("unexpected retrospective output: %q", retroOutput)
@@ -452,17 +452,17 @@ func TestWorkLocalStartStatusRetrospectiveAndGlobalRunLookup(t *testing.T) {
 	}
 
 	logsOutput, err := captureStdout(t, func() error {
-		return WorkLocal(outside, []string{"logs", "--run-id", manifest.RunID, "--tail", "20"})
+		return runLocalWorkCommand(outside, []string{"logs", "--run-id", manifest.RunID, "--tail", "20"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(logs): %v", err)
+		t.Fatalf("runLocalWorkCommand(logs): %v", err)
 	}
 	if !strings.Contains(logsOutput, "== implement-stdout.log ==") || !strings.Contains(logsOutput, "fake-codex:exec -C") || !strings.Contains(logsOutput, CodexBypassFlag) {
 		t.Fatalf("unexpected logs output: %q", logsOutput)
 	}
 }
 
-func TestWorkLocalRunsHardeningPassWhenReviewFindingsRemain(t *testing.T) {
+func TestLocalWorkRunsHardeningPassWhenReviewFindingsRemain(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	markerPath := filepath.Join(home, "hardening.marker")
@@ -505,10 +505,10 @@ func TestWorkLocalRunsHardeningPassWhenReviewFindingsRemain(t *testing.T) {
 	t.Setenv("FAKE_CODEX_HARDENED_PATH", markerPath)
 
 	output, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"start", "--task", "Trigger the hardening pass"})
+		return runLocalWorkCommand(repo, []string{"start", "--task", "Trigger the hardening pass"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(start): %v\n%s", err, output)
+		t.Fatalf("runLocalWorkCommand(start): %v\n%s", err, output)
 	}
 	manifest, runDir := mustLatestLocalWorkRun(t, repo)
 	iterationDir := localWorkIterationDir(runDir, 1)
@@ -535,7 +535,7 @@ func TestWorkLocalRunsHardeningPassWhenReviewFindingsRemain(t *testing.T) {
 	}
 }
 
-func TestWorkLocalStatusAndLogsJSON(t *testing.T) {
+func TestLocalWorkStatusAndLogsJSON(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	markerPath := filepath.Join(home, "hardening.marker")
@@ -574,15 +574,15 @@ func TestWorkLocalStatusAndLogsJSON(t *testing.T) {
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 	t.Setenv("FAKE_CODEX_HARDENED_PATH", markerPath)
 
-	if err := WorkLocal(repo, []string{"start", "--task", "Trigger json status", "--grouping-policy", "singleton", "--validation-parallelism", "2"}); err != nil {
-		t.Fatalf("WorkLocal(start): %v", err)
+	if err := runLocalWorkCommand(repo, []string{"start", "--task", "Trigger json status", "--grouping-policy", "singleton", "--validation-parallelism", "2"}); err != nil {
+		t.Fatalf("runLocalWorkCommand(start): %v", err)
 	}
 
 	statusOutput, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"status", "--last", "--json"})
+		return runLocalWorkCommand(repo, []string{"status", "--last", "--json"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(status --json): %v", err)
+		t.Fatalf("runLocalWorkCommand(status --json): %v", err)
 	}
 	var status struct {
 		RunID         string                    `json:"run_id"`
@@ -597,10 +597,10 @@ func TestWorkLocalStatusAndLogsJSON(t *testing.T) {
 	}
 
 	logsOutput, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"logs", "--last", "--json", "--tail", "10"})
+		return runLocalWorkCommand(repo, []string{"logs", "--last", "--json", "--tail", "10"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(logs --json): %v", err)
+		t.Fatalf("runLocalWorkCommand(logs --json): %v", err)
 	}
 	var logs struct {
 		Grouping localWorkGroupingResult `json:"grouping"`
@@ -614,7 +614,7 @@ func TestWorkLocalStatusAndLogsJSON(t *testing.T) {
 	}
 }
 
-func TestWorkLocalAIFallbacksToSingletonGrouping(t *testing.T) {
+func TestLocalWorkAIFallbacksToSingletonGrouping(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	markerPath := filepath.Join(home, "hardening.marker")
@@ -656,8 +656,8 @@ func TestWorkLocalAIFallbacksToSingletonGrouping(t *testing.T) {
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 	t.Setenv("FAKE_CODEX_HARDENED_PATH", markerPath)
 
-	if err := WorkLocal(repo, []string{"start", "--task", "Fallback grouping"}); err != nil {
-		t.Fatalf("WorkLocal(start): %v", err)
+	if err := runLocalWorkCommand(repo, []string{"start", "--task", "Fallback grouping"}); err != nil {
+		t.Fatalf("runLocalWorkCommand(start): %v", err)
 	}
 	manifest, _ := mustLatestLocalWorkRun(t, repo)
 	if len(manifest.Iterations) != 1 {
@@ -669,7 +669,7 @@ func TestWorkLocalAIFallbacksToSingletonGrouping(t *testing.T) {
 	}
 }
 
-func TestWorkLocalPathGroupingBypassesAIGrouper(t *testing.T) {
+func TestLocalWorkPathGroupingBypassesAIGrouper(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	markerPath := filepath.Join(home, "hardening.marker")
@@ -712,8 +712,8 @@ func TestWorkLocalPathGroupingBypassesAIGrouper(t *testing.T) {
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 	t.Setenv("FAKE_CODEX_HARDENED_PATH", markerPath)
 
-	if err := WorkLocal(repo, []string{"start", "--task", "Path grouping bypass", "--grouping-policy", "path"}); err != nil {
-		t.Fatalf("WorkLocal(start): %v", err)
+	if err := runLocalWorkCommand(repo, []string{"start", "--task", "Path grouping bypass", "--grouping-policy", "path"}); err != nil {
+		t.Fatalf("runLocalWorkCommand(start): %v", err)
 	}
 	manifest, _ := mustLatestLocalWorkRun(t, repo)
 	if got := manifest.Iterations[0].EffectiveGroupingPolicy; got != localWorkPathGroupingPolicy {
@@ -721,7 +721,7 @@ func TestWorkLocalPathGroupingBypassesAIGrouper(t *testing.T) {
 	}
 }
 
-func TestWorkLocalValidationFailurePersistsRuntimeStateAndFailureDetails(t *testing.T) {
+func TestLocalWorkValidationFailurePersistsRuntimeStateAndFailureDetails(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	fakeBin := filepath.Join(home, "bin")
@@ -752,7 +752,7 @@ func TestWorkLocalValidationFailurePersistsRuntimeStateAndFailureDetails(t *test
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 
-	err := WorkLocal(repo, []string{"start", "--task", "Fail validator"})
+	err := runLocalWorkCommand(repo, []string{"start", "--task", "Fail validator"})
 	if err == nil || !strings.Contains(err.Error(), "validator group readme-validation failed after 3 attempt(s)") {
 		t.Fatalf("expected validator failure, got %v", err)
 	}
@@ -762,10 +762,10 @@ func TestWorkLocalValidationFailurePersistsRuntimeStateAndFailureDetails(t *test
 	}
 
 	statusOutput, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"status", "--last", "--json"})
+		return runLocalWorkCommand(repo, []string{"status", "--last", "--json"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(status --json): %v", err)
+		t.Fatalf("runLocalWorkCommand(status --json): %v", err)
 	}
 	var status struct {
 		LastError               string                           `json:"last_error"`
@@ -782,20 +782,20 @@ func TestWorkLocalValidationFailurePersistsRuntimeStateAndFailureDetails(t *test
 	}
 
 	humanStatus, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"status", "--last"})
+		return runLocalWorkCommand(repo, []string{"status", "--last"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(status): %v", err)
+		t.Fatalf("runLocalWorkCommand(status): %v", err)
 	}
 	if !strings.Contains(humanStatus, "Validation group: readme-validation status=failed attempts=3") {
 		t.Fatalf("expected failed validation group in human status: %q", humanStatus)
 	}
 
 	logsOutput, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"logs", "--last", "--json", "--tail", "10"})
+		return runLocalWorkCommand(repo, []string{"logs", "--last", "--json", "--tail", "10"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(logs --json): %v", err)
+		t.Fatalf("runLocalWorkCommand(logs --json): %v", err)
 	}
 	var logs struct {
 		RuntimeState *localWorkIterationRuntimeState `json:"runtime_state"`
@@ -808,27 +808,27 @@ func TestWorkLocalValidationFailurePersistsRuntimeStateAndFailureDetails(t *test
 	}
 
 	humanLogs, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"logs", "--last", "--tail", "5"})
+		return runLocalWorkCommand(repo, []string{"logs", "--last", "--tail", "5"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(logs): %v", err)
+		t.Fatalf("runLocalWorkCommand(logs): %v", err)
 	}
 	if !strings.Contains(humanLogs, "Validation group: readme-validation status=failed attempts=3") {
 		t.Fatalf("expected failed validation group in human logs: %q", humanLogs)
 	}
 
 	retroOutput, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"retrospective", "--last"})
+		return runLocalWorkCommand(repo, []string{"retrospective", "--last"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(retrospective): %v", err)
+		t.Fatalf("runLocalWorkCommand(retrospective): %v", err)
 	}
 	if !strings.Contains(retroOutput, "failing group: readme-validation") || !strings.Contains(retroOutput, "attempts exhausted: 3") {
 		t.Fatalf("expected validation failure details in retrospective: %q", retroOutput)
 	}
 }
 
-func TestWorkLocalResumeAfterValidatorFailureReusesGroupingAndCleansRuntimeState(t *testing.T) {
+func TestLocalWorkResumeAfterValidatorFailureReusesGroupingAndCleansRuntimeState(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	fakeBin := filepath.Join(home, "bin")
@@ -888,7 +888,7 @@ func TestWorkLocalResumeAfterValidatorFailureReusesGroupingAndCleansRuntimeState
 	t.Setenv("FAKE_VALIDATE_COUNT_PATH", validateCountPath)
 	t.Setenv("FAKE_HARDENED_PATH", hardenedPath)
 
-	startErr := WorkLocal(repo, []string{"start", "--task", "Resume validator failure"})
+	startErr := runLocalWorkCommand(repo, []string{"start", "--task", "Resume validator failure"})
 	if startErr == nil {
 		t.Fatal("expected initial start to fail")
 	}
@@ -899,10 +899,10 @@ func TestWorkLocalResumeAfterValidatorFailureReusesGroupingAndCleansRuntimeState
 
 	outside := t.TempDir()
 	resumeOutput, err := captureStdout(t, func() error {
-		return WorkLocal(outside, []string{"resume", "--repo", repo, "--last"})
+		return runLocalWorkCommand(outside, []string{"resume", "--repo", repo, "--last"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(resume): %v\n%s", err, resumeOutput)
+		t.Fatalf("runLocalWorkCommand(resume): %v\n%s", err, resumeOutput)
 	}
 	if !strings.Contains(resumeOutput, "Completed run lw-") {
 		t.Fatalf("unexpected resume output: %q", resumeOutput)
@@ -919,7 +919,7 @@ func TestWorkLocalResumeAfterValidatorFailureReusesGroupingAndCleansRuntimeState
 	}
 }
 
-func TestWorkLocalFindingHistoryRecordsLifecycle(t *testing.T) {
+func TestLocalWorkFindingHistoryRecordsLifecycle(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	hardenedPath := filepath.Join(home, "hardened")
@@ -961,8 +961,8 @@ func TestWorkLocalFindingHistoryRecordsLifecycle(t *testing.T) {
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 	t.Setenv("FAKE_HARDENED_PATH", hardenedPath)
 
-	if err := WorkLocal(repo, []string{"start", "--task", "Finding history"}); err != nil {
-		t.Fatalf("WorkLocal(start): %v", err)
+	if err := runLocalWorkCommand(repo, []string{"start", "--task", "Finding history"}); err != nil {
+		t.Fatalf("runLocalWorkCommand(start): %v", err)
 	}
 	manifest, _ := mustLatestLocalWorkRun(t, repo)
 	store, err := openLocalWorkDB()
@@ -996,7 +996,7 @@ func TestWorkLocalFindingHistoryRecordsLifecycle(t *testing.T) {
 	}
 }
 
-func TestWorkLocalReportsAndFiltersPreexistingFindings(t *testing.T) {
+func TestLocalWorkReportsAndFiltersPreexistingFindings(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	hardenedPath := filepath.Join(home, "hardened")
@@ -1057,10 +1057,10 @@ func TestWorkLocalReportsAndFiltersPreexistingFindings(t *testing.T) {
 	t.Setenv("FAKE_VALIDATE_COUNT_PATH", validateCountPath)
 
 	output, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"start", "--task", "Filter preexisting issues"})
+		return runLocalWorkCommand(repo, []string{"start", "--task", "Filter preexisting issues"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(start): %v\n%s", err, output)
+		t.Fatalf("runLocalWorkCommand(start): %v\n%s", err, output)
 	}
 	if !strings.Contains(output, "Pre-existing issues excluded from propagation: 1") || !strings.Contains(output, "Legacy heading needs cleanup") {
 		t.Fatalf("expected preexisting issue report in output, got %q", output)
@@ -1087,17 +1087,48 @@ func TestWorkLocalReportsAndFiltersPreexistingFindings(t *testing.T) {
 	}
 
 	retroOutput, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"retrospective", "--last"})
+		return runLocalWorkCommand(repo, []string{"retrospective", "--last"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(retrospective): %v", err)
+		t.Fatalf("runLocalWorkCommand(retrospective): %v", err)
 	}
 	if !strings.Contains(retroOutput, "## Pre-existing issues excluded") || !strings.Contains(retroOutput, "Legacy heading needs cleanup") {
 		t.Fatalf("expected retrospective to include preexisting issue section, got %q", retroOutput)
 	}
 }
 
-func TestWorkLocalDocsMentionRuntimeStateAndValidationControls(t *testing.T) {
+func TestActiveWorkGoSourcesAvoidLegacySymbolNames(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	for _, relRoot := range []string{"cmd", "internal/gocli"} {
+		root := filepath.Join(repoRoot, relRoot)
+		if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			for _, forbidden := range []string{"GithubWorkOn", "githubWorkOn", "WorkLocal("} {
+				if strings.Contains(string(content), forbidden) {
+					t.Fatalf("active Go source %s contains legacy symbol %q", path, forbidden)
+				}
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+}
+
+func TestLocalWorkDocsMentionRuntimeStateAndValidationControls(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
@@ -1107,9 +1138,9 @@ func TestWorkLocalDocsMentionRuntimeStateAndValidationControls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read README.md: %v", err)
 	}
-	workLocalDoc, err := os.ReadFile(filepath.Join(repoRoot, "docs", "work-local.md"))
+	workLocalDoc, err := os.ReadFile(filepath.Join(repoRoot, "docs", "work.md"))
 	if err != nil {
-		t.Fatalf("read docs/work-local.md: %v", err)
+		t.Fatalf("read docs/work.md: %v", err)
 	}
 	for _, needle := range []string{
 		"state.db",
@@ -1130,12 +1161,60 @@ func TestWorkLocalDocsMentionRuntimeStateAndValidationControls(t *testing.T) {
 		"Go 1.25 baseline",
 	} {
 		if !strings.Contains(string(workLocalDoc), needle) {
-			t.Fatalf("expected work-local doc to mention %q", needle)
+			t.Fatalf("expected work doc to mention %q", needle)
 		}
 	}
 }
 
-func TestWorkLocalStatusPrefersNewerRuntimeState(t *testing.T) {
+func TestMergedWorkDocsAndHelpAvoidLegacyCommandMentions(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+
+	cleanFiles := []string{
+		"README.md",
+		"docs/work.md",
+		"docs/getting-started.html",
+		"docs/agents.html",
+		"docs/skills.html",
+		"docs/index.html",
+		"internal/gocli/github_help.go",
+		"internal/gocli/repo.go",
+	}
+	for _, rel := range cleanFiles {
+		content, err := os.ReadFile(filepath.Join(repoRoot, rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		text := string(content)
+		if strings.Contains(text, "nana work-on") {
+			t.Fatalf("expected %s to avoid `nana work-on` references", rel)
+		}
+		if strings.Contains(text, "nana work-local") {
+			t.Fatalf("expected %s to avoid `nana work-local` references", rel)
+		}
+	}
+
+	migrationDoc, err := os.ReadFile(filepath.Join(repoRoot, "docs", "work-local.md"))
+	if err != nil {
+		t.Fatalf("read docs/work-local.md: %v", err)
+	}
+	migrationText := string(migrationDoc)
+	for _, needle := range []string{
+		"no longer a supported user-facing command",
+		"nana work start --task",
+		"~/.nana/work/state.db",
+		"[docs/work.md](./work.md)",
+	} {
+		if !strings.Contains(migrationText, needle) {
+			t.Fatalf("expected docs/work-local.md to mention %q", needle)
+		}
+	}
+}
+
+func TestLocalWorkStatusPrefersNewerRuntimeState(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1182,10 +1261,10 @@ func TestWorkLocalStatusPrefersNewerRuntimeState(t *testing.T) {
 	}
 
 	output, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"status", "--last", "--json"})
+		return runLocalWorkCommand(repo, []string{"status", "--last", "--json"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(status --json): %v", err)
+		t.Fatalf("runLocalWorkCommand(status --json): %v", err)
 	}
 	var snapshot struct {
 		Phase    string `json:"phase"`
@@ -1200,7 +1279,7 @@ func TestWorkLocalStatusPrefersNewerRuntimeState(t *testing.T) {
 	}
 }
 
-func TestWorkLocalStatusCleansOrphanedRuntimeStateAfterCompletion(t *testing.T) {
+func TestLocalWorkStatusCleansOrphanedRuntimeStateAfterCompletion(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1254,16 +1333,16 @@ func TestWorkLocalStatusCleansOrphanedRuntimeStateAfterCompletion(t *testing.T) 
 	}
 
 	if _, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"status", "--last"})
+		return runLocalWorkCommand(repo, []string{"status", "--last"})
 	}); err != nil {
-		t.Fatalf("WorkLocal(status): %v", err)
+		t.Fatalf("runLocalWorkCommand(status): %v", err)
 	}
 	if _, err := readLocalWorkRuntimeState(runID, 1); err != nil {
 		t.Fatalf("expected runtime-state row to remain readable, got err=%v", err)
 	}
 }
 
-func TestWorkLocalStatusUsesDBInsteadOfLatestRunFile(t *testing.T) {
+func TestLocalWorkStatusUsesDBInsteadOfLatestRunFile(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1299,10 +1378,10 @@ func TestWorkLocalStatusUsesDBInsteadOfLatestRunFile(t *testing.T) {
 	}
 
 	output, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"status", "--last"})
+		return runLocalWorkCommand(repo, []string{"status", "--last"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(status --last): %v", err)
+		t.Fatalf("runLocalWorkCommand(status --last): %v", err)
 	}
 	if !strings.Contains(output, manifest.RunID) {
 		t.Fatalf("expected DB-backed status output to mention run id, got %q", output)
@@ -1312,7 +1391,49 @@ func TestWorkLocalStatusUsesDBInsteadOfLatestRunFile(t *testing.T) {
 	}
 }
 
-func TestWorkLocalStatusRunIDUsesDBInsteadOfIndexFile(t *testing.T) {
+func TestLocalWorkManifestWritesSharedWorkRunIndex(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot, err := resolveLocalWorkRepoRoot(repo, "")
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	manifest := localWorkManifest{
+		Version:               3,
+		RunID:                 "lw-index-shared",
+		CreatedAt:             ISOTimeNow(),
+		UpdatedAt:             ISOTimeNow(),
+		Status:                "completed",
+		CurrentIteration:      1,
+		CurrentPhase:          "completed",
+		CurrentSubphase:       "completed",
+		RepoRoot:              repoRoot,
+		RepoName:              filepath.Base(repoRoot),
+		RepoID:                localWorkRepoID(repoRoot),
+		SandboxPath:           filepath.Join(home, "sandbox"),
+		SandboxRepoPath:       repoRoot,
+		InputPath:             filepath.Join(home, "input.md"),
+		InputMode:             "task",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	entry, err := readWorkRunIndex(manifest.RunID)
+	if err != nil {
+		t.Fatalf("read shared index: %v", err)
+	}
+	if entry.Backend != "local" || entry.RepoKey != manifest.RepoID || entry.RepoRoot != repoRoot {
+		t.Fatalf("unexpected shared index entry: %+v", entry)
+	}
+}
+
+func TestLocalWorkStatusRunIDUsesDBInsteadOfIndexFile(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1349,10 +1470,10 @@ func TestWorkLocalStatusRunIDUsesDBInsteadOfIndexFile(t *testing.T) {
 
 	outside := t.TempDir()
 	output, err := captureStdout(t, func() error {
-		return WorkLocal(outside, []string{"status", "--run-id", manifest.RunID})
+		return runLocalWorkCommand(outside, []string{"status", "--run-id", manifest.RunID})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(status --run-id): %v", err)
+		t.Fatalf("runLocalWorkCommand(status --run-id): %v", err)
 	}
 	if !strings.Contains(output, manifest.RunID) {
 		t.Fatalf("expected DB-backed status output to mention run id, got %q", output)
@@ -1362,7 +1483,7 @@ func TestWorkLocalStatusRunIDUsesDBInsteadOfIndexFile(t *testing.T) {
 	}
 }
 
-func TestWorkLocalStatusUsesDBInsteadOfRepoMetadataFile(t *testing.T) {
+func TestLocalWorkStatusUsesDBInsteadOfRepoMetadataFile(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1398,10 +1519,10 @@ func TestWorkLocalStatusUsesDBInsteadOfRepoMetadataFile(t *testing.T) {
 	}
 
 	output, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"status", "--last"})
+		return runLocalWorkCommand(repo, []string{"status", "--last"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(status --last): %v", err)
+		t.Fatalf("runLocalWorkCommand(status --last): %v", err)
 	}
 	if !strings.Contains(output, repoRoot) {
 		t.Fatalf("expected DB-backed status output to mention repo root, got %q", output)
@@ -1454,7 +1575,7 @@ func TestWriteLocalWorkManifestAllowsDBStateWithoutIndexFile(t *testing.T) {
 	}
 }
 
-func TestWorkLocalStatusIgnoresLegacyMalformedManifestDuringRunIDLookup(t *testing.T) {
+func TestLocalWorkStatusIgnoresLegacyMalformedManifestDuringRunIDLookup(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1497,17 +1618,17 @@ func TestWorkLocalStatusIgnoresLegacyMalformedManifestDuringRunIDLookup(t *testi
 	}
 	outside := t.TempDir()
 	output, err := captureStdout(t, func() error {
-		return WorkLocal(outside, []string{"status", "--run-id", validManifest.RunID})
+		return runLocalWorkCommand(outside, []string{"status", "--run-id", validManifest.RunID})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(status --run-id): %v", err)
+		t.Fatalf("runLocalWorkCommand(status --run-id): %v", err)
 	}
 	if !strings.Contains(output, validManifest.RunID) {
 		t.Fatalf("expected valid DB-backed run resolution, got %q", output)
 	}
 }
 
-func TestWorkLocalStatusIgnoresLegacyMalformedManifestDuringLastLookup(t *testing.T) {
+func TestLocalWorkStatusIgnoresLegacyMalformedManifestDuringLastLookup(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1549,17 +1670,17 @@ func TestWorkLocalStatusIgnoresLegacyMalformedManifestDuringLastLookup(t *testin
 		t.Fatalf("write malformed manifest: %v", err)
 	}
 	output, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"status", "--last"})
+		return runLocalWorkCommand(repo, []string{"status", "--last"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(status --last): %v", err)
+		t.Fatalf("runLocalWorkCommand(status --last): %v", err)
 	}
 	if !strings.Contains(output, validManifest.RunID) {
 		t.Fatalf("expected valid DB-backed last-run resolution, got %q", output)
 	}
 }
 
-func TestWorkLocalStatusFailsOnMalformedRuntimeStateRow(t *testing.T) {
+func TestLocalWorkStatusFailsOnMalformedRuntimeStateRow(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1602,13 +1723,13 @@ func TestWorkLocalStatusFailsOnMalformedRuntimeStateRow(t *testing.T) {
 	}
 
 	if _, err := captureStdout(t, func() error {
-		return WorkLocal(repo, []string{"status", "--last"})
+		return runLocalWorkCommand(repo, []string{"status", "--last"})
 	}); err == nil {
 		t.Fatal("expected malformed runtime-state row to fail status")
 	}
 }
 
-func TestWorkLocalResumeAfterFailedImplement(t *testing.T) {
+func TestLocalWorkResumeAfterFailedImplement(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	failOncePath := filepath.Join(home, "fail-once.marker")
@@ -1643,17 +1764,17 @@ func TestWorkLocalResumeAfterFailedImplement(t *testing.T) {
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 	t.Setenv("FAKE_CODEX_FAIL_ONCE_PATH", failOncePath)
 
-	startErr := WorkLocal(repo, []string{"start", "--task", "Recover after one failure"})
+	startErr := runLocalWorkCommand(repo, []string{"start", "--task", "Recover after one failure"})
 	if startErr == nil {
 		t.Fatal("expected initial start to fail")
 	}
 
 	outside := t.TempDir()
 	resumeOutput, err := captureStdout(t, func() error {
-		return WorkLocal(outside, []string{"resume", "--repo", repo, "--last"})
+		return runLocalWorkCommand(outside, []string{"resume", "--repo", repo, "--last"})
 	})
 	if err != nil {
-		t.Fatalf("WorkLocal(resume): %v\n%s", err, resumeOutput)
+		t.Fatalf("runLocalWorkCommand(resume): %v\n%s", err, resumeOutput)
 	}
 	if !strings.Contains(resumeOutput, "Resuming run lw-") || !strings.Contains(resumeOutput, "Completed run lw-") {
 		t.Fatalf("unexpected resume output: %q", resumeOutput)

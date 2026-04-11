@@ -242,19 +242,19 @@ type githubLane struct {
 	purpose  string
 }
 
-func GithubWorkOn(cwd string, args []string) error {
+func GithubWork(cwd string, args []string) error {
 	if len(args) == 0 || isHelpToken(args[0]) {
-		fmt.Fprint(os.Stdout, GithubWorkOnHelp)
+		fmt.Fprint(os.Stdout, GithubWorkHelp)
 		return nil
 	}
 	if args[0] != "defaults" || len(args) < 2 {
 		if args[0] == "stats" {
-			return githubWorkOnStats(args[1:])
+			return githubWorkStats(args[1:])
 		}
 		if args[0] == "retrospective" {
-			return githubWorkOnRetrospective(args[1:])
+			return githubWorkRetrospective(args[1:])
 		}
-		return fmt.Errorf("Unknown work-on subcommand: %s\n\n%s", args[0], GithubWorkOnHelp)
+		return fmt.Errorf("Unknown work subcommand: %s\n\n%s", args[0], GithubWorkHelp)
 	}
 
 	switch args[1] {
@@ -263,7 +263,7 @@ func GithubWorkOn(cwd string, args []string) error {
 	case "show":
 		return githubDefaultsShow(args[2:])
 	default:
-		return fmt.Errorf("Unknown work-on defaults subcommand: %s\n\n%s", args[1], GithubWorkOnHelp)
+		return fmt.Errorf("Unknown work defaults subcommand: %s\n\n%s", args[1], GithubWorkHelp)
 	}
 }
 
@@ -288,7 +288,7 @@ func GithubReviewRules(cwd string, args []string) error {
 
 func githubDefaultsSet(args []string) error {
 	if len(args) == 0 || !validRepoSlug(args[0]) {
-		return fmt.Errorf("Usage: nana work-on defaults set <owner/repo> [--considerations <list>] [--role-layout <split|reviewer+executor>] [--review-rules-mode <manual|automatic>] [--review-rules-trusted-reviewers <a,b>] [--review-rules-blocked-reviewers <a,b>] [--review-rules-min-distinct-reviewers <n>]\n\n%s", GithubWorkOnHelp)
+		return fmt.Errorf("Usage: nana work defaults set <owner/repo> [--considerations <list>] [--role-layout <split|reviewer+executor>] [--review-rules-mode <manual|automatic>] [--review-rules-trusted-reviewers <a,b>] [--review-rules-blocked-reviewers <a,b>] [--review-rules-min-distinct-reviewers <n>]\n\n%s", GithubWorkHelp)
 	}
 
 	repoSlug := args[0]
@@ -442,7 +442,7 @@ func githubDefaultsSet(args []string) error {
 
 func githubDefaultsShow(args []string) error {
 	if len(args) == 0 || !validRepoSlug(args[0]) {
-		return fmt.Errorf("Usage: nana work-on defaults show <owner/repo>\n\n%s", GithubWorkOnHelp)
+		return fmt.Errorf("Usage: nana work defaults show <owner/repo>\n\n%s", GithubWorkHelp)
 	}
 	repoSlug := args[0]
 	settingsPath := githubRepoSettingsPath(repoSlug)
@@ -488,9 +488,9 @@ func githubDefaultsShow(args []string) error {
 	return nil
 }
 
-func githubWorkOnStats(args []string) error {
+func githubWorkStats(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("Usage: nana work-on stats <github-issue-or-pr-url>\n\n%s", GithubWorkOnHelp)
+		return fmt.Errorf("Usage: nana work stats <github-issue-or-pr-url>\n\n%s", GithubWorkHelp)
 	}
 	target, err := parseGithubTargetURL(args[0])
 	if err != nil {
@@ -522,7 +522,7 @@ func githubWorkOnStats(args []string) error {
 	return nil
 }
 
-func githubWorkOnRetrospective(args []string) error {
+func githubWorkRetrospective(args []string) error {
 	runID := ""
 	useLast := true
 	for index := 0; index < len(args); index++ {
@@ -861,11 +861,11 @@ func githubNanaHome() string {
 }
 
 func githubRepoSettingsPath(repoSlug string) string {
-	return filepath.Join(githubNanaHome(), "repos", filepath.FromSlash(repoSlug), "settings.json")
+	return filepath.Join(githubWorkRepoRoot(repoSlug), "settings.json")
 }
 
 func githubReviewRulesGlobalConfigPath() string {
-	return filepath.Join(githubNanaHome(), "github-workon", "review-rules-config.json")
+	return githubWorkReviewRulesGlobalConfigPath()
 }
 
 func readGithubRepoSettings(path string) (*githubRepoSettings, error) {
@@ -910,7 +910,7 @@ func validRepoSlug(value string) bool {
 
 func requireFlagValue(args []string, index int, flag string) (string, error) {
 	if index+1 >= len(args) {
-		return "", fmt.Errorf("Missing value after %s.\n%s", flag, GithubWorkOnHelp)
+		return "", fmt.Errorf("Missing value after %s.\n%s", flag, GithubWorkHelp)
 	}
 	return args[index+1], nil
 }
@@ -918,7 +918,7 @@ func requireFlagValue(args []string, index int, flag string) (string, error) {
 func parseGithubConsiderations(value string, flag string) ([]string, error) {
 	raw := strings.TrimSpace(value)
 	if raw == "" {
-		return nil, fmt.Errorf("Missing value after %s.\n%s", flag, GithubWorkOnHelp)
+		return nil, fmt.Errorf("Missing value after %s.\n%s", flag, GithubWorkHelp)
 	}
 	parts := []string{}
 	for _, part := range strings.Split(raw, ",") {
@@ -937,7 +937,7 @@ func parseGithubConsiderations(value string, flag string) ([]string, error) {
 func parseGithubRoleLayout(value string, flag string) (string, error) {
 	raw := strings.ToLower(strings.TrimSpace(value))
 	if raw == "" {
-		return "", fmt.Errorf("Missing value after %s.\n%s", flag, GithubWorkOnHelp)
+		return "", fmt.Errorf("Missing value after %s.\n%s", flag, GithubWorkHelp)
 	}
 	switch raw {
 	case "merged", "reviewer-executor", "reviewer_executor":
@@ -945,14 +945,14 @@ func parseGithubRoleLayout(value string, flag string) (string, error) {
 	case "split", "reviewer+executor":
 		return raw, nil
 	default:
-		return "", fmt.Errorf("Invalid %s value: %s. Expected one of %s.\n%s", flag, value, strings.Join(supportedGithubRoleLayouts, ", "), GithubWorkOnHelp)
+		return "", fmt.Errorf("Invalid %s value: %s. Expected one of %s.\n%s", flag, value, strings.Join(supportedGithubRoleLayouts, ", "), GithubWorkHelp)
 	}
 }
 
 func parseGithubReviewRulesMode(value string, flag string) (string, error) {
 	raw := strings.ToLower(strings.TrimSpace(value))
 	if !slices.Contains(supportedReviewRulesModes, raw) {
-		return "", fmt.Errorf("Invalid %s value: %s. Expected one of manual, automatic.\n%s", flag, value, GithubWorkOnHelp)
+		return "", fmt.Errorf("Invalid %s value: %s. Expected one of manual, automatic.\n%s", flag, value, GithubWorkHelp)
 	}
 	return raw, nil
 }
@@ -960,7 +960,7 @@ func parseGithubReviewRulesMode(value string, flag string) (string, error) {
 func parseGithubLoginList(value string, flag string) ([]string, error) {
 	raw := strings.TrimSpace(value)
 	if raw == "" {
-		return nil, fmt.Errorf("Missing value after %s.\n%s", flag, GithubWorkOnHelp)
+		return nil, fmt.Errorf("Missing value after %s.\n%s", flag, GithubWorkHelp)
 	}
 	if strings.EqualFold(raw, "none") || strings.EqualFold(raw, "(none)") {
 		return []string{}, nil
@@ -978,11 +978,11 @@ func parseGithubLoginList(value string, flag string) ([]string, error) {
 func parseGithubPositiveInt(value string, flag string) (int, error) {
 	raw := strings.TrimSpace(value)
 	if raw == "" {
-		return 0, fmt.Errorf("Missing value after %s.\n%s", flag, GithubWorkOnHelp)
+		return 0, fmt.Errorf("Missing value after %s.\n%s", flag, GithubWorkHelp)
 	}
 	parsed, err := strconv.Atoi(raw)
 	if err != nil || parsed < 0 {
-		return 0, fmt.Errorf("Invalid %s value: %s. Expected a non-negative integer.\n%s", flag, value, GithubWorkOnHelp)
+		return 0, fmt.Errorf("Invalid %s value: %s. Expected a non-negative integer.\n%s", flag, value, GithubWorkHelp)
 	}
 	return parsed, nil
 }
@@ -1052,7 +1052,7 @@ func buildGithubConsiderationInstructionLines(activeConsiderations []string, rol
 		lines = append(lines, "Stay single-owner for this run. Do not spawn native subagents or tmux team workers unless considerations are added later.")
 	} else {
 		lines = append(lines, "Run this as a coordinated multi-lane session using isolated Codex lane processes, not native subagents.")
-		lines = append(lines, "Launch lane processes with `nana work-on lane-exec --run-id <run-id> --lane <alias>` so each lane gets its own CODEX_HOME and MCP profile.")
+		lines = append(lines, "Launch lane processes with `nana work lane-exec --run-id <run-id> --lane <alias>` so each lane gets its own CODEX_HOME and MCP profile.")
 		if roleLayout == "reviewer+executor" {
 			lines = append(lines, "For merged lanes, run one isolated lane process per lane alias so that the same agent owns both review and implementation for that lane.")
 		} else {
@@ -1094,9 +1094,11 @@ func buildIssueStatsLines(stats githubIssueTokenStats) []string {
 }
 
 func resolveGithubRunManifestPath(runID string, useLast bool) (string, string, error) {
-	nanaHome := githubNanaHome()
 	if runID != "" {
-		reposRoot := filepath.Join(nanaHome, "repos")
+		if manifestPath, repoRoot, ok := resolveGithubRunManifestPathFromIndex(runID); ok {
+			return manifestPath, repoRoot, nil
+		}
+		reposRoot := githubWorkReposRoot()
 		foundManifest := ""
 		foundRepoRoot := ""
 		_ = filepath.Walk(reposRoot, func(path string, info os.FileInfo, err error) error {
@@ -1114,18 +1116,74 @@ func resolveGithubRunManifestPath(runID string, useLast bool) (string, string, e
 			return nil
 		})
 		if foundManifest != "" {
+			if manifest, err := readGithubWorkManifest(foundManifest); err == nil {
+				_ = indexGithubWorkRunManifest(foundManifest, manifest)
+			}
 			return foundManifest, foundRepoRoot, nil
 		}
 	}
 	if useLast || runID == "" {
-		var latest githubLatestRunPointer
-		path := filepath.Join(nanaHome, "github-workon", "latest-run.json")
-		if err := readGithubJSON(path, &latest); err != nil {
-			return "", "", fmt.Errorf("No GitHub work-on run found in %s. Start one first with `nana work-on start <url>`.", filepath.Join(nanaHome, "repos"))
+		if entry, err := latestWorkRunIndex("github"); err == nil {
+			if manifestPath, repoRoot, ok := githubRunManifestPathFromIndexEntry(entry); ok {
+				return manifestPath, repoRoot, nil
+			}
 		}
-		return filepath.Join(latest.RepoRoot, "runs", latest.RunID, "manifest.json"), latest.RepoRoot, nil
+		var latest githubLatestRunPointer
+		path := githubWorkLatestRunPath()
+		if err := readGithubJSON(path, &latest); err != nil {
+			return "", "", fmt.Errorf("No GitHub work run found in %s. Start one first with `nana work start <url>`.", githubWorkReposRoot())
+		}
+		manifestPath := filepath.Join(latest.RepoRoot, "runs", latest.RunID, "manifest.json")
+		if manifest, err := readGithubWorkManifest(manifestPath); err == nil {
+			_ = indexGithubWorkRunManifest(manifestPath, manifest)
+		}
+		return manifestPath, latest.RepoRoot, nil
 	}
-	return "", "", fmt.Errorf("Run %s was not found under %s.", runID, filepath.Join(nanaHome, "repos"))
+	return "", "", fmt.Errorf("Run %s was not found under %s.", runID, githubWorkReposRoot())
+}
+
+func resolveGithubRunManifestPathFromIndex(runID string) (string, string, bool) {
+	entry, err := readWorkRunIndex(runID)
+	if err != nil || entry.Backend != "github" {
+		return "", "", false
+	}
+	return githubRunManifestPathFromIndexEntry(entry)
+}
+
+func githubRunManifestPathFromIndexEntry(entry workRunIndexEntry) (string, string, bool) {
+	manifestPath := strings.TrimSpace(entry.ManifestPath)
+	if manifestPath == "" {
+		return "", "", false
+	}
+	if _, err := os.Stat(manifestPath); err != nil {
+		return "", "", false
+	}
+	repoRoot := strings.TrimSpace(entry.RepoRoot)
+	if repoRoot == "" {
+		repoRoot = filepath.Dir(filepath.Dir(filepath.Dir(manifestPath)))
+	}
+	return manifestPath, repoRoot, true
+}
+
+func indexGithubWorkRunManifest(manifestPath string, manifest githubWorkManifest) error {
+	repoRoot := strings.TrimSpace(manifest.ManagedRepoRoot)
+	if repoRoot == "" && strings.TrimSpace(manifestPath) != "" {
+		repoRoot = filepath.Dir(filepath.Dir(filepath.Dir(manifestPath)))
+	}
+	updatedAt := strings.TrimSpace(manifest.UpdatedAt)
+	if updatedAt == "" {
+		updatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	return writeWorkRunIndex(workRunIndexEntry{
+		RunID:        manifest.RunID,
+		Backend:      "github",
+		RepoKey:      manifest.RepoSlug,
+		RepoRoot:     repoRoot,
+		RepoName:     manifest.RepoName,
+		ManifestPath: manifestPath,
+		UpdatedAt:    updatedAt,
+		TargetKind:   manifest.TargetKind,
+	})
 }
 
 func writeThreadUsageArtifact(runDir string, sandboxPath string) (*githubThreadUsageArtifact, error) {
@@ -1915,15 +1973,15 @@ type parsedGithubTarget struct {
 func parseGithubTargetURL(raw string) (parsedGithubTarget, error) {
 	const prefix = "https://github.com/"
 	if !strings.HasPrefix(raw, prefix) {
-		return parsedGithubTarget{}, fmt.Errorf("Invalid GitHub URL: %s.\n%s", raw, GithubWorkOnHelp)
+		return parsedGithubTarget{}, fmt.Errorf("Invalid GitHub URL: %s.\n%s", raw, GithubWorkHelp)
 	}
 	parts := strings.Split(strings.Trim(strings.TrimPrefix(raw, prefix), "/"), "/")
 	if len(parts) < 4 {
-		return parsedGithubTarget{}, fmt.Errorf("Unsupported GitHub URL shape: %s. Expected an issue or pull request URL.\n%s", raw, GithubWorkOnHelp)
+		return parsedGithubTarget{}, fmt.Errorf("Unsupported GitHub URL shape: %s. Expected an issue or pull request URL.\n%s", raw, GithubWorkHelp)
 	}
 	number, err := strconv.Atoi(parts[3])
 	if err != nil || number <= 0 {
-		return parsedGithubTarget{}, fmt.Errorf("Invalid GitHub target number in URL: %s.\n%s", raw, GithubWorkOnHelp)
+		return parsedGithubTarget{}, fmt.Errorf("Invalid GitHub target number in URL: %s.\n%s", raw, GithubWorkHelp)
 	}
 	kind := ""
 	switch strings.ToLower(parts[2]) {
@@ -1932,7 +1990,7 @@ func parseGithubTargetURL(raw string) (parsedGithubTarget, error) {
 	case "pull", "pulls":
 		kind = "pr"
 	default:
-		return parsedGithubTarget{}, fmt.Errorf("Unsupported GitHub URL shape: %s. Expected an issue or pull request URL.\n%s", raw, GithubWorkOnHelp)
+		return parsedGithubTarget{}, fmt.Errorf("Unsupported GitHub URL shape: %s. Expected an issue or pull request URL.\n%s", raw, GithubWorkHelp)
 	}
 	return parsedGithubTarget{
 		repoSlug: parts[0] + "/" + parts[1],
@@ -2001,11 +2059,11 @@ func githubRepoRoot(repoSlug string) string {
 }
 
 func githubIssueStatsPath(repoSlug string, issueNumber int) string {
-	return filepath.Join(githubRepoRoot(repoSlug), "issues", fmt.Sprintf("issue-%d.json", issueNumber))
+	return githubWorkIssueStatsPath(repoSlug, issueNumber)
 }
 
 func githubSandboxPath(repoSlug string, sandboxID string) string {
-	return filepath.Join(githubRepoRoot(repoSlug), "sandboxes", sandboxID)
+	return githubWorkSandboxPath(repoSlug, sandboxID)
 }
 
 func buildGithubTargetSandboxID(targetKind string, targetNumber int) string {

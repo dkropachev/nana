@@ -5,18 +5,18 @@ import (
 	"os"
 )
 
-const IssueHelp = `nana issue - GitHub issue-oriented aliases for the work-on runtime
+const IssueHelp = `nana issue - GitHub issue-oriented aliases for nana work
 
 Usage:
-  nana issue implement <github-issue-url> [work-on start flags...]
-  nana issue investigate <github-issue-url> [work-on start flags...]
-  nana issue sync [work-on sync flags...]
+  nana issue implement <github-issue-url> [work start flags...]
+  nana issue investigate <github-issue-url> [work start flags...]
+  nana issue sync [work sync flags...]
   nana issue help
 
 Behavior:
-  - implement routes to: nana work-on start <issue-url> ...
+  - implement routes to: nana work start <issue-url> ...
   - investigate fetches issue + repo context, updates managed repo metadata, infers considerations, and stops before implementation
-  - sync routes to: nana work-on sync ...
+  - sync routes to: nana work sync ...
 `
 
 const ReviewRulesHelp = `nana review-rules - Persistent repo rules mined from PR review history
@@ -36,12 +36,12 @@ Behavior:
   - scan mines PR reviews and review comments into pending repo rule candidates
   - global config controls the default extraction mode
   - global reviewer policy can trust, block, or require multiple distinct reviewers
-  - repo-specific mode is configured via: nana work-on defaults set <owner/repo> --review-rules-mode <manual|automatic>
-  - repo-specific reviewer policy is configured via: nana work-on defaults set <owner/repo> --review-rules-trusted-reviewers <a,b>|none --review-rules-blocked-reviewers <a,b>|none --review-rules-min-distinct-reviewers <n>
+  - repo-specific mode is configured via: nana work defaults set <owner/repo> --review-rules-mode <manual|automatic>
+  - repo-specific reviewer policy is configured via: nana work defaults set <owner/repo> --review-rules-trusted-reviewers <a,b>|none --review-rules-blocked-reviewers <a,b>|none --review-rules-min-distinct-reviewers <n>
   - approve promotes pending candidates into approved rules
   - disable, enable, and archive manage rule lifecycle without deleting evidence
   - explain prints full rule metadata and evidence
-  - approved rules are injected into related work-on role instructions
+  - approved rules are injected into related work role instructions
 `
 
 const GithubReviewHelp = `nana review - Review an external GitHub PR with deterministic persistence
@@ -59,31 +59,31 @@ Behavior:
   - followup prints findings that predated the reviewed PR and fails when the PR is still open unless --allow-open is passed
 `
 
-const GithubWorkOnHelp = `nana work-on - GitHub-targeted issue/PR implementation helper
+const GithubWorkHelp = `nana work - GitHub-backed issue/PR implementation helper
 
 Usage:
-  nana work-on start <github-issue-or-pr-url> [--considerations <list>] [--role-layout <split|reviewer+executor>] [--new-pr] [--create-pr | --local-only] [--reviewer <login|@me>] [codex-args...]
-  nana work-on sync [--run-id <id> | --last] [--reviewer <login|@me>] [--resume-last] [codex-args...]
-  nana work-on defaults set <owner/repo> [--considerations <list>] [--role-layout <split|reviewer+executor>] [--review-rules-mode <manual|automatic>]
-  nana work-on defaults show <owner/repo>
-  nana work-on stats <github-issue-or-pr-url>
-  nana work-on retrospective [--run-id <id> | --last]
-  nana work-on help
+  nana work start <github-issue-or-pr-url> [--considerations <list>] [--role-layout <split|reviewer+executor>] [--new-pr] [--create-pr | --local-only] [--reviewer <login|@me>] [codex-args...]
+  nana work sync [--run-id <id> | --last] [--reviewer <login|@me>] [--resume-last] [codex-args...]
+  nana work defaults set <owner/repo> [--considerations <list>] [--role-layout <split|reviewer+executor>] [--review-rules-mode <manual|automatic>]
+  nana work defaults show <owner/repo>
+  nana work stats <github-issue-or-pr-url>
+  nana work retrospective [--run-id <id> | --last]
+  nana work help
 
 Examples:
-  nana work-on start https://github.com/dkropachev/alternator-client-java/issues/1
-  nana work-on start https://github.com/dkropachev/alternator-client-java/issues/1 --considerations arch,perf,api,style,qa
-  nana work-on start https://github.com/dkropachev/alternator-client-java/issues/1 --considerations security,api --role-layout reviewer+executor
-  nana work-on start https://github.com/dkropachev/alternator-client-java/issues/1 --new-pr --create-pr
-  nana work-on start https://github.com/openai/codex/pull/456 --reviewer @me -- --model gpt-5.4
-  nana work-on defaults set dkropachev/alternator-client-java --considerations arch,perf,api --role-layout split
-  nana work-on stats https://github.com/dkropachev/alternator-client-java/issues/1
-  nana work-on retrospective --last
-  nana work-on sync --last --resume-last
+  nana work start https://github.com/dkropachev/alternator-client-java/issues/1
+  nana work start https://github.com/dkropachev/alternator-client-java/issues/1 --considerations arch,perf,api,style,qa
+  nana work start https://github.com/dkropachev/alternator-client-java/issues/1 --considerations security,api --role-layout reviewer+executor
+  nana work start https://github.com/dkropachev/alternator-client-java/issues/1 --new-pr --create-pr
+  nana work start https://github.com/openai/codex/pull/456 --reviewer @me -- --model gpt-5.4
+  nana work defaults set dkropachev/alternator-client-java --considerations arch,perf,api --role-layout split
+  nana work stats https://github.com/dkropachev/alternator-client-java/issues/1
+  nana work retrospective --last
+  nana work sync --last --resume-last
 
 Storage:
-  - managed repo state: ~/.nana/repos/<owner>/<repo-name>
-  - managed sandboxes: ~/.nana/repos/<owner>/<repo-name>/sandboxes/issue-<n> or pr-<n>
+  - managed repo state: ~/.nana/work/repos/<owner>/<repo-name>
+  - managed sandboxes: ~/.nana/work/repos/<owner>/<repo-name>/sandboxes/issue-<n> or pr-<n>
   - repo concern overrides: .nana/work-on-concerns.json or .github/nana-work-on-concerns.json
   - repo hot-path API overrides: .nana/work-on-hot-path-apis.json or .github/nana-work-on-hot-path-apis.json
 
@@ -114,7 +114,7 @@ func MaybeHandleGithubHelp(command string, args []string) bool {
 		}
 	case "work-on":
 		if wantsSubcommandHelp(args) {
-			fmt.Fprint(os.Stdout, GithubWorkOnHelp)
+			fmt.Fprint(os.Stdout, GithubWorkHelp)
 			return true
 		}
 	}
