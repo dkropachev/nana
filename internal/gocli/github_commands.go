@@ -14,7 +14,7 @@ type githubCommandResult struct {
 	Handled    bool
 }
 
-type githubWorkonManifest struct {
+type githubWorkManifest struct {
 	Version                 int                        `json:"version,omitempty"`
 	RunID                   string                     `json:"run_id"`
 	CreatedAt               string                     `json:"created_at,omitempty"`
@@ -94,7 +94,7 @@ type githubPullStatePayload struct {
 	State  string `json:"state"`
 }
 
-type githubWorkOnStartOptions struct {
+type githubWorkStartOptions struct {
 	Target                  parsedGithubTarget
 	Reviewer                string
 	RequestedConsiderations []string
@@ -104,7 +104,7 @@ type githubWorkOnStartOptions struct {
 	CodexArgs               []string
 }
 
-type githubWorkOnSyncOptions struct {
+type githubWorkSyncOptions struct {
 	RunID             string
 	UseLast           bool
 	Reviewer          string
@@ -113,38 +113,38 @@ type githubWorkOnSyncOptions struct {
 	CodexArgs         []string
 }
 
-func GithubWorkOnCommand(cwd string, args []string) (githubCommandResult, error) {
+func GithubWorkCommand(cwd string, args []string) (githubCommandResult, error) {
 	if len(args) == 0 || isHelpToken(args[0]) {
-		fmt.Fprint(os.Stdout, GithubWorkOnHelp)
+		fmt.Fprint(os.Stdout, GithubWorkHelp)
 		return githubCommandResult{Handled: true}, nil
 	}
 
 	switch args[0] {
 	case "defaults", "stats", "retrospective":
-		if err := GithubWorkOn(cwd, args); err != nil {
+		if err := GithubWork(cwd, args); err != nil {
 			return githubCommandResult{}, err
 		}
 		return githubCommandResult{Handled: true}, nil
 	case "start":
-		options, err := parseGithubWorkOnStartArgs(args)
+		options, err := parseGithubWorkStartArgs(args)
 		if err != nil {
 			return githubCommandResult{}, err
 		}
-		if err := startGithubWorkOn(options); err != nil {
+		if err := startGithubWork(options); err != nil {
 			return githubCommandResult{}, err
 		}
 		return githubCommandResult{Handled: true}, nil
 	case "sync":
-		options, err := parseGithubWorkOnSyncArgs(args)
+		options, err := parseGithubWorkSyncArgs(args)
 		if err != nil {
 			return githubCommandResult{}, err
 		}
-		if err := syncGithubWorkOn(options); err != nil {
+		if err := syncGithubWork(options); err != nil {
 			return githubCommandResult{}, err
 		}
 		return githubCommandResult{Handled: true}, nil
 	case "verify-refresh":
-		selection, err := normalizeGithubWorkOnRunSelectionArgs(args, true)
+		selection, err := normalizeGithubWorkRunSelectionArgs(args, true)
 		if err != nil {
 			return githubCommandResult{}, err
 		}
@@ -158,7 +158,7 @@ func GithubWorkOnCommand(cwd string, args []string) (githubCommandResult, error)
 		}
 		return githubCommandResult{Handled: true}, nil
 	case "lane-exec":
-		runSelection, laneAlias, task, codexArgs, err := parseGithubWorkOnLaneExecArgs(args)
+		runSelection, laneAlias, task, codexArgs, err := parseGithubWorkLaneExecArgs(args)
 		if err != nil {
 			return githubCommandResult{}, err
 		}
@@ -178,7 +178,7 @@ func GithubWorkOnCommand(cwd string, args []string) (githubCommandResult, error)
 		}
 		return githubCommandResult{Handled: true}, nil
 	default:
-		return githubCommandResult{}, fmt.Errorf("Unknown work-on subcommand: %s\n\n%s", args[0], GithubWorkOnHelp)
+		return githubCommandResult{}, fmt.Errorf("Unknown work subcommand: %s\n\n%s", args[0], GithubWorkHelp)
 	}
 }
 
@@ -208,7 +208,7 @@ func GithubIssue(cwd string, args []string) (githubCommandResult, error) {
 	switch command {
 	case "implement":
 		if len(rest) == 0 {
-			return githubCommandResult{}, fmt.Errorf("Usage: nana issue implement <github-issue-url> [work-on start flags...]")
+			return githubCommandResult{}, fmt.Errorf("Usage: nana issue implement <github-issue-url> [work start flags...]")
 		}
 		target, err := parseGithubTargetURL(rest[0])
 		if err != nil {
@@ -217,17 +217,17 @@ func GithubIssue(cwd string, args []string) (githubCommandResult, error) {
 		if target.kind != "issue" {
 			return githubCommandResult{}, fmt.Errorf("nana issue implement expects a GitHub issue URL.\n%s", IssueHelp)
 		}
-		options, err := parseGithubWorkOnStartArgs(append([]string{"start"}, rest...))
+		options, err := parseGithubWorkStartArgs(append([]string{"start"}, rest...))
 		if err != nil {
 			return githubCommandResult{}, err
 		}
-		if err := startGithubWorkOn(options); err != nil {
+		if err := startGithubWork(options); err != nil {
 			return githubCommandResult{}, err
 		}
 		return githubCommandResult{Handled: true}, nil
 	case "investigate":
 		if len(rest) == 0 {
-			return githubCommandResult{}, fmt.Errorf("Usage: nana issue investigate <github-issue-url> [work-on start flags...]")
+			return githubCommandResult{}, fmt.Errorf("Usage: nana issue investigate <github-issue-url> [work start flags...]")
 		}
 		target, err := parseGithubTargetURL(rest[0])
 		if err != nil {
@@ -245,11 +245,11 @@ func GithubIssue(cwd string, args []string) (githubCommandResult, error) {
 		if err != nil {
 			return githubCommandResult{}, err
 		}
-		options, err := parseGithubWorkOnSyncArgs(syncArgs)
+		options, err := parseGithubWorkSyncArgs(syncArgs)
 		if err != nil {
 			return githubCommandResult{}, err
 		}
-		if err := syncGithubWorkOn(options); err != nil {
+		if err := syncGithubWork(options); err != nil {
 			return githubCommandResult{}, err
 		}
 		return githubCommandResult{Handled: true}, nil
@@ -261,126 +261,9 @@ func GithubIssue(cwd string, args []string) (githubCommandResult, error) {
 	}
 }
 
-func normalizeGithubWorkOnStartArgs(args []string) ([]string, error) {
+func parseGithubWorkStartArgs(args []string) (githubWorkStartOptions, error) {
 	if len(args) < 2 {
-		return nil, fmt.Errorf("Usage: nana work-on start <github-issue-or-pr-url>\n\n%s", GithubWorkOnHelp)
-	}
-	targetIndex := 1
-	if strings.HasPrefix(args[targetIndex], "-") {
-		targetIndex = -1
-	}
-
-	repoSlug := ""
-	issueNumber := 0
-	prNumber := 0
-	for index := 1; index < len(args); index++ {
-		token := args[index]
-		if token == "--" {
-			break
-		}
-		if isHelpToken(token) {
-			fmt.Fprint(os.Stdout, GithubWorkOnHelp)
-			return nil, nil
-		}
-		switch {
-		case token == "--reviewer":
-			value, err := requireFlagValue(args, index, token)
-			if err != nil {
-				return nil, err
-			}
-			if strings.TrimSpace(value) == "" {
-				return nil, fmt.Errorf("Missing value after --reviewer.\n%s", GithubWorkOnHelp)
-			}
-			index++
-		case strings.HasPrefix(token, "--reviewer="):
-			if strings.TrimSpace(strings.TrimPrefix(token, "--reviewer=")) == "" {
-				return nil, fmt.Errorf("Missing value after --reviewer.\n%s", GithubWorkOnHelp)
-			}
-		case token == "--mode" || strings.HasPrefix(token, "--mode="):
-			return nil, fmt.Errorf("`--mode` has been removed. Use `--considerations` only.")
-		case token == "--considerations":
-			if _, err := requireFlagValue(args, index, token); err != nil {
-				return nil, err
-			}
-			index++
-		case strings.HasPrefix(token, "--considerations="):
-		case token == "--role-layout":
-			if _, err := requireFlagValue(args, index, token); err != nil {
-				return nil, err
-			}
-			index++
-		case strings.HasPrefix(token, "--role-layout="):
-		case token == "--new-pr", token == "--create-pr", token == "--local-only":
-		case token == "--repo":
-			value, err := requireFlagValue(args, index, token)
-			if err != nil {
-				return nil, err
-			}
-			repoSlug = strings.TrimSpace(value)
-			if repoSlug == "" {
-				return nil, fmt.Errorf("Missing value after --repo.\n%s", GithubWorkOnHelp)
-			}
-			index++
-		case strings.HasPrefix(token, "--repo="):
-			repoSlug = strings.TrimSpace(strings.TrimPrefix(token, "--repo="))
-			if repoSlug == "" {
-				return nil, fmt.Errorf("Missing value after --repo.\n%s", GithubWorkOnHelp)
-			}
-		case token == "--issue":
-			value, err := requireFlagValue(args, index, token)
-			if err != nil {
-				return nil, err
-			}
-			parsed, parseErr := strconv.Atoi(strings.TrimSpace(value))
-			if parseErr != nil || parsed <= 0 {
-				return nil, fmt.Errorf("Invalid --issue value: %s.\n%s", value, GithubWorkOnHelp)
-			}
-			issueNumber = parsed
-			index++
-		case strings.HasPrefix(token, "--issue="):
-			value := strings.TrimSpace(strings.TrimPrefix(token, "--issue="))
-			parsed, parseErr := strconv.Atoi(value)
-			if parseErr != nil || parsed <= 0 {
-				return nil, fmt.Errorf("Invalid --issue value: %s.\n%s", value, GithubWorkOnHelp)
-			}
-			issueNumber = parsed
-		case token == "--pr":
-			value, err := requireFlagValue(args, index, token)
-			if err != nil {
-				return nil, err
-			}
-			parsed, parseErr := strconv.Atoi(strings.TrimSpace(value))
-			if parseErr != nil || parsed <= 0 {
-				return nil, fmt.Errorf("Invalid --pr value: %s.\n%s", value, GithubWorkOnHelp)
-			}
-			prNumber = parsed
-			index++
-		case strings.HasPrefix(token, "--pr="):
-			value := strings.TrimSpace(strings.TrimPrefix(token, "--pr="))
-			parsed, parseErr := strconv.Atoi(value)
-			if parseErr != nil || parsed <= 0 {
-				return nil, fmt.Errorf("Invalid --pr value: %s.\n%s", value, GithubWorkOnHelp)
-			}
-			prNumber = parsed
-		}
-	}
-
-	if targetIndex >= 0 {
-		if _, err := parseGithubTargetURL(args[targetIndex]); err != nil {
-			return nil, err
-		}
-		return append([]string{"work-on"}, args...), nil
-	}
-
-	if !validRepoSlug(repoSlug) || ((issueNumber > 0) == (prNumber > 0)) {
-		return nil, fmt.Errorf("Usage: nana work-on start <github-issue-or-pr-url>\n\n%s", GithubWorkOnHelp)
-	}
-	return append([]string{"work-on"}, args...), nil
-}
-
-func parseGithubWorkOnStartArgs(args []string) (githubWorkOnStartOptions, error) {
-	if len(args) < 2 {
-		return githubWorkOnStartOptions{}, fmt.Errorf("Usage: nana work-on start <github-issue-or-pr-url>\n\n%s", GithubWorkOnHelp)
+		return githubWorkStartOptions{}, fmt.Errorf("Usage: nana work start <github-issue-or-pr-url>\n\n%s", GithubWorkHelp)
 	}
 	reviewer := "@me"
 	requestedConsiderations := []string{}
@@ -402,58 +285,58 @@ func parseGithubWorkOnStartArgs(args []string) (githubWorkOnStartOptions, error)
 			break
 		}
 		if isHelpToken(token) {
-			return githubWorkOnStartOptions{}, fmt.Errorf("Usage: nana work-on start <github-issue-or-pr-url>\n\n%s", GithubWorkOnHelp)
+			return githubWorkStartOptions{}, fmt.Errorf("Usage: nana work start <github-issue-or-pr-url>\n\n%s", GithubWorkHelp)
 		}
 		switch {
 		case token == "--reviewer":
 			value, err := requireFlagValue(args, index, token)
 			if err != nil {
-				return githubWorkOnStartOptions{}, err
+				return githubWorkStartOptions{}, err
 			}
 			reviewer = strings.TrimSpace(value)
 			if reviewer == "" {
-				return githubWorkOnStartOptions{}, fmt.Errorf("Missing value after --reviewer.\n%s", GithubWorkOnHelp)
+				return githubWorkStartOptions{}, fmt.Errorf("Missing value after --reviewer.\n%s", GithubWorkHelp)
 			}
 			index++
 		case strings.HasPrefix(token, "--reviewer="):
 			reviewer = strings.TrimSpace(strings.TrimPrefix(token, "--reviewer="))
 			if reviewer == "" {
-				return githubWorkOnStartOptions{}, fmt.Errorf("Missing value after --reviewer.\n%s", GithubWorkOnHelp)
+				return githubWorkStartOptions{}, fmt.Errorf("Missing value after --reviewer.\n%s", GithubWorkHelp)
 			}
 		case token == "--mode" || strings.HasPrefix(token, "--mode="):
-			return githubWorkOnStartOptions{}, fmt.Errorf("`--mode` has been removed. Use `--considerations` only.")
+			return githubWorkStartOptions{}, fmt.Errorf("`--mode` has been removed. Use `--considerations` only.")
 		case token == "--considerations":
 			value, err := requireFlagValue(args, index, token)
 			if err != nil {
-				return githubWorkOnStartOptions{}, err
+				return githubWorkStartOptions{}, err
 			}
 			parsed, err := parseGithubConsiderations(value, token)
 			if err != nil {
-				return githubWorkOnStartOptions{}, err
+				return githubWorkStartOptions{}, err
 			}
 			requestedConsiderations = parsed
 			index++
 		case strings.HasPrefix(token, "--considerations="):
 			parsed, err := parseGithubConsiderations(strings.TrimPrefix(token, "--considerations="), "--considerations")
 			if err != nil {
-				return githubWorkOnStartOptions{}, err
+				return githubWorkStartOptions{}, err
 			}
 			requestedConsiderations = parsed
 		case token == "--role-layout":
 			value, err := requireFlagValue(args, index, token)
 			if err != nil {
-				return githubWorkOnStartOptions{}, err
+				return githubWorkStartOptions{}, err
 			}
 			parsed, err := parseGithubRoleLayout(value, token)
 			if err != nil {
-				return githubWorkOnStartOptions{}, err
+				return githubWorkStartOptions{}, err
 			}
 			roleLayout = parsed
 			index++
 		case strings.HasPrefix(token, "--role-layout="):
 			parsed, err := parseGithubRoleLayout(strings.TrimPrefix(token, "--role-layout="), "--role-layout")
 			if err != nil {
-				return githubWorkOnStartOptions{}, err
+				return githubWorkStartOptions{}, err
 			}
 			roleLayout = parsed
 		case token == "--new-pr":
@@ -465,7 +348,7 @@ func parseGithubWorkOnStartArgs(args []string) (githubWorkOnStartOptions, error)
 		case token == "--repo":
 			value, err := requireFlagValue(args, index, token)
 			if err != nil {
-				return githubWorkOnStartOptions{}, err
+				return githubWorkStartOptions{}, err
 			}
 			repoSlug = strings.TrimSpace(value)
 			index++
@@ -474,11 +357,11 @@ func parseGithubWorkOnStartArgs(args []string) (githubWorkOnStartOptions, error)
 		case token == "--issue":
 			value, err := requireFlagValue(args, index, token)
 			if err != nil {
-				return githubWorkOnStartOptions{}, err
+				return githubWorkStartOptions{}, err
 			}
 			parsed, parseErr := strconv.Atoi(strings.TrimSpace(value))
 			if parseErr != nil || parsed <= 0 {
-				return githubWorkOnStartOptions{}, fmt.Errorf("Invalid --issue value: %s.\n%s", value, GithubWorkOnHelp)
+				return githubWorkStartOptions{}, fmt.Errorf("Invalid --issue value: %s.\n%s", value, GithubWorkHelp)
 			}
 			issueNumber = parsed
 			index++
@@ -486,17 +369,17 @@ func parseGithubWorkOnStartArgs(args []string) (githubWorkOnStartOptions, error)
 			value := strings.TrimSpace(strings.TrimPrefix(token, "--issue="))
 			parsed, parseErr := strconv.Atoi(value)
 			if parseErr != nil || parsed <= 0 {
-				return githubWorkOnStartOptions{}, fmt.Errorf("Invalid --issue value: %s.\n%s", value, GithubWorkOnHelp)
+				return githubWorkStartOptions{}, fmt.Errorf("Invalid --issue value: %s.\n%s", value, GithubWorkHelp)
 			}
 			issueNumber = parsed
 		case token == "--pr":
 			value, err := requireFlagValue(args, index, token)
 			if err != nil {
-				return githubWorkOnStartOptions{}, err
+				return githubWorkStartOptions{}, err
 			}
 			parsed, parseErr := strconv.Atoi(strings.TrimSpace(value))
 			if parseErr != nil || parsed <= 0 {
-				return githubWorkOnStartOptions{}, fmt.Errorf("Invalid --pr value: %s.\n%s", value, GithubWorkOnHelp)
+				return githubWorkStartOptions{}, fmt.Errorf("Invalid --pr value: %s.\n%s", value, GithubWorkHelp)
 			}
 			prNumber = parsed
 			index++
@@ -504,7 +387,7 @@ func parseGithubWorkOnStartArgs(args []string) (githubWorkOnStartOptions, error)
 			value := strings.TrimSpace(strings.TrimPrefix(token, "--pr="))
 			parsed, parseErr := strconv.Atoi(value)
 			if parseErr != nil || parsed <= 0 {
-				return githubWorkOnStartOptions{}, fmt.Errorf("Invalid --pr value: %s.\n%s", value, GithubWorkOnHelp)
+				return githubWorkStartOptions{}, fmt.Errorf("Invalid --pr value: %s.\n%s", value, GithubWorkHelp)
 			}
 			prNumber = parsed
 		}
@@ -514,11 +397,11 @@ func parseGithubWorkOnStartArgs(args []string) (githubWorkOnStartOptions, error)
 	if targetIndex >= 0 {
 		target, err = parseGithubTargetURL(args[targetIndex])
 		if err != nil {
-			return githubWorkOnStartOptions{}, err
+			return githubWorkStartOptions{}, err
 		}
 	} else {
 		if !validRepoSlug(repoSlug) || ((issueNumber > 0) == (prNumber > 0)) {
-			return githubWorkOnStartOptions{}, fmt.Errorf("Usage: nana work-on start <github-issue-or-pr-url>\n\n%s", GithubWorkOnHelp)
+			return githubWorkStartOptions{}, fmt.Errorf("Usage: nana work start <github-issue-or-pr-url>\n\n%s", GithubWorkHelp)
 		}
 		resource := "issues"
 		number := issueNumber
@@ -528,10 +411,10 @@ func parseGithubWorkOnStartArgs(args []string) (githubWorkOnStartOptions, error)
 		}
 		target, err = parseGithubTargetURL(fmt.Sprintf("https://github.com/%s/%s/%d", repoSlug, resource, number))
 		if err != nil {
-			return githubWorkOnStartOptions{}, err
+			return githubWorkStartOptions{}, err
 		}
 	}
-	return githubWorkOnStartOptions{
+	return githubWorkStartOptions{
 		Target:                  target,
 		Reviewer:                reviewer,
 		RequestedConsiderations: requestedConsiderations,
@@ -542,25 +425,13 @@ func parseGithubWorkOnStartArgs(args []string) (githubWorkOnStartOptions, error)
 	}, nil
 }
 
-func normalizeGithubWorkOnSyncArgs(args []string) ([]string, error) {
+func parseGithubWorkSyncArgs(args []string) (githubWorkSyncOptions, error) {
 	if len(args) < 1 || args[0] != "sync" {
-		return nil, fmt.Errorf("Usage: nana work-on sync [--run-id <id> | --last] [--reviewer <login|@me>] [--resume-last] [codex-args...]\n\n%s", GithubWorkOnHelp)
+		return githubWorkSyncOptions{}, fmt.Errorf("Usage: nana work sync [--run-id <id> | --last] [--reviewer <login|@me>] [--resume-last] [codex-args...]\n\n%s", GithubWorkHelp)
 	}
-	selection, err := normalizeGithubWorkOnRunSelectionArgs(args, false)
+	runSelection, err := normalizeGithubWorkRunSelectionArgs(args, false)
 	if err != nil {
-		return nil, err
-	}
-	_ = selection
-	return append([]string{"work-on"}, args...), nil
-}
-
-func parseGithubWorkOnSyncArgs(args []string) (githubWorkOnSyncOptions, error) {
-	if len(args) < 1 || args[0] != "sync" {
-		return githubWorkOnSyncOptions{}, fmt.Errorf("Usage: nana work-on sync [--run-id <id> | --last] [--reviewer <login|@me>] [--resume-last] [codex-args...]\n\n%s", GithubWorkOnHelp)
-	}
-	runSelection, err := normalizeGithubWorkOnRunSelectionArgs(args, false)
-	if err != nil {
-		return githubWorkOnSyncOptions{}, err
+		return githubWorkSyncOptions{}, err
 	}
 	useLast := runSelection == "<last>"
 	runID := ""
@@ -581,29 +452,29 @@ func parseGithubWorkOnSyncArgs(args []string) (githubWorkOnSyncOptions, error) {
 		case token == "--reviewer":
 			value, err := requireFlagValue(args, index, token)
 			if err != nil {
-				return githubWorkOnSyncOptions{}, err
+				return githubWorkSyncOptions{}, err
 			}
 			reviewer = strings.TrimSpace(value)
 			if reviewer == "" {
-				return githubWorkOnSyncOptions{}, fmt.Errorf("Missing value after --reviewer.\n%s", GithubWorkOnHelp)
+				return githubWorkSyncOptions{}, fmt.Errorf("Missing value after --reviewer.\n%s", GithubWorkHelp)
 			}
 			index++
 		case strings.HasPrefix(token, "--reviewer="):
 			reviewer = strings.TrimSpace(strings.TrimPrefix(token, "--reviewer="))
 			if reviewer == "" {
-				return githubWorkOnSyncOptions{}, fmt.Errorf("Missing value after --reviewer.\n%s", GithubWorkOnHelp)
+				return githubWorkSyncOptions{}, fmt.Errorf("Missing value after --reviewer.\n%s", GithubWorkHelp)
 			}
 		case token == "--resume-last":
 			resumeLast = true
 		case strings.HasPrefix(token, "https://github.com/"):
 			target, err := parseGithubTargetURL(token)
 			if err != nil {
-				return githubWorkOnSyncOptions{}, err
+				return githubWorkSyncOptions{}, err
 			}
 			feedbackTargetURL = githubCanonicalTargetURL(target)
 		}
 	}
-	return githubWorkOnSyncOptions{
+	return githubWorkSyncOptions{
 		RunID:             runID,
 		UseLast:           useLast,
 		Reviewer:          reviewer,
@@ -613,7 +484,7 @@ func parseGithubWorkOnSyncArgs(args []string) (githubWorkOnSyncOptions, error) {
 	}, nil
 }
 
-func normalizeGithubWorkOnRunSelectionArgs(args []string, requireRunSelection bool) (string, error) {
+func normalizeGithubWorkRunSelectionArgs(args []string, requireRunSelection bool) (string, error) {
 	runID := ""
 	useLast := false
 	for index := 1; index < len(args); index++ {
@@ -622,7 +493,7 @@ func normalizeGithubWorkOnRunSelectionArgs(args []string, requireRunSelection bo
 			break
 		}
 		if isHelpToken(token) {
-			fmt.Fprint(os.Stdout, GithubWorkOnHelp)
+			fmt.Fprint(os.Stdout, GithubWorkHelp)
 			return "", nil
 		}
 		switch {
@@ -633,13 +504,13 @@ func normalizeGithubWorkOnRunSelectionArgs(args []string, requireRunSelection bo
 			}
 			runID = strings.TrimSpace(value)
 			if runID == "" {
-				return "", fmt.Errorf("Missing value after --run-id.\n%s", GithubWorkOnHelp)
+				return "", fmt.Errorf("Missing value after --run-id.\n%s", GithubWorkHelp)
 			}
 			index++
 		case strings.HasPrefix(token, "--run-id="):
 			runID = strings.TrimSpace(strings.TrimPrefix(token, "--run-id="))
 			if runID == "" {
-				return "", fmt.Errorf("Missing value after --run-id.\n%s", GithubWorkOnHelp)
+				return "", fmt.Errorf("Missing value after --run-id.\n%s", GithubWorkHelp)
 			}
 		case token == "--last":
 			useLast = true
@@ -657,10 +528,10 @@ func normalizeGithubWorkOnRunSelectionArgs(args []string, requireRunSelection bo
 		}
 	}
 	if runID != "" && useLast {
-		return "", fmt.Errorf("Use either --run-id <id> or --last, not both.\n%s", GithubWorkOnHelp)
+		return "", fmt.Errorf("Use either --run-id <id> or --last, not both.\n%s", GithubWorkHelp)
 	}
 	if requireRunSelection && runID == "" && !useLast {
-		return "", fmt.Errorf("Usage: nana work-on verify-refresh [--run-id <id> | --last]\n\n%s", GithubWorkOnHelp)
+		return "", fmt.Errorf("Usage: nana work verify-refresh [--run-id <id> | --last]\n\n%s", GithubWorkHelp)
 	}
 	if runID != "" {
 		return runID, nil
@@ -671,14 +542,14 @@ func normalizeGithubWorkOnRunSelectionArgs(args []string, requireRunSelection bo
 	return "", nil
 }
 
-func parseGithubWorkOnLaneExecArgs(args []string) (string, string, string, []string, error) {
+func parseGithubWorkLaneExecArgs(args []string) (string, string, string, []string, error) {
 	if len(args) < 2 {
-		return "", "", "", nil, fmt.Errorf("Usage: nana work-on lane-exec --run-id <id>|--last --lane <alias> [--task <text>] [-- codex-args...]\n\n%s", GithubWorkOnHelp)
+		return "", "", "", nil, fmt.Errorf("Usage: nana work lane-exec --run-id <id>|--last --lane <alias> [--task <text>] [-- codex-args...]\n\n%s", GithubWorkHelp)
 	}
 	laneAlias := ""
 	task := ""
 	codexArgs := []string{}
-	runSelection, err := normalizeGithubWorkOnRunSelectionArgs(args, true)
+	runSelection, err := normalizeGithubWorkRunSelectionArgs(args, true)
 	if err != nil {
 		return "", "", "", nil, err
 	}
@@ -710,7 +581,7 @@ func parseGithubWorkOnLaneExecArgs(args []string) (string, string, string, []str
 		}
 	}
 	if laneAlias == "" {
-		return "", "", "", nil, fmt.Errorf("Usage: nana work-on lane-exec --run-id <id>|--last --lane <alias> [--task <text>] [-- codex-args...]\n\n%s", GithubWorkOnHelp)
+		return "", "", "", nil, fmt.Errorf("Usage: nana work lane-exec --run-id <id>|--last --lane <alias> [--task <text>] [-- codex-args...]\n\n%s", GithubWorkHelp)
 	}
 	return runSelection, laneAlias, task, codexArgs, nil
 }
@@ -976,8 +847,8 @@ func ResolveGithubRunIDForTargetURL(targetURL string) (string, error) {
 	return strings.TrimSpace(manifest.RunID), nil
 }
 
-func findLatestRunManifestForTargetURL(target parsedGithubTarget) (*githubWorkonManifest, error) {
-	reposRoot := filepath.Join(githubNanaHome(), "repos")
+func findLatestRunManifestForTargetURL(target parsedGithubTarget) (*githubWorkManifest, error) {
+	reposRoot := githubWorkReposRoot()
 	entries, err := os.ReadDir(reposRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -986,7 +857,7 @@ func findLatestRunManifestForTargetURL(target parsedGithubTarget) (*githubWorkon
 		return nil, err
 	}
 	normalizedTargetURL := githubCanonicalTargetURL(target)
-	var latest *githubWorkonManifest
+	var latest *githubWorkManifest
 	for _, ownerEntry := range entries {
 		if !ownerEntry.IsDir() {
 			continue
@@ -1011,7 +882,7 @@ func findLatestRunManifestForTargetURL(target parsedGithubTarget) (*githubWorkon
 				if !runEntry.IsDir() {
 					continue
 				}
-				manifest, err := readGithubWorkonManifest(filepath.Join(runsDir, runEntry.Name(), "manifest.json"))
+				manifest, err := readGithubWorkManifest(filepath.Join(runsDir, runEntry.Name(), "manifest.json"))
 				if err != nil {
 					continue
 				}
@@ -1032,8 +903,8 @@ func findLatestRunManifestForTargetURL(target parsedGithubTarget) (*githubWorkon
 	return latest, nil
 }
 
-func findLatestRunManifestForPRSandboxLink(target parsedGithubTarget) (*githubWorkonManifest, error) {
-	prSandboxPath := githubSandboxPath(target.repoSlug, buildGithubTargetSandboxID("pr", target.number))
+func findLatestRunManifestForPRSandboxLink(target parsedGithubTarget) (*githubWorkManifest, error) {
+	prSandboxPath := githubWorkSandboxPath(target.repoSlug, buildGithubTargetSandboxID("pr", target.number))
 	info, err := os.Lstat(prSandboxPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1055,8 +926,8 @@ func findLatestRunManifestForPRSandboxLink(target parsedGithubTarget) (*githubWo
 	return findLatestRunManifestForSandbox(target.repoSlug, metadata.SandboxID)
 }
 
-func findLatestRunManifestForSandbox(repoSlug string, sandboxID string) (*githubWorkonManifest, error) {
-	runsDir := filepath.Join(githubRepoRoot(repoSlug), "runs")
+func findLatestRunManifestForSandbox(repoSlug string, sandboxID string) (*githubWorkManifest, error) {
+	runsDir := filepath.Join(githubWorkRepoRoot(repoSlug), "runs")
 	entries, err := os.ReadDir(runsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1064,12 +935,12 @@ func findLatestRunManifestForSandbox(repoSlug string, sandboxID string) (*github
 		}
 		return nil, err
 	}
-	var latest *githubWorkonManifest
+	var latest *githubWorkManifest
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		manifest, err := readGithubWorkonManifest(filepath.Join(runsDir, entry.Name(), "manifest.json"))
+		manifest, err := readGithubWorkManifest(filepath.Join(runsDir, entry.Name(), "manifest.json"))
 		if err != nil || strings.TrimSpace(manifest.SandboxID) != sandboxID {
 			continue
 		}
@@ -1081,10 +952,10 @@ func findLatestRunManifestForSandbox(repoSlug string, sandboxID string) (*github
 	return latest, nil
 }
 
-func readGithubWorkonManifest(path string) (githubWorkonManifest, error) {
-	var manifest githubWorkonManifest
+func readGithubWorkManifest(path string) (githubWorkManifest, error) {
+	var manifest githubWorkManifest
 	if err := readGithubJSON(path, &manifest); err != nil {
-		return githubWorkonManifest{}, err
+		return githubWorkManifest{}, err
 	}
 	return manifest, nil
 }

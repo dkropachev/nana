@@ -14,7 +14,7 @@ Usage:
   nana repo help
 
 Notes:
-  - Usually you do not need to run this manually; Nana performs onboarding automatically when workflows such as ` + "`nana work-local start`" + ` begin.
+  - Usually you do not need to run this manually; Nana performs onboarding automatically when workflows such as ` + "`nana work start --task ...`" + ` begin.
   - Run it manually when you want to inspect the detected lint/unit/integration/benchmark split before a long run, after changing Makefile/build scripts, or when a warning suggests the repo should split unit/integration/benchmark targets more cleanly.
 `
 

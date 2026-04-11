@@ -28,12 +28,12 @@ type githubFeedbackSnapshot struct {
 	ReviewComments []githubPullReviewCommentPayload
 }
 
-func syncGithubWorkOn(options githubWorkOnSyncOptions) error {
+func syncGithubWork(options githubWorkSyncOptions) error {
 	manifestPath, _, err := resolveGithubRunManifestPath(options.RunID, options.UseLast)
 	if err != nil {
 		return err
 	}
-	manifest, err := readGithubWorkonManifest(manifestPath)
+	manifest, err := readGithubWorkManifest(manifestPath)
 	if err != nil {
 		return err
 	}
@@ -82,6 +82,9 @@ func syncGithubWorkOn(options githubWorkOnSyncOptions) error {
 	if err := writeGithubJSON(manifestPath, manifest); err != nil {
 		return err
 	}
+	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+		return err
+	}
 	runDir := filepath.Dir(manifestPath)
 	feedbackInstructionsPath := filepath.Join(runDir, "feedback-instructions.md")
 	if err := os.WriteFile(feedbackInstructionsPath, []byte(buildGithubFeedbackInstructions(manifest, reviewer, newFeedback)), 0o644); err != nil {
@@ -124,7 +127,7 @@ func syncGithubWorkOn(options githubWorkOnSyncOptions) error {
 	return runErr
 }
 
-func fetchGithubFeedbackSnapshot(manifest githubWorkonManifest, reviewer string, apiBaseURL string, token string, targetOverrideURL string) (githubFeedbackSnapshot, error) {
+func fetchGithubFeedbackSnapshot(manifest githubWorkManifest, reviewer string, apiBaseURL string, token string, targetOverrideURL string) (githubFeedbackSnapshot, error) {
 	effectiveIssueNumber := manifest.TargetNumber
 	effectivePRNumber := 0
 	if manifest.TargetKind == "pr" {
@@ -183,7 +186,7 @@ func fetchGithubFeedbackSnapshot(manifest githubWorkonManifest, reviewer string,
 	}, nil
 }
 
-func filterGithubNewFeedback(snapshot githubFeedbackSnapshot, manifest githubWorkonManifest) githubFeedbackSnapshot {
+func filterGithubNewFeedback(snapshot githubFeedbackSnapshot, manifest githubWorkManifest) githubFeedbackSnapshot {
 	filtered := githubFeedbackSnapshot{}
 	for _, comment := range snapshot.IssueComments {
 		if comment.ID > manifest.LastSeenIssueCommentID {
@@ -209,7 +212,7 @@ type githubFeedbackCursor struct {
 	reviewCommentID int
 }
 
-func advanceGithubFeedbackCursor(snapshot githubFeedbackSnapshot, manifest githubWorkonManifest) githubFeedbackCursor {
+func advanceGithubFeedbackCursor(snapshot githubFeedbackSnapshot, manifest githubWorkManifest) githubFeedbackCursor {
 	cursor := githubFeedbackCursor{
 		issueCommentID:  manifest.LastSeenIssueCommentID,
 		reviewID:        manifest.LastSeenReviewID,
@@ -233,7 +236,7 @@ func advanceGithubFeedbackCursor(snapshot githubFeedbackSnapshot, manifest githu
 	return cursor
 }
 
-func buildGithubFeedbackInstructions(manifest githubWorkonManifest, reviewer string, feedback githubFeedbackSnapshot) string {
+func buildGithubFeedbackInstructions(manifest githubWorkManifest, reviewer string, feedback githubFeedbackSnapshot) string {
 	lines := []string{
 		"# NANA Work-on Feedback",
 		"",

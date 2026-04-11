@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func startGithubWorkOn(options githubWorkOnStartOptions) error {
+func startGithubWork(options githubWorkStartOptions) error {
 	apiBaseURL := strings.TrimSpace(os.Getenv("GITHUB_API_URL"))
 	if apiBaseURL == "" {
 		apiBaseURL = "https://api.github.com"
@@ -85,7 +85,7 @@ func startGithubWorkOn(options githubWorkOnStartOptions) error {
 	}
 	pipeline := buildGithubPipeline(activeConsiderations, roleLayout)
 	convertedPipeline := convertGithubLanes(pipeline)
-	manifest := githubWorkonManifest{
+	manifest := githubWorkManifest{
 		Version:                 3,
 		RunID:                   runID,
 		CreatedAt:               now.Format(time.RFC3339),
@@ -121,6 +121,9 @@ func startGithubWorkOn(options githubWorkOnStartOptions) error {
 	if err := writeGithubJSON(manifestPath, manifest); err != nil {
 		return err
 	}
+	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+		return err
+	}
 	startInstructionsPath := filepath.Join(runDir, "start-instructions.md")
 	if err := os.WriteFile(startInstructionsPath, []byte(buildGithubStartInstructions(manifest)), 0o644); err != nil {
 		return err
@@ -128,7 +131,7 @@ func startGithubWorkOn(options githubWorkOnStartOptions) error {
 	if err := writeGithubJSON(filepath.Join(paths.RepoRoot, "latest-run.json"), map[string]string{"repo_root": paths.RepoRoot, "run_id": runID}); err != nil {
 		return err
 	}
-	if err := writeGithubJSON(filepath.Join(githubNanaHome(), "github-workon", "latest-run.json"), map[string]string{"repo_root": paths.RepoRoot, "run_id": runID}); err != nil {
+	if err := writeGithubJSON(githubWorkLatestRunPath(), map[string]string{"repo_root": paths.RepoRoot, "run_id": runID}); err != nil {
 		return err
 	}
 
@@ -210,7 +213,7 @@ func convertGithubLanes(lanes []githubLane) []githubPipelineLane {
 	return out
 }
 
-func buildGithubStartInstructions(manifest githubWorkonManifest) string {
+func buildGithubStartInstructions(manifest githubWorkManifest) string {
 	lines := []string{
 		"# NANA Work-on Start",
 		"",

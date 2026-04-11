@@ -101,6 +101,8 @@ func ResolveCLIInvocation(args []string) CLIInvocation {
 		return CLIInvocation{Command: "review-rules", LaunchArgs: nil}
 	case "repo":
 		return CLIInvocation{Command: "repo", LaunchArgs: nil}
+	case "work":
+		return CLIInvocation{Command: "work", LaunchArgs: nil}
 	case "work-on":
 		return CLIInvocation{Command: "work-on", LaunchArgs: nil}
 	case "work-local":

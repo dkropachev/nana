@@ -36,8 +36,7 @@ Go-native commands:
   nana doctor
   nana investigate
   nana repo onboard
-  nana work-on
-  nana work-local
+  nana work
 `
 
 func main() {
@@ -48,6 +47,9 @@ func main() {
 			return
 		}
 		fmt.Fprint(os.Stdout, helpText)
+		return
+	}
+	if gocli.MaybeHandleWorkHelp(invocation.Command, args) {
 		return
 	}
 	if gocli.MaybeHandleGithubHelp(invocation.Command, args) {
@@ -199,15 +201,13 @@ func main() {
 			exitWithError(err)
 		}
 		return
-	case "work-on":
-		if _, err := gocli.GithubWorkOnCommand(mustGetwd(), args[1:]); err != nil {
+	case "work":
+		if err := gocli.Work(mustGetwd(), args[1:]); err != nil {
 			exitWithError(err)
 		}
 		return
-	case "work-local":
-		if err := gocli.WorkLocal(mustGetwd(), args[1:]); err != nil {
-			exitWithError(err)
-		}
+	case "work-on", "work-local":
+		exitWithError(gocli.WorkLegacyCommandError(invocation.Command))
 		return
 	case "review-rules":
 		if err := gocli.GithubReviewRules(mustGetwd(), args[1:]); err != nil {
@@ -238,6 +238,9 @@ func handleNestedHelp(args []string) bool {
 	command := args[0]
 	if command == "investigate" {
 		fmt.Fprint(os.Stdout, gocli.InvestigateHelp)
+		return true
+	}
+	if gocli.MaybeHandleWorkHelp(command, []string{command, "help"}) {
 		return true
 	}
 	if gocli.MaybeHandleGithubHelp(command, []string{command, "help"}) {
@@ -287,8 +290,16 @@ func handleNestedHelp(args []string) bool {
 	case "repo":
 		mustHandleHelp(gocli.Repo(cwd, []string{"help"}))
 		return true
+	case "work":
+		mustHandleHelp(gocli.Work(cwd, []string{"help"}))
+		return true
 	case "work-local":
-		mustHandleHelp(gocli.WorkLocal(cwd, []string{"help"}))
+		fmt.Fprintf(os.Stdout, "nana work-local has been replaced by `nana work`.\n\n")
+		mustHandleHelp(gocli.Work(cwd, []string{"help"}))
+		return true
+	case "work-on":
+		fmt.Fprintf(os.Stdout, "nana work-on has been replaced by `nana work`.\n\n")
+		mustHandleHelp(gocli.Work(cwd, []string{"help"}))
 		return true
 	}
 

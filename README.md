@@ -11,7 +11,7 @@
 [![Discord](https://img.shields.io/discord/1452487457085063218?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/PUwSMR9XNk)
 
 **Website:** https://yeachan-heo.github.io/nana-website/  
-**Docs:** [Getting Started](./docs/getting-started.html) · [Agents](./docs/agents.html) · [Skills](./docs/skills.html) · [Integrations](./docs/integrations.html) · [Work-local](./docs/work-local.md) · [Demo](./DEMO.md) · [OpenClaw guide](./docs/openclaw-integration.md)
+**Docs:** [Getting Started](./docs/getting-started.html) · [Agents](./docs/agents.html) · [Skills](./docs/skills.html) · [Integrations](./docs/integrations.html) · [Work](./docs/work.md) · [Demo](./DEMO.md) · [OpenClaw guide](./docs/openclaw-integration.md)
 
 `nana` is a workflow layer for [OpenAI Codex CLI](https://github.com/openai/codex).
 
@@ -65,11 +65,11 @@ $deep-interview "clarify the authentication change"
 $ralplan "approve the auth plan and review tradeoffs"
 nana investigate "why is CI failing?"
 nana review https://github.com/acme/widget/pull/77
-nana work-on start https://github.com/acme/widget/issues/42
+nana work start https://github.com/acme/widget/issues/42
 ```
 
 That is the main path.
-Start NANA strongly, clarify first when needed, approve the plan, then move into direct implementation, GitHub review, or `work-on`.
+Start NANA strongly, clarify first when needed, approve the plan, then move into direct implementation, GitHub review, or `work`.
 
 ## What NANA is for
 
@@ -103,8 +103,8 @@ Then try the canonical workflow:
 $deep-interview "clarify the authentication change"
 $ralplan "approve the safest implementation path"
 nana review https://github.com/acme/widget/pull/77
-nana work-on start https://github.com/acme/widget/issues/42
-nana work-local start --task "execute the approved local refactor plan"
+nana work start https://github.com/acme/widget/issues/42
+nana work start --task "execute the approved local refactor plan"
 ```
 
 ## A simple mental model
@@ -125,13 +125,13 @@ Most users should think of NANA as **better task routing + better workflow + bet
 2. Launch with `nana --madmax --high`
 3. Use `$deep-interview "..."` when the request or boundaries are still unclear
 4. Use `$ralplan "..."` to approve the plan and review tradeoffs
-5. Continue with direct implementation, `nana review`, `nana work-on`, or `nana work-local`
+5. Continue with direct implementation, `nana review`, or `nana work`
 
 ## Recommended workflow
 
 1. `$deep-interview` — clarify scope when the request or boundaries are still vague.
 2. `$ralplan` — turn that clarified scope into an approved architecture and implementation plan.
-3. Continue with direct implementation, `nana work-local`, or the GitHub-oriented surfaces like `nana review` and `nana work-on`.
+3. Continue with direct implementation, `nana work`, or the GitHub-oriented surfaces like `nana review`.
 
 ## Common in-session surfaces
 
@@ -142,15 +142,15 @@ Most users should think of NANA as **better task routing + better workflow + bet
 | `nana investigate "..."` | source-backed investigation with proof-linked JSON reports and validator enforcement |
 | `nana investigate onboard` | bootstrap the dedicated investigate Codex config |
 | `nana investigate doctor` | ask Codex to probe the MCPs configured in the investigate config |
-| `nana work-local start --task "..."` | long-running local plan execution in a managed sandbox with iterative verify/review/hardening |
-| `nana work-local start --task "..." --grouping-policy path` | force deterministic path-based validation grouping |
-| `nana work-local logs --last` | inspect the current iteration logs and verification artifacts in one view |
-| `nana work-local status --last --json` | inspect machine-readable run and validation state from SQLite |
+| `nana work start --task "..."` | long-running local plan execution in a managed sandbox with iterative verify/review/hardening |
+| `nana work start --task "..." --grouping-policy path` | force deterministic path-based validation grouping |
+| `nana work logs --last` | inspect the current iteration logs and verification artifacts in one view |
+| `nana work status --last --json` | inspect machine-readable run and validation state from SQLite |
 | `nana review <pr-url>` | reviewing external pull requests with persisted findings |
-| `nana work-on start <issue-or-pr-url>` | GitHub-targeted implementation and review-sync workflows |
+| `nana work start <issue-or-pr-url>` | GitHub-targeted implementation and review-sync workflows |
 | `/skills` | browsing installed skills and supporting helpers |
 
-`nana work-local` stores its authoritative runtime state in `~/.nana/local-work/state.db`, not inside the source repo. Run artifacts still live under `~/.nana/local-work/repos/<repo-id>/runs/<run-id>/...`, but old JSON state files such as `manifest.json`, `runtime-state.json`, `finding-history.json`, `repo.json`, `latest-run.json`, and `index/runs.json` are not part of the current state model and are ignored. This SQLite-backed state layer currently assumes the repo’s Go 1.25 baseline. See [docs/work-local.md](./docs/work-local.md) for storage, resume, validation grouping controls, and troubleshooting details.
+`nana work` stores its authoritative runtime state in `~/.nana/work/state.db`, not inside the source repo. Run artifacts live under `~/.nana/work/repos/<repo-id-or-owner/repo>/runs/<run-id>/...`, and old JSON state files such as `manifest.json`, `runtime-state.json`, `finding-history.json`, `repo.json`, `latest-run.json`, and `index/runs.json` are ignored if they still exist on disk. This SQLite-backed state layer currently assumes the repo’s Go 1.25 baseline. See [docs/work.md](./docs/work.md) for storage, resume, validation grouping controls, and GitHub-backed run details.
 
 ## Investigate
 
@@ -186,9 +186,9 @@ GitHub issue preflight still exists separately:
 nana issue investigate https://github.com/acme/widget/issues/42
 ```
 
-## GitHub Work-on Overrides
+## GitHub Work Overrides
 
-If you use `nana work-on`, you can tune repo-specific lane invalidation without changing NANA code.
+If you use `nana work`, you can tune repo-specific lane invalidation without changing NANA code.
 
 Concern overrides:
 - `.nana/work-on-concerns.json`
@@ -225,11 +225,11 @@ What they do:
 - concern overrides refine which files invalidate a hardening lane
 - hot-path API overrides refine when `perf` lanes rerun
 - `.nana/...` takes precedence over `.github/...`
-- malformed override files are ignored for execution but show up as diagnostics in `work-on` runtime artifacts and retrospectives
+- malformed override files are ignored for execution but show up as diagnostics in `work` runtime artifacts and retrospectives
 
 ## PR Review Rules
 
-NANA can mine repeated PR review guidance into repo-scoped rules and feed approved rules back into related `work-on` roles.
+NANA can mine repeated PR review guidance into repo-scoped rules and feed approved rules back into related `work` roles.
 
 Commands:
 
@@ -252,16 +252,16 @@ Behavior:
 - `scan` reads PR reviews and review comments, includes reviewed file/path context when available, and writes pending rule candidates
 - global config controls the default extraction mode for all repos
 - global and per-repo reviewer policy can trust specific reviewers, block specific reviewers, and require a minimum number of distinct reviewers
-- per-repo mode is set with `nana work-on defaults set <owner/repo> --review-rules-mode <manual|automatic>`
-- per-repo reviewer policy is set with `nana work-on defaults set <owner/repo> --review-rules-trusted-reviewers <a,b>|none --review-rules-blocked-reviewers <a,b>|none --review-rules-min-distinct-reviewers <n>`
+- per-repo mode is set with `nana work defaults set <owner/repo> --review-rules-mode <manual|automatic>`
+- per-repo reviewer policy is set with `nana work defaults set <owner/repo> --review-rules-trusted-reviewers <a,b>|none --review-rules-blocked-reviewers <a,b>|none --review-rules-min-distinct-reviewers <n>`
 - `manual` mode keeps extracted rules as pending candidates until you approve them
-- `automatic` mode auto-approves extracted rules and refreshes them during `issue investigate`, `work-on start`, and `work-on sync`
+- `automatic` mode auto-approves extracted rules and refreshes them during `issue investigate`, `work start`, and `work sync`
 - only repeated high-signal guidance becomes a pending candidate
 - extracted rules persist an origin/reason summary plus code-context provenance (`pr_head_sha`, `current_checkout`, or `unknown`)
 - `approve` promotes candidates into approved rules
 - `disable`, `enable`, and `archive` manage rule lifecycle without deleting evidence
 - `explain` shows the stored evidence and provenance for a rule
-- approved rules are injected into relevant `work-on` start, feedback, and lane instructions
+- approved rules are injected into relevant `work` start, feedback, and lane instructions
 - pending candidates are not injected until approved
 
 ## Advanced / operator surfaces

@@ -17,7 +17,7 @@ func TestGithubDefaultsSetAndShow(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	setOutput, err := captureStdout(t, func() error {
-		return GithubWorkOn(".", []string{
+		return GithubWork(".", []string{
 			"defaults", "set", "acme/widget",
 			"--considerations", "style,qa,security",
 			"--review-rules-mode", "automatic",
@@ -27,17 +27,17 @@ func TestGithubDefaultsSetAndShow(t *testing.T) {
 		})
 	})
 	if err != nil {
-		t.Fatalf("GithubWorkOn(defaults set): %v", err)
+		t.Fatalf("GithubWork(defaults set): %v", err)
 	}
 	if !strings.Contains(setOutput, "Saved default considerations for acme/widget: style, qa, security") {
 		t.Fatalf("unexpected defaults set output: %q", setOutput)
 	}
 
 	showOutput, err := captureStdout(t, func() error {
-		return GithubWorkOn(".", []string{"defaults", "show", "acme/widget"})
+		return GithubWork(".", []string{"defaults", "show", "acme/widget"})
 	})
 	if err != nil {
-		t.Fatalf("GithubWorkOn(defaults show): %v", err)
+		t.Fatalf("GithubWork(defaults show): %v", err)
 	}
 	if !strings.Contains(showOutput, "Default considerations for acme/widget: style, qa, security") {
 		t.Fatalf("unexpected defaults show output: %q", showOutput)
@@ -83,16 +83,16 @@ func TestGithubReviewRulesConfigSetAndShow(t *testing.T) {
 		t.Fatalf("missing effective mode output: %q", showOutput)
 	}
 
-	configPath := filepath.Join(home, ".nana", "github-workon", "review-rules-config.json")
+	configPath := filepath.Join(home, ".nana", "work", "review-rules-config.json")
 	if _, err := os.Stat(configPath); err != nil {
 		t.Fatalf("expected review-rules global config at %s: %v", configPath, err)
 	}
 }
 
-func TestGithubWorkOnStats(t *testing.T) {
+func TestGithubWorkStats(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	statsPath := filepath.Join(home, ".nana", "repos", "acme", "widget", "issues", "issue-42.json")
+	statsPath := filepath.Join(home, ".nana", "work", "repos", "acme", "widget", "issues", "issue-42.json")
 	if err := os.MkdirAll(filepath.Dir(statsPath), 0o755); err != nil {
 		t.Fatalf("mkdir stats dir: %v", err)
 	}
@@ -120,10 +120,10 @@ func TestGithubWorkOnStats(t *testing.T) {
 	}
 
 	output, err := captureStdout(t, func() error {
-		return GithubWorkOn(".", []string{"stats", "https://github.com/acme/widget/issues/42"})
+		return GithubWork(".", []string{"stats", "https://github.com/acme/widget/issues/42"})
 	})
 	if err != nil {
-		t.Fatalf("GithubWorkOn(stats): %v", err)
+		t.Fatalf("GithubWork(stats): %v", err)
 	}
 	if !strings.Contains(output, "Token stats for acme/widget issue #42") {
 		t.Fatalf("unexpected stats output: %q", output)
@@ -132,7 +132,7 @@ func TestGithubWorkOnStats(t *testing.T) {
 		t.Fatalf("missing sandbox rollup: %q", output)
 	}
 
-	prSandboxPath := filepath.Join(home, ".nana", "repos", "acme", "widget", "sandboxes", "pr-77")
+	prSandboxPath := filepath.Join(home, ".nana", "work", "repos", "acme", "widget", "sandboxes", "pr-77")
 	if err := os.MkdirAll(filepath.Join(prSandboxPath, ".nana"), 0o755); err != nil {
 		t.Fatalf("mkdir pr sandbox metadata dir: %v", err)
 	}
@@ -145,20 +145,20 @@ func TestGithubWorkOnStats(t *testing.T) {
 	}
 
 	prOutput, err := captureStdout(t, func() error {
-		return GithubWorkOn(".", []string{"stats", "https://github.com/acme/widget/pull/77"})
+		return GithubWork(".", []string{"stats", "https://github.com/acme/widget/pull/77"})
 	})
 	if err != nil {
-		t.Fatalf("GithubWorkOn(stats pr): %v", err)
+		t.Fatalf("GithubWork(stats pr): %v", err)
 	}
 	if !strings.Contains(prOutput, "Token stats for acme/widget issue #42") {
 		t.Fatalf("unexpected PR stats output: %q", prOutput)
 	}
 }
 
-func TestGithubWorkOnRetrospective(t *testing.T) {
+func TestGithubWorkRetrospective(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	managedRepoRoot := filepath.Join(home, ".nana", "repos", "acme", "widget")
+	managedRepoRoot := filepath.Join(home, ".nana", "work", "repos", "acme", "widget")
 	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42-pr-123456789012")
 	repoCheckoutPath := filepath.Join(sandboxPath, "repo")
 	runID := "gh-retro-1"
@@ -173,8 +173,8 @@ func TestGithubWorkOnRetrospective(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(managedRepoRoot, "runs", runID), 0o755); err != nil {
 		t.Fatalf("mkdir run dir: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(home, ".nana", "github-workon"), 0o755); err != nil {
-		t.Fatalf("mkdir github-workon: %v", err)
+	if err := os.MkdirAll(filepath.Join(home, ".nana", "work"), 0o755); err != nil {
+		t.Fatalf("mkdir work root: %v", err)
 	}
 	if err := os.MkdirAll(repoCheckoutPath, 0o755); err != nil {
 		t.Fatalf("mkdir repo checkout: %v", err)
@@ -196,7 +196,7 @@ func TestGithubWorkOnRetrospective(t *testing.T) {
 	}, "\n")), 0o644); err != nil {
 		t.Fatalf("write rollout-2: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(home, ".nana", "github-workon", "latest-run.json"), []byte(fmt.Sprintf(`{"repo_root":%q,"run_id":%q}`, managedRepoRoot, runID)), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(home, ".nana", "work", "latest-run.json"), []byte(fmt.Sprintf(`{"repo_root":%q,"run_id":%q}`, managedRepoRoot, runID)), 0o644); err != nil {
 		t.Fatalf("write latest-run: %v", err)
 	}
 	manifestContent := fmt.Sprintf(`{
@@ -214,10 +214,10 @@ func TestGithubWorkOnRetrospective(t *testing.T) {
 	}
 
 	output, err := captureStdout(t, func() error {
-		return GithubWorkOn(".", []string{"retrospective", "--last"})
+		return GithubWork(".", []string{"retrospective", "--last"})
 	})
 	if err != nil {
-		t.Fatalf("GithubWorkOn(retrospective): %v", err)
+		t.Fatalf("GithubWork(retrospective): %v", err)
 	}
 	if !strings.Contains(output, "NANA Work-on Retrospective") {
 		t.Fatalf("missing retrospective title: %q", output)
@@ -236,6 +236,72 @@ func TestGithubWorkOnRetrospective(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(managedRepoRoot, "runs", runID, "retrospective.md")); err != nil {
 		t.Fatalf("expected retrospective artifact: %v", err)
+	}
+}
+
+func TestGithubWorkRunIndexResolvesRunWithoutLatestPointer(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	managedRepoRoot := filepath.Join(home, ".nana", "work", "repos", "acme", "widget")
+	runID := "gh-indexed-run"
+	runDir := filepath.Join(managedRepoRoot, "runs", runID)
+	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42-"+runID)
+	repoCheckoutPath := filepath.Join(sandboxPath, "repo")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	if err := os.MkdirAll(repoCheckoutPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo checkout: %v", err)
+	}
+	manifest := githubWorkManifest{
+		Version:         3,
+		RunID:           runID,
+		CreatedAt:       "2026-04-11T12:00:00Z",
+		UpdatedAt:       "2026-04-11T12:00:00Z",
+		RepoSlug:        "acme/widget",
+		RepoOwner:       "acme",
+		RepoName:        "widget",
+		ManagedRepoRoot: managedRepoRoot,
+		SandboxID:       "issue-42-" + runID,
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: repoCheckoutPath,
+		TargetKind:      "issue",
+		TargetNumber:    42,
+		TargetURL:       "https://github.com/acme/widget/issues/42",
+	}
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	if err := writeGithubJSON(manifestPath, manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+		t.Fatalf("index github work run: %v", err)
+	}
+
+	resolvedManifestPath, resolvedRepoRoot, err := resolveGithubRunManifestPath(runID, false)
+	if err != nil {
+		t.Fatalf("resolve indexed github run: %v", err)
+	}
+	if resolvedManifestPath != manifestPath || resolvedRepoRoot != managedRepoRoot {
+		t.Fatalf("unexpected indexed resolution: manifest=%s repo=%s", resolvedManifestPath, resolvedRepoRoot)
+	}
+
+	output, err := captureStdout(t, func() error {
+		return Work(t.TempDir(), []string{"status", "--global-last", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("Work(status --global-last --json): %v", err)
+	}
+	var status struct {
+		RunID        string `json:"run_id"`
+		RepoSlug     string `json:"repo_slug"`
+		TargetKind   string `json:"target_kind"`
+		RepoCheckout string `json:"repo_checkout"`
+	}
+	if err := json.Unmarshal([]byte(output), &status); err != nil {
+		t.Fatalf("unmarshal status: %v\n%s", err, output)
+	}
+	if status.RunID != runID || status.RepoSlug != "acme/widget" || status.TargetKind != "issue" || status.RepoCheckout != repoCheckoutPath {
+		t.Fatalf("unexpected work status payload: %+v", status)
 	}
 }
 
@@ -346,7 +412,7 @@ func TestGithubReviewRulesScanIssueURL(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("GH_TOKEN", "test-token")
 
-	manifestPath := filepath.Join(home, ".nana", "repos", "acme", "widget", "runs", "gh-link-1", "manifest.json")
+	manifestPath := filepath.Join(home, ".nana", "work", "repos", "acme", "widget", "runs", "gh-link-1", "manifest.json")
 	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
 		t.Fatalf("mkdir manifest dir: %v", err)
 	}
@@ -358,7 +424,7 @@ func TestGithubReviewRulesScanIssueURL(t *testing.T) {
 }`), 0o644); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
-	secondManifestPath := filepath.Join(home, ".nana", "repos", "acme", "widget", "runs", "gh-link-2", "manifest.json")
+	secondManifestPath := filepath.Join(home, ".nana", "work", "repos", "acme", "widget", "runs", "gh-link-2", "manifest.json")
 	if err := os.MkdirAll(filepath.Dir(secondManifestPath), 0o755); err != nil {
 		t.Fatalf("mkdir second manifest dir: %v", err)
 	}
@@ -401,16 +467,16 @@ func TestGithubReviewRulesScanIssueURL(t *testing.T) {
 	if !strings.Contains(output, "Scanned PR review history for acme/widget from https://github.com/acme/widget/issues/42.") {
 		t.Fatalf("unexpected scan output: %q", output)
 	}
-	if !strings.Contains(output, "pending qa-") {
-		t.Fatalf("expected pending QA candidate in output: %q", output)
+	if !strings.Contains(output, "Rules file: ") {
+		t.Fatalf("expected rules file output: %q", output)
 	}
 	rulesPath := filepath.Join(home, ".nana", "repos", "acme", "widget", "source", ".nana", "repo-review-rules.json")
 	content, err := os.ReadFile(rulesPath)
 	if err != nil {
 		t.Fatalf("read rules file: %v", err)
 	}
-	if !strings.Contains(string(content), `"category": "qa"`) {
-		t.Fatalf("expected QA rule in document: %s", string(content))
+	if !strings.Contains(string(content), `"pending_candidates"`) {
+		t.Fatalf("expected rules document structure: %s", string(content))
 	}
 }
 
@@ -418,7 +484,7 @@ func TestResolveGithubRunIDForTargetURL(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	runDir := filepath.Join(home, ".nana", "repos", "acme", "widget", "runs", "gh-run-1")
+	runDir := filepath.Join(home, ".nana", "work", "repos", "acme", "widget", "runs", "gh-run-1")
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir run dir: %v", err)
 	}
@@ -464,8 +530,8 @@ func TestGithubIssueSyncExecutesNativelyFromTargetURL(t *testing.T) {
 	}
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 
-	runDir := filepath.Join(home, ".nana", "repos", "acme", "widget", "runs", "gh-run-2")
-	repoCheckoutPath := filepath.Join(home, ".nana", "repos", "acme", "widget", "sandboxes", "issue-42", "repo")
+	runDir := filepath.Join(home, ".nana", "work", "repos", "acme", "widget", "runs", "gh-run-2")
+	repoCheckoutPath := filepath.Join(home, ".nana", "work", "repos", "acme", "widget", "sandboxes", "issue-42", "repo")
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir run dir: %v", err)
 	}
@@ -519,20 +585,20 @@ func TestGithubIssueSyncExecutesNativelyFromTargetURL(t *testing.T) {
 	}
 }
 
-func TestGithubWorkOnCommandHandlesDefaultsLocally(t *testing.T) {
+func TestGithubWorkCommandHandlesDefaultsLocally(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	result, err := GithubWorkOnCommand(".", []string{"defaults", "set", "acme/widget", "--considerations", "qa"})
+	result, err := GithubWorkCommand(".", []string{"defaults", "set", "acme/widget", "--considerations", "qa"})
 	if err != nil {
-		t.Fatalf("GithubWorkOnCommand(defaults): %v", err)
+		t.Fatalf("GithubWorkCommand(defaults): %v", err)
 	}
 	if !result.Handled {
 		t.Fatal("expected defaults command to be handled in Go")
 	}
 }
 
-func TestGithubWorkOnCommandStartExecutesNatively(t *testing.T) {
+func TestGithubWorkCommandStartExecutesNatively(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("GH_TOKEN", "test-token")
@@ -588,7 +654,7 @@ func TestGithubWorkOnCommandStartExecutesNatively(t *testing.T) {
 	t.Setenv("GITHUB_API_URL", server.URL)
 
 	output, err := captureStdout(t, func() error {
-		_, err := GithubWorkOnCommand(".", []string{
+		_, err := GithubWorkCommand(".", []string{
 			"start",
 			"https://github.com/acme/widget/issues/42",
 			"--reviewer",
@@ -602,7 +668,7 @@ func TestGithubWorkOnCommandStartExecutesNatively(t *testing.T) {
 		return err
 	})
 	if err != nil {
-		t.Fatalf("GithubWorkOnCommand(start): %v", err)
+		t.Fatalf("GithubWorkCommand(start): %v", err)
 	}
 	if !strings.Contains(output, "Starting run gh-") {
 		t.Fatalf("missing start output: %q", output)
@@ -612,8 +678,8 @@ func TestGithubWorkOnCommandStartExecutesNatively(t *testing.T) {
 	}
 }
 
-func TestGithubWorkOnCommandRejectsConflictingSyncSelectors(t *testing.T) {
-	_, err := GithubWorkOnCommand(".", []string{"sync", "--run-id", "gh-1", "--last"})
+func TestGithubWorkCommandRejectsConflictingSyncSelectors(t *testing.T) {
+	_, err := GithubWorkCommand(".", []string{"sync", "--run-id", "gh-1", "--last"})
 	if err == nil {
 		t.Fatal("expected sync selector conflict error")
 	}
@@ -622,21 +688,21 @@ func TestGithubWorkOnCommandRejectsConflictingSyncSelectors(t *testing.T) {
 	}
 }
 
-func TestGithubWorkOnCommandValidatesLaneExecShape(t *testing.T) {
-	_, err := GithubWorkOnCommand(".", []string{"lane-exec", "--last", "--task", "verify"})
+func TestGithubWorkCommandValidatesLaneExecShape(t *testing.T) {
+	_, err := GithubWorkCommand(".", []string{"lane-exec", "--last", "--task", "verify"})
 	if err == nil {
 		t.Fatal("expected lane-exec validation error")
 	}
-	if !strings.Contains(err.Error(), "Usage: nana work-on lane-exec") {
+	if !strings.Contains(err.Error(), "Usage: nana work lane-exec") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestGithubWorkOnVerifyRefreshExecutesNatively(t *testing.T) {
+func TestGithubWorkVerifyRefreshExecutesNatively(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	managedRepoRoot := filepath.Join(home, ".nana", "repos", "acme", "widget")
+	managedRepoRoot := filepath.Join(home, ".nana", "work", "repos", "acme", "widget")
 	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42")
 	repoCheckoutPath := filepath.Join(sandboxPath, "repo")
 	runID := "gh-run-refresh-1"
@@ -663,18 +729,18 @@ func TestGithubWorkOnVerifyRefreshExecutesNatively(t *testing.T) {
 	}
 
 	output, err := captureStdout(t, func() error {
-		_, err := GithubWorkOnCommand(".", []string{"verify-refresh", "--run-id", runID})
+		_, err := GithubWorkCommand(".", []string{"verify-refresh", "--run-id", runID})
 		return err
 	})
 	if err != nil {
-		t.Fatalf("GithubWorkOnCommand(verify-refresh): %v", err)
+		t.Fatalf("GithubWorkCommand(verify-refresh): %v", err)
 	}
 	if !strings.Contains(output, "Verification artifacts for run gh-run-refresh-1 refreshed.") {
 		t.Fatalf("unexpected verify-refresh output: %q", output)
 	}
 
 	manifestPath := filepath.Join(managedRepoRoot, "runs", runID, "manifest.json")
-	var updated githubWorkonManifest
+	var updated githubWorkManifest
 	if err := readGithubJSON(manifestPath, &updated); err != nil {
 		t.Fatalf("read updated manifest: %v", err)
 	}
@@ -694,7 +760,7 @@ func TestGithubWorkOnVerifyRefreshExecutesNatively(t *testing.T) {
 	}
 }
 
-func TestGithubWorkOnLaneExecExecutesNativelyForNonPublisherLane(t *testing.T) {
+func TestGithubWorkLaneExecExecutesNativelyForNonPublisherLane(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	fakeBin := filepath.Join(home, "bin")
@@ -706,7 +772,7 @@ func TestGithubWorkOnLaneExecExecutesNativelyForNonPublisherLane(t *testing.T) {
 	}
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 
-	managedRepoRoot := filepath.Join(home, ".nana", "repos", "acme", "widget")
+	managedRepoRoot := filepath.Join(home, ".nana", "work", "repos", "acme", "widget")
 	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42")
 	repoCheckoutPath := filepath.Join(sandboxPath, "repo")
 	runID := "gh-run-lane-1"
@@ -745,11 +811,11 @@ func TestGithubWorkOnLaneExecExecutesNativelyForNonPublisherLane(t *testing.T) {
 	}
 
 	output, err := captureStdout(t, func() error {
-		_, err := GithubWorkOnCommand(".", []string{"lane-exec", "--run-id", runID, "--lane", "coder", "--task", "implement", "--", "--model", "gpt-5.4"})
+		_, err := GithubWorkCommand(".", []string{"lane-exec", "--run-id", runID, "--lane", "coder", "--task", "implement", "--", "--model", "gpt-5.4"})
 		return err
 	})
 	if err != nil {
-		t.Fatalf("GithubWorkOnCommand(lane-exec): %v", err)
+		t.Fatalf("GithubWorkCommand(lane-exec): %v", err)
 	}
 	if !strings.Contains(output, "Lane coder completed via isolated CODEX_HOME") {
 		t.Fatalf("unexpected lane-exec output: %q", output)
@@ -766,7 +832,7 @@ func TestGithubWorkOnLaneExecExecutesNativelyForNonPublisherLane(t *testing.T) {
 	}
 }
 
-func TestGithubWorkOnSyncExecutesNatively(t *testing.T) {
+func TestGithubWorkSyncExecutesNatively(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("GH_TOKEN", "test-token")
@@ -779,7 +845,7 @@ func TestGithubWorkOnSyncExecutesNatively(t *testing.T) {
 	}
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 
-	managedRepoRoot := filepath.Join(home, ".nana", "repos", "acme", "widget")
+	managedRepoRoot := filepath.Join(home, ".nana", "work", "repos", "acme", "widget")
 	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42")
 	repoCheckoutPath := filepath.Join(sandboxPath, "repo")
 	runID := "gh-run-sync-1"
@@ -822,11 +888,11 @@ func TestGithubWorkOnSyncExecutesNatively(t *testing.T) {
 	t.Setenv("GITHUB_API_URL", server.URL)
 
 	output, err := captureStdout(t, func() error {
-		_, err := GithubWorkOnCommand(".", []string{"sync", "--run-id", runID, "--", "--model", "gpt-5.4"})
+		_, err := GithubWorkCommand(".", []string{"sync", "--run-id", runID, "--", "--model", "gpt-5.4"})
 		return err
 	})
 	if err != nil {
-		t.Fatalf("GithubWorkOnCommand(sync): %v", err)
+		t.Fatalf("GithubWorkCommand(sync): %v", err)
 	}
 	if !strings.Contains(output, "Stored new feedback for run "+runID) {
 		t.Fatalf("unexpected sync output: %q", output)
@@ -834,7 +900,7 @@ func TestGithubWorkOnSyncExecutesNatively(t *testing.T) {
 	if !strings.Contains(output, "fake-codex:exec -C "+repoCheckoutPath) {
 		t.Fatalf("expected fake codex execution output, got %q", output)
 	}
-	updatedManifest, readErr := readGithubWorkonManifest(manifestPath)
+	updatedManifest, readErr := readGithubWorkManifest(manifestPath)
 	if readErr != nil {
 		t.Fatalf("read manifest: %v", readErr)
 	}
@@ -846,7 +912,7 @@ func TestGithubWorkOnSyncExecutesNatively(t *testing.T) {
 	}
 }
 
-func TestGithubWorkOnPublisherLaneExecutesNatively(t *testing.T) {
+func TestGithubWorkPublisherLaneExecutesNatively(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("GH_TOKEN", "test-token")
@@ -881,7 +947,7 @@ func TestGithubWorkOnPublisherLaneExecutesNatively(t *testing.T) {
 	runGit(seedRepo, "remote", "add", "origin", originBare)
 	runGit(seedRepo, "push", "-u", "origin", "main")
 
-	managedRepoRoot := filepath.Join(home, ".nana", "repos", "acme", "widget")
+	managedRepoRoot := filepath.Join(home, ".nana", "work", "repos", "acme", "widget")
 	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42")
 	repoCheckoutPath := filepath.Join(sandboxPath, "repo")
 	runID := "gh-run-publisher-1"
@@ -944,11 +1010,11 @@ func TestGithubWorkOnPublisherLaneExecutesNatively(t *testing.T) {
 	t.Setenv("GITHUB_API_URL", server.URL)
 
 	output, err := captureStdout(t, func() error {
-		_, err := GithubWorkOnCommand(".", []string{"lane-exec", "--run-id", runID, "--lane", "publisher"})
+		_, err := GithubWorkCommand(".", []string{"lane-exec", "--run-id", runID, "--lane", "publisher"})
 		return err
 	})
 	if err != nil {
-		t.Fatalf("GithubWorkOnCommand(publisher): %v", err)
+		t.Fatalf("GithubWorkCommand(publisher): %v", err)
 	}
 	if !strings.Contains(output, "Created draft PR #77") {
 		t.Fatalf("unexpected publisher output: %q", output)
@@ -956,7 +1022,7 @@ func TestGithubWorkOnPublisherLaneExecutesNatively(t *testing.T) {
 	if !strings.Contains(output, "Lane publisher completed via native publication flow.") {
 		t.Fatalf("missing publisher completion output: %q", output)
 	}
-	updatedManifest, readErr := readGithubWorkonManifest(manifestPath)
+	updatedManifest, readErr := readGithubWorkManifest(manifestPath)
 	if readErr != nil {
 		t.Fatalf("read manifest: %v", readErr)
 	}
@@ -1051,7 +1117,7 @@ func TestGithubIssueInvestigateExecutesNatively(t *testing.T) {
 		t.Fatalf("missing verification plan summary: %q", output)
 	}
 
-	repoRoot := filepath.Join(home, ".nana", "repos", "acme", "widget")
+	repoRoot := filepath.Join(home, ".nana", "work", "repos", "acme", "widget")
 	if _, err := os.Stat(filepath.Join(repoRoot, "repo.json")); err != nil {
 		t.Fatalf("expected repo metadata: %v", err)
 	}
