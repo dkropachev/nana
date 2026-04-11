@@ -15,42 +15,63 @@ type githubCommandResult struct {
 }
 
 type githubWorkonManifest struct {
-	Version                 int                        `json:"version,omitempty"`
-	RunID                   string                     `json:"run_id"`
-	CreatedAt               string                     `json:"created_at,omitempty"`
-	RepoSlug                string                     `json:"repo_slug"`
-	RepoOwner               string                     `json:"repo_owner"`
-	RepoName                string                     `json:"repo_name"`
-	ManagedRepoRoot         string                     `json:"managed_repo_root,omitempty"`
-	SourcePath              string                     `json:"source_path,omitempty"`
-	TargetURL               string                     `json:"target_url"`
-	TargetKind              string                     `json:"target_kind"`
-	UpdatedAt               string                     `json:"updated_at"`
-	PublishedPRNumber       int                        `json:"published_pr_number"`
-	PublishedPRURL          string                     `json:"published_pr_url,omitempty"`
-	PublishedPRHeadRef      string                     `json:"published_pr_head_ref,omitempty"`
-	PublicationState        string                     `json:"publication_state,omitempty"`
-	PublicationError        string                     `json:"publication_error,omitempty"`
-	PublicationUpdatedAt    string                     `json:"publication_updated_at,omitempty"`
-	SandboxID               string                     `json:"sandbox_id"`
-	SandboxPath             string                     `json:"sandbox_path"`
-	SandboxRepoPath         string                     `json:"sandbox_repo_path"`
-	VerificationPlan        *githubVerificationPlan    `json:"verification_plan,omitempty"`
-	VerificationScriptsDir  string                     `json:"verification_scripts_dir,omitempty"`
-	CreatePROnComplete      bool                       `json:"create_pr_on_complete,omitempty"`
-	ConsiderationPipeline   []githubPipelineLane       `json:"consideration_pipeline,omitempty"`
-	LanePromptArtifacts     []githubLanePromptArtifact `json:"lane_prompt_artifacts,omitempty"`
-	ConsiderationsActive    []string                   `json:"considerations_active,omitempty"`
-	RoleLayout              string                     `json:"role_layout,omitempty"`
-	TargetNumber            int                        `json:"target_number,omitempty"`
-	TargetTitle             string                     `json:"target_title,omitempty"`
-	TargetState             string                     `json:"target_state,omitempty"`
-	ReviewReviewer          string                     `json:"review_reviewer,omitempty"`
-	APIBaseURL              string                     `json:"api_base_url,omitempty"`
-	DefaultBranch           string                     `json:"default_branch,omitempty"`
-	LastSeenIssueCommentID  int                        `json:"last_seen_issue_comment_id,omitempty"`
-	LastSeenReviewID        int                        `json:"last_seen_review_id,omitempty"`
-	LastSeenReviewCommentID int                        `json:"last_seen_review_comment_id,omitempty"`
+	Version                 int                         `json:"version,omitempty"`
+	RunID                   string                      `json:"run_id"`
+	CreatedAt               string                      `json:"created_at,omitempty"`
+	RepoSlug                string                      `json:"repo_slug"`
+	RepoOwner               string                      `json:"repo_owner"`
+	RepoName                string                      `json:"repo_name"`
+	ManagedRepoRoot         string                      `json:"managed_repo_root,omitempty"`
+	SourcePath              string                      `json:"source_path,omitempty"`
+	TargetURL               string                      `json:"target_url"`
+	TargetKind              string                      `json:"target_kind"`
+	UpdatedAt               string                      `json:"updated_at"`
+	PublishedPRNumber       int                         `json:"published_pr_number"`
+	PublishedPRURL          string                      `json:"published_pr_url,omitempty"`
+	PublishedPRHeadRef      string                      `json:"published_pr_head_ref,omitempty"`
+	PublicationState        string                      `json:"publication_state,omitempty"`
+	PublicationError        string                      `json:"publication_error,omitempty"`
+	PublicationUpdatedAt    string                      `json:"publication_updated_at,omitempty"`
+	SandboxID               string                      `json:"sandbox_id"`
+	SandboxPath             string                      `json:"sandbox_path"`
+	SandboxRepoPath         string                      `json:"sandbox_repo_path"`
+	VerificationPlan        *githubVerificationPlan     `json:"verification_plan,omitempty"`
+	VerificationScriptsDir  string                      `json:"verification_scripts_dir,omitempty"`
+	CreatePROnComplete      bool                        `json:"create_pr_on_complete,omitempty"`
+	ConsiderationPipeline   []githubPipelineLane        `json:"consideration_pipeline,omitempty"`
+	LanePromptArtifacts     []githubLanePromptArtifact  `json:"lane_prompt_artifacts,omitempty"`
+	ConsiderationsActive    []string                    `json:"considerations_active,omitempty"`
+	RoleLayout              string                      `json:"role_layout,omitempty"`
+	TargetNumber            int                         `json:"target_number,omitempty"`
+	TargetTitle             string                      `json:"target_title,omitempty"`
+	TargetState             string                      `json:"target_state,omitempty"`
+	TargetAuthor            string                      `json:"target_author,omitempty"`
+	ReviewReviewer          string                      `json:"review_reviewer,omitempty"`
+	EffectiveReviewerPolicy *githubReviewerPolicy       `json:"effective_reviewer_policy,omitempty"`
+	APIBaseURL              string                      `json:"api_base_url,omitempty"`
+	DefaultBranch           string                      `json:"default_branch,omitempty"`
+	LastSeenIssueCommentID  int                         `json:"last_seen_issue_comment_id,omitempty"`
+	LastSeenReviewID        int                         `json:"last_seen_review_id,omitempty"`
+	LastSeenReviewCommentID int                         `json:"last_seen_review_comment_id,omitempty"`
+	Policy                  *githubResolvedWorkOnPolicy `json:"policy,omitempty"`
+	RepoProfilePath         string                      `json:"repo_profile_path,omitempty"`
+	RepoProfileFingerprint  string                      `json:"repo_profile_fingerprint,omitempty"`
+	RepoProfile             *githubRepoProfile          `json:"repo_profile,omitempty"`
+	ControlPlaneReviewers   []string                    `json:"control_plane_reviewers,omitempty"`
+	IgnoredFeedbackActors   map[string]int              `json:"ignored_feedback_actors,omitempty"`
+	RequestedReviewers      []string                    `json:"requested_reviewers,omitempty"`
+	ReviewRequestState      string                      `json:"review_request_state,omitempty"`
+	ReviewRequestError      string                      `json:"review_request_error,omitempty"`
+	ReviewRequestUpdatedAt  string                      `json:"review_request_updated_at,omitempty"`
+	MergeState              string                      `json:"merge_state,omitempty"`
+	MergeError              string                      `json:"merge_error,omitempty"`
+	MergeUpdatedAt          string                      `json:"merge_updated_at,omitempty"`
+	MergedPRNumber          int                         `json:"merged_pr_number,omitempty"`
+	MergedSHA               string                      `json:"merged_sha,omitempty"`
+	MergeMethod             string                      `json:"merge_method,omitempty"`
+	NeedsHuman              bool                        `json:"needs_human,omitempty"`
+	NeedsHumanReason        string                      `json:"needs_human_reason,omitempty"`
+	NextAction              string                      `json:"next_action,omitempty"`
 }
 
 type githubPipelineLane struct {
@@ -120,7 +141,7 @@ func GithubWorkOnCommand(cwd string, args []string) (githubCommandResult, error)
 	}
 
 	switch args[0] {
-	case "defaults", "stats", "retrospective":
+	case "defaults", "stats", "retrospective", "explain":
 		if err := GithubWorkOn(cwd, args); err != nil {
 			return githubCommandResult{}, err
 		}
@@ -1086,5 +1107,6 @@ func readGithubWorkonManifest(path string) (githubWorkonManifest, error) {
 	if err := readGithubJSON(path, &manifest); err != nil {
 		return githubWorkonManifest{}, err
 	}
+	hydrateGithubWorkonManifestDefaults(&manifest)
 	return manifest, nil
 }
