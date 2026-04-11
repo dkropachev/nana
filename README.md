@@ -148,6 +148,8 @@ Most users should think of NANA as **better task routing + better workflow + bet
 | `nana work-local status --last --json` | inspect machine-readable run and validation state from SQLite |
 | `nana review <pr-url>` | reviewing external pull requests with persisted findings |
 | `nana work-on start <issue-or-pr-url>` | GitHub-targeted implementation and review-sync workflows |
+| `nana work-on explain --last [--json]` | inspect the effective GitHub work-on policy, repo profile, and human-gate state for a run |
+| `nana repo onboard --json` | inspect the detected verification split and derived repo profile for a local checkout |
 | `/skills` | browsing installed skills and supporting helpers |
 
 `nana work-local` stores its authoritative runtime state in `~/.nana/local-work/state.db`, not inside the source repo. Run artifacts still live under `~/.nana/local-work/repos/<repo-id>/runs/<run-id>/...`, but old JSON state files such as `manifest.json`, `runtime-state.json`, `finding-history.json`, `repo.json`, `latest-run.json`, and `index/runs.json` are not part of the current state model and are ignored. This SQLite-backed state layer currently assumes the repo’s Go 1.25 baseline. See [docs/work-local.md](./docs/work-local.md) for storage, resume, validation grouping controls, and troubleshooting details.
@@ -211,6 +213,10 @@ Hot-path API overrides:
 - `.nana/work-on-hot-path-apis.json`
 - `.github/nana-work-on-hot-path-apis.json`
 
+Policy overrides:
+- `.nana/work-on-policy.json`
+- `.github/nana-work-on-policy.json`
+
 Example:
 
 ```json
@@ -224,8 +230,40 @@ Example:
 What they do:
 - concern overrides refine which files invalidate a hardening lane
 - hot-path API overrides refine when `perf` lanes rerun
+- policy overrides shape experimental repo-native work-on behavior, GitHub human-gate behavior, and allowed publication actions
+- experimental merge automation only runs when policy enables `allowed_actions.merge`, local verification has passed, GitHub CI is green, and a control-plane reviewer has approved without a later changes-requested review
+- `any_human` feedback mode accepts non-bot GitHub actors except the target author and blocked reviewers
+
+Minimal policy examples:
+
+```json
+{
+  "version": 1,
+  "experimental": true,
+  "allowed_actions": {"commit": true, "push": true, "open_draft_pr": true, "request_review": true, "merge": false},
+  "feedback_source": "assigned_trusted",
+  "human_gate": "publish_time"
+}
+```
+
+```json
+{
+  "version": 1,
+  "experimental": true,
+  "allowed_actions": {"commit": true, "push": true, "open_draft_pr": true, "request_review": true, "merge": true},
+  "feedback_source": "assigned_trusted",
+  "human_gate": "publish_time",
+  "merge_method": "squash"
+}
+```
 - `.nana/...` takes precedence over `.github/...`
 - malformed override files are ignored for execution but show up as diagnostics in `work-on` runtime artifacts and retrospectives
+
+Repo profile:
+- managed GitHub repos persist a derived repo profile at `~/.nana/repos/<owner>/<repo>/repo-profile.json`
+- the profile records detected verification shape, commit-style heuristics, PR template presence, workflow files, CODEOWNERS presence, review-rule summary, and warnings for ambiguous signals
+- low-confidence repo-native signals fall back to generic commit/PR behavior rather than blocking execution
+- `nana work-on explain --last` shows the effective policy, repo profile, GitHub control-plane reviewers, review-request state, merge state, and next action for the active run
 
 ## PR Review Rules
 
