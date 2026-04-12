@@ -46,12 +46,12 @@ func TestImprovementPolicyPrecedenceAndLabels(t *testing.T) {
 	if strings.Join(policy.Labels, ",") != "improvement,improvement-scout,perf" {
 		t.Fatalf("expected normalized improvement labels, got %#v", policy.Labels)
 	}
-	if policy.MaxIssues != 5 {
-		t.Fatalf("expected default max issue cap of 5, got %#v", policy)
+	if policy.MaxIssues != defaultScoutIssueCap {
+		t.Fatalf("expected default max issue cap of %d, got %#v", defaultScoutIssueCap, policy)
 	}
 }
 
-func TestScoutLocalFromFileCapsAtFiveForBothRoles(t *testing.T) {
+func TestScoutLocalFromFileUsesDefaultCapForBothRoles(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		run        func(string, []string) error
@@ -109,6 +109,40 @@ func TestScoutLocalFromFileCapsAtFiveForBothRoles(t *testing.T) {
 				t.Fatalf("missing normalized labels in draft: %s", draft)
 			}
 		})
+	}
+}
+
+func TestScoutLocalFromFileAllowsPolicyCapUpToFifty(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir .nana: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".nana", "improvement-policy.json"), []byte(`{"version":1,"max_issues":10}`), 0o644); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	inputPath := filepath.Join(repo, "proposals.json")
+	if err := os.WriteFile(inputPath, []byte(scoutProposalJSON(12, "docs")), 0o644); err != nil {
+		t.Fatalf("write proposals: %v", err)
+	}
+	output, err := captureStdout(t, func() error {
+		return Improve(repo, []string{"--from-file", inputPath})
+	})
+	if err != nil {
+		t.Fatalf("Improve: %v", err)
+	}
+	if !strings.Contains(output, "Keeping 10 proposal(s) local by policy") {
+		t.Fatalf("expected max_issues 10 output, got %q", output)
+	}
+	matches, err := filepath.Glob(filepath.Join(repo, ".nana", "improvements", "improve-*", "proposals.json"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("expected one proposals artifact, matches=%#v err=%v", matches, err)
+	}
+	var report improvementReport
+	if err := readGithubJSON(matches[0], &report); err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if len(report.Proposals) != 10 {
+		t.Fatalf("expected 10 capped proposals, got %d", len(report.Proposals))
 	}
 }
 

@@ -26,8 +26,8 @@ Behavior:
   - local repos always keep proposals under .nana/improvements/
   - GitHub repos read .nana/improvement-policy.json or .github/nana-improvement-policy.json from the repo checkout
   - GitHub policy issue_destination controls publication: local, repo/target, or fork
-  - emits at most 5 proposals per run
-  - created issues are labeled with improvement-scout, never enhancement, and count toward that role's 5-open-issue cap
+  - emits 5 proposals per run by default; policy max_issues can raise the cap up to 50
+  - created issues are labeled with improvement-scout, never enhancement, and count toward that role's open-issue cap
 
 Policy example:
   {"version":1,"issue_destination":"repo","labels":["improvement","ux","perf"]}
@@ -45,8 +45,8 @@ Behavior:
   - local repos always keep proposals under .nana/enhancements/
   - GitHub repos read .nana/enhancement-policy.json or .github/nana-enhancement-policy.json from the repo checkout
   - GitHub policy issue_destination controls publication: local, repo/target, or fork
-  - emits at most 5 proposals per run
-  - created issues are labeled with enhancement-scout and count toward that role's 5-open-issue cap
+  - emits 5 proposals per run by default; policy max_issues can raise the cap up to 50
+  - created issues are labeled with enhancement-scout and count toward that role's open-issue cap
 
 Policy example:
   {"version":1,"issue_destination":"repo","labels":["enhancement"]}
@@ -78,6 +78,7 @@ const (
 	improvementScoutRole = "improvement-scout"
 	enhancementScoutRole = "enhancement-scout"
 	defaultScoutIssueCap = 5
+	maxScoutIssueCap     = 50
 )
 
 type ImproveOptions struct {
@@ -616,8 +617,10 @@ func readScoutPolicy(repoPath string, role string) improvementPolicy {
 	}
 	policy.IssueDestination = normalizeImprovementDestination(policy.IssueDestination)
 	policy.Labels = normalizeScoutLabels(policy.Labels, role)
-	if policy.MaxIssues <= 0 || policy.MaxIssues > defaultScoutIssueCap {
+	if policy.MaxIssues <= 0 {
 		policy.MaxIssues = defaultScoutIssueCap
+	} else if policy.MaxIssues > maxScoutIssueCap {
+		policy.MaxIssues = maxScoutIssueCap
 	}
 	return policy
 }
@@ -971,8 +974,11 @@ func publishScoutIssues(repoSlug string, proposals []improvementProposal, policy
 }
 
 func effectiveScoutMaxIssues(policy improvementPolicy) int {
-	if policy.MaxIssues <= 0 || policy.MaxIssues > defaultScoutIssueCap {
+	if policy.MaxIssues <= 0 {
 		return defaultScoutIssueCap
+	}
+	if policy.MaxIssues > maxScoutIssueCap {
+		return maxScoutIssueCap
 	}
 	return policy.MaxIssues
 }

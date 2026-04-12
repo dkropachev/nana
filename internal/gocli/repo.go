@@ -16,6 +16,7 @@ Usage:
   nana repo onboard [--repo <path>] [--json]
   nana repo onboard <owner/repo> [--repo-mode local|fork|repo] [--issue-pick manual|label|auto] [--pr-forward approve|auto]
   nana repo config <owner/repo> [--repo-mode local|fork|repo] [--issue-pick manual|label|auto] [--pr-forward approve|auto]
+  nana repo scout enable [--repo <path>] [--role improvement|enhancement|both] [--mode auto|manual] [--issue-destination local|repo|fork] [--fork-repo <owner/repo>] [--labels <a,b>] [--max-issues <1-50>] [--github]
   nana repo defaults set [--repo-mode local|fork|repo] [--issue-pick manual|label|auto] [--pr-forward approve|auto]
   nana repo defaults show [--json]
   nana repo explain <owner/repo> [--json]
@@ -63,6 +64,8 @@ func Repo(cwd string, args []string) error {
 			return fmt.Errorf("Usage: nana repo config <owner/repo> [--repo-mode local|fork|repo] [--issue-pick manual|label|auto] [--pr-forward approve|auto]\n\n%s", RepoHelp)
 		}
 		return githubDefaultsSet(args[1:])
+	case "scout":
+		return repoScout(cwd, args[1:])
 	case "defaults":
 		return repoAutomationDefaults(args[1:])
 	case "explain":
