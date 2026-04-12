@@ -271,7 +271,7 @@ Repo profile:
 
 ## Improvement Proposals
 
-`nana improve` runs the `improvement-scout` role to inspect a repo and produce evidence-backed UX/performance improvement proposals. `nana enhance` runs the `enhancement-scout` role for grounded repo-forward enhancements. `nana start` also runs scout startup automation when scout-specific flags are provided or local scout policies are present. Bare `nana start` loops indefinitely until interrupted; use `--once` or `--cycles <n>` for bounded runs. Local repo runs always keep drafts under `.nana/improvements/<run-id>/` or `.nana/enhancements/<run-id>/`.
+`nana improve` runs the `improvement-scout` role to inspect a repo and produce evidence-backed UX/performance improvement proposals. `nana enhance` runs the `enhancement-scout` role for grounded repo-forward enhancements. `nana start` also runs scout startup automation when scout-specific flags are provided or local scout policies are present. Bare `nana start` loops indefinitely until interrupted; use `--once` or `--cycles <n>` for bounded runs. Local repo runs keep drafts under `.nana/improvements/<run-id>/` or `.nana/enhancements/<run-id>/`, and auto-mode local start picks up one pending discovered item for local implementation per cycle.
 
 For GitHub targets, repo policy controls whether proposals stay local or become issues:
 
@@ -309,7 +309,7 @@ Use `--github` to write shareable `.github/nana-*-policy.json` files instead of 
 
 `.nana/...` takes precedence. Improvement labels are normalized to include `improvement` and `improvement-scout` while excluding `enhancement`. Enhancement labels include `enhancement` and `enhancement-scout`. Scout policy defaults to 5 proposals per run and allows `max_issues` up to 50.
 
-For GitHub targets, `issue_destination: "repo"` publishes to the target repo and `issue_destination: "fork"` publishes to `fork_repo`. For local repos, `nana start` treats `mode: "auto"` in every supported scout policy as permission to switch to the repo's default branch and commit generated scout artifacts there. Auto mode requires a clean worktree and a resolvable local default branch.
+For GitHub targets, `issue_destination: "repo"` publishes to the target repo and `issue_destination: "fork"` publishes to `fork_repo`. For local repos, `nana start` treats `mode: "auto"` in every supported scout policy as permission to switch to the repo's default branch, commit generated scout artifacts there, and run `nana work start --task ...` for one pending local discovered item per cycle. Auto mode requires a clean worktree and a resolvable local default branch.
 
 ## Start Automation
 

@@ -103,6 +103,7 @@ Repo overrides still live in the source checkout:
 Local repo behavior:
 
 - proposals are saved under `.nana/improvements/<run-id>/` or `.nana/enhancements/<run-id>/`
+- auto-mode local start picks up one pending discovered item for local implementation per cycle
 - no GitHub APIs are called
 
 GitHub target behavior:
@@ -115,7 +116,7 @@ GitHub target behavior:
 - `issue_destination` controls publication: `local`, `repo`/`target`, or `fork`
 - scout issue labels include the role label
 - scout policy defaults to 5 proposals per run and allows `max_issues` up to 50
-- local `mode: "auto"` in every supported scout policy makes `nana start` switch to the repo's default branch and commit generated scout artifacts there; this requires a clean worktree and a resolvable local default branch
+- local `mode: "auto"` in every supported scout policy makes `nana start` switch to the repo's default branch, commit generated scout artifacts there, and run `nana work start --task ...` for one pending local discovered item per cycle; this requires a clean worktree and a resolvable local default branch
 - `nana repo scout enable` creates or updates these policy files; by default it writes `.nana` policies for both scouts with local auto mode
 
 Policy examples:

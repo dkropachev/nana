@@ -404,6 +404,11 @@ func runScoutStart(cwd string, options ImproveOptions) error {
 			fmt.Fprintln(os.Stdout, "[start] No scout artifact changes to commit on default branch.")
 		}
 	}
+	if autoLocal && strings.TrimSpace(options.FromFile) == "" {
+		if err := startRunLocalScoutPickup(repoPath, options.CodexArgs); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

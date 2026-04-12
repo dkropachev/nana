@@ -45,6 +45,7 @@ type startRuntimeOptions struct {
 var startRunStartWork = startWorkStart
 var startPromoteStartWork = startWorkPromote
 var startRunScoutStart = runScoutStart
+var startRunLocalScoutPickup = runLocalScoutDiscoveredItems
 var startLoopSleep = time.Sleep
 var startLoopContinue = func() bool { return true }
 
