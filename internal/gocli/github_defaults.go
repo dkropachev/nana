@@ -36,6 +36,12 @@ type githubRepoSettings struct {
 	DefaultRoleLayout         string                `json:"default_role_layout,omitempty"`
 	ReviewRulesMode           string                `json:"review_rules_mode,omitempty"`
 	ReviewRulesReviewerPolicy *githubReviewerPolicy `json:"review_rules_reviewer_policy,omitempty"`
+	RepoMode                  string                `json:"repo_mode,omitempty"`
+	IssuePickMode             string                `json:"issue_pick_mode,omitempty"`
+	PRForwardMode             string                `json:"pr_forward_mode,omitempty"`
+	ForkIssuesMode            string                `json:"fork_issues_mode,omitempty"`
+	ImplementMode             string                `json:"implement_mode,omitempty"`
+	PublishTarget             string                `json:"publish_target,omitempty"`
 	HotPathAPIProfile         *githubHotPathProfile `json:"hot_path_api_profile,omitempty"`
 	UpdatedAt                 string                `json:"updated_at"`
 }
@@ -232,6 +238,11 @@ type githubReviewSignal struct {
 var supportedGithubConsiderations = []string{"arch", "perf", "api", "security", "dependency", "style", "qa"}
 var supportedGithubRoleLayouts = []string{"split", "reviewer+executor"}
 var supportedReviewRulesModes = []string{"manual", "automatic"}
+var supportedGithubAutomationModes = []string{"manual", "auto", "labeled"}
+var supportedGithubPublishTargets = []string{"local-branch", "fork", "repo"}
+var supportedGithubRepoModes = []string{"local", "fork", "repo"}
+var supportedGithubIssuePickModes = []string{"manual", "label", "auto"}
+var supportedGithubPRForwardModes = []string{"approve", "auto"}
 
 type githubLane struct {
 	alias    string
@@ -291,7 +302,7 @@ func GithubReviewRules(cwd string, args []string) error {
 
 func githubDefaultsSet(args []string) error {
 	if len(args) == 0 || !validRepoSlug(args[0]) {
-		return fmt.Errorf("Usage: nana work defaults set <owner/repo> [--considerations <list>] [--role-layout <split|reviewer+executor>] [--review-rules-mode <manual|automatic>] [--review-rules-trusted-reviewers <a,b>] [--review-rules-blocked-reviewers <a,b>] [--review-rules-min-distinct-reviewers <n>]\n\n%s", GithubWorkHelp)
+		return fmt.Errorf("Usage: nana work defaults set <owner/repo> [--considerations <list>] [--role-layout <split|reviewer+executor>] [--review-rules-mode <manual|automatic>] [--repo-mode <local|fork|repo>] [--issue-pick <manual|label|auto>] [--pr-forward <approve|auto>] [--fork-issues <manual|auto|label>] [--implement <manual|auto|label>] [--publish <local|fork|repo>] [--review-rules-trusted-reviewers <a,b>] [--review-rules-blocked-reviewers <a,b>] [--review-rules-min-distinct-reviewers <n>]\n\n%s", GithubWorkHelp)
 	}
 
 	repoSlug := args[0]
@@ -304,6 +315,15 @@ func githubDefaultsSet(args []string) error {
 	considerations := append([]string{}, existing.DefaultConsiderations...)
 	roleLayout := existing.DefaultRoleLayout
 	reviewRulesMode := existing.ReviewRulesMode
+	forkIssuesMode := existing.ForkIssuesMode
+	implementMode := existing.ImplementMode
+	publishTarget := existing.PublishTarget
+	repoWorkMode := defaultString(normalizeGithubRepoMode(existing.RepoMode), publishTargetToRepoMode(existing.PublishTarget))
+	issuePickMode := defaultString(normalizeGithubIssuePickMode(existing.IssuePickMode), automationModeToIssuePickMode(existing.ImplementMode))
+	if issuePickMode == "" {
+		issuePickMode = automationModeToIssuePickMode(existing.ForkIssuesMode)
+	}
+	prForwardMode := existing.PRForwardMode
 	policy := &githubReviewerPolicy{}
 	if existing.ReviewRulesReviewerPolicy != nil {
 		policy = normalizeGithubReviewerPolicy(existing.ReviewRulesReviewerPolicy)
@@ -366,6 +386,120 @@ func githubDefaultsSet(args []string) error {
 				return err
 			}
 			reviewRulesMode = parsed
+		case token == "--repo-mode":
+			value, err := requireFlagValue(args, index, token)
+			if err != nil {
+				return err
+			}
+			parsed, err := parseGithubRepoMode(value, token)
+			if err != nil {
+				return err
+			}
+			repoWorkMode = parsed
+			publishTarget = repoModeToPublishTarget(parsed)
+			index++
+		case strings.HasPrefix(token, "--repo-mode="):
+			parsed, err := parseGithubRepoMode(strings.TrimPrefix(token, "--repo-mode="), "--repo-mode")
+			if err != nil {
+				return err
+			}
+			repoWorkMode = parsed
+			publishTarget = repoModeToPublishTarget(parsed)
+		case token == "--issue-pick":
+			value, err := requireFlagValue(args, index, token)
+			if err != nil {
+				return err
+			}
+			parsed, err := parseGithubIssuePickMode(value, token)
+			if err != nil {
+				return err
+			}
+			issuePickMode = parsed
+			forkIssuesMode = issuePickModeToAutomationMode(parsed)
+			implementMode = issuePickModeToAutomationMode(parsed)
+			index++
+		case strings.HasPrefix(token, "--issue-pick="):
+			parsed, err := parseGithubIssuePickMode(strings.TrimPrefix(token, "--issue-pick="), "--issue-pick")
+			if err != nil {
+				return err
+			}
+			issuePickMode = parsed
+			forkIssuesMode = issuePickModeToAutomationMode(parsed)
+			implementMode = issuePickModeToAutomationMode(parsed)
+		case token == "--pr-forward":
+			value, err := requireFlagValue(args, index, token)
+			if err != nil {
+				return err
+			}
+			parsed, err := parseGithubPRForwardMode(value, token)
+			if err != nil {
+				return err
+			}
+			prForwardMode = parsed
+			index++
+		case strings.HasPrefix(token, "--pr-forward="):
+			parsed, err := parseGithubPRForwardMode(strings.TrimPrefix(token, "--pr-forward="), "--pr-forward")
+			if err != nil {
+				return err
+			}
+			prForwardMode = parsed
+		case token == "--fork-issues":
+			value, err := requireFlagValue(args, index, token)
+			if err != nil {
+				return err
+			}
+			parsed, err := parseGithubAutomationMode(value, token)
+			if err != nil {
+				return err
+			}
+			forkIssuesMode = parsed
+			issuePickMode = automationModeToIssuePickMode(parsed)
+			index++
+		case strings.HasPrefix(token, "--fork-issues="):
+			parsed, err := parseGithubAutomationMode(strings.TrimPrefix(token, "--fork-issues="), "--fork-issues")
+			if err != nil {
+				return err
+			}
+			forkIssuesMode = parsed
+			issuePickMode = automationModeToIssuePickMode(parsed)
+		case token == "--implement":
+			value, err := requireFlagValue(args, index, token)
+			if err != nil {
+				return err
+			}
+			parsed, err := parseGithubAutomationMode(value, token)
+			if err != nil {
+				return err
+			}
+			implementMode = parsed
+			issuePickMode = automationModeToIssuePickMode(parsed)
+			index++
+		case strings.HasPrefix(token, "--implement="):
+			parsed, err := parseGithubAutomationMode(strings.TrimPrefix(token, "--implement="), "--implement")
+			if err != nil {
+				return err
+			}
+			implementMode = parsed
+			issuePickMode = automationModeToIssuePickMode(parsed)
+		case token == "--publish":
+			value, err := requireFlagValue(args, index, token)
+			if err != nil {
+				return err
+			}
+			parsed, err := parseGithubPublishTarget(value, token)
+			if err != nil {
+				return err
+			}
+			publishTarget = parsed
+			repoWorkMode = publishTargetToRepoMode(parsed)
+			index++
+		case strings.HasPrefix(token, "--publish="):
+			parsed, err := parseGithubPublishTarget(strings.TrimPrefix(token, "--publish="), "--publish")
+			if err != nil {
+				return err
+			}
+			publishTarget = parsed
+			repoWorkMode = publishTargetToRepoMode(parsed)
 		case token == "--review-rules-trusted-reviewers":
 			value, err := requireFlagValue(args, index, token)
 			if err != nil {
@@ -421,12 +555,25 @@ func githubDefaultsSet(args []string) error {
 	if roleLayout == "" {
 		roleLayout = "split"
 	}
+	repoWorkMode = defaultString(normalizeGithubRepoMode(repoWorkMode), "local")
+	publishTarget = defaultString(repoModeToPublishTarget(repoWorkMode), normalizeGithubPublishTarget(publishTarget))
+	if publishTarget == "" {
+		publishTarget = "local-branch"
+	}
+	issuePickMode = defaultString(normalizeGithubIssuePickMode(issuePickMode), "manual")
+	prForwardMode = defaultString(normalizeGithubPRForwardMode(prForwardMode), "approve")
 	settings := githubRepoSettings{
-		Version:                   4,
+		Version:                   6,
 		DefaultConsiderations:     considerations,
 		DefaultRoleLayout:         roleLayout,
 		ReviewRulesMode:           reviewRulesMode,
 		ReviewRulesReviewerPolicy: normalizeGithubReviewerPolicy(policy),
+		RepoMode:                  repoWorkMode,
+		IssuePickMode:             issuePickMode,
+		PRForwardMode:             prForwardMode,
+		ForkIssuesMode:            normalizeGithubAutomationMode(forkIssuesMode),
+		ImplementMode:             normalizeGithubAutomationMode(implementMode),
+		PublishTarget:             normalizeGithubPublishTarget(publishTarget),
 		UpdatedAt:                 time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := writeGithubJSON(settingsPath, settings); err != nil {
@@ -439,6 +586,12 @@ func githubDefaultsSet(args []string) error {
 	fmt.Fprintf(os.Stdout, "[github] Saved review-rules trusted reviewers for %s: %s\n", repoSlug, joinOrNone(settings.ReviewRulesReviewerPolicy.GetTrusted()))
 	fmt.Fprintf(os.Stdout, "[github] Saved review-rules blocked reviewers for %s: %s\n", repoSlug, joinOrNone(settings.ReviewRulesReviewerPolicy.GetBlocked()))
 	fmt.Fprintf(os.Stdout, "[github] Saved review-rules min distinct reviewers for %s: %s\n", repoSlug, intOrNone(settings.ReviewRulesReviewerPolicy.GetMinDistinct()))
+	fmt.Fprintf(os.Stdout, "[github] Saved repo mode for %s: %s\n", repoSlug, defaultString(settings.RepoMode, "local"))
+	fmt.Fprintf(os.Stdout, "[github] Saved issue-pick mode for %s: %s\n", repoSlug, defaultString(settings.IssuePickMode, "manual"))
+	fmt.Fprintf(os.Stdout, "[github] Saved PR forward mode for %s: %s\n", repoSlug, defaultString(settings.PRForwardMode, "approve"))
+	fmt.Fprintf(os.Stdout, "[github] Saved fork-issues mode for %s: %s\n", repoSlug, defaultString(settings.ForkIssuesMode, "manual"))
+	fmt.Fprintf(os.Stdout, "[github] Saved implement mode for %s: %s\n", repoSlug, defaultString(settings.ImplementMode, "manual"))
+	fmt.Fprintf(os.Stdout, "[github] Saved publish target for %s: %s\n", repoSlug, defaultString(settings.PublishTarget, "local-branch"))
 	fmt.Fprintf(os.Stdout, "[github] Settings path: %s\n", settingsPath)
 	return nil
 }
@@ -454,17 +607,29 @@ func githubDefaultsShow(args []string) error {
 
 	defaults := []string{}
 	roleLayout := "split"
-	repoMode := ""
+	reviewRulesRepoMode := ""
 	repoPolicy := (*githubReviewerPolicy)(nil)
+	repoWorkMode := "local"
+	issuePickMode := "manual"
+	prForwardMode := "approve"
+	forkIssuesMode := "manual"
+	implementMode := "manual"
+	publishTarget := "local-branch"
 	if settings != nil {
 		defaults = settings.DefaultConsiderations
 		if settings.DefaultRoleLayout != "" {
 			roleLayout = settings.DefaultRoleLayout
 		}
-		repoMode = settings.ReviewRulesMode
+		reviewRulesRepoMode = settings.ReviewRulesMode
 		repoPolicy = settings.ReviewRulesReviewerPolicy
+		repoWorkMode = resolvedGithubRepoMode(settings)
+		issuePickMode = resolvedGithubIssuePickMode(settings)
+		prForwardMode = resolvedGithubPRForwardMode(settings)
+		forkIssuesMode = defaultString(normalizeGithubAutomationMode(settings.ForkIssuesMode), "manual")
+		implementMode = defaultString(normalizeGithubAutomationMode(settings.ImplementMode), "manual")
+		publishTarget = defaultString(normalizeGithubPublishTarget(settings.PublishTarget), repoModeToPublishTarget(repoWorkMode))
 	}
-	effectiveMode := repoMode
+	effectiveMode := reviewRulesRepoMode
 	if effectiveMode == "" {
 		if globalConfig != nil && globalConfig.DefaultMode != "" {
 			effectiveMode = globalConfig.DefaultMode
@@ -479,10 +644,16 @@ func githubDefaultsShow(args []string) error {
 
 	fmt.Fprintf(os.Stdout, "[github] Default considerations for %s: %s\n", repoSlug, joinOrNone(defaults))
 	fmt.Fprintf(os.Stdout, "[github] Default role layout for %s: %s\n", repoSlug, roleLayout)
-	fmt.Fprintf(os.Stdout, "[github] Repo review-rules mode for %s: %s\n", repoSlug, defaultString(repoMode, "(none)"))
+	fmt.Fprintf(os.Stdout, "[github] Repo review-rules mode for %s: %s\n", repoSlug, defaultString(reviewRulesRepoMode, "(none)"))
 	fmt.Fprintf(os.Stdout, "[github] Effective review-rules mode for %s: %s\n", repoSlug, effectiveMode)
 	fmt.Fprintf(os.Stdout, "[github] Repo reviewer policy for %s: %s\n", repoSlug, formatGithubReviewerPolicy(repoPolicy))
 	fmt.Fprintf(os.Stdout, "[github] Effective reviewer policy for %s: %s\n", repoSlug, formatGithubReviewerPolicy(effectivePolicy))
+	fmt.Fprintf(os.Stdout, "[github] Repo mode for %s: %s\n", repoSlug, repoWorkMode)
+	fmt.Fprintf(os.Stdout, "[github] Issue-pick mode for %s: %s\n", repoSlug, issuePickMode)
+	fmt.Fprintf(os.Stdout, "[github] PR forward mode for %s: %s\n", repoSlug, prForwardMode)
+	fmt.Fprintf(os.Stdout, "[github] Fork issues mode for %s: %s\n", repoSlug, forkIssuesMode)
+	fmt.Fprintf(os.Stdout, "[github] Implement mode for %s: %s\n", repoSlug, implementMode)
+	fmt.Fprintf(os.Stdout, "[github] Publish target for %s: %s\n", repoSlug, publishTarget)
 	fmt.Fprintln(os.Stdout, "[github] Resolved default pipeline:")
 	for _, line := range buildGithubConsiderationInstructionLines(defaults, roleLayout) {
 		fmt.Fprintf(os.Stdout, "%s\n", line)
@@ -802,13 +973,25 @@ func githubReviewRulesConfigShow(args []string) error {
 		return fmt.Errorf("GitHub review-rules config show currently supports <owner/repo>, issue URLs, or PR URLs in the Go CLI")
 	}
 	settings, _ := readGithubRepoSettings(githubRepoSettingsPath(repoSlug))
-	repoMode := ""
+	reviewRulesRepoMode := ""
 	repoPolicy := (*githubReviewerPolicy)(nil)
+	repoWorkMode := "local"
+	issuePickMode := "manual"
+	prForwardMode := "approve"
+	forkIssuesMode := "manual"
+	implementMode := "manual"
+	publishTarget := "local-branch"
 	if settings != nil {
-		repoMode = settings.ReviewRulesMode
+		reviewRulesRepoMode = settings.ReviewRulesMode
 		repoPolicy = settings.ReviewRulesReviewerPolicy
+		repoWorkMode = resolvedGithubRepoMode(settings)
+		issuePickMode = resolvedGithubIssuePickMode(settings)
+		prForwardMode = resolvedGithubPRForwardMode(settings)
+		forkIssuesMode = defaultString(normalizeGithubAutomationMode(settings.ForkIssuesMode), "manual")
+		implementMode = defaultString(normalizeGithubAutomationMode(settings.ImplementMode), "manual")
+		publishTarget = defaultString(normalizeGithubPublishTarget(settings.PublishTarget), repoModeToPublishTarget(repoWorkMode))
 	}
-	effectiveMode := repoMode
+	effectiveMode := reviewRulesRepoMode
 	if effectiveMode == "" {
 		effectiveMode = mode
 	}
@@ -816,10 +999,16 @@ func githubReviewRulesConfigShow(args []string) error {
 	if effectivePolicy == nil {
 		effectivePolicy = normalizeGithubReviewerPolicy(policy)
 	}
-	fmt.Fprintf(os.Stdout, "[github] Repo review-rules mode for %s: %s\n", repoSlug, defaultString(repoMode, "(none)"))
+	fmt.Fprintf(os.Stdout, "[github] Repo review-rules mode for %s: %s\n", repoSlug, defaultString(reviewRulesRepoMode, "(none)"))
 	fmt.Fprintf(os.Stdout, "[github] Effective review-rules mode for %s: %s\n", repoSlug, effectiveMode)
 	fmt.Fprintf(os.Stdout, "[github] Repo reviewer policy for %s: %s\n", repoSlug, formatGithubReviewerPolicy(repoPolicy))
 	fmt.Fprintf(os.Stdout, "[github] Effective reviewer policy for %s: %s\n", repoSlug, formatGithubReviewerPolicy(effectivePolicy))
+	fmt.Fprintf(os.Stdout, "[github] Repo mode for %s: %s\n", repoSlug, repoWorkMode)
+	fmt.Fprintf(os.Stdout, "[github] Issue-pick mode for %s: %s\n", repoSlug, issuePickMode)
+	fmt.Fprintf(os.Stdout, "[github] PR forward mode for %s: %s\n", repoSlug, prForwardMode)
+	fmt.Fprintf(os.Stdout, "[github] Fork issues mode for %s: %s\n", repoSlug, forkIssuesMode)
+	fmt.Fprintf(os.Stdout, "[github] Implement mode for %s: %s\n", repoSlug, implementMode)
+	fmt.Fprintf(os.Stdout, "[github] Publish target for %s: %s\n", repoSlug, publishTarget)
 	return nil
 }
 
@@ -1060,6 +1249,185 @@ func parseGithubReviewRulesMode(value string, flag string) (string, error) {
 		return "", fmt.Errorf("Invalid %s value: %s. Expected one of manual, automatic.\n%s", flag, value, GithubWorkHelp)
 	}
 	return raw, nil
+}
+
+func parseGithubAutomationMode(value string, flag string) (string, error) {
+	raw := strings.ToLower(strings.TrimSpace(value))
+	if raw == "label" {
+		raw = "labeled"
+	}
+	if !slices.Contains(supportedGithubAutomationModes, raw) {
+		return "", fmt.Errorf("Invalid %s value: %s. Expected one of %s.", flag, value, strings.Join(supportedGithubAutomationModes, ", "))
+	}
+	return raw, nil
+}
+
+func normalizeGithubAutomationMode(value string) string {
+	raw := strings.ToLower(strings.TrimSpace(value))
+	if raw == "label" {
+		raw = "labeled"
+	}
+	if slices.Contains(supportedGithubAutomationModes, raw) {
+		return raw
+	}
+	return ""
+}
+
+func parseGithubPublishTarget(value string, flag string) (string, error) {
+	raw := strings.ToLower(strings.TrimSpace(value))
+	if raw == "local" {
+		raw = "local-branch"
+	}
+	if !slices.Contains(supportedGithubPublishTargets, raw) {
+		return "", fmt.Errorf("Invalid %s value: %s. Expected one of local, fork, repo.", flag, value)
+	}
+	return raw, nil
+}
+
+func normalizeGithubPublishTarget(value string) string {
+	raw := strings.ToLower(strings.TrimSpace(value))
+	if raw == "local" {
+		raw = "local-branch"
+	}
+	if slices.Contains(supportedGithubPublishTargets, raw) {
+		return raw
+	}
+	return ""
+}
+
+func parseGithubRepoMode(value string, flag string) (string, error) {
+	raw := normalizeGithubRepoMode(value)
+	if raw == "" {
+		return "", fmt.Errorf("Invalid %s value: %s. Expected one of %s.", flag, value, strings.Join(supportedGithubRepoModes, ", "))
+	}
+	return raw, nil
+}
+
+func normalizeGithubRepoMode(value string) string {
+	raw := strings.ToLower(strings.TrimSpace(value))
+	switch raw {
+	case "local-branch":
+		return "local"
+	case "local", "fork", "repo":
+		return raw
+	default:
+		return ""
+	}
+}
+
+func repoModeToPublishTarget(value string) string {
+	switch normalizeGithubRepoMode(value) {
+	case "local":
+		return "local-branch"
+	case "fork":
+		return "fork"
+	case "repo":
+		return "repo"
+	default:
+		return ""
+	}
+}
+
+func publishTargetToRepoMode(value string) string {
+	switch normalizeGithubPublishTarget(value) {
+	case "local-branch":
+		return "local"
+	case "fork":
+		return "fork"
+	case "repo":
+		return "repo"
+	default:
+		return ""
+	}
+}
+
+func parseGithubIssuePickMode(value string, flag string) (string, error) {
+	raw := normalizeGithubIssuePickMode(value)
+	if raw == "" {
+		return "", fmt.Errorf("Invalid %s value: %s. Expected one of %s.", flag, value, strings.Join(supportedGithubIssuePickModes, ", "))
+	}
+	return raw, nil
+}
+
+func normalizeGithubIssuePickMode(value string) string {
+	raw := strings.ToLower(strings.TrimSpace(value))
+	switch raw {
+	case "labeled":
+		return "label"
+	case "manual", "label", "auto":
+		return raw
+	default:
+		return ""
+	}
+}
+
+func issuePickModeToAutomationMode(value string) string {
+	switch normalizeGithubIssuePickMode(value) {
+	case "label":
+		return "labeled"
+	case "manual":
+		return "manual"
+	case "auto":
+		return "auto"
+	default:
+		return ""
+	}
+}
+
+func automationModeToIssuePickMode(value string) string {
+	return normalizeGithubIssuePickMode(normalizeGithubAutomationMode(value))
+}
+
+func parseGithubPRForwardMode(value string, flag string) (string, error) {
+	raw := normalizeGithubPRForwardMode(value)
+	if raw == "" {
+		return "", fmt.Errorf("Invalid %s value: %s. Expected one of %s.", flag, value, strings.Join(supportedGithubPRForwardModes, ", "))
+	}
+	return raw, nil
+}
+
+func normalizeGithubPRForwardMode(value string) string {
+	raw := strings.ToLower(strings.TrimSpace(value))
+	if slices.Contains(supportedGithubPRForwardModes, raw) {
+		return raw
+	}
+	return ""
+}
+
+func resolvedGithubRepoMode(settings *githubRepoSettings) string {
+	if settings == nil {
+		return "local"
+	}
+	if mode := normalizeGithubRepoMode(settings.RepoMode); mode != "" {
+		return mode
+	}
+	if mode := publishTargetToRepoMode(settings.PublishTarget); mode != "" {
+		return mode
+	}
+	return "local"
+}
+
+func resolvedGithubIssuePickMode(settings *githubRepoSettings) string {
+	if settings == nil {
+		return "manual"
+	}
+	if mode := normalizeGithubIssuePickMode(settings.IssuePickMode); mode != "" {
+		return mode
+	}
+	if mode := automationModeToIssuePickMode(settings.ImplementMode); mode != "" {
+		return mode
+	}
+	if mode := automationModeToIssuePickMode(settings.ForkIssuesMode); mode != "" {
+		return mode
+	}
+	return "manual"
+}
+
+func resolvedGithubPRForwardMode(settings *githubRepoSettings) string {
+	if settings == nil {
+		return "approve"
+	}
+	return defaultString(normalizeGithubPRForwardMode(settings.PRForwardMode), "approve")
 }
 
 func parseGithubLoginList(value string, flag string) ([]string, error) {

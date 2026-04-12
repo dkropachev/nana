@@ -24,7 +24,7 @@ import (
 const LocalWorkHelp = `nana work - Local implementation runtime for git-backed repos
 
 Usage:
-  nana work start [--repo <path>] (--task <text> | --plan-file <path>) [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [-- codex-args...]
+  nana work start [--repo <path>] [--task <text> | --plan-file <path>] [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [-- codex-args...]
   nana work resume [--run-id <id> | --last | --global-last] [--repo <path>] [-- codex-args...]
   nana work status [--run-id <id> | --last | --global-last] [--repo <path>] [--json]
   nana work logs [--run-id <id> | --last | --global-last] [--repo <path>] [--tail <n>] [--json]
@@ -33,7 +33,9 @@ Usage:
 
 Behavior:
   - runs only against a local git repo in an isolated managed sandbox
-  - never submits, publishes, pushes, or calls GitHub APIs
+  - infers a task from the current branch when --task and --plan-file are omitted
+  - commits verified sandbox changes back to the local source branch after completion
+  - never submits, publishes, pushes to remotes, or calls GitHub APIs
   - loops through implement -> verify -> self-review -> harden -> re-verify with capped hardening rounds
   - runs lint, compile/build, and unit tests every iteration; integration runs on the final pass by default
   - persists run artifacts under ~/.nana/work/
@@ -58,6 +60,12 @@ const (
 	localWorkPathGroupingPolicy    = "path"
 	localWorkSingletonPolicy       = "singleton"
 )
+
+var localWorkFinalReviewGateRoles = []string{
+	"quality-reviewer",
+	"security-reviewer",
+	"performance-reviewer",
+}
 
 type localWorkStartOptions struct {
 	RepoPath              string
@@ -105,75 +113,89 @@ type workRunIndexEntry struct {
 }
 
 type localWorkManifest struct {
-	Version                        int                          `json:"version"`
-	RunID                          string                       `json:"run_id"`
-	CreatedAt                      string                       `json:"created_at"`
-	UpdatedAt                      string                       `json:"updated_at"`
-	CompletedAt                    string                       `json:"completed_at,omitempty"`
-	Status                         string                       `json:"status"`
-	CurrentPhase                   string                       `json:"current_phase,omitempty"`
-	CurrentIteration               int                          `json:"current_iteration,omitempty"`
-	RepoRoot                       string                       `json:"repo_root"`
-	RepoName                       string                       `json:"repo_name"`
-	RepoID                         string                       `json:"repo_id"`
-	SourceBranch                   string                       `json:"source_branch"`
-	BaselineSHA                    string                       `json:"baseline_sha"`
-	SandboxPath                    string                       `json:"sandbox_path"`
-	SandboxRepoPath                string                       `json:"sandbox_repo_path"`
-	VerificationPlan               *githubVerificationPlan      `json:"verification_plan,omitempty"`
-	VerificationScriptsDir         string                       `json:"verification_scripts_dir,omitempty"`
-	InputPath                      string                       `json:"input_path"`
-	InputMode                      string                       `json:"input_mode"`
-	IntegrationPolicy              string                       `json:"integration_policy"`
-	GroupingPolicy                 string                       `json:"grouping_policy,omitempty"`
-	ValidationParallelism          int                          `json:"validation_parallelism,omitempty"`
-	MaxIterations                  int                          `json:"max_iterations"`
-	CurrentRound                   int                          `json:"current_round,omitempty"`
-	CurrentSubphase                string                       `json:"current_subphase,omitempty"`
-	LastError                      string                       `json:"last_error,omitempty"`
-	RejectedFindingFingerprints    []string                     `json:"rejected_finding_fingerprints,omitempty"`
-	PreexistingFindingFingerprints []string                     `json:"preexisting_finding_fingerprints,omitempty"`
-	PreexistingFindings            []localWorkRememberedFinding `json:"preexisting_findings,omitempty"`
-	Iterations                     []localWorkIterationSummary  `json:"iterations,omitempty"`
+	Version                        int                            `json:"version"`
+	RunID                          string                         `json:"run_id"`
+	CreatedAt                      string                         `json:"created_at"`
+	UpdatedAt                      string                         `json:"updated_at"`
+	CompletedAt                    string                         `json:"completed_at,omitempty"`
+	Status                         string                         `json:"status"`
+	CurrentPhase                   string                         `json:"current_phase,omitempty"`
+	CurrentIteration               int                            `json:"current_iteration,omitempty"`
+	RepoRoot                       string                         `json:"repo_root"`
+	RepoName                       string                         `json:"repo_name"`
+	RepoID                         string                         `json:"repo_id"`
+	SourceBranch                   string                         `json:"source_branch"`
+	BaselineSHA                    string                         `json:"baseline_sha"`
+	SandboxPath                    string                         `json:"sandbox_path"`
+	SandboxRepoPath                string                         `json:"sandbox_repo_path"`
+	VerificationPlan               *githubVerificationPlan        `json:"verification_plan,omitempty"`
+	VerificationScriptsDir         string                         `json:"verification_scripts_dir,omitempty"`
+	InputPath                      string                         `json:"input_path"`
+	InputMode                      string                         `json:"input_mode"`
+	IntegrationPolicy              string                         `json:"integration_policy"`
+	GroupingPolicy                 string                         `json:"grouping_policy,omitempty"`
+	ValidationParallelism          int                            `json:"validation_parallelism,omitempty"`
+	MaxIterations                  int                            `json:"max_iterations"`
+	CurrentRound                   int                            `json:"current_round,omitempty"`
+	CurrentSubphase                string                         `json:"current_subphase,omitempty"`
+	LastError                      string                         `json:"last_error,omitempty"`
+	FinalApplyStatus               string                         `json:"final_apply_status,omitempty"`
+	FinalApplyCommitSHA            string                         `json:"final_apply_commit_sha,omitempty"`
+	FinalApplyError                string                         `json:"final_apply_error,omitempty"`
+	FinalAppliedAt                 string                         `json:"final_applied_at,omitempty"`
+	FinalGateStatus                string                         `json:"final_gate_status,omitempty"`
+	FinalGateRoleResults           []localWorkFinalGateRoleResult `json:"final_gate_role_results,omitempty"`
+	CandidateAuditStatus           string                         `json:"candidate_audit_status,omitempty"`
+	CandidateBlockedPaths          []string                       `json:"candidate_blocked_paths,omitempty"`
+	RejectedFindingFingerprints    []string                       `json:"rejected_finding_fingerprints,omitempty"`
+	PreexistingFindingFingerprints []string                       `json:"preexisting_finding_fingerprints,omitempty"`
+	PreexistingFindings            []localWorkRememberedFinding   `json:"preexisting_findings,omitempty"`
+	Iterations                     []localWorkIterationSummary    `json:"iterations,omitempty"`
 }
 
 type localWorkIterationSummary struct {
-	Iteration                             int      `json:"iteration"`
-	StartedAt                             string   `json:"started_at"`
-	CompletedAt                           string   `json:"completed_at"`
-	Status                                string   `json:"status"`
-	DiffFingerprint                       string   `json:"diff_fingerprint,omitempty"`
-	VerificationFingerprint               string   `json:"verification_fingerprint,omitempty"`
-	ReviewFingerprint                     string   `json:"review_fingerprint,omitempty"`
-	InitialReviewFingerprint              string   `json:"initial_review_fingerprint,omitempty"`
-	HardeningFingerprint                  string   `json:"hardening_fingerprint,omitempty"`
-	PostHardeningVerificationFingerprint  string   `json:"post_hardening_verification_fingerprint,omitempty"`
-	VerificationPassed                    bool     `json:"verification_passed"`
-	VerificationFailedStages              []string `json:"verification_failed_stages,omitempty"`
-	VerificationSummary                   string   `json:"verification_summary,omitempty"`
-	InitialReviewFindings                 int      `json:"initial_review_findings,omitempty"`
-	ValidatedFindings                     int      `json:"validated_findings,omitempty"`
-	ConfirmedFindings                     int      `json:"confirmed_findings,omitempty"`
-	RejectedFindings                      int      `json:"rejected_findings,omitempty"`
-	PreexistingFindings                   int      `json:"preexisting_findings,omitempty"`
-	ModifiedFindings                      int      `json:"modified_findings,omitempty"`
-	SkippedRejectedFindings               int      `json:"skipped_rejected_findings,omitempty"`
-	SkippedPreexistingFindings            int      `json:"skipped_preexisting_findings,omitempty"`
-	ValidationGroups                      []string `json:"validation_groups,omitempty"`
-	ValidationGroupRationales             []string `json:"validation_group_rationales,omitempty"`
-	RequestedGroupingPolicy               string   `json:"requested_grouping_policy,omitempty"`
-	EffectiveGroupingPolicy               string   `json:"effective_grouping_policy,omitempty"`
-	GroupingFallbackReason                string   `json:"grouping_fallback_reason,omitempty"`
-	GroupingAttempts                      int      `json:"grouping_attempts,omitempty"`
-	ValidatorAttempts                     int      `json:"validator_attempts,omitempty"`
-	ReviewRoundsUsed                      int      `json:"review_rounds_used,omitempty"`
-	ReviewFindingsByRound                 []int    `json:"review_findings_by_round,omitempty"`
-	ReviewRoundFingerprints               []string `json:"review_round_fingerprints,omitempty"`
-	HardeningRoundFingerprints            []string `json:"hardening_round_fingerprints,omitempty"`
-	PostHardeningVerificationFingerprints []string `json:"post_hardening_verification_fingerprints,omitempty"`
-	ReviewFindings                        int      `json:"review_findings"`
-	ReviewFindingTitles                   []string `json:"review_finding_titles,omitempty"`
-	IntegrationRan                        bool     `json:"integration_ran,omitempty"`
+	Iteration                             int                            `json:"iteration"`
+	StartedAt                             string                         `json:"started_at"`
+	CompletedAt                           string                         `json:"completed_at"`
+	Status                                string                         `json:"status"`
+	DiffFingerprint                       string                         `json:"diff_fingerprint,omitempty"`
+	VerificationFingerprint               string                         `json:"verification_fingerprint,omitempty"`
+	ReviewFingerprint                     string                         `json:"review_fingerprint,omitempty"`
+	InitialReviewFingerprint              string                         `json:"initial_review_fingerprint,omitempty"`
+	HardeningFingerprint                  string                         `json:"hardening_fingerprint,omitempty"`
+	PostHardeningVerificationFingerprint  string                         `json:"post_hardening_verification_fingerprint,omitempty"`
+	VerificationPassed                    bool                           `json:"verification_passed"`
+	VerificationFailedStages              []string                       `json:"verification_failed_stages,omitempty"`
+	VerificationSummary                   string                         `json:"verification_summary,omitempty"`
+	InitialReviewFindings                 int                            `json:"initial_review_findings,omitempty"`
+	ValidatedFindings                     int                            `json:"validated_findings,omitempty"`
+	ConfirmedFindings                     int                            `json:"confirmed_findings,omitempty"`
+	RejectedFindings                      int                            `json:"rejected_findings,omitempty"`
+	PreexistingFindings                   int                            `json:"preexisting_findings,omitempty"`
+	ModifiedFindings                      int                            `json:"modified_findings,omitempty"`
+	SkippedRejectedFindings               int                            `json:"skipped_rejected_findings,omitempty"`
+	SkippedPreexistingFindings            int                            `json:"skipped_preexisting_findings,omitempty"`
+	ValidationGroups                      []string                       `json:"validation_groups,omitempty"`
+	ValidationGroupRationales             []string                       `json:"validation_group_rationales,omitempty"`
+	RequestedGroupingPolicy               string                         `json:"requested_grouping_policy,omitempty"`
+	EffectiveGroupingPolicy               string                         `json:"effective_grouping_policy,omitempty"`
+	GroupingFallbackReason                string                         `json:"grouping_fallback_reason,omitempty"`
+	GroupingAttempts                      int                            `json:"grouping_attempts,omitempty"`
+	ValidatorAttempts                     int                            `json:"validator_attempts,omitempty"`
+	ReviewRoundsUsed                      int                            `json:"review_rounds_used,omitempty"`
+	ReviewFindingsByRound                 []int                          `json:"review_findings_by_round,omitempty"`
+	ReviewRoundFingerprints               []string                       `json:"review_round_fingerprints,omitempty"`
+	HardeningRoundFingerprints            []string                       `json:"hardening_round_fingerprints,omitempty"`
+	PostHardeningVerificationFingerprints []string                       `json:"post_hardening_verification_fingerprints,omitempty"`
+	ReviewFindings                        int                            `json:"review_findings"`
+	ReviewFindingTitles                   []string                       `json:"review_finding_titles,omitempty"`
+	FinalGateFindings                     int                            `json:"final_gate_findings,omitempty"`
+	FinalGateRoles                        []string                       `json:"final_gate_roles,omitempty"`
+	FinalGateStatus                       string                         `json:"final_gate_status,omitempty"`
+	FinalGateRoleResults                  []localWorkFinalGateRoleResult `json:"final_gate_role_results,omitempty"`
+	CandidateAuditStatus                  string                         `json:"candidate_audit_status,omitempty"`
+	CandidateBlockedPaths                 []string                       `json:"candidate_blocked_paths,omitempty"`
+	IntegrationRan                        bool                           `json:"integration_ran,omitempty"`
 }
 
 type localWorkVerificationCommandResult struct {
@@ -201,6 +223,23 @@ type localWorkVerificationReport struct {
 type localWorkExecutionResult struct {
 	Stdout string
 	Stderr string
+}
+
+type localWorkFinalApplyResult struct {
+	Status    string
+	CommitSHA string
+	Error     string
+}
+
+type localWorkFinalGateRoleResult struct {
+	Role     string `json:"role"`
+	Findings int    `json:"findings"`
+}
+
+type localWorkCandidateAuditResult struct {
+	Status       string   `json:"status,omitempty"`
+	BlockedPaths []string `json:"blocked_paths,omitempty"`
+	Error        string   `json:"error,omitempty"`
 }
 
 type localWorkFindingGroup struct {
@@ -925,8 +964,8 @@ func parseLocalWorkStartArgs(args []string) (localWorkStartOptions, error) {
 		}
 	}
 
-	if (strings.TrimSpace(options.Task) == "") == (strings.TrimSpace(options.PlanFile) == "") {
-		return localWorkStartOptions{}, fmt.Errorf("Specify exactly one of --task or --plan-file.\n%s", LocalWorkHelp)
+	if strings.TrimSpace(options.Task) != "" && strings.TrimSpace(options.PlanFile) != "" {
+		return localWorkStartOptions{}, fmt.Errorf("Specify at most one of --task or --plan-file.\n%s", LocalWorkHelp)
 	}
 	switch options.IntegrationPolicy {
 	case "final", "always", "never":
@@ -1086,10 +1125,6 @@ func startLocalWork(cwd string, options localWorkStartOptions) error {
 	if err := ensureLocalWorkRepoClean(repoRoot); err != nil {
 		return err
 	}
-	inputContent, inputMode, err := readLocalWorkInput(cwd, options)
-	if err != nil {
-		return err
-	}
 
 	baselineSHAOutput, err := githubGitOutput(repoRoot, "rev-parse", "HEAD")
 	if err != nil {
@@ -1101,6 +1136,10 @@ func startLocalWork(cwd string, options localWorkStartOptions) error {
 	}
 	baselineSHA := strings.TrimSpace(baselineSHAOutput)
 	sourceBranch := strings.TrimSpace(sourceBranchOutput)
+	inputContent, inputMode, err := readLocalWorkInput(cwd, options, sourceBranch)
+	if err != nil {
+		return err
+	}
 	repoID := localWorkRepoID(repoRoot)
 	repoName := filepath.Base(repoRoot)
 	runID := fmt.Sprintf("lw-%d", time.Now().UnixNano())
@@ -1177,11 +1216,55 @@ func resumeLocalWork(cwd string, options localWorkResumeOptions) error {
 	if manifest.Status == "completed" {
 		return fmt.Errorf("work run %s is already completed", manifest.RunID)
 	}
+	if manifest.Status == "blocked" && manifest.FinalApplyStatus == "blocked-before-apply" {
+		return retryBlockedLocalWorkFinalApply(manifest)
+	}
+	if manifest.Status == "blocked" {
+		return fmt.Errorf("work run %s is blocked: %s", manifest.RunID, defaultString(manifest.LastError, manifest.FinalApplyError))
+	}
 	if len(manifest.Iterations) >= manifest.MaxIterations {
 		return fmt.Errorf("work run %s has already exhausted max iterations (%d)", manifest.RunID, manifest.MaxIterations)
 	}
 	fmt.Fprintf(os.Stdout, "[local] Resuming run %s for %s\n", manifest.RunID, manifest.RepoRoot)
 	return executeLocalWorkLoop(manifest.RunID, options.CodexArgs)
+}
+
+func retryBlockedLocalWorkFinalApply(manifest localWorkManifest) error {
+	fmt.Fprintf(os.Stdout, "[local] Retrying final source commit for run %s\n", manifest.RunID)
+	applyResult := applyLocalWorkFinalDiff(manifest)
+	manifest.FinalApplyStatus = applyResult.Status
+	manifest.FinalApplyCommitSHA = applyResult.CommitSHA
+	manifest.FinalApplyError = applyResult.Error
+	manifest.FinalAppliedAt = ISOTimeNow()
+	manifest.UpdatedAt = manifest.FinalAppliedAt
+	if strings.HasPrefix(applyResult.Status, "blocked") {
+		manifest.LastError = applyResult.Error
+		setLocalWorkProgress(&manifest, nil, "apply-blocked", "commit-source", manifest.CurrentRound)
+		if err := writeLocalWorkManifest(manifest); err != nil {
+			return err
+		}
+		return errors.New(applyResult.Error)
+	}
+	manifest.Status = "completed"
+	manifest.LastError = ""
+	setLocalWorkProgress(&manifest, nil, "completed", "completed", 0)
+	manifest.CompletedAt = manifest.FinalAppliedAt
+	if len(manifest.Iterations) > 0 {
+		manifest.Iterations[len(manifest.Iterations)-1].Status = "completed"
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		return err
+	}
+	if _, err := writeLocalWorkRetrospective(manifest); err != nil {
+		return err
+	}
+	switch applyResult.Status {
+	case "committed":
+		fmt.Fprintf(os.Stdout, "[local] Completed run %s; committed to source branch at %s.\n", manifest.RunID, applyResult.CommitSHA)
+	case "no-op":
+		fmt.Fprintf(os.Stdout, "[local] Completed run %s; no source changes to commit.\n", manifest.RunID)
+	}
+	return nil
 }
 
 func executeLocalWorkLoop(runID string, codexArgs []string) error {
@@ -1257,6 +1340,9 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 				if writeErr := writeLocalWorkActiveState(runDir, &manifest, &state); writeErr != nil {
 					return writeErr
 				}
+				return err
+			}
+			if err := refreshLocalWorkSandboxIntentToAdd(manifest.SandboxRepoPath); err != nil {
 				return err
 			}
 			state.ImplementCompleted = true
@@ -1352,6 +1438,57 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			}
 		}
 
+		finalGateFindingsCount := 0
+		finalGateRoles := []string{}
+		finalGateRoleResults := []localWorkFinalGateRoleResult{}
+		finalGateStatus := ""
+		candidateAuditStatus := ""
+		candidateBlockedPaths := []string{}
+		if initialVerification.Passed && len(initialFindings) == 0 {
+			hasDiff, err := localWorkSandboxHasDiff(manifest)
+			if err != nil {
+				return err
+			}
+			if !hasDiff {
+				finalGateStatus = "no-op"
+				candidateAuditStatus = "no-op"
+			} else {
+				audit, err := auditLocalWorkCandidateFiles(manifest)
+				if err != nil {
+					return err
+				}
+				candidateAuditStatus = audit.Status
+				candidateBlockedPaths = append([]string{}, audit.BlockedPaths...)
+				if audit.Status == "blocked-candidate-files" {
+					finalGateStatus = "blocked"
+				} else {
+					setLocalWorkProgress(&manifest, &state, "final-review", "final-review", 0)
+					if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
+						return err
+					}
+					gateFindings, gateRoles, gateRoleResults, gateCount, err := runLocalWorkFinalReviewGate(manifest, codexArgs, iterationDir, "initial")
+					if err != nil {
+						manifest.Status = "failed"
+						manifest.LastError = err.Error()
+						manifest.UpdatedAt = ISOTimeNow()
+						if writeErr := writeLocalWorkActiveState(runDir, &manifest, &state); writeErr != nil {
+							return writeErr
+						}
+						return err
+					}
+					initialFindings = append(initialFindings, gateFindings...)
+					finalGateFindingsCount += gateCount
+					finalGateRoles = append(finalGateRoles, gateRoles...)
+					finalGateRoleResults = mergeFinalGateRoleResults(finalGateRoleResults, gateRoleResults)
+					if gateCount > 0 {
+						finalGateStatus = "findings"
+					} else {
+						finalGateStatus = "passed"
+					}
+				}
+			}
+		}
+
 		reviewPromptContent, _ := os.ReadFile(reviewPromptPath)
 		if len(reviewPromptContent) > 0 {
 			if err := os.WriteFile(filepath.Join(iterationDir, "review-initial-prompt.md"), reviewPromptContent, 0o644); err != nil {
@@ -1414,6 +1551,10 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			hardeningStdoutPath := filepath.Join(iterationDir, fmt.Sprintf("hardening-round-%d-stdout.log", round))
 			hardeningStderrPath := filepath.Join(iterationDir, fmt.Sprintf("hardening-round-%d-stderr.log", round))
 			if !roundState.HardeningCompleted {
+				preHardeningUntracked, err := localWorkUntrackedFiles(manifest.SandboxRepoPath)
+				if err != nil {
+					return err
+				}
 				setLocalWorkProgress(&manifest, &state, "harden", "hardening", round)
 				if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 					return err
@@ -1439,6 +1580,9 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 					if writeErr := writeLocalWorkActiveState(runDir, &manifest, &state); writeErr != nil {
 						return writeErr
 					}
+					return err
+				}
+				if err := refreshLocalWorkSandboxIntentToAddIgnoring(manifest.SandboxRepoPath, preHardeningUntracked); err != nil {
 					return err
 				}
 				roundState.HardeningCompleted = true
@@ -1519,6 +1663,51 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 				roundState.PostReviewCompleted = false
 				round--
 				continue
+			}
+
+			if finalVerification.Passed && len(postHardeningFindings) == 0 {
+				hasDiff, err := localWorkSandboxHasDiff(manifest)
+				if err != nil {
+					return err
+				}
+				if !hasDiff {
+					finalGateStatus = "no-op"
+					candidateAuditStatus = "no-op"
+				} else {
+					audit, err := auditLocalWorkCandidateFiles(manifest)
+					if err != nil {
+						return err
+					}
+					candidateAuditStatus = audit.Status
+					candidateBlockedPaths = append([]string{}, audit.BlockedPaths...)
+					if audit.Status == "blocked-candidate-files" {
+						finalGateStatus = "blocked"
+					} else {
+						setLocalWorkProgress(&manifest, &state, "final-review", "final-review", round)
+						if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
+							return err
+						}
+						gateFindings, gateRoles, gateRoleResults, gateCount, err := runLocalWorkFinalReviewGate(manifest, codexArgs, iterationDir, fmt.Sprintf("round-%d", round))
+						if err != nil {
+							manifest.Status = "failed"
+							manifest.LastError = err.Error()
+							manifest.UpdatedAt = ISOTimeNow()
+							if writeErr := writeLocalWorkActiveState(runDir, &manifest, &state); writeErr != nil {
+								return writeErr
+							}
+							return err
+						}
+						postHardeningFindings = append(postHardeningFindings, gateFindings...)
+						finalGateFindingsCount += gateCount
+						finalGateRoles = append(finalGateRoles, gateRoles...)
+						finalGateRoleResults = mergeFinalGateRoleResults(finalGateRoleResults, gateRoleResults)
+						if gateCount > 0 {
+							finalGateStatus = "findings"
+						} else {
+							finalGateStatus = "passed"
+						}
+					}
+				}
 			}
 
 			filteredRoundResult := filterKnownFindings(postHardeningFindings, manifest.RejectedFindingFingerprints, manifest.PreexistingFindingFingerprints)
@@ -1640,15 +1829,50 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			PostHardeningVerificationFingerprints: append([]string{}, postHardeningVerificationFingerprints...),
 			ReviewFindings:                        len(finalFindings),
 			ReviewFindingTitles:                   reviewFindingTitles(finalFindings),
+			FinalGateFindings:                     finalGateFindingsCount,
+			FinalGateRoles:                        uniqueStrings(finalGateRoles),
+			FinalGateStatus:                       finalGateStatus,
+			FinalGateRoleResults:                  finalGateRoleResults,
+			CandidateAuditStatus:                  candidateAuditStatus,
+			CandidateBlockedPaths:                 append([]string{}, candidateBlockedPaths...),
 			IntegrationRan:                        integrationRan,
 		}
+		manifest.FinalGateStatus = finalGateStatus
+		manifest.FinalGateRoleResults = finalGateRoleResults
+		manifest.CandidateAuditStatus = candidateAuditStatus
+		manifest.CandidateBlockedPaths = append([]string{}, candidateBlockedPaths...)
 		if finalVerification.Passed && len(finalFindings) == 0 {
-			summary.Status = "completed"
+			if candidateAuditStatus == "blocked-candidate-files" {
+				summary.Status = "blocked"
+				manifest.Status = "blocked"
+				manifest.LastError = localWorkCandidateBlockedMessage(candidateBlockedPaths)
+				setLocalWorkProgress(&manifest, &state, "candidate-blocked", "candidate-audit", roundsUsed)
+			} else {
+				setLocalWorkProgress(&manifest, &state, "apply", "commit-source", roundsUsed)
+				if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
+					return err
+				}
+				applyResult := applyLocalWorkFinalDiff(manifest)
+				manifest.FinalApplyStatus = applyResult.Status
+				manifest.FinalApplyCommitSHA = applyResult.CommitSHA
+				manifest.FinalApplyError = applyResult.Error
+				manifest.FinalAppliedAt = ISOTimeNow()
+				if strings.HasPrefix(applyResult.Status, "blocked") {
+					summary.Status = "blocked"
+					manifest.Status = "blocked"
+					manifest.LastError = applyResult.Error
+					setLocalWorkProgress(&manifest, &state, "apply-blocked", "commit-source", roundsUsed)
+				} else {
+					summary.Status = "completed"
+				}
+			}
 		}
 
 		manifest.Iterations = append(manifest.Iterations, summary)
 		manifest.UpdatedAt = summary.CompletedAt
-		setLocalWorkProgress(&manifest, &state, "iteration-complete", "iteration-complete", 0)
+		if summary.Status != "blocked" {
+			setLocalWorkProgress(&manifest, &state, "iteration-complete", "iteration-complete", 0)
+		}
 		if summary.Status == "completed" {
 			manifest.Status = "completed"
 			setLocalWorkProgress(&manifest, &state, "completed", "completed", 0)
@@ -1671,8 +1895,23 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 				return err
 			}
 			printLocalWorkRememberedFindings(os.Stdout, "Pre-existing issues excluded from propagation", manifest.PreexistingFindings)
-			fmt.Fprintf(os.Stdout, "[local] Completed run %s after %d iteration(s).\n", manifest.RunID, iteration)
+			switch manifest.FinalApplyStatus {
+			case "committed":
+				fmt.Fprintf(os.Stdout, "[local] Completed run %s after %d iteration(s); committed to source branch at %s.\n", manifest.RunID, iteration, manifest.FinalApplyCommitSHA)
+			case "no-op":
+				fmt.Fprintf(os.Stdout, "[local] Completed run %s after %d iteration(s); no source changes to commit.\n", manifest.RunID, iteration)
+			default:
+				fmt.Fprintf(os.Stdout, "[local] Completed run %s after %d iteration(s).\n", manifest.RunID, iteration)
+			}
 			return nil
+		}
+		if summary.Status == "blocked" {
+			if _, err := writeLocalWorkRetrospective(manifest); err != nil {
+				return err
+			}
+			blocker := defaultString(manifest.FinalApplyError, manifest.LastError)
+			fmt.Fprintf(os.Stdout, "[local] Blocked run %s after %d iteration(s); source commit was not created: %s\n", manifest.RunID, iteration, blocker)
+			return errors.New(blocker)
 		}
 
 		if stallReason := detectLocalWorkStall(manifest.Iterations); stallReason != "" {
@@ -1853,6 +2092,14 @@ type localWorkStatusSnapshot struct {
 	ActiveValidationContext  *localWorkValidationContextState `json:"active_validation_context,omitempty"`
 	RejectedFingerprintCount int                              `json:"rejected_fingerprint_count,omitempty"`
 	PreexistingFindingCount  int                              `json:"preexisting_finding_count,omitempty"`
+	FinalApplyStatus         string                           `json:"final_apply_status,omitempty"`
+	FinalApplyCommitSHA      string                           `json:"final_apply_commit_sha,omitempty"`
+	FinalApplyError          string                           `json:"final_apply_error,omitempty"`
+	FinalGateStatus          string                           `json:"final_gate_status,omitempty"`
+	FinalGateRoleResults     []localWorkFinalGateRoleResult   `json:"final_gate_role_results,omitempty"`
+	CandidateAuditStatus     string                           `json:"candidate_audit_status,omitempty"`
+	CandidateBlockedPaths    []string                         `json:"candidate_blocked_paths,omitempty"`
+	NextAction               string                           `json:"next_action,omitempty"`
 	LastError                string                           `json:"last_error,omitempty"`
 }
 
@@ -1874,6 +2121,37 @@ func localWorkStatus(cwd string, options localWorkStatusOptions) error {
 	fmt.Fprintf(os.Stdout, "[local] Run artifacts: %s\n", snapshot.RunArtifacts)
 	fmt.Fprintf(os.Stdout, "[local] Sandbox: %s\n", snapshot.Sandbox)
 	fmt.Fprintf(os.Stdout, "[local] Status: %s\n", snapshot.Status)
+	if strings.TrimSpace(snapshot.FinalApplyStatus) != "" {
+		fmt.Fprintf(os.Stdout, "[local] Final apply: %s", snapshot.FinalApplyStatus)
+		if strings.TrimSpace(snapshot.FinalApplyCommitSHA) != "" {
+			fmt.Fprintf(os.Stdout, " commit=%s", snapshot.FinalApplyCommitSHA)
+		}
+		if strings.TrimSpace(snapshot.FinalApplyError) != "" {
+			fmt.Fprintf(os.Stdout, " error=%s", snapshot.FinalApplyError)
+		}
+		fmt.Fprintln(os.Stdout)
+	}
+	if strings.TrimSpace(snapshot.FinalGateStatus) != "" {
+		fmt.Fprintf(os.Stdout, "[local] Final gate: %s", snapshot.FinalGateStatus)
+		if len(snapshot.FinalGateRoleResults) > 0 {
+			parts := make([]string, 0, len(snapshot.FinalGateRoleResults))
+			for _, result := range snapshot.FinalGateRoleResults {
+				parts = append(parts, fmt.Sprintf("%s=%d", result.Role, result.Findings))
+			}
+			fmt.Fprintf(os.Stdout, " %s", strings.Join(parts, ","))
+		}
+		fmt.Fprintln(os.Stdout)
+	}
+	if strings.TrimSpace(snapshot.CandidateAuditStatus) != "" {
+		fmt.Fprintf(os.Stdout, "[local] Candidate audit: %s", snapshot.CandidateAuditStatus)
+		if len(snapshot.CandidateBlockedPaths) > 0 {
+			fmt.Fprintf(os.Stdout, " blocked=%s", strings.Join(snapshot.CandidateBlockedPaths, ","))
+		}
+		fmt.Fprintln(os.Stdout)
+	}
+	if strings.TrimSpace(snapshot.NextAction) != "" {
+		fmt.Fprintf(os.Stdout, "[local] Next action: %s\n", snapshot.NextAction)
+	}
 	fmt.Fprintf(os.Stdout, "[local] Iteration: %d/%d (phase=%s", snapshot.Iteration, snapshot.MaxIterations, defaultString(snapshot.Phase, "n/a"))
 	if strings.TrimSpace(snapshot.Subphase) != "" {
 		fmt.Fprintf(os.Stdout, ", subphase=%s", snapshot.Subphase)
@@ -1958,6 +2236,14 @@ func localWorkBuildStatusSnapshot(manifest localWorkManifest, runDir string) (lo
 		ActiveValidationContext:  activeContext,
 		RejectedFingerprintCount: len(manifest.RejectedFindingFingerprints),
 		PreexistingFindingCount:  len(manifest.PreexistingFindings),
+		FinalApplyStatus:         manifest.FinalApplyStatus,
+		FinalApplyCommitSHA:      manifest.FinalApplyCommitSHA,
+		FinalApplyError:          manifest.FinalApplyError,
+		FinalGateStatus:          manifest.FinalGateStatus,
+		FinalGateRoleResults:     append([]localWorkFinalGateRoleResult{}, manifest.FinalGateRoleResults...),
+		CandidateAuditStatus:     manifest.CandidateAuditStatus,
+		CandidateBlockedPaths:    append([]string{}, manifest.CandidateBlockedPaths...),
+		NextAction:               localWorkBlockedNextAction(manifest),
 		LastError:                manifest.LastError,
 	}
 	if runtimeState != nil {
@@ -2155,6 +2441,10 @@ func localWorkLogFiles(iterationDir string) ([]string, error) {
 		"hardening-round-*-stderr.log",
 		"review-round-*-stdout.log",
 		"review-round-*-stderr.log",
+		"final-gate-*-prompt.md",
+		"final-gate-*-stdout.log",
+		"final-gate-*-stderr.log",
+		"final-gate-*-findings.json",
 		"verification.json",
 		"verification-round-*-post-hardening.json",
 		"review-initial-findings.json",
@@ -2414,7 +2704,11 @@ func hasCodexExecutionPolicyArg(args []string) bool {
 }
 
 func runLocalWorkReview(manifest localWorkManifest, codexArgs []string, prompt string) (localWorkExecutionResult, []githubPullReviewFinding, error) {
-	result, err := runLocalWorkCodexPrompt(manifest, codexArgs, prompt, "reviewer")
+	return runLocalWorkReviewWithAlias(manifest, codexArgs, prompt, "reviewer")
+}
+
+func runLocalWorkReviewWithAlias(manifest localWorkManifest, codexArgs []string, prompt string, alias string) (localWorkExecutionResult, []githubPullReviewFinding, error) {
+	result, err := runLocalWorkCodexPrompt(manifest, codexArgs, prompt, alias)
 	if err != nil {
 		return result, nil, err
 	}
@@ -3731,9 +4025,89 @@ func ensureLocalWorkRepoClean(repoRoot string) error {
 	return fmt.Errorf("work requires a clean repo before start; found local changes:\n%s", strings.Join(remaining, "\n"))
 }
 
-func readLocalWorkInput(cwd string, options localWorkStartOptions) (string, string, error) {
+func inferLocalWorkTaskFromBranch(sourceBranch string) (string, error) {
+	branch := strings.TrimSpace(sourceBranch)
+	if branch == "" || branch == "HEAD" {
+		return "", localWorkTaskInferenceError(branch)
+	}
+	branch = strings.TrimPrefix(branch, "refs/heads/")
+	branch = strings.TrimPrefix(branch, "origin/")
+
+	genericBranches := map[string]bool{
+		"main":        true,
+		"master":      true,
+		"trunk":       true,
+		"develop":     true,
+		"development": true,
+		"dev":         true,
+		"staging":     true,
+		"stage":       true,
+		"production":  true,
+		"prod":        true,
+		"release":     true,
+		"releases":    true,
+	}
+	if genericBranches[strings.ToLower(branch)] {
+		return "", localWorkTaskInferenceError(branch)
+	}
+
+	normalized := strings.NewReplacer("/", " ", "-", " ", "_", " ", ".", " ").Replace(branch)
+	words := strings.Fields(normalized)
+	prefixes := map[string]bool{
+		"feature":  true,
+		"feat":     true,
+		"bugfix":   true,
+		"fix":      true,
+		"hotfix":   true,
+		"chore":    true,
+		"docs":     true,
+		"doc":      true,
+		"refactor": true,
+		"task":     true,
+		"issue":    true,
+		"pr":       true,
+		"wip":      true,
+		"work":     true,
+	}
+	for len(words) > 0 && prefixes[strings.ToLower(words[0])] {
+		words = words[1:]
+	}
+	meaningful := make([]string, 0, len(words))
+	for _, word := range words {
+		cleaned := strings.Trim(word, " #[](){}")
+		if cleaned == "" {
+			continue
+		}
+		if genericBranches[strings.ToLower(cleaned)] {
+			continue
+		}
+		meaningful = append(meaningful, cleaned)
+	}
+	if len(meaningful) == 0 {
+		return "", localWorkTaskInferenceError(branch)
+	}
+	summary := strings.Join(meaningful, " ")
+	return fmt.Sprintf("Continue work on local branch %q. Inferred task from branch name: %s.", branch, summary), nil
+}
+
+func localWorkTaskInferenceError(branch string) error {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		branch = "(unknown)"
+	}
+	return fmt.Errorf("could not infer a local work task from branch %q; provide --task yourself because inference failed", branch)
+}
+
+func readLocalWorkInput(cwd string, options localWorkStartOptions, sourceBranch string) (string, string, error) {
 	if strings.TrimSpace(options.Task) != "" {
 		return options.Task, "task", nil
+	}
+	if strings.TrimSpace(options.PlanFile) == "" {
+		task, err := inferLocalWorkTaskFromBranch(sourceBranch)
+		if err != nil {
+			return "", "", err
+		}
+		return task, "inferred-branch", nil
 	}
 	path := options.PlanFile
 	if !filepath.IsAbs(path) {
@@ -4033,6 +4407,9 @@ func writeLocalWorkRetrospective(manifest localWorkManifest) (string, error) {
 		fmt.Sprintf("- Validation parallelism: %d", manifest.ValidationParallelism),
 		fmt.Sprintf("- Stored rejected findings: %d", len(manifest.RejectedFindingFingerprints)),
 		fmt.Sprintf("- Stored pre-existing findings: %d", len(manifest.PreexistingFindings)),
+		fmt.Sprintf("- Final source apply: %s", defaultString(manifest.FinalApplyStatus, "(not attempted)")),
+		fmt.Sprintf("- Final source commit: %s", defaultString(manifest.FinalApplyCommitSHA, "(none)")),
+		fmt.Sprintf("- Candidate audit: %s", defaultString(manifest.CandidateAuditStatus, "(not attempted)")),
 		fmt.Sprintf("- Finding history events: %d", len(history)),
 		fmt.Sprintf("- Final diff: %s", defaultString(strings.TrimSpace(diffShortstat), "(no diff)")),
 		"",
@@ -4061,6 +4438,21 @@ func writeLocalWorkRetrospective(manifest localWorkManifest) (string, error) {
 		if strings.TrimSpace(iteration.GroupingFallbackReason) != "" {
 			lines = append(lines, "  - grouping fallback: "+iteration.GroupingFallbackReason)
 		}
+		if iteration.FinalGateFindings > 0 || len(iteration.FinalGateRoles) > 0 {
+			lines = append(lines, fmt.Sprintf("  - final review gate: findings=%d roles=%s", iteration.FinalGateFindings, strings.Join(iteration.FinalGateRoles, ", ")))
+		}
+	}
+	if strings.TrimSpace(manifest.FinalApplyError) != "" {
+		lines = append(lines, "", "## Final source apply blocker", "", manifest.FinalApplyError)
+	}
+	if len(manifest.CandidateBlockedPaths) > 0 {
+		lines = append(lines, "", "## Candidate file blocker")
+		for _, path := range manifest.CandidateBlockedPaths {
+			lines = append(lines, "- "+path)
+		}
+	}
+	if nextAction := localWorkBlockedNextAction(manifest); strings.TrimSpace(nextAction) != "" {
+		lines = append(lines, "", "## Next action", "", nextAction)
 	}
 	if len(manifest.PreexistingFindings) > 0 {
 		lines = append(lines, "", "## Pre-existing issues excluded")

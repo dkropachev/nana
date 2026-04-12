@@ -38,6 +38,11 @@ type githubWorkManifest struct {
 	VerificationPlan        *githubVerificationPlan    `json:"verification_plan,omitempty"`
 	VerificationScriptsDir  string                     `json:"verification_scripts_dir,omitempty"`
 	CreatePROnComplete      bool                       `json:"create_pr_on_complete,omitempty"`
+	RepoMode                string                     `json:"repo_mode,omitempty"`
+	PRForwardMode           string                     `json:"pr_forward_mode,omitempty"`
+	PublishTarget           string                     `json:"publish_target,omitempty"`
+	PublishRepoSlug         string                     `json:"publish_repo_slug,omitempty"`
+	PublishRepoOwner        string                     `json:"publish_repo_owner,omitempty"`
 	ConsiderationPipeline   []githubPipelineLane       `json:"consideration_pipeline,omitempty"`
 	LanePromptArtifacts     []githubLanePromptArtifact `json:"lane_prompt_artifacts,omitempty"`
 	ConsiderationsActive    []string                   `json:"considerations_active,omitempty"`
@@ -122,6 +127,9 @@ type githubWorkStartOptions struct {
 	RoleLayout              string
 	NewPR                   bool
 	CreatePR                bool
+	CreatePRExplicit        bool
+	RepoMode                string
+	PublishTarget           string
 	CodexArgs               []string
 }
 
@@ -291,6 +299,9 @@ func parseGithubWorkStartArgs(args []string) (githubWorkStartOptions, error) {
 	roleLayout := ""
 	newPR := false
 	createPR := false
+	createPRExplicit := false
+	repoMode := ""
+	publishTarget := ""
 	codexArgs := []string{}
 	targetIndex := 1
 	if strings.HasPrefix(args[targetIndex], "-") {
@@ -364,8 +375,57 @@ func parseGithubWorkStartArgs(args []string) (githubWorkStartOptions, error) {
 			newPR = true
 		case token == "--create-pr":
 			createPR = true
+			createPRExplicit = true
 		case token == "--local-only":
 			createPR = false
+			createPRExplicit = true
+			publishTarget = "local-branch"
+		case token == "--repo-mode":
+			value, err := requireFlagValue(args, index, token)
+			if err != nil {
+				return githubWorkStartOptions{}, err
+			}
+			parsed, err := parseGithubRepoMode(value, token)
+			if err != nil {
+				return githubWorkStartOptions{}, err
+			}
+			repoMode = parsed
+			publishTarget = repoModeToPublishTarget(parsed)
+			createPR = parsed != "local"
+			createPRExplicit = true
+			index++
+		case strings.HasPrefix(token, "--repo-mode="):
+			parsed, err := parseGithubRepoMode(strings.TrimPrefix(token, "--repo-mode="), "--repo-mode")
+			if err != nil {
+				return githubWorkStartOptions{}, err
+			}
+			repoMode = parsed
+			publishTarget = repoModeToPublishTarget(parsed)
+			createPR = parsed != "local"
+			createPRExplicit = true
+		case token == "--publish":
+			value, err := requireFlagValue(args, index, token)
+			if err != nil {
+				return githubWorkStartOptions{}, err
+			}
+			parsed, err := parseGithubPublishTarget(value, token)
+			if err != nil {
+				return githubWorkStartOptions{}, err
+			}
+			publishTarget = parsed
+			repoMode = publishTargetToRepoMode(parsed)
+			createPR = publishTarget != "local-branch"
+			createPRExplicit = true
+			index++
+		case strings.HasPrefix(token, "--publish="):
+			parsed, err := parseGithubPublishTarget(strings.TrimPrefix(token, "--publish="), "--publish")
+			if err != nil {
+				return githubWorkStartOptions{}, err
+			}
+			publishTarget = parsed
+			repoMode = publishTargetToRepoMode(parsed)
+			createPR = publishTarget != "local-branch"
+			createPRExplicit = true
 		case token == "--repo":
 			value, err := requireFlagValue(args, index, token)
 			if err != nil {
@@ -442,6 +502,9 @@ func parseGithubWorkStartArgs(args []string) (githubWorkStartOptions, error) {
 		RoleLayout:              roleLayout,
 		NewPR:                   newPR,
 		CreatePR:                createPR,
+		CreatePRExplicit:        createPRExplicit,
+		RepoMode:                repoMode,
+		PublishTarget:           publishTarget,
 		CodexArgs:               codexArgs,
 	}, nil
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,6 +32,13 @@ type githubMergeResponse struct {
 	SHA     string `json:"sha"`
 	Merged  bool   `json:"merged"`
 	Message string `json:"message"`
+}
+
+type githubPublicationTarget struct {
+	RepoSlug   string
+	RepoOwner  string
+	RemoteName string
+	RemoteURL  string
 }
 
 type githubCheckRunsResponse struct {
@@ -84,22 +92,6 @@ func executeGithubPublisherLane(runID string, useLast bool) error {
 	if branchName == "" {
 		branchName = fmt.Sprintf("nana/%s-%d/%s", manifest.TargetKind, manifest.TargetNumber, manifest.SandboxID)
 	}
-	if err := ensureGithubPublicationCommit(manifest.SandboxRepoPath, manifest); err != nil {
-		return err
-	}
-	headSHA, err := githubGitOutput(manifest.SandboxRepoPath, "rev-parse", "HEAD")
-	if err != nil {
-		return err
-	}
-	headSHA = strings.TrimSpace(headSHA)
-	if strings.TrimSpace(headSHABefore) != headSHA {
-		fmt.Fprintf(os.Stdout, "[github] Created automatic publication commit on %s.\n", branchName)
-	}
-	if err := githubRunGit(manifest.SandboxRepoPath, "push", "-u", "origin", fmt.Sprintf("HEAD:%s", branchName)); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stdout, "[github] Pushed HEAD to origin/%s.\n", branchName)
-
 	apiBaseURL := strings.TrimSpace(os.Getenv("GITHUB_API_URL"))
 	if apiBaseURL == "" {
 		apiBaseURL = manifest.APIBaseURL
@@ -111,7 +103,32 @@ func executeGithubPublisherLane(runID string, useLast bool) error {
 	if err != nil {
 		return err
 	}
-	pr, created, err := ensureGithubDraftPR(manifest, apiBaseURL, token, branchName)
+	publicationTarget, err := resolveGithubPublicationTarget(&manifest, apiBaseURL, token)
+	if err != nil {
+		return err
+	}
+	if err := ensureGithubPublicationCommit(manifest.SandboxRepoPath, manifest); err != nil {
+		return err
+	}
+	headSHA, err := githubGitOutput(manifest.SandboxRepoPath, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	headSHA = strings.TrimSpace(headSHA)
+	if strings.TrimSpace(headSHABefore) != headSHA {
+		fmt.Fprintf(os.Stdout, "[github] Created automatic publication commit on %s.\n", branchName)
+	}
+	if publicationTarget.RemoteURL != "" {
+		if err := ensureGithubRemote(manifest.SandboxRepoPath, publicationTarget.RemoteName, publicationTarget.RemoteURL); err != nil {
+			return err
+		}
+	}
+	if err := githubRunGit(manifest.SandboxRepoPath, "push", "-u", publicationTarget.RemoteName, fmt.Sprintf("HEAD:%s", branchName)); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "[github] Pushed HEAD to %s/%s.\n", publicationTarget.RemoteName, branchName)
+
+	pr, created, err := ensureGithubDraftPR(manifest, publicationTarget, apiBaseURL, token, branchName)
 	if err != nil {
 		return err
 	}
@@ -120,36 +137,48 @@ func executeGithubPublisherLane(runID string, useLast bool) error {
 	} else {
 		fmt.Fprintf(os.Stdout, "[github] Updated draft PR #%d: %s\n", pr.Number, pr.HTMLURL)
 	}
-	ciState, err := readGithubCIState(manifest.RepoSlug, headSHA, apiBaseURL, token)
+	ciResult, err := readGithubCIResult(publicationTarget.RepoSlug, headSHA, apiBaseURL, token)
 	if err != nil {
 		return err
 	}
+	ciState := ciResult.State
 	manifest.PublishedPRNumber = pr.Number
 	manifest.PublishedPRURL = pr.HTMLURL
 	manifest.PublishedPRHeadRef = branchName
-	requestedReviewers, reviewRequestState, reviewRequestError, err := ensureGithubRequestedReviews(manifest, pr.Number, apiBaseURL, token)
-	if err != nil {
-		return err
-	}
-	manifest.RequestedReviewers = requestedReviewers
-	manifest.ReviewRequestState = reviewRequestState
-	manifest.ReviewRequestError = reviewRequestError
-	manifest.ReviewRequestUpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	if manifest.ReviewRequestState == "requested" {
-		fmt.Fprintf(os.Stdout, "[github] Requested review from %s.\n", formatGithubActorSet(manifest.RequestedReviewers))
-	} else if manifest.ReviewRequestState == "already_requested" {
-		fmt.Fprintf(os.Stdout, "[github] Review request already satisfied for %s.\n", formatGithubActorSet(manifest.RequestedReviewers))
+	if publicationTarget.RepoSlug == manifest.RepoSlug {
+		requestedReviewers, reviewRequestState, reviewRequestError, err := ensureGithubRequestedReviews(manifest, pr.Number, apiBaseURL, token)
+		if err != nil {
+			return err
+		}
+		manifest.RequestedReviewers = requestedReviewers
+		manifest.ReviewRequestState = reviewRequestState
+		manifest.ReviewRequestError = reviewRequestError
+		manifest.ReviewRequestUpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		if manifest.ReviewRequestState == "requested" {
+			fmt.Fprintf(os.Stdout, "[github] Requested review from %s.\n", formatGithubActorSet(manifest.RequestedReviewers))
+		} else if manifest.ReviewRequestState == "already_requested" {
+			fmt.Fprintf(os.Stdout, "[github] Review request already satisfied for %s.\n", formatGithubActorSet(manifest.RequestedReviewers))
+		}
+	} else {
+		manifest.ReviewRequestState = "not_requested"
+		manifest.ReviewRequestUpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	manifest.PublicationState = ciState
 	manifest.PublicationUpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	manifest.PublicationError = ""
 	manifest.NeedsHuman, manifest.NeedsHumanReason, manifest.NextAction = determineGithubHumanGateState(manifest.Policy, true)
 	if ciState == "blocked" {
-		manifest.PublicationError = "External CI has failing checks"
+		manifest.PublicationError = defaultString(ciResult.Detail, "External CI has failing checks")
+	} else if ciState == "ci_waiting" && ciResult.Detail != "" {
+		manifest.PublicationError = ciResult.Detail
 	}
-	mergeState, mergeSHA, mergeError, err := ensureGithubMerge(manifest, pr, ciState, apiBaseURL, token)
-	if err != nil {
-		return err
+	mergeState, mergeSHA, mergeError := "not_attempted", "", ""
+	if publicationTarget.RepoSlug == manifest.RepoSlug {
+		var mergeErr error
+		mergeState, mergeSHA, mergeError, mergeErr = ensureGithubMerge(manifest, pr, ciState, apiBaseURL, token)
+		if mergeErr != nil {
+			return mergeErr
+		}
 	}
 	manifest.MergeState = mergeState
 	manifest.MergeError = mergeError
@@ -190,6 +219,42 @@ func runPublisherVerificationGate(verificationScriptsDir string, sandboxPath str
 	return nil
 }
 
+func resolveGithubPublicationTarget(manifest *githubWorkManifest, apiBaseURL string, token string) (githubPublicationTarget, error) {
+	publishTarget := defaultString(normalizeGithubPublishTarget(manifest.PublishTarget), "repo")
+	if publishTarget == "local-branch" {
+		return githubPublicationTarget{}, fmt.Errorf("publication target is local-branch; no pull request should be published")
+	}
+	if publishTarget == "repo" {
+		manifest.PublishRepoSlug = manifest.RepoSlug
+		manifest.PublishRepoOwner = manifest.RepoOwner
+		return githubPublicationTarget{RepoSlug: manifest.RepoSlug, RepoOwner: manifest.RepoOwner, RemoteName: "origin"}, nil
+	}
+	viewer, err := githubCurrentViewer(apiBaseURL, token)
+	if err != nil {
+		return githubPublicationTarget{}, err
+	}
+	fork, _, err := ensureGithubFork(manifest.RepoSlug, manifest.RepoName, viewer, apiBaseURL, token)
+	if err != nil {
+		return githubPublicationTarget{}, err
+	}
+	if err := ensureStartWorkForkReady(fork.FullName, apiBaseURL, token); err != nil {
+		return githubPublicationTarget{}, err
+	}
+	manifest.PublishRepoSlug = fork.FullName
+	manifest.PublishRepoOwner = viewer
+	return githubPublicationTarget{RepoSlug: fork.FullName, RepoOwner: viewer, RemoteName: "nana-fork", RemoteURL: fork.CloneURL}, nil
+}
+
+func ensureGithubRemote(repoPath string, name string, remoteURL string) error {
+	if strings.TrimSpace(remoteURL) == "" {
+		return nil
+	}
+	if _, err := githubGitOutput(repoPath, "remote", "get-url", name); err == nil {
+		return githubRunGit(repoPath, "remote", "set-url", name, remoteURL)
+	}
+	return githubRunGit(repoPath, "remote", "add", name, remoteURL)
+}
+
 func ensureGithubPublicationCommit(repoPath string, manifest githubWorkManifest) error {
 	status, _ := githubGitOutput(repoPath, "status", "--porcelain")
 	if strings.TrimSpace(status) == "" {
@@ -202,9 +267,9 @@ func ensureGithubPublicationCommit(repoPath string, manifest githubWorkManifest)
 	return githubRunGit(repoPath, "commit", "-m", message)
 }
 
-func ensureGithubDraftPR(manifest githubWorkManifest, apiBaseURL string, token string, branchName string) (githubPullRequestResponse, bool, error) {
+func ensureGithubDraftPR(manifest githubWorkManifest, target githubPublicationTarget, apiBaseURL string, token string, branchName string) (githubPullRequestResponse, bool, error) {
 	var existing []githubPullRequestResponse
-	path := fmt.Sprintf("/repos/%s/pulls?state=open&head=%s:%s&base=%s", manifest.RepoSlug, manifest.RepoOwner, url.QueryEscape(branchName), url.QueryEscape(manifest.DefaultBranch))
+	path := fmt.Sprintf("/repos/%s/pulls?state=open&head=%s:%s&base=%s", target.RepoSlug, target.RepoOwner, url.QueryEscape(branchName), url.QueryEscape(manifest.DefaultBranch))
 	if err := githubAPIGetJSON(apiBaseURL, token, path, &existing); err == nil && len(existing) > 0 {
 		payload := map[string]any{
 			"title": manifest.TargetTitle,
@@ -213,20 +278,20 @@ func ensureGithubDraftPR(manifest githubWorkManifest, apiBaseURL string, token s
 			"base":  manifest.DefaultBranch,
 		}
 		var updated githubPullRequestResponse
-		if err := githubAPIRequestJSON("PATCH", apiBaseURL, token, fmt.Sprintf("/repos/%s/pulls/%d", manifest.RepoSlug, existing[0].Number), payload, &updated); err != nil {
+		if err := githubAPIRequestJSON("PATCH", apiBaseURL, token, fmt.Sprintf("/repos/%s/pulls/%d", target.RepoSlug, existing[0].Number), payload, &updated); err != nil {
 			return githubPullRequestResponse{}, false, err
 		}
 		return updated, false, nil
 	}
 	payload := map[string]any{
 		"title": manifest.TargetTitle,
-		"head":  fmt.Sprintf("%s:%s", manifest.RepoOwner, branchName),
+		"head":  fmt.Sprintf("%s:%s", target.RepoOwner, branchName),
 		"base":  manifest.DefaultBranch,
 		"body":  buildDraftPullRequestBody(manifest, branchName),
 		"draft": true,
 	}
 	var created githubPullRequestResponse
-	if err := githubAPIRequestJSON("POST", apiBaseURL, token, fmt.Sprintf("/repos/%s/pulls", manifest.RepoSlug), payload, &created); err != nil {
+	if err := githubAPIRequestJSON("POST", apiBaseURL, token, fmt.Sprintf("/repos/%s/pulls", target.RepoSlug), payload, &created); err != nil {
 		return githubPullRequestResponse{}, false, err
 	}
 	return created, true, nil
@@ -365,7 +430,9 @@ func fetchGithubExistingRequestedReviewers(repoSlug string, prNumber int, apiBas
 }
 
 // ensureGithubMerge is intentionally conservative: merge is experimental, policy-gated,
-// and requires both green CI and a current control-plane approval.
+// and requires green CI. The default approve mode also requires a current
+// control-plane approval; pr-forward=auto lets policy-approved repos merge
+// without that extra review trigger.
 func ensureGithubMerge(manifest githubWorkManifest, pr githubPullRequestResponse, ciState string, apiBaseURL string, token string) (string, string, string, error) {
 	if manifest.Policy == nil || !manifest.Policy.Experimental || !manifest.Policy.AllowedActions.Merge {
 		return "not_attempted", "", "", nil
@@ -379,12 +446,14 @@ func ensureGithubMerge(manifest githubWorkManifest, pr githubPullRequestResponse
 	if ciState != "ci_green" {
 		return "blocked", "", "GitHub CI is not green", nil
 	}
-	approved, reason, err := githubControlPlaneApprovalSatisfied(manifest, pr.Number, apiBaseURL, token)
-	if err != nil {
-		return "blocked", "", err.Error(), nil
-	}
-	if !approved {
-		return "blocked", "", reason, nil
+	if defaultString(normalizeGithubPRForwardMode(manifest.PRForwardMode), "approve") != "auto" {
+		approved, reason, err := githubControlPlaneApprovalSatisfied(manifest, pr.Number, apiBaseURL, token)
+		if err != nil {
+			return "blocked", "", err.Error(), nil
+		}
+		if !approved {
+			return "blocked", "", reason, nil
+		}
 	}
 	method := githubEffectiveMergeMethod(manifest.Policy)
 	payload := map[string]any{"merge_method": method}
@@ -448,11 +517,31 @@ func eligibleGithubControlPlaneReviewers(manifest githubWorkManifest) []string {
 	return uniqueStrings(reviewers)
 }
 
+type githubCIResult struct {
+	State  string
+	Detail string
+}
+
 func readGithubCIState(repoSlug string, headSHA string, apiBaseURL string, token string) (string, error) {
+	result, err := readGithubCIResult(repoSlug, headSHA, apiBaseURL, token)
+	return result.State, err
+}
+
+func readGithubCIResult(repoSlug string, headSHA string, apiBaseURL string, token string) (githubCIResult, error) {
 	var checks githubCheckRunsResponse
-	_ = githubAPIGetJSON(apiBaseURL, token, fmt.Sprintf("/repos/%s/commits/%s/check-runs?per_page=100", repoSlug, url.QueryEscape(headSHA)), &checks)
+	checksErr := githubAPIGetJSON(apiBaseURL, token, fmt.Sprintf("/repos/%s/commits/%s/check-runs?per_page=100", repoSlug, url.QueryEscape(headSHA)), &checks)
 	var runs githubWorkflowRunsResponse
-	_ = githubAPIGetJSON(apiBaseURL, token, fmt.Sprintf("/repos/%s/actions/runs?head_sha=%s&per_page=100", repoSlug, url.QueryEscape(headSHA)), &runs)
+	runsErr := githubAPIGetJSON(apiBaseURL, token, fmt.Sprintf("/repos/%s/actions/runs?head_sha=%s&per_page=100", repoSlug, url.QueryEscape(headSHA)), &runs)
+	unavailable := []string{}
+	if checksErr != nil {
+		unavailable = append(unavailable, "check_runs_unavailable")
+	}
+	if runsErr != nil {
+		unavailable = append(unavailable, "workflow_runs_unavailable")
+	}
+	if len(unavailable) > 0 {
+		return githubCIResult{State: "ci_waiting", Detail: strings.Join(unavailable, ";")}, nil
+	}
 	hasAny := len(checks.CheckRuns) > 0 || len(runs.WorkflowRuns) > 0
 	hasPending := false
 	hasFailures := false
@@ -475,13 +564,16 @@ func readGithubCIState(repoSlug string, headSHA string, apiBaseURL string, token
 			hasFailures = true
 		}
 	}
-	if hasAny && !hasPending && !hasFailures {
-		return "ci_green", nil
-	}
 	if hasFailures {
-		return "blocked", nil
+		return githubCIResult{State: "blocked", Detail: "ci_failed"}, nil
 	}
-	return "ci_waiting", nil
+	if hasAny && !hasPending {
+		return githubCIResult{State: "ci_green", Detail: "ci_green"}, nil
+	}
+	if hasAny {
+		return githubCIResult{State: "ci_waiting", Detail: "ci_pending"}, nil
+	}
+	return githubCIResult{State: "ci_waiting", Detail: "no_ci_found"}, nil
 }
 
 func githubAPIRequestJSON(method string, apiBaseURL string, token string, path string, payload any, target any) error {
@@ -509,7 +601,17 @@ func githubAPIRequestJSON(method string, apiBaseURL string, token string, path s
 		_, _ = raw.ReadFrom(resp.Body)
 		return fmt.Errorf("GitHub API request failed (%d %s): %s", resp.StatusCode, resp.Status, raw.String())
 	}
-	return json.NewDecoder(resp.Body).Decode(target)
+	if target == nil {
+		return nil
+	}
+	content, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(content)) == "" {
+		return nil
+	}
+	return json.Unmarshal(content, target)
 }
 
 func laneResultPathForRun(manifestPath string, alias string) string {

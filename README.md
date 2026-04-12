@@ -142,20 +142,21 @@ Most users should think of NANA as **better task routing + better workflow + bet
 | `nana investigate "..."` | source-backed investigation with proof-linked JSON reports and validator enforcement |
 | `nana investigate onboard` | bootstrap the dedicated investigate Codex config |
 | `nana investigate doctor` | ask Codex to probe the MCPs configured in the investigate config |
-| `nana start` | run supported repo startup automation, including scout roles declared by repo policy |
+| `nana start` | run onboarded repo automation; with scout flags or policy-backed local repos, run supported scout startup automation |
 | `nana improve [owner/repo]` | run the improvement-scout role for UX/perf proposals and route them by repo policy |
 | `nana enhance [owner/repo]` | run the enhancement-scout role for forward-looking repo proposals with the same policy routing |
-| `nana work start --task "..."` | long-running local plan execution in a managed sandbox with iterative verify/review/hardening |
+| `nana work start --task "..."` | long-running local plan execution in a managed sandbox, ending with verified changes committed to the local branch |
 | `nana work start --task "..." --grouping-policy path` | force deterministic path-based validation grouping |
 | `nana work logs --last` | inspect the current iteration logs and verification artifacts in one view |
 | `nana work status --last --json` | inspect machine-readable run and validation state from SQLite |
 | `nana review <pr-url>` | reviewing external pull requests with persisted findings |
 | `nana work start <issue-or-pr-url>` | GitHub-targeted implementation and review-sync workflows |
+| `nana repo explain <owner/repo>` | show exactly how `nana start` will treat an onboarded repo |
 | `nana work explain --last [--json]` | inspect the effective GitHub work policy, repo profile, and human-gate state for a run |
 | `nana repo onboard --json` | inspect the detected verification split and derived repo profile for a local checkout |
 | `/skills` | browsing installed skills and supporting helpers |
 
-`nana work` stores its authoritative runtime state in `~/.nana/work/state.db`, not inside the source repo. Run artifacts live under `~/.nana/work/repos/<repo-id-or-owner/repo>/runs/<run-id>/...`, and old JSON state files such as `manifest.json`, `runtime-state.json`, `finding-history.json`, `repo.json`, `latest-run.json`, and `index/runs.json` are ignored if they still exist on disk. This SQLite-backed state layer currently assumes the repo’s Go 1.25 baseline. See [docs/work.md](./docs/work.md) for storage, resume, validation grouping controls, and GitHub-backed run details.
+`nana work` stores its authoritative runtime state in `~/.nana/work/state.db`, not inside the source repo. Local runs work in a managed sandbox, run expanded completion reviews, and then create a local commit with the verified diff on the source branch; they do not push to remotes. Run artifacts live under `~/.nana/work/repos/<repo-id-or-owner/repo>/runs/<run-id>/...`, and old JSON state files such as `manifest.json`, `runtime-state.json`, `finding-history.json`, `repo.json`, `latest-run.json`, and `index/runs.json` are ignored if they still exist on disk. This SQLite-backed state layer currently assumes the repo’s Go 1.25 baseline. See [docs/work.md](./docs/work.md) for storage, resume, validation grouping controls, and GitHub-backed run details.
 
 ## Investigate
 
@@ -234,7 +235,7 @@ What they do:
 - concern overrides refine which files invalidate a hardening lane
 - hot-path API overrides refine when `perf` lanes rerun
 - policy overrides shape experimental repo-native work-on behavior, GitHub human-gate behavior, and allowed publication actions
-- experimental merge automation only runs when policy enables `allowed_actions.merge`, local verification has passed, GitHub CI is green, and a control-plane reviewer has approved without a later changes-requested review
+- experimental merge automation only runs when policy enables `allowed_actions.merge`, local verification has passed, and GitHub CI is green; `pr-forward=approve` also requires a control-plane reviewer approval without a later changes-requested review
 - `any_human` feedback mode accepts non-bot GitHub actors except the target author and blocked reviewers
 
 Minimal policy examples:
@@ -270,7 +271,7 @@ Repo profile:
 
 ## Improvement Proposals
 
-`nana improve` runs the `improvement-scout` role to inspect a repo and produce evidence-backed UX/performance improvement proposals. `nana enhance` runs the `enhancement-scout` role for grounded repo-forward enhancements. `nana start` auto-runs the scout roles declared by repo policy. Local repo runs always keep drafts under `.nana/improvements/<run-id>/` or `.nana/enhancements/<run-id>/`.
+`nana improve` runs the `improvement-scout` role to inspect a repo and produce evidence-backed UX/performance improvement proposals. `nana enhance` runs the `enhancement-scout` role for grounded repo-forward enhancements. `nana start` also runs scout startup automation when scout-specific flags are provided or local scout policies are present. Local repo runs always keep drafts under `.nana/improvements/<run-id>/` or `.nana/enhancements/<run-id>/`.
 
 For GitHub targets, repo policy controls whether proposals stay local or become issues:
 
@@ -301,6 +302,29 @@ Policy files:
 `.nana/...` takes precedence. Improvement labels are normalized to include `improvement` and `improvement-scout` while excluding `enhancement`. Enhancement labels include `enhancement` and `enhancement-scout`. Both scout roles emit at most 5 proposals per run and are capped at 5 open GitHub issues at a time.
 
 For GitHub targets, `issue_destination: "repo"` publishes to the target repo and `issue_destination: "fork"` publishes to `fork_repo`. For local repos, `nana start` treats `mode: "auto"` in every supported scout policy as permission to switch to the local `default` branch and commit generated scout artifacts there. Auto mode requires a clean worktree and an existing local `default` branch.
+
+## Start Automation
+
+Use `nana repo defaults set --repo-mode local|fork|repo --issue-pick manual|label|auto --pr-forward approve|auto` to set defaults for future manual GitHub repo onboarding. Use `nana repo onboard <owner/repo> ...` or `nana repo config <owner/repo> ...` to opt a specific GitHub repo into global automation. Then run one command:
+
+```bash
+nana start
+```
+
+Automatically onboarded repos use system defaults, meaning `repo-mode=local`, `issue-pick=manual`, and `pr-forward=approve` unless later configured. `nana start` scans all onboarded GitHub repos under `~/.nana/work/repos`, skips repos where `repo-mode` is `local` or `issue-pick` is `manual`, mirrors eligible source issues into your fork, prioritizes queued work by `P1` through `P5` labels plus inferred complexity, and starts at most three workers while respecting a ten-open-PR cap for fork publishing.
+
+Mode behavior:
+- `repo-mode local`: keep work on a local branch and do not open a PR
+- `repo-mode fork`: push work to your fork
+- `repo-mode repo`: push work to the target repo
+- `issue-pick manual`: do not automatically pick issues
+- `issue-pick label`: pick issues labeled with the single Nana opt-in label `nana`
+- `issue-pick auto`: pick all eligible open issues
+- `pr-forward approve`: wait for approval before going forward with the PR
+- `pr-forward auto`: go forward automatically; fork creates the target-repo PR, repo merges the PR
+
+Use `nana repo explain <owner/repo>` to see the effective settings, label gate, repo mode, state paths, and caps for a repo.
+
 
 ## PR Review Rules
 

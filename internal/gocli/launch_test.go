@@ -27,6 +27,7 @@ func TestResolveCLIInvocation(t *testing.T) {
 		{name: "review", args: []string{"review", "https://github.com/acme/widget/pull/77"}, wantCmd: "review", wantLaunch: nil},
 		{name: "review-rules", args: []string{"review-rules", "scan", "acme/widget"}, wantCmd: "review-rules", wantLaunch: nil},
 		{name: "repo", args: []string{"repo", "onboard"}, wantCmd: "repo", wantLaunch: nil},
+		{name: "start", args: []string{"start", "help"}, wantCmd: "start", wantLaunch: nil},
 		{name: "work", args: []string{"work", "help"}, wantCmd: "work", wantLaunch: nil},
 		{name: "work-on", args: []string{"work-on", "help"}, wantCmd: "work-on", wantLaunch: nil},
 		{name: "work-local", args: []string{"work-local", "help"}, wantCmd: "work-local", wantLaunch: nil},

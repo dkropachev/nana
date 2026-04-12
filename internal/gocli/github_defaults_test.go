@@ -860,6 +860,13 @@ func TestGithubWorkCommandStartExecutesNatively(t *testing.T) {
 	if !strings.Contains(output, "fake-codex:exec -C") {
 		t.Fatalf("expected fake codex execution output, got %q", output)
 	}
+	manifest, _, err := resolveGithubWorkRun(localWorkRunSelection{GlobalLast: true})
+	if err != nil {
+		t.Fatalf("resolve github run: %v", err)
+	}
+	if manifest.PublishTarget != "local-branch" || manifest.CreatePROnComplete {
+		t.Fatalf("expected default publish target local-branch without PR, got target=%q create=%t", manifest.PublishTarget, manifest.CreatePROnComplete)
+	}
 }
 
 func TestGithubWorkCommandRejectsConflictingSyncSelectors(t *testing.T) {
@@ -1644,6 +1651,53 @@ func TestGithubWorkPublisherRequestsControlPlaneReviewsWhenAllowed(t *testing.T)
 	}
 }
 
+func TestReadGithubCIResultDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path + "?" + r.URL.RawQuery {
+		case "/repos/acme/widget/commits/green-sha/check-runs?per_page=100":
+			_, _ = w.Write([]byte(`{"check_runs":[{"status":"completed","conclusion":"success"}]}`))
+		case "/repos/acme/widget/actions/runs?head_sha=green-sha&per_page=100":
+			_, _ = w.Write([]byte(`{"workflow_runs":[]}`))
+		case "/repos/acme/widget/commits/fail-sha/check-runs?per_page=100":
+			_, _ = w.Write([]byte(`{"check_runs":[{"status":"completed","conclusion":"failure"}]}`))
+		case "/repos/acme/widget/actions/runs?head_sha=fail-sha&per_page=100":
+			_, _ = w.Write([]byte(`{"workflow_runs":[]}`))
+		case "/repos/acme/widget/commits/pending-sha/check-runs?per_page=100":
+			_, _ = w.Write([]byte(`{"check_runs":[{"status":"queued"}]}`))
+		case "/repos/acme/widget/actions/runs?head_sha=pending-sha&per_page=100":
+			_, _ = w.Write([]byte(`{"workflow_runs":[]}`))
+		case "/repos/acme/widget/commits/no-ci-sha/check-runs?per_page=100":
+			_, _ = w.Write([]byte(`{"check_runs":[]}`))
+		case "/repos/acme/widget/actions/runs?head_sha=no-ci-sha&per_page=100":
+			_, _ = w.Write([]byte(`{"workflow_runs":[]}`))
+		case "/repos/acme/widget/commits/unavailable-sha/check-runs?per_page=100":
+			http.Error(w, `{"message":"unavailable"}`, http.StatusInternalServerError)
+		case "/repos/acme/widget/actions/runs?head_sha=unavailable-sha&per_page=100":
+			_, _ = w.Write([]byte(`{"workflow_runs":[]}`))
+		default:
+			http.Error(w, fmt.Sprintf("unexpected route: %s?%s", r.URL.Path, r.URL.RawQuery), http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	cases := []struct{ sha, state, detail string }{
+		{"green-sha", "ci_green", "ci_green"},
+		{"fail-sha", "blocked", "ci_failed"},
+		{"pending-sha", "ci_waiting", "ci_pending"},
+		{"no-ci-sha", "ci_waiting", "no_ci_found"},
+		{"unavailable-sha", "ci_waiting", "check_runs_unavailable"},
+	}
+	for _, tc := range cases {
+		got, err := readGithubCIResult("acme/widget", tc.sha, server.URL, "token")
+		if err != nil {
+			t.Fatalf("read CI %s: %v", tc.sha, err)
+		}
+		if got.State != tc.state || got.Detail != tc.detail {
+			t.Fatalf("CI %s = %+v, want state=%s detail=%s", tc.sha, got, tc.state, tc.detail)
+		}
+	}
+}
+
 func TestEnsureGithubMergeRequiresGreenCIAndApproval(t *testing.T) {
 	manifest := githubWorkManifest{
 		RepoSlug:              "acme/widget",
@@ -1713,6 +1767,65 @@ func TestEnsureGithubMergeBlocksOnChangesRequestedAndSucceedsOnApproval(t *testi
 	}
 	if state != "merged" || sha != "merged-sha" || reason != "" || !mergeCalled {
 		t.Fatalf("expected successful merge, state=%s sha=%s reason=%q mergeCalled=%t", state, sha, reason, mergeCalled)
+	}
+}
+
+func TestEnsureGithubMergeAutoSkipsApprovalButKeepsSafetyGates(t *testing.T) {
+	manifest := githubWorkManifest{
+		RepoSlug:      "acme/widget",
+		PRForwardMode: "auto",
+		Policy:        &githubResolvedWorkPolicy{Experimental: true, MergeMethod: "squash", AllowedActions: githubWorkActionPolicy{Merge: true}},
+	}
+	pr := githubPullRequestResponse{Number: 77}
+	pr.Head.SHA = "head-sha"
+	mergeCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/repos/acme/widget/pulls/77/merge":
+			mergeCalled = true
+			_, _ = w.Write([]byte(`{"merged":true,"sha":"merged-sha","message":"merged"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/pulls/77/reviews":
+			t.Fatalf("pr-forward=auto should not fetch approval reviews")
+		default:
+			http.Error(w, fmt.Sprintf("unexpected route: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery), http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	state, sha, reason, err := ensureGithubMerge(manifest, pr, "ci_green", server.URL, "token")
+	if err != nil {
+		t.Fatalf("merge auto: %v", err)
+	}
+	if state != "merged" || sha != "merged-sha" || reason != "" || !mergeCalled {
+		t.Fatalf("expected auto merge, state=%s sha=%s reason=%q mergeCalled=%t", state, sha, reason, mergeCalled)
+	}
+
+	manifest.Policy.AllowedActions.Merge = false
+	state, _, reason, err = ensureGithubMerge(manifest, pr, "ci_green", server.URL, "token")
+	if err != nil {
+		t.Fatalf("merge disabled policy: %v", err)
+	}
+	if state != "not_attempted" || reason != "" {
+		t.Fatalf("expected disabled policy to skip merge, state=%s reason=%q", state, reason)
+	}
+
+	manifest.Policy.AllowedActions.Merge = true
+	pr.Draft = true
+	state, _, reason, err = ensureGithubMerge(manifest, pr, "ci_green", server.URL, "token")
+	if err != nil {
+		t.Fatalf("merge draft: %v", err)
+	}
+	if state != "blocked" || reason != "pull request is draft" {
+		t.Fatalf("expected draft block, state=%s reason=%q", state, reason)
+	}
+
+	pr.Draft = false
+	state, _, reason, err = ensureGithubMerge(manifest, pr, "ci_waiting", server.URL, "token")
+	if err != nil {
+		t.Fatalf("merge waiting CI: %v", err)
+	}
+	if state != "blocked" || reason != "GitHub CI is not green" {
+		t.Fatalf("expected CI block, state=%s reason=%q", state, reason)
 	}
 }
 
@@ -1851,7 +1964,9 @@ func TestGithubReviewExecutesNatively(t *testing.T) {
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
 		t.Fatalf("mkdir fake bin: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(fakeBin, "codex"), []byte("#!/bin/sh\nprintf '{\"findings\":[{\"title\":\"Broken check\",\"severity\":\"medium\",\"path\":\"CHANGELOG.md\",\"line\":1,\"summary\":\"summary\",\"detail\":\"detail\",\"fix\":\"fix\",\"rationale\":\"why\"}]}'\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(fakeBin, "codex"), []byte(`#!/bin/sh
+printf '{"findings":[{"title":"Broken check","severity":"medium","path":"CHANGELOG.md","line":1,"summary":"summary","detail":"detail","fix":"fix","rationale":"why"}]}'
+`), 0o755); err != nil {
 		t.Fatalf("write fake codex: %v", err)
 	}
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
@@ -2112,5 +2227,99 @@ func TestGithubPublisherBlocksDraftPROpenWhenPolicyDisablesIt(t *testing.T) {
 	_, err := GithubWorkCommand(".", []string{"lane-exec", "--run-id", runID, "--lane", "publisher"})
 	if err == nil || !strings.Contains(err.Error(), "open_draft_pr action is disabled") {
 		t.Fatalf("expected open_draft_pr policy block, got %v", err)
+	}
+}
+
+func TestGithubWorkCommandStartHonorsRepoPublishTarget(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GH_TOKEN", "test-token")
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "codex"), []byte("#!/bin/sh\nprintf 'fake-codex:%s\\n' \"$*\"\n"), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	originRepo := filepath.Join(home, "origin")
+	if err := os.MkdirAll(originRepo, 0o755); err != nil {
+		t.Fatalf("mkdir origin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(originRepo, "README.md"), []byte("# widget\n"), 0o644); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = originRepo
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.com", "GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init", "-b", "main")
+	runGit("add", ".")
+	runGit("commit", "-m", "init")
+	if err := writeGithubJSON(githubRepoSettingsPath("acme/widget"), githubRepoSettings{Version: 5, PublishTarget: "fork", DefaultRoleLayout: "split"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/acme/widget":
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"name":"widget","full_name":"acme/widget","clone_url":%q,"default_branch":"main","html_url":"https://github.com/acme/widget"}`, originRepo)))
+		case "/repos/acme/widget/issues/42":
+			_, _ = w.Write([]byte(`{"title":"Start me","state":"open"}`))
+		default:
+			http.Error(w, fmt.Sprintf("unexpected route: %s", r.URL.Path), http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("GITHUB_API_URL", server.URL)
+	_, err := captureStdout(t, func() error {
+		_, err := GithubWorkCommand(".", []string{"start", "https://github.com/acme/widget/issues/42"})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("GithubWorkCommand(start): %v", err)
+	}
+	manifest, _, err := resolveGithubWorkRun(localWorkRunSelection{GlobalLast: true})
+	if err != nil {
+		t.Fatalf("resolve github run: %v", err)
+	}
+	if manifest.PublishTarget != "fork" || !manifest.CreatePROnComplete {
+		t.Fatalf("expected publish target fork with PR, got target=%q create=%t", manifest.PublishTarget, manifest.CreatePROnComplete)
+	}
+}
+
+func TestResolveGithubPublicationTargetUsesForkWhenConfigured(t *testing.T) {
+	t.Setenv("GH_TOKEN", "token")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /user":
+			_, _ = w.Write([]byte(`{"login":"me"}`))
+		case "GET /repos/me/widget":
+			http.Error(w, `{"message":"missing"}`, http.StatusNotFound)
+		case "POST /repos/acme/widget/forks":
+			_, _ = w.Write([]byte(`{"name":"widget","full_name":"me/widget","clone_url":"https://example.invalid/me/widget.git"}`))
+		case "PATCH /repos/me/widget":
+			w.WriteHeader(http.StatusNoContent)
+		case "PUT /repos/me/widget/actions/permissions":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, fmt.Sprintf("unexpected route: %s %s", r.Method, r.URL.Path), http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	manifest := githubWorkManifest{RepoSlug: "acme/widget", RepoOwner: "acme", RepoName: "widget", PublishTarget: "fork"}
+	target, err := resolveGithubPublicationTarget(&manifest, server.URL, "token")
+	if err != nil {
+		t.Fatalf("resolve publication target: %v", err)
+	}
+	if target.RepoSlug != "me/widget" || target.RepoOwner != "me" || target.RemoteName != "nana-fork" || target.RemoteURL == "" {
+		t.Fatalf("unexpected publication target: %+v", target)
+	}
+	if manifest.PublishRepoSlug != "me/widget" || manifest.PublishRepoOwner != "me" {
+		t.Fatalf("manifest publication target not recorded: %+v", manifest)
 	}
 }

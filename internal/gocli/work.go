@@ -26,7 +26,9 @@ Usage:
   nana work help
 
 Behavior:
-  - local mode is selected when start is driven by --task or --plan-file
+  - local mode is selected when start does not receive a GitHub issue/PR URL
+  - local mode uses --task, --plan-file, or an inferred task from the current branch
+  - local mode commits verified sandbox changes back to the source branch after final review gates pass
   - GitHub mode is selected when start receives a GitHub issue/PR URL
   - authoritative runtime state lives under ~/.nana/work/
   - legacy work-local and work-on entrypoints have been replaced by nana work

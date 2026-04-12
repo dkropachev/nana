@@ -145,6 +145,7 @@ func TestBinaryNestedGithubHelpRoutesLocally(t *testing.T) {
 		{args: []string{"review", "--help"}, expected: "nana review - Review an external GitHub PR with deterministic persistence"},
 		{args: []string{"review-rules", "--help"}, expected: "nana review-rules - Persistent repo rules mined from PR review history"},
 		{args: []string{"repo", "--help"}, expected: "nana repo - Repository onboarding and verification-plan inspection"},
+		{args: []string{"start", "--help"}, expected: "nana start - Run automation for onboarded repositories"},
 		{args: []string{"work", "--help"}, expected: "nana work - Unified local and GitHub-backed implementation runtime"},
 		{args: []string{"work-on", "--help"}, expected: "has been replaced by `nana work`"},
 		{args: []string{"work-local", "--help"}, expected: "has been replaced by `nana work`"},
@@ -173,7 +174,7 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("binary help failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "nana repo onboard") || !strings.Contains(string(output), "nana work") || !strings.Contains(string(output), "nana account <subcommand>") {
+	if !strings.Contains(string(output), "nana repo onboard") || !strings.Contains(string(output), "nana start") || !strings.Contains(string(output), "nana work") || !strings.Contains(string(output), "nana account <subcommand>") {
 		t.Fatalf("expected work surfaces in top-level help, got %q", output)
 	}
 }
@@ -403,6 +404,107 @@ func TestBinaryGithubWorkStartRunsNatively(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "fake-codex:exec -C") {
 		t.Fatalf("expected native codex execution output, got %q", output)
+	}
+}
+
+func TestBinaryLocalWorkStartCommitsVerifiedSandboxResult(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cwd := t.TempDir()
+	fakeBin := filepath.Join(cwd, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`PAYLOAD="$(cat)"`,
+		`case "$PAYLOAD" in`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    printf '{"findings":[]}\n'`,
+		`    ;;`,
+		`  *)`,
+		`    printf 'binary local work\n' >> "$NANA_PROJECT_AGENTS_ROOT/README.md"`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	originBare := filepath.Join(cwd, "origin.git")
+	sourceRepo := filepath.Join(cwd, "source")
+	gitEnv := append(os.Environ(),
+		"GIT_AUTHOR_NAME=Test",
+		"GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=Test",
+		"GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	runGit := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := runCommand(t, "git", args...)
+		cmd.Dir = dir
+		cmd.Env = gitEnv
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	runGit(cwd, "init", "--bare", originBare)
+	if err := os.MkdirAll(sourceRepo, 0o755); err != nil {
+		t.Fatalf("mkdir source repo: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRepo, "README.md"), []byte("# local work\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRepo, "Makefile"), []byte(strings.Join([]string{
+		"lint:",
+		"\t@printf 'lint\\n' >> verify.log",
+		"build:",
+		"\t@printf 'build\\n' >> verify.log",
+		"test:",
+		"\t@printf 'test\\n' >> verify.log",
+		"test-integration:",
+		"\t@printf 'integration\\n' >> verify.log",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write Makefile: %v", err)
+	}
+	runGit(sourceRepo, "init", "-b", "main")
+	runGit(sourceRepo, "add", ".")
+	runGit(sourceRepo, "commit", "-m", "init")
+	runGit(sourceRepo, "remote", "add", "origin", originBare)
+	runGit(sourceRepo, "push", "-u", "origin", "main")
+	originBefore := runGit(originBare, "rev-parse", "refs/heads/main")
+
+	cmd := runCommand(t, binaryPath, "work", "start", "--task", "Update README")
+	cmd.Dir = sourceRepo
+	cmd.Env = append(os.Environ(),
+		"PATH="+fakeBin+":"+os.Getenv("PATH"),
+		"HOME="+filepath.Join(cwd, "home"),
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("local work start failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "committed to source branch") {
+		t.Fatalf("expected committed completion output, got %q", output)
+	}
+	subject := runGit(sourceRepo, "log", "-1", "--pretty=%s")
+	if !strings.HasPrefix(subject, "nana work: apply lw-") {
+		t.Fatalf("unexpected local work commit subject: %q", subject)
+	}
+	readme, err := os.ReadFile(filepath.Join(sourceRepo, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	if !strings.Contains(string(readme), "binary local work") {
+		t.Fatalf("expected source checkout README update, got %q", readme)
+	}
+	if _, err := os.Stat(filepath.Join(sourceRepo, ".nana", "work")); !os.IsNotExist(err) {
+		t.Fatalf("expected no source repo work runtime artifacts, err=%v", err)
+	}
+	originAfter := runGit(originBare, "rev-parse", "refs/heads/main")
+	if originAfter != originBefore {
+		t.Fatalf("local work should not push to remote, before=%s after=%s", originBefore, originAfter)
 	}
 }
 

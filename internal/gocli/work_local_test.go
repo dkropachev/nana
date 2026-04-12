@@ -325,9 +325,103 @@ func TestNormalizeLocalWorkCodexArgsDefaultsToBypass(t *testing.T) {
 
 func TestReadLocalWorkInputRejectsMissingPlanFile(t *testing.T) {
 	cwd := t.TempDir()
-	_, _, err := readLocalWorkInput(cwd, localWorkStartOptions{PlanFile: "TODO.md"})
+	_, _, err := readLocalWorkInput(cwd, localWorkStartOptions{PlanFile: "TODO.md"}, "feature/test")
 	if err == nil || !strings.Contains(err.Error(), "plan file not found:") {
 		t.Fatalf("expected explicit missing plan file error, got %v", err)
+	}
+}
+
+func TestParseLocalWorkStartArgsAllowsBranchTaskInference(t *testing.T) {
+	options, err := parseLocalWorkStartArgs([]string{"--repo", ".", "--max-iterations", "1"})
+	if err != nil {
+		t.Fatalf("parseLocalWorkStartArgs: %v", err)
+	}
+	if strings.TrimSpace(options.Task) != "" || strings.TrimSpace(options.PlanFile) != "" {
+		t.Fatalf("expected task and plan file to stay empty for inference, got %#v", options)
+	}
+
+	_, err = parseLocalWorkStartArgs([]string{"--task", "one", "--plan-file", "plan.md"})
+	if err == nil || !strings.Contains(err.Error(), "Specify at most one of --task or --plan-file") {
+		t.Fatalf("expected at-most-one validation, got %v", err)
+	}
+}
+
+func TestInferLocalWorkTaskFromBranch(t *testing.T) {
+	task, err := inferLocalWorkTaskFromBranch("feature/add-branch-task-inference")
+	if err != nil {
+		t.Fatalf("inferLocalWorkTaskFromBranch: %v", err)
+	}
+	if !strings.Contains(task, `local branch "feature/add-branch-task-inference"`) || !strings.Contains(task, "add branch task inference") {
+		t.Fatalf("unexpected inferred task: %q", task)
+	}
+
+	for _, branch := range []string{"main", "master", "HEAD", ""} {
+		_, err := inferLocalWorkTaskFromBranch(branch)
+		if err == nil || !strings.Contains(err.Error(), "provide --task yourself because inference failed") {
+			t.Fatalf("expected inference failure for branch %q, got %v", branch, err)
+		}
+	}
+}
+
+func TestReadLocalWorkInputInfersTaskFromBranch(t *testing.T) {
+	content, mode, err := readLocalWorkInput(t.TempDir(), localWorkStartOptions{}, "fix/parser-edge-case")
+	if err != nil {
+		t.Fatalf("readLocalWorkInput inferred branch: %v", err)
+	}
+	if mode != "inferred-branch" {
+		t.Fatalf("expected inferred-branch mode, got %q", mode)
+	}
+	if !strings.Contains(content, "parser edge case") {
+		t.Fatalf("expected inferred task content, got %q", content)
+	}
+}
+
+func TestLocalWorkStartInfersTaskFromCurrentBranch(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	cmd := exec.Command("git", "switch", "-c", "feature/add-branch-task-inference")
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git switch branch failed: %v\n%s", err, output)
+	}
+
+	home := t.TempDir()
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		`PAYLOAD="$(cat) $*"`,
+		`case "$PAYLOAD" in`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    printf '{"findings":[]}\n'`,
+		`    ;;`,
+		`  *)`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	if err := runLocalWorkCommand(repo, []string{"start", "--max-iterations", "1"}); err != nil {
+		t.Fatalf("runLocalWorkCommand inferred start: %v", err)
+	}
+	manifest, _ := mustLatestLocalWorkRun(t, repo)
+	if manifest.InputMode != "inferred-branch" {
+		t.Fatalf("expected inferred input mode, got %q", manifest.InputMode)
+	}
+	if manifest.SourceBranch != "feature/add-branch-task-inference" {
+		t.Fatalf("expected source branch to be recorded, got %q", manifest.SourceBranch)
+	}
+	content, err := os.ReadFile(manifest.InputPath)
+	if err != nil {
+		t.Fatalf("read input path: %v", err)
+	}
+	if !strings.Contains(string(content), "add branch task inference") {
+		t.Fatalf("expected inferred task in input file, got %q", content)
 	}
 }
 
@@ -395,7 +489,7 @@ func TestLocalWorkStartStatusRetrospectiveAndGlobalRunLookup(t *testing.T) {
 		`    printf '{"findings":[]}\n'`,
 		`    ;;`,
 		`  *)`,
-		`    printf 'implemented\n' >> README.md`,
+		`    printf 'implemented\n' >> "$NANA_PROJECT_AGENTS_ROOT/README.md"`,
 		`    printf 'fake-codex:%s\n' "$*"`,
 		`    ;;`,
 		"esac",
@@ -423,6 +517,40 @@ func TestLocalWorkStartStatusRetrospectiveAndGlobalRunLookup(t *testing.T) {
 	manifest, runDir := mustLatestLocalWorkRun(t, repo)
 	if manifest.Status != "completed" {
 		t.Fatalf("expected completed manifest, got %#v", manifest)
+	}
+	if manifest.FinalApplyStatus != "committed" || strings.TrimSpace(manifest.FinalApplyCommitSHA) == "" {
+		t.Fatalf("expected committed final apply, got %#v", manifest)
+	}
+	sourceHead, err := githubGitOutput(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("read source HEAD: %v", err)
+	}
+	if strings.TrimSpace(sourceHead) != manifest.FinalApplyCommitSHA || strings.TrimSpace(sourceHead) == manifest.BaselineSHA {
+		t.Fatalf("expected source HEAD to advance to final apply commit, head=%q manifest=%#v", sourceHead, manifest)
+	}
+	commitSubject, err := githubGitOutput(repo, "log", "-1", "--pretty=%s")
+	if err != nil {
+		t.Fatalf("read commit subject: %v", err)
+	}
+	if strings.TrimSpace(commitSubject) != "nana work: apply "+manifest.RunID {
+		t.Fatalf("unexpected final apply commit subject %q", commitSubject)
+	}
+	sourceStatus, err := githubGitOutput(repo, "status", "--porcelain")
+	if err != nil {
+		t.Fatalf("read source status: %v", err)
+	}
+	if strings.TrimSpace(sourceStatus) != "" {
+		t.Fatalf("expected clean source checkout after final commit, got %q", sourceStatus)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "verify.log")); !os.IsNotExist(err) {
+		t.Fatalf("expected sandbox verification artifact to stay out of source checkout, err=%v", err)
+	}
+	committedFiles, err := githubGitOutput(repo, "show", "--name-only", "--pretty=", "HEAD")
+	if err != nil {
+		t.Fatalf("read committed files: %v", err)
+	}
+	if strings.Contains(committedFiles, "verify.log") {
+		t.Fatalf("expected final commit to exclude verification artifact, got %q", committedFiles)
 	}
 	if len(manifest.Iterations) != 1 {
 		t.Fatalf("expected single iteration, got %#v", manifest.Iterations)
@@ -565,6 +693,521 @@ func TestLocalWorkRunsHardeningPassWhenReviewFindingsRemain(t *testing.T) {
 	}
 	if len(summary.ReviewFindingsByRound) != 1 || len(summary.HardeningRoundFingerprints) != 1 || len(summary.PostHardeningVerificationFingerprints) != 1 {
 		t.Fatalf("expected round metadata in summary: %#v", summary)
+	}
+}
+
+func TestLocalWorkFinalReviewGateBlocksCompletionUntilHardened(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	finalGateHardenedPath := filepath.Join(home, "final-gate-hardened.marker")
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`PAYLOAD="$(cat)"`,
+		`case "$PAYLOAD" in`,
+		`  *"# NANA Work-local Finding Grouping"*)`,
+		`    printf '{"groups":[{"group_id":"quality-final-gate","rationale":"quality final gate","findings":["readme.md|quality final gate found missing regression|1|add regression"]}]}\n'`,
+		`    ;;`,
+		`  *"# NANA Work-local Finding Validation"*)`,
+		`    printf '{"group":"quality-final-gate","decisions":[{"fingerprint":"readme.md|quality final gate found missing regression|1|add regression","status":"confirmed","reason":"valid final gate finding"}]}\n'`,
+		`    ;;`,
+		`  *"# NANA Work-local Hardening Pass"*)`,
+		`    : > "$FAKE_FINAL_GATE_HARDENED_PATH"`,
+		`    printf 'final gate fixed\n' >> "$NANA_PROJECT_AGENTS_ROOT/README.md"`,
+		`    printf 'hardening-complete\n'`,
+		`    ;;`,
+		`  *"Review role: quality-reviewer"*)`,
+		`    if [ -f "$FAKE_FINAL_GATE_HARDENED_PATH" ]; then`,
+		`      printf '{"findings":[]}\n'`,
+		`    else`,
+		`      printf '{"findings":[{"title":"Quality final gate found missing regression","severity":"medium","path":"README.md","line":1,"summary":"add regression","detail":"detail","fix":"fix","rationale":"why"}]}\n'`,
+		`    fi`,
+		`    ;;`,
+		`  *"Review role: security-reviewer"*|*"Review role: performance-reviewer"*)`,
+		`    printf '{"findings":[]}\n'`,
+		`    ;;`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    printf '{"findings":[]}\n'`,
+		`    ;;`,
+		`  *)`,
+		`    printf 'implemented\n' >> "$NANA_PROJECT_AGENTS_ROOT/README.md"`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_FINAL_GATE_HARDENED_PATH", finalGateHardenedPath)
+
+	output, err := captureStdout(t, func() error {
+		return runLocalWorkCommand(repo, []string{"start", "--task", "Trigger final gate hardening"})
+	})
+	if err != nil {
+		t.Fatalf("runLocalWorkCommand(start): %v\n%s", err, output)
+	}
+	manifest, runDir := mustLatestLocalWorkRun(t, repo)
+	if manifest.Status != "completed" || manifest.FinalApplyStatus != "committed" {
+		t.Fatalf("expected completed committed run, got %#v", manifest)
+	}
+	if len(manifest.Iterations) != 1 {
+		t.Fatalf("unexpected iterations: %#v", manifest.Iterations)
+	}
+	summary := manifest.Iterations[0]
+	if summary.FinalGateFindings != 1 || len(summary.FinalGateRoles) != 1 || summary.FinalGateRoles[0] != "quality-reviewer" || summary.ReviewRoundsUsed != 1 {
+		t.Fatalf("expected final gate to drive one hardening round, got %#v", summary)
+	}
+	if manifest.FinalGateStatus != "passed" || summary.FinalGateStatus != "passed" || len(summary.FinalGateRoleResults) != 3 {
+		t.Fatalf("expected persisted final gate role summary, manifest=%#v summary=%#v", manifest, summary)
+	}
+	iterationDir := localWorkIterationDir(runDir, 1)
+	for _, name := range []string{
+		"final-gate-initial-quality-reviewer-findings.json",
+		"final-gate-round-1-quality-reviewer-findings.json",
+		"hardening-round-1-prompt.md",
+	} {
+		if _, err := os.Stat(filepath.Join(iterationDir, name)); err != nil {
+			t.Fatalf("expected final gate artifact %s: %v", name, err)
+		}
+	}
+	statusOutput, err := captureStdout(t, func() error {
+		return runLocalWorkCommand(repo, []string{"status", "--last", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("status json: %v", err)
+	}
+	var status struct {
+		FinalGateStatus      string                         `json:"final_gate_status"`
+		FinalGateRoleResults []localWorkFinalGateRoleResult `json:"final_gate_role_results"`
+	}
+	if err := json.Unmarshal([]byte(statusOutput), &status); err != nil {
+		t.Fatalf("unmarshal status: %v\n%s", err, statusOutput)
+	}
+	if status.FinalGateStatus != "passed" || len(status.FinalGateRoleResults) != 3 {
+		t.Fatalf("expected final gate summary in status, got %+v", status)
+	}
+}
+
+func TestLocalWorkFinalApplyBlocksOnDirtySourceAndResumeCommits(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`PAYLOAD="$(cat)"`,
+		`case "$PAYLOAD" in`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    printf '{"findings":[]}\n'`,
+		`    ;;`,
+		`  *)`,
+		`    printf 'implemented\n' >> "$NANA_PROJECT_AGENTS_ROOT/README.md"`,
+		`    printf 'source drift\n' > "$FAKE_SOURCE_REPO/drift.txt"`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_SOURCE_REPO", repo)
+
+	output, err := captureStdout(t, func() error {
+		return runLocalWorkCommand(repo, []string{"start", "--task", "Dirty source before final apply"})
+	})
+	if err == nil || !strings.Contains(err.Error(), "source checkout has local changes") {
+		t.Fatalf("expected dirty-source apply blocker, err=%v output=%s", err, output)
+	}
+	manifest, _ := mustLatestLocalWorkRun(t, repo)
+	if manifest.Status != "blocked" || manifest.FinalApplyStatus != "blocked-before-apply" || !strings.Contains(manifest.FinalApplyError, "source checkout has local changes") {
+		t.Fatalf("expected blocked final apply manifest, got %#v", manifest)
+	}
+	headBeforeResume, err := githubGitOutput(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("read source head: %v", err)
+	}
+	if strings.TrimSpace(headBeforeResume) != manifest.BaselineSHA {
+		t.Fatalf("expected source HEAD to remain at baseline while blocked, head=%q manifest=%#v", headBeforeResume, manifest)
+	}
+	if err := os.Remove(filepath.Join(repo, "drift.txt")); err != nil {
+		t.Fatalf("remove drift: %v", err)
+	}
+
+	resumeOutput, err := captureStdout(t, func() error {
+		return runLocalWorkCommand(repo, []string{"resume", "--run-id", manifest.RunID})
+	})
+	if err != nil {
+		t.Fatalf("resume blocked apply: %v\n%s", err, resumeOutput)
+	}
+	manifest = mustLocalWorkManifestByRunID(t, manifest.RunID)
+	if manifest.Status != "completed" || manifest.FinalApplyStatus != "committed" || strings.TrimSpace(manifest.FinalApplyCommitSHA) == "" {
+		t.Fatalf("expected resume to complete final commit, got %#v", manifest)
+	}
+}
+
+func TestLocalWorkFinalApplyCommitsNewSandboxFiles(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`PAYLOAD="$(cat)"`,
+		`case "$PAYLOAD" in`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    printf '{"findings":[]}\n'`,
+		`    ;;`,
+		`  *)`,
+		`    printf 'new file\n' > "$NANA_PROJECT_AGENTS_ROOT/NEW.md"`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	if err := runLocalWorkCommand(repo, []string{"start", "--task", "Create a new file"}); err != nil {
+		t.Fatalf("runLocalWorkCommand(start): %v", err)
+	}
+	manifest, _ := mustLatestLocalWorkRun(t, repo)
+	if manifest.FinalApplyStatus != "committed" {
+		t.Fatalf("expected committed apply, got %#v", manifest)
+	}
+	content, err := os.ReadFile(filepath.Join(repo, "NEW.md"))
+	if err != nil {
+		t.Fatalf("expected new file in source checkout: %v", err)
+	}
+	if strings.TrimSpace(string(content)) != "new file" {
+		t.Fatalf("unexpected NEW.md content %q", content)
+	}
+	committedFiles, err := githubGitOutput(repo, "show", "--name-only", "--pretty=", "HEAD")
+	if err != nil {
+		t.Fatalf("read committed files: %v", err)
+	}
+	if !strings.Contains(committedFiles, "NEW.md") {
+		t.Fatalf("expected final commit to include NEW.md, got %q", committedFiles)
+	}
+}
+
+func TestLocalWorkSkipsFinalGateWhenSandboxDiffIsEmpty(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`PAYLOAD="$(cat)"`,
+		`case "$PAYLOAD" in`,
+		`  *"Review role:"*)`,
+		`    printf 'final gate should not run for empty diff\n' >&2`,
+		`    exit 99`,
+		`    ;;`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    printf '{"findings":[]}\n'`,
+		`    ;;`,
+		`  *)`,
+		`    printf 'no-op implementation\n'`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	if err := runLocalWorkCommand(repo, []string{"start", "--task", "Do nothing"}); err != nil {
+		t.Fatalf("runLocalWorkCommand(start): %v", err)
+	}
+	manifest, runDir := mustLatestLocalWorkRun(t, repo)
+	if manifest.FinalApplyStatus != "no-op" || manifest.FinalGateStatus != "no-op" {
+		t.Fatalf("expected no-op apply and final gate, got %#v", manifest)
+	}
+	if got := manifest.Iterations[0].FinalGateStatus; got != "no-op" {
+		t.Fatalf("expected no-op final gate in iteration summary, got %q", got)
+	}
+	matches, err := filepath.Glob(filepath.Join(localWorkIterationDir(runDir, 1), "final-gate-*"))
+	if err != nil {
+		t.Fatalf("glob final gate artifacts: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("expected no final gate artifacts for no-op diff, got %#v", matches)
+	}
+}
+
+func TestLocalWorkCandidateAuditBlocksGeneratedFilesBeforeFinalGate(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`PAYLOAD="$(cat)"`,
+		`case "$PAYLOAD" in`,
+		`  *"Review role:"*)`,
+		`    printf 'final gate should not run when candidate audit blocks\n' >&2`,
+		`    exit 99`,
+		`    ;;`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    printf '{"findings":[]}\n'`,
+		`    ;;`,
+		`  *)`,
+		`    mkdir -p "$NANA_PROJECT_AGENTS_ROOT/target/classes"`,
+		`    printf 'generated\n' > "$NANA_PROJECT_AGENTS_ROOT/target/classes/generated.txt"`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	output, err := captureStdout(t, func() error {
+		return runLocalWorkCommand(repo, []string{"start", "--task", "Create generated artifact"})
+	})
+	if err == nil || !strings.Contains(err.Error(), "candidate diff contains generated or runtime files") {
+		t.Fatalf("expected candidate audit blocker, err=%v output=%s", err, output)
+	}
+	manifest, _ := mustLatestLocalWorkRun(t, repo)
+	if manifest.Status != "blocked" || manifest.CandidateAuditStatus != "blocked-candidate-files" || len(manifest.CandidateBlockedPaths) != 1 {
+		t.Fatalf("expected blocked candidate audit manifest, got %#v", manifest)
+	}
+	if manifest.CandidateBlockedPaths[0] != "target/classes/generated.txt" {
+		t.Fatalf("unexpected candidate blocked paths: %#v", manifest.CandidateBlockedPaths)
+	}
+	statusOutput, err := captureStdout(t, func() error {
+		return runLocalWorkCommand(repo, []string{"status", "--last"})
+	})
+	if err != nil {
+		t.Fatalf("status blocked run: %v", err)
+	}
+	if !strings.Contains(statusOutput, "Next action: remove generated/runtime files") {
+		t.Fatalf("expected recovery action in status, got %q", statusOutput)
+	}
+}
+
+func TestLocalWorkCandidateAuditAllowsSourceFiles(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	baseline, err := githubGitOutput(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("read baseline: %v", err)
+	}
+	runID := "lw-candidate-audit"
+	repoID := localWorkRepoID(repo)
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	sandboxPath := filepath.Join(home, "sandbox")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := cloneGithubSourceToSandbox(repo, sandboxRepoPath); err != nil {
+		t.Fatalf("clone sandbox: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(sandboxRepoPath, "src"), 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxRepoPath, "README.md"), []byte("# local work\nupdated\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxRepoPath, "src", "new.go"), []byte("package src\n"), 0o644); err != nil {
+		t.Fatalf("write src/new.go: %v", err)
+	}
+	if err := refreshLocalWorkSandboxIntentToAdd(sandboxRepoPath); err != nil {
+		t.Fatalf("intent-to-add: %v", err)
+	}
+	result, err := auditLocalWorkCandidateFiles(localWorkManifest{
+		RunID:           runID,
+		RepoRoot:        repo,
+		RepoID:          repoID,
+		BaselineSHA:     strings.TrimSpace(baseline),
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+	})
+	if err != nil {
+		t.Fatalf("audit candidate files: %v", err)
+	}
+	if result.Status != "passed" || len(result.BlockedPaths) != 0 {
+		t.Fatalf("expected source files to pass candidate audit, got %#v", result)
+	}
+}
+
+func TestApplyLocalWorkFinalDiffBlocksWhenSourceHeadChanged(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	baseline, err := githubGitOutput(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("read baseline: %v", err)
+	}
+	runID := "lw-head-changed"
+	repoID := localWorkRepoID(repo)
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	sandboxPath := filepath.Join(home, "sandbox")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := cloneGithubSourceToSandbox(repo, sandboxRepoPath); err != nil {
+		t.Fatalf("clone sandbox: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxRepoPath, "README.md"), []byte("# local work\nsandbox change\n"), 0o644); err != nil {
+		t.Fatalf("write sandbox readme: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "source.txt"), []byte("source change\n"), 0o644); err != nil {
+		t.Fatalf("write source change: %v", err)
+	}
+	if err := githubRunGit(repo, "add", "source.txt"); err != nil {
+		t.Fatalf("git add source: %v", err)
+	}
+	if err := githubRunGit(repo, "commit", "-m", "source moved"); err != nil {
+		t.Fatalf("git commit source: %v", err)
+	}
+
+	result := applyLocalWorkFinalDiff(localWorkManifest{
+		RunID:           runID,
+		RepoRoot:        repo,
+		RepoID:          repoID,
+		BaselineSHA:     strings.TrimSpace(baseline),
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+	})
+	if result.Status != "blocked-before-apply" || !strings.Contains(result.Error, "source checkout HEAD changed") {
+		t.Fatalf("expected HEAD-changed blocker, got %#v", result)
+	}
+}
+
+func TestApplyLocalWorkFinalDiffBlocksAfterApplyWhenCommitFails(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	baseline, err := githubGitOutput(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("read baseline: %v", err)
+	}
+	runID := "lw-commit-fails"
+	repoID := localWorkRepoID(repo)
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	sandboxPath := filepath.Join(home, "sandbox")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := cloneGithubSourceToSandbox(repo, sandboxRepoPath); err != nil {
+		t.Fatalf("clone sandbox: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxRepoPath, "README.md"), []byte("# local work\nsandbox change\n"), 0o644); err != nil {
+		t.Fatalf("write sandbox readme: %v", err)
+	}
+	hooksDir := filepath.Join(repo, ".git", "hooks")
+	if err := os.WriteFile(filepath.Join(hooksDir, "pre-commit"), []byte("#!/bin/sh\nexit 17\n"), 0o755); err != nil {
+		t.Fatalf("write pre-commit hook: %v", err)
+	}
+
+	result := applyLocalWorkFinalDiff(localWorkManifest{
+		RunID:           runID,
+		RepoRoot:        repo,
+		RepoID:          repoID,
+		BaselineSHA:     strings.TrimSpace(baseline),
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+	})
+	if result.Status != "blocked-after-apply" || !strings.Contains(result.Error, "staged final-apply changes") {
+		t.Fatalf("expected post-apply blocker, got %#v", result)
+	}
+	cachedFiles, err := githubGitOutput(repo, "diff", "--cached", "--name-only")
+	if err != nil {
+		t.Fatalf("read cached diff: %v", err)
+	}
+	if !strings.Contains(cachedFiles, "README.md") {
+		t.Fatalf("expected README.md staged after commit failure, got %q", cachedFiles)
+	}
+	manifest := localWorkManifest{
+		Version:               4,
+		RunID:                 runID,
+		CreatedAt:             ISOTimeNow(),
+		UpdatedAt:             ISOTimeNow(),
+		Status:                "blocked",
+		CurrentPhase:          "apply-blocked",
+		RepoRoot:              repo,
+		RepoName:              filepath.Base(repo),
+		RepoID:                repoID,
+		BaselineSHA:           strings.TrimSpace(baseline),
+		SandboxPath:           sandboxPath,
+		SandboxRepoPath:       sandboxRepoPath,
+		InputPath:             filepath.Join(runDir, "input-plan.md"),
+		InputMode:             "task",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+		FinalApplyStatus:      result.Status,
+		FinalApplyError:       result.Error,
+		LastError:             result.Error,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write blocked manifest: %v", err)
+	}
+	if _, err := captureStdout(t, func() error {
+		return runLocalWorkCommand(repo, []string{"resume", "--run-id", runID})
+	}); err == nil || !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("expected blocked-after-apply resume to refuse retry, got %v", err)
+	}
+}
+
+func TestApplyLocalWorkFinalDiffNoOpWhenSandboxHasNoDiff(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	baseline, err := githubGitOutput(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("read baseline: %v", err)
+	}
+	runID := "lw-no-op"
+	repoID := localWorkRepoID(repo)
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	sandboxPath := filepath.Join(home, "sandbox")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := cloneGithubSourceToSandbox(repo, sandboxRepoPath); err != nil {
+		t.Fatalf("clone sandbox: %v", err)
+	}
+
+	result := applyLocalWorkFinalDiff(localWorkManifest{
+		RunID:           runID,
+		RepoRoot:        repo,
+		RepoID:          repoID,
+		BaselineSHA:     strings.TrimSpace(baseline),
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+	})
+	if result.Status != "no-op" || strings.TrimSpace(result.CommitSHA) != "" || strings.TrimSpace(result.Error) != "" {
+		t.Fatalf("expected no-op apply, got %#v", result)
+	}
+	head, err := githubGitOutput(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("read source head: %v", err)
+	}
+	if strings.TrimSpace(head) != strings.TrimSpace(baseline) {
+		t.Fatalf("expected no-op to leave source HEAD unchanged, head=%q baseline=%q", head, baseline)
 	}
 }
 

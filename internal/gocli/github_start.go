@@ -67,6 +67,31 @@ func startGithubWork(options githubWorkStartOptions) error {
 	if err := writeGithubJSON(paths.RepoSettingsPath, settings); err != nil {
 		return err
 	}
+	repoMode := normalizeGithubRepoMode(options.RepoMode)
+	publishTarget := normalizeGithubPublishTarget(options.PublishTarget)
+	if repoMode == "" && publishTarget != "" {
+		repoMode = publishTargetToRepoMode(publishTarget)
+	}
+	if repoMode == "" {
+		if options.CreatePRExplicit {
+			if options.CreatePR {
+				repoMode = "repo"
+			} else {
+				repoMode = "local"
+			}
+		} else {
+			repoMode = resolvedGithubRepoMode(settings)
+		}
+	}
+	if publishTarget == "" {
+		publishTarget = repoModeToPublishTarget(repoMode)
+	}
+	if publishTarget == "" {
+		publishTarget = "local-branch"
+		repoMode = "local"
+	}
+	prForwardMode := resolvedGithubPRForwardMode(settings)
+	createPROnComplete := publishTarget != "local-branch"
 	profile, profilePath, err := refreshGithubRepoProfile(repoMeta.RepoSlug, paths.SourcePath, repoVerificationPlan, settings.DefaultConsiderations, now)
 	if err != nil {
 		return err
@@ -122,7 +147,10 @@ func startGithubWork(options githubWorkStartOptions) error {
 		RoleLayout:              roleLayout,
 		ConsiderationPipeline:   convertedPipeline,
 		LanePromptArtifacts:     []githubLanePromptArtifact{},
-		CreatePROnComplete:      options.CreatePR,
+		CreatePROnComplete:      createPROnComplete,
+		RepoMode:                repoMode,
+		PRForwardMode:           prForwardMode,
+		PublishTarget:           publishTarget,
 		TargetKind:              options.Target.kind,
 		TargetNumber:            options.Target.number,
 		TargetTitle:             target.Issue.Title,

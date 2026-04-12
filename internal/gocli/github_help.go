@@ -62,9 +62,9 @@ Behavior:
 const GithubWorkHelp = `nana work - GitHub-backed issue/PR implementation helper
 
 Usage:
-  nana work start <github-issue-or-pr-url> [--considerations <list>] [--role-layout <split|reviewer+executor>] [--new-pr] [--create-pr | --local-only] [--reviewer <login|@me>] [codex-args...]
+  nana work start <github-issue-or-pr-url> [--considerations <list>] [--role-layout <split|reviewer+executor>] [--new-pr] [--repo-mode <local|fork|repo>] [--create-pr | --local-only] [--reviewer <login|@me>] [codex-args...]
   nana work sync [--run-id <id> | --last] [--reviewer <login|@me>] [--resume-last] [codex-args...]
-  nana work defaults set <owner/repo> [--considerations <list>] [--role-layout <split|reviewer+executor>] [--review-rules-mode <manual|automatic>]
+  nana work defaults set <owner/repo> [--considerations <list>] [--role-layout <split|reviewer+executor>] [--review-rules-mode <manual|automatic>] [--repo-mode <local|fork|repo>] [--issue-pick <manual|label|auto>] [--pr-forward <approve|auto>]
   nana work defaults show <owner/repo>
   nana work stats <github-issue-or-pr-url>
   nana work retrospective [--run-id <id> | --last]
@@ -96,8 +96,13 @@ Override shapes:
   - hot-path apis: {"version":1,"hot_path_api_files":["docs/openapi/search.yaml"],"api_identifier_tokens":["searchDocuments"]}
   - policy: {"version":1,"experimental":true,"allowed_actions":{"commit":true,"push":true,"open_draft_pr":true,"request_review":true,"merge":false},"feedback_source":"assigned_trusted","human_gate":"publish_time","merge_method":"squash"}
 
+Repo automation:
+  - repo-mode controls where changes land: local keeps a local branch, fork pushes to your fork, repo pushes to the target repo.
+  - issue-pick controls automatic issue selection for fork/repo modes: manual, label, or auto.
+  - pr-forward controls the PR step after work lands: approve waits for approval; auto forwards automatically. In fork mode, forwarding creates the matching PR on the target repo. In repo mode, forwarding means merge.
+
 Policy notes:
-  - merge automation is experimental and requires allowed_actions.merge, local verification, green GitHub CI, and control-plane approval.
+  - merge automation is experimental and requires allowed_actions.merge, local verification, and green GitHub CI; pr-forward=approve also requires control-plane approval.
   - any_human feedback mode excludes bots, target authors, and blocked reviewers.
 
 Auth:

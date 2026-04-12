@@ -53,7 +53,7 @@ Policy example:
   {"version":1,"issue_destination":"fork","fork_repo":"my-user/widget","labels":["enhancement"]}
 `
 
-const StartHelp = `nana start - Run supported repo startup automation
+const ScoutStartHelp = `nana start - Run supported repo startup automation
 
 Usage:
   nana start [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [-- codex-args...]
@@ -149,12 +149,12 @@ func Enhance(cwd string, args []string) error {
 	return runScout(cwd, options, enhancementScoutRole)
 }
 
-func Start(cwd string, args []string) error {
+func StartScouts(cwd string, args []string) error {
 	if len(args) > 0 && isHelpToken(args[0]) || len(args) > 0 && args[0] == "help" {
-		fmt.Fprint(os.Stdout, StartHelp)
+		fmt.Fprint(os.Stdout, ScoutStartHelp)
 		return nil
 	}
-	options, err := parseScoutArgs(args, StartHelp, "start")
+	options, err := parseScoutArgs(args, ScoutStartHelp, "start")
 	if err != nil {
 		return err
 	}
