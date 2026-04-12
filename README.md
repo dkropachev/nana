@@ -142,7 +142,7 @@ Most users should think of NANA as **better task routing + better workflow + bet
 | `nana investigate "..."` | source-backed investigation with proof-linked JSON reports and validator enforcement |
 | `nana investigate onboard` | bootstrap the dedicated investigate Codex config |
 | `nana investigate doctor` | ask Codex to probe the MCPs configured in the investigate config |
-| `nana start` | run onboarded repo automation; with scout flags or policy-backed local repos, run supported scout startup automation |
+| `nana start` | run onboarded repo automation, including issue pickup, scouts, and a post-scout pickup pass; with scout flags or policy-backed local repos, run supported scout startup automation |
 | `nana improve [owner/repo]` | run the improvement-scout role for UX/perf proposals and route them by repo policy |
 | `nana enhance [owner/repo]` | run the enhancement-scout role for forward-looking repo proposals with the same policy routing |
 | `nana work start --task "..."` | long-running local plan execution in a managed sandbox, ending with verified changes committed to the local branch |
@@ -311,14 +311,14 @@ Use `nana repo defaults set --repo-mode local|fork|repo --issue-pick manual|labe
 nana start
 ```
 
-Automatically onboarded repos use system defaults, meaning `repo-mode=local`, `issue-pick=manual`, and `pr-forward=approve` unless later configured. `nana start` scans all onboarded GitHub repos under `~/.nana/work/repos`, skips repos where `repo-mode` is `local` or `issue-pick` is `manual`, mirrors eligible source issues into your fork, prioritizes queued work by `P1` through `P5` labels plus inferred complexity, and starts at most three workers while respecting a ten-open-PR cap for fork publishing.
+Automatically onboarded repos use system defaults, meaning `repo-mode=local`, `issue-pick=manual`, and `pr-forward=approve` unless later configured. `nana start` scans all onboarded GitHub repos under `~/.nana/work/repos`, skips repos where `repo-mode` is `local` or `issue-pick` is `manual`, mirrors eligible source issues into your fork, prioritizes queued work by `P1` through `P5` labels plus inferred complexity, and starts at most three workers while respecting a ten-open-PR cap for fork publishing. When the managed source checkout declares scout policies, `nana start` runs those scouts after the first pickup pass and then refreshes issue pickup so scout-created proposals can be implemented in the same cycle. Use `--cycles <n>` to repeat the full onboarded-repo automation cycle more than once.
 
 Mode behavior:
 - `repo-mode local`: keep work on a local branch and do not open a PR
 - `repo-mode fork`: push work to your fork
 - `repo-mode repo`: push work to the target repo
 - `issue-pick manual`: do not automatically pick issues
-- `issue-pick label`: pick issues labeled with the single Nana opt-in label `nana`
+- `issue-pick label`: pick issues with the `nana` label, plus Nana-generated scout proposal issues labeled `improvement-scout` or `enhancement-scout`
 - `issue-pick auto`: pick all eligible open issues
 - `pr-forward approve`: wait for approval before going forward with the PR
 - `pr-forward auto`: go forward automatically; fork creates the target-repo PR, repo merges the PR

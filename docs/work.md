@@ -24,7 +24,7 @@ Selection rules:
 - local mode uses `--task`, `--plan-file`, or an inferred task from the current branch
 - GitHub mode is selected when `start` receives a GitHub issue/PR URL
 - `sync` and `lane-exec` are GitHub-only run controls
-- top-level `nana start` is proposal-only startup automation: it runs supported scout roles declared by repo policy and does not edit code
+- top-level `nana start` runs supported scout roles for local scout startup, and for onboarded GitHub repos it also mirrors issues, starts eligible work, runs scouts, and refreshes issue pickup after scouts finish
 - `improve` and `enhance` are proposal-only direct scout role commands
 
 ## Storage
@@ -138,9 +138,9 @@ nana repo config owner/repo --repo-mode repo --issue-pick auto --pr-forward auto
 nana repo explain owner/repo
 ```
 
-`repo-mode` controls how Nana works with the repository: `local` keeps changes on a local branch and is the default, `fork` pushes implementation work to your fork, and `repo` pushes implementation work to the target repo. For `fork` and `repo`, `issue-pick` controls automatic issue selection with `manual`, `label`, or `auto`; label mode requires the single opt-in label `nana`. `pr-forward` controls what happens after a PR exists: `approve` waits for approval, while `auto` goes forward automatically. In `fork` mode, going forward creates the matching PR on the target repo. In `repo` mode, going forward means merging the PR.
+`repo-mode` controls how Nana works with the repository: `local` keeps changes on a local branch and is the default, `fork` pushes implementation work to your fork, and `repo` pushes implementation work to the target repo. For `fork` and `repo`, `issue-pick` controls automatic issue selection with `manual`, `label`, or `auto`; label mode picks issues with the single opt-in label `nana`, and also picks Nana-generated scout proposal issues labeled `improvement-scout` or `enhancement-scout`. `pr-forward` controls what happens after a PR exists: `approve` waits for approval, while `auto` goes forward automatically. In `fork` mode, going forward creates the matching PR on the target repo. In `repo` mode, going forward means merging the PR.
 
-A `nana start` automation run scans `~/.nana/work/repos`, skips repos where `repo-mode` is `local` or `issue-pick` is `manual`, mirrors eligible issues, prioritizes queued work by `P1` through `P5` labels and inferred complexity, and starts up to three workers without exceeding ten open PRs for fork publishing. State is persisted under `~/.nana/start/<owner>/<repo>/state.json`.
+A `nana start` automation run scans `~/.nana/work/repos`, skips repos where `repo-mode` is `local` or `issue-pick` is `manual`, mirrors eligible issues, prioritizes queued work by `P1` through `P5` labels and inferred complexity, and starts up to three workers without exceeding ten open PRs for fork publishing. If the managed source checkout has improvement or enhancement scout policies, the run then executes those scouts and performs a second issue pickup pass so newly created proposal issues can move into implementation in the same cycle. Use `--cycles <n>` to repeat that onboarded-repo cycle. State is persisted under `~/.nana/start/<owner>/<repo>/state.json`.
 
 
 ## Troubleshooting

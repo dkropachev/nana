@@ -1015,7 +1015,8 @@ func startWorkAutomationAllowsIssue(mode string, labels []string, action string)
 
 func startWorkHasAutomationLabel(labels []string, action string) bool {
 	for _, label := range labels {
-		if strings.EqualFold(strings.TrimSpace(label), "nana") {
+		normalized := strings.ToLower(strings.TrimSpace(label))
+		if normalized == "nana" || normalized == improvementScoutRole || normalized == enhancementScoutRole {
 			return true
 		}
 	}

@@ -2,6 +2,7 @@ package gocli
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -54,6 +55,102 @@ func TestStartRunsEnabledOnboardedReposAndSkipsManual(t *testing.T) {
 	}
 	if strings.Contains(output, "acme/manual") {
 		t.Fatalf("manual repo should not be selected, output=%q", output)
+	}
+}
+
+func TestStartRunsScoutsBetweenIssuePickupPasses(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := writeGithubJSON(githubRepoSettingsPath("acme/cycled"), githubRepoSettings{Version: 6, RepoMode: "fork", IssuePickMode: "auto", PRForwardMode: "approve", ForkIssuesMode: "auto", ImplementMode: "auto", PublishTarget: "fork"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	sourcePath := githubManagedPaths("acme/cycled").SourcePath
+	if err := os.MkdirAll(filepath.Join(sourcePath, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir policy dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourcePath, ".nana", "improvement-policy.json"), []byte(`{"version":1,"issue_destination":"repo"}`), 0o644); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+
+	oldRun := startRunStartWork
+	oldPromote := startPromoteStartWork
+	oldScout := startRunScoutStart
+	events := []string{}
+	startRunStartWork = func(options startWorkOptions) error {
+		events = append(events, "work:"+options.RepoSlug)
+		if options.PublishTarget != "fork" || options.ForkIssuesMode != "auto" || options.ImplementMode != "auto" {
+			t.Fatalf("unexpected work options: %#v", options)
+		}
+		return nil
+	}
+	startPromoteStartWork = func(options startWorkOptions) error {
+		events = append(events, "promote:"+options.RepoSlug)
+		return nil
+	}
+	startRunScoutStart = func(cwd string, options ImproveOptions) error {
+		events = append(events, "scout:"+options.Target)
+		if options.Target != "acme/cycled" || strings.Join(options.Focus, ",") != "ux,perf" {
+			t.Fatalf("unexpected scout options: %#v", options)
+		}
+		return nil
+	}
+	defer func() {
+		startRunStartWork = oldRun
+		startPromoteStartWork = oldPromote
+		startRunScoutStart = oldScout
+	}()
+
+	output, err := captureStdout(t, func() error {
+		return Start(".", []string{"--repo", "acme/cycled"})
+	})
+	if err != nil {
+		t.Fatalf("Start: %v\n%s", err, output)
+	}
+	expected := []string{"work:acme/cycled", "scout:acme/cycled", "work:acme/cycled"}
+	if !reflect.DeepEqual(events, expected) {
+		t.Fatalf("expected issue pickup, scouts, issue pickup; got %#v", events)
+	}
+	if !strings.Contains(output, "scouts finished; refreshing issue queue") {
+		t.Fatalf("expected scout refresh output, got %q", output)
+	}
+}
+
+func TestStartCyclesRepeatRepoAutomationCycle(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := writeGithubJSON(githubRepoSettingsPath("acme/repeat"), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve", ForkIssuesMode: "auto", ImplementMode: "auto", PublishTarget: "repo"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	oldRun := startRunStartWork
+	oldPromote := startPromoteStartWork
+	oldScout := startRunScoutStart
+	runCount := 0
+	startRunStartWork = func(options startWorkOptions) error {
+		runCount++
+		return nil
+	}
+	startPromoteStartWork = func(options startWorkOptions) error { return nil }
+	startRunScoutStart = func(cwd string, options ImproveOptions) error {
+		t.Fatal("scouts should not run without policy files")
+		return nil
+	}
+	defer func() {
+		startRunStartWork = oldRun
+		startPromoteStartWork = oldPromote
+		startRunScoutStart = oldScout
+	}()
+
+	output, err := captureStdout(t, func() error {
+		return Start(".", []string{"--repo", "acme/repeat", "--cycles", "2"})
+	})
+	if err != nil {
+		t.Fatalf("Start: %v\n%s", err, output)
+	}
+	if runCount != 2 {
+		t.Fatalf("expected one work pass per cycle without scouts, got %d", runCount)
+	}
+	if !strings.Contains(output, "Cycle 1/2") || !strings.Contains(output, "Cycle 2/2") {
+		t.Fatalf("expected cycle progress output, got %q", output)
 	}
 }
 

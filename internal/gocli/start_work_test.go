@@ -161,6 +161,17 @@ func TestStartWorkStartHonorsOpenPRCap(t *testing.T) {
 	}
 }
 
+func TestStartWorkLabelModeTreatsScoutProposalsAsAutomationOptIn(t *testing.T) {
+	for _, role := range []string{improvementScoutRole, enhancementScoutRole} {
+		if !startWorkAutomationAllowsIssue("labeled", []string{role}, "implement") {
+			t.Fatalf("expected %s label to opt into labeled implementation", role)
+		}
+	}
+	if startWorkAutomationAllowsIssue("labeled", []string{"enhancement"}, "implement") {
+		t.Fatalf("generic enhancement label should not opt into labeled implementation")
+	}
+}
+
 func TestStartWorkPromoteCreatesUpstreamPRForMergedForkPR(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
