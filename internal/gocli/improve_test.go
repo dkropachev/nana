@@ -259,7 +259,7 @@ func TestStartNoSupportedPoliciesIsNoop(t *testing.T) {
 
 func TestStartAutoModeCommitsBothScoutsToDefaultBranch(t *testing.T) {
 	repo := t.TempDir()
-	runScoutTestGit(t, repo, "init", "-b", "default")
+	runScoutTestGit(t, repo, "init", "-b", "main")
 	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("# widget\n"), 0o644); err != nil {
 		t.Fatalf("write README: %v", err)
 	}
@@ -290,13 +290,13 @@ func TestStartAutoModeCommitsBothScoutsToDefaultBranch(t *testing.T) {
 	if !strings.Contains(output, "Committed scout artifacts to default branch") {
 		t.Fatalf("missing auto commit output: %q", output)
 	}
-	if branch := strings.TrimSpace(scoutTestGitOutput(t, repo, "rev-parse", "--abbrev-ref", "HEAD")); branch != "default" {
+	if branch := strings.TrimSpace(scoutTestGitOutput(t, repo, "rev-parse", "--abbrev-ref", "HEAD")); branch != "main" {
 		t.Fatalf("expected checkout on default branch, got %q", branch)
 	}
 	if subject := strings.TrimSpace(scoutTestGitOutput(t, repo, "log", "-1", "--pretty=%s")); subject != "Record scout startup artifacts" {
 		t.Fatalf("expected scout artifact commit, got %q", subject)
 	}
-	tree := scoutTestGitOutput(t, repo, "ls-tree", "-r", "--name-only", "default")
+	tree := scoutTestGitOutput(t, repo, "ls-tree", "-r", "--name-only", "main")
 	for _, expected := range []string{".nana/improvements/", ".nana/enhancements/"} {
 		if !strings.Contains(tree, expected) {
 			t.Fatalf("expected %s in default branch tree:\n%s", expected, tree)
@@ -309,7 +309,7 @@ func TestStartAutoModeCommitsBothScoutsToDefaultBranch(t *testing.T) {
 
 func TestStartAutoModeCommitsSingleScoutToDefaultBranch(t *testing.T) {
 	repo := t.TempDir()
-	runScoutTestGit(t, repo, "init", "-b", "default")
+	runScoutTestGit(t, repo, "init", "-b", "main")
 	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
 		t.Fatalf("mkdir .nana: %v", err)
 	}
@@ -331,12 +331,47 @@ func TestStartAutoModeCommitsSingleScoutToDefaultBranch(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Start(): %v", err)
 	}
-	tree := scoutTestGitOutput(t, repo, "ls-tree", "-r", "--name-only", "default")
+	tree := scoutTestGitOutput(t, repo, "ls-tree", "-r", "--name-only", "main")
 	if !strings.Contains(tree, ".nana/improvements/") {
 		t.Fatalf("expected improvement artifacts on default branch:\n%s", tree)
 	}
 	if strings.Contains(tree, ".nana/enhancements/") {
 		t.Fatalf("did not expect enhancement artifacts:\n%s", tree)
+	}
+}
+
+func TestStartAutoModeUsesOriginHeadDefaultBranch(t *testing.T) {
+	repo := t.TempDir()
+	runScoutTestGit(t, repo, "init", "-b", "develop")
+	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir .nana: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("# widget\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".nana", "improvement-policy.json"), []byte(`{"version":1,"mode":"auto"}`), 0o644); err != nil {
+		t.Fatalf("write improvement policy: %v", err)
+	}
+	runScoutTestGit(t, repo, "add", ".")
+	runScoutTestGit(t, repo, "commit", "-m", "init")
+	runScoutTestGit(t, repo, "update-ref", "refs/remotes/origin/develop", "HEAD")
+	runScoutTestGit(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/develop")
+	runScoutTestGit(t, repo, "checkout", "-b", "feature")
+	inputPath := filepath.Join(t.TempDir(), "proposals.json")
+	if err := os.WriteFile(inputPath, []byte(scoutProposalJSON(1, "docs")), 0o644); err != nil {
+		t.Fatalf("write proposals: %v", err)
+	}
+	if _, err := captureStdout(t, func() error {
+		return Start(repo, []string{"--from-file", inputPath})
+	}); err != nil {
+		t.Fatalf("Start(): %v", err)
+	}
+	if branch := strings.TrimSpace(scoutTestGitOutput(t, repo, "rev-parse", "--abbrev-ref", "HEAD")); branch != "develop" {
+		t.Fatalf("expected checkout on origin/HEAD default branch, got %q", branch)
+	}
+	tree := scoutTestGitOutput(t, repo, "ls-tree", "-r", "--name-only", "develop")
+	if !strings.Contains(tree, ".nana/improvements/") {
+		t.Fatalf("expected improvement artifacts on develop branch:\n%s", tree)
 	}
 }
 

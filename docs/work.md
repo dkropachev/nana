@@ -115,7 +115,7 @@ GitHub target behavior:
 - `issue_destination` controls publication: `local`, `repo`/`target`, or `fork`
 - scout issue labels include the role label
 - each scout role emits at most 5 proposals per run and is capped at 5 open GitHub issues at a time
-- local `mode: "auto"` in every supported scout policy makes `nana start` switch to the `default` branch and commit generated scout artifacts there; this requires a clean worktree and an existing local `default` branch
+- local `mode: "auto"` in every supported scout policy makes `nana start` switch to the repo's default branch and commit generated scout artifacts there; this requires a clean worktree and a resolvable local default branch
 
 Policy examples:
 

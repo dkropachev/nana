@@ -65,8 +65,8 @@ Behavior:
   - runs enhancement-scout when .nana/enhancement-policy.json or .github/nana-enhancement-policy.json exists
   - local repos keep proposals under .nana/improvements/ or .nana/enhancements/
   - GitHub targets follow their scout policy issue_destination
-  - local repos with mode "auto" in every supported scout policy commit generated artifacts to the default branch
-  - auto mode requires a clean worktree and an existing local default branch
+  - local repos with mode "auto" in every supported scout policy commit generated artifacts to the repo's default branch
+  - auto mode requires a clean worktree and a resolvable local default branch
   - exits cleanly when the repo does not declare supported scout policies
 `
 
@@ -476,17 +476,39 @@ func ensureScoutDefaultBranch(repoPath string) error {
 	if strings.TrimSpace(status) != "" {
 		return fmt.Errorf("scout auto mode requires a clean worktree before switching to default branch")
 	}
-	if err := githubRunGit(repoPath, "show-ref", "--verify", "--quiet", "refs/heads/default"); err != nil {
-		return fmt.Errorf("scout auto mode requires a local default branch")
+	defaultBranch, err := resolveScoutDefaultBranch(repoPath)
+	if err != nil {
+		return err
 	}
 	current, err := githubGitOutput(repoPath, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(current) == "default" {
+	if strings.TrimSpace(current) == defaultBranch {
 		return nil
 	}
-	return githubRunGit(repoPath, "checkout", "default")
+	return githubRunGit(repoPath, "checkout", defaultBranch)
+}
+
+func resolveScoutDefaultBranch(repoPath string) (string, error) {
+	if output, err := githubGitOutput(repoPath, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); err == nil {
+		branch := strings.TrimSpace(output)
+		if strings.Contains(branch, "/") {
+			branch = strings.TrimPrefix(branch, strings.SplitN(branch, "/", 2)[0]+"/")
+		}
+		if branch != "" {
+			if err := githubRunGit(repoPath, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+				return branch, nil
+			}
+			return "", fmt.Errorf("scout auto mode resolved default branch %q from origin/HEAD, but no matching local branch exists", branch)
+		}
+	}
+	for _, branch := range []string{"main", "master", "trunk", "default"} {
+		if err := githubRunGit(repoPath, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+			return branch, nil
+		}
+	}
+	return "", fmt.Errorf("scout auto mode requires a resolvable local default branch")
 }
 
 func commitScoutArtifactsToDefault(repoPath string) (bool, error) {
