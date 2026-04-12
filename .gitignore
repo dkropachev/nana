@@ -14,8 +14,6 @@ dist/
 .claire/
 .codex
 .codex/
-.codex-investigate
-.codex-investigate/
 .agents/
 coverage/
 target/

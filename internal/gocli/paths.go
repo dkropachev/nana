@@ -39,7 +39,7 @@ func ResolveCodexHomeForLaunch(cwd string) string {
 
 func ResolveInvestigateCodexHome(cwd string) string {
 	if scope, _ := resolveDoctorScope(cwd); scope == "project" {
-		return filepath.Join(cwd, ".codex-investigate")
+		return filepath.Join(cwd, ".nana", "codex-home-investigate")
 	}
 	return DefaultUserInvestigateCodexHome(os.Getenv("HOME"))
 }

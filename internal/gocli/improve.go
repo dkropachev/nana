@@ -508,7 +508,7 @@ func ensureScoutRuntimeGitignore(repoPath string) (bool, error) {
 	content := string(existing)
 	lines := strings.Split(content, "\n")
 	missing := []string{}
-	for _, entry := range []string{".codex", ".codex/", ".codex-investigate", ".codex-investigate/"} {
+	for _, entry := range []string{".codex", ".codex/"} {
 		if !gitignoreHasEntry(lines, entry) {
 			missing = append(missing, entry)
 		}
@@ -556,7 +556,7 @@ func scoutRelevantDirtyStatusLines(status string) []string {
 			path = strings.TrimSpace(line[3:])
 		}
 		path = strings.Trim(path, `"`)
-		if path == ".codex" || strings.HasPrefix(path, ".codex/") || path == ".codex-investigate" || strings.HasPrefix(path, ".codex-investigate/") {
+		if path == ".codex" || strings.HasPrefix(path, ".codex/") {
 			continue
 		}
 		dirty = append(dirty, line)

@@ -469,7 +469,7 @@ func TestStartAutoModeIgnoresCodexRuntimeDirectory(t *testing.T) {
 		t.Fatalf("expected clean status with .codex ignored, got %q", status)
 	}
 	gitignore := scoutTestGitOutput(t, repo, "show", "HEAD:.gitignore")
-	for _, expected := range []string{".codex", ".codex/", ".codex-investigate", ".codex-investigate/"} {
+	for _, expected := range []string{".codex", ".codex/"} {
 		if !strings.Contains(gitignore, expected) {
 			t.Fatalf("expected %q in committed .gitignore:\n%s", expected, gitignore)
 		}

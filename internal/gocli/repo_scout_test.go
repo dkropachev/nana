@@ -32,7 +32,7 @@ func TestRepoScoutEnableWritesDefaultLocalPolicies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read .gitignore: %v", err)
 	}
-	for _, expected := range []string{".codex", ".codex/", ".codex-investigate", ".codex-investigate/"} {
+	for _, expected := range []string{".codex", ".codex/"} {
 		if !strings.Contains(string(content), expected) {
 			t.Fatalf("expected %q in .gitignore:\n%s", expected, content)
 		}

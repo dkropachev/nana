@@ -151,7 +151,7 @@ func resolveSetupScopeDirectories(cwd string, scope string) setupScopeDirectorie
 
 func resolveInvestigateScopeDirectories(cwd string, scope string) setupScopeDirectories {
 	if scope == "project" {
-		codexHomeDir := filepath.Join(cwd, ".codex-investigate")
+		codexHomeDir := filepath.Join(cwd, ".nana", "codex-home-investigate")
 		return setupScopeDirectories{
 			codexConfigFile: filepath.Join(codexHomeDir, "config.toml"),
 			codexHomeDir:    codexHomeDir,
@@ -372,9 +372,9 @@ func writeSetupAgentsMd(repoRoot string, cwd string, codexHomeDir string, option
 	}
 	content := string(templateBytes)
 	targetPath := filepath.Join(cwd, "AGENTS.md")
-	if strings.Contains(codexHomeDir, filepath.Join(cwd, ".codex-investigate")) {
+	if strings.Contains(codexHomeDir, filepath.Join(cwd, ".nana", "codex-home-investigate")) {
 		targetPath = filepath.Join(codexHomeDir, "AGENTS.md")
-		content = strings.ReplaceAll(content, "~/.codex", "./.codex-investigate")
+		content = strings.ReplaceAll(content, "~/.codex", "./.nana/codex-home-investigate")
 		content = addGeneratedAgentsMarker(content)
 		return writeFileIfChanged(targetPath, content, options)
 	}

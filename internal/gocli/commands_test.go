@@ -137,7 +137,7 @@ func TestResolveInvestigateCodexHome(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cwd, ".nana", "setup-scope.json"), []byte(`{"scope":"project"}`), 0o644); err != nil {
 		t.Fatalf("write setup-scope: %v", err)
 	}
-	if got := ResolveInvestigateCodexHome(cwd); got != filepath.Join(cwd, ".codex-investigate") {
+	if got := ResolveInvestigateCodexHome(cwd); got != filepath.Join(cwd, ".nana", "codex-home-investigate") {
 		t.Fatalf("ResolveInvestigateCodexHome(project) = %q", got)
 	}
 }
