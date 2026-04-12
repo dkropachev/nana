@@ -156,6 +156,7 @@ func TestImproveRunsScoutPromptAfterOptionSeparator(t *testing.T) {
 	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
 		"#!/bin/sh",
 		`printf '%s\n' "$@" > "$FAKE_CODEX_ARGS_PATH"`,
+		`printf 'codex transcript noise\n' >&2`,
 		`printf '{"version":1,"proposals":[]}\n'`,
 	}, "\n"))
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
@@ -166,6 +167,9 @@ func TestImproveRunsScoutPromptAfterOptionSeparator(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Improve: %v\n%s", err, output)
+	}
+	if strings.Contains(output, "codex transcript noise") {
+		t.Fatalf("successful scout run should not print codex stderr, got %q", output)
 	}
 	args, err := os.ReadFile(argsPath)
 	if err != nil {

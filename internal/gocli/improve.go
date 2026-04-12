@@ -816,9 +816,6 @@ func runScoutRole(repoPath string, repoSlug string, focus []string, codexArgs []
 		}
 		return nil, err
 	}
-	if stderr.Len() > 0 {
-		fmt.Fprint(os.Stdout, stderr.String())
-	}
 	return stdout.Bytes(), nil
 }
 
