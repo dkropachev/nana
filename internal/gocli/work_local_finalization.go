@@ -71,6 +71,7 @@ func buildLocalWorkSpecializedReviewPrompt(manifest localWorkManifest, role stri
 	lines := []string{
 		"Review this local implementation and return JSON only.",
 		"This is a mandatory final completion gate for local work. Report only actionable issues that should block declaring the run complete.",
+		"Use existing verification artifacts first. You may run targeted tests, diagnostics, or runtime commands when needed to ground a finding or approval. Do not rerun broad/full suites unless the diff or missing evidence specifically requires it. Do not edit files.",
 		fmt.Sprintf("Review role: %s", role),
 		`Schema: {"findings":[{"title":"...","severity":"low|medium|high|critical","path":"...","line":123,"summary":"...","detail":"...","fix":"...","rationale":"..."}]}`,
 		"If there are no actionable issues, return {\"findings\":[]}.",
@@ -79,6 +80,14 @@ func buildLocalWorkSpecializedReviewPrompt(manifest localWorkManifest, role stri
 		fmt.Sprintf("Changed files: %s", strings.Join(changedFiles, ", ")),
 		"Diff:",
 		diffOutput,
+	}
+	if role == "qa-tester" {
+		lines = append(lines,
+			"QA focus:",
+			"- Focus on user-facing runtime behavior and CLI/app smoke checks for changed executable or interactive surfaces.",
+			"- Run targeted CLI/app checks when behavior cannot be validated from existing verification artifacts and diff review alone.",
+			"- If the diff has no meaningful runtime or user-facing behavior, return {\"findings\":[]}.",
+		)
 	}
 	if promptSurface, err := readGithubPromptSurface(role); err == nil && strings.TrimSpace(promptSurface) != "" {
 		lines = append(lines, "", strings.TrimSpace(promptSurface))

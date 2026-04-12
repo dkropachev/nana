@@ -65,6 +65,7 @@ var localWorkFinalReviewGateRoles = []string{
 	"quality-reviewer",
 	"security-reviewer",
 	"performance-reviewer",
+	"qa-tester",
 }
 
 type localWorkStartOptions struct {

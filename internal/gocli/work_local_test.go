@@ -727,7 +727,7 @@ func TestLocalWorkFinalReviewGateBlocksCompletionUntilHardened(t *testing.T) {
 		`      printf '{"findings":[{"title":"Quality final gate found missing regression","severity":"medium","path":"README.md","line":1,"summary":"add regression","detail":"detail","fix":"fix","rationale":"why"}]}\n'`,
 		`    fi`,
 		`    ;;`,
-		`  *"Review role: security-reviewer"*|*"Review role: performance-reviewer"*)`,
+		`  *"Review role: security-reviewer"*|*"Review role: performance-reviewer"*|*"Review role: qa-tester"*)`,
 		`    printf '{"findings":[]}\n'`,
 		`    ;;`,
 		`  *"Review this local implementation and return JSON only."*)`,
@@ -761,17 +761,29 @@ func TestLocalWorkFinalReviewGateBlocksCompletionUntilHardened(t *testing.T) {
 	if summary.FinalGateFindings != 1 || len(summary.FinalGateRoles) != 1 || summary.FinalGateRoles[0] != "quality-reviewer" || summary.ReviewRoundsUsed != 1 {
 		t.Fatalf("expected final gate to drive one hardening round, got %#v", summary)
 	}
-	if manifest.FinalGateStatus != "passed" || summary.FinalGateStatus != "passed" || len(summary.FinalGateRoleResults) != 3 {
+	if manifest.FinalGateStatus != "passed" || summary.FinalGateStatus != "passed" || len(summary.FinalGateRoleResults) != 4 {
 		t.Fatalf("expected persisted final gate role summary, manifest=%#v summary=%#v", manifest, summary)
 	}
 	iterationDir := localWorkIterationDir(runDir, 1)
 	for _, name := range []string{
 		"final-gate-initial-quality-reviewer-findings.json",
+		"final-gate-initial-qa-tester-findings.json",
+		"final-gate-initial-qa-tester-prompt.md",
 		"final-gate-round-1-quality-reviewer-findings.json",
+		"final-gate-round-1-qa-tester-findings.json",
 		"hardening-round-1-prompt.md",
 	} {
 		if _, err := os.Stat(filepath.Join(iterationDir, name)); err != nil {
 			t.Fatalf("expected final gate artifact %s: %v", name, err)
+		}
+	}
+	qaPrompt, err := os.ReadFile(filepath.Join(iterationDir, "final-gate-initial-qa-tester-prompt.md"))
+	if err != nil {
+		t.Fatalf("read qa prompt: %v", err)
+	}
+	for _, needle := range []string{"Review role: qa-tester", "You may run targeted tests", "QA focus:", "user-facing runtime behavior"} {
+		if !strings.Contains(string(qaPrompt), needle) {
+			t.Fatalf("expected QA prompt to contain %q:\n%s", needle, qaPrompt)
 		}
 	}
 	statusOutput, err := captureStdout(t, func() error {
@@ -787,7 +799,7 @@ func TestLocalWorkFinalReviewGateBlocksCompletionUntilHardened(t *testing.T) {
 	if err := json.Unmarshal([]byte(statusOutput), &status); err != nil {
 		t.Fatalf("unmarshal status: %v\n%s", err, statusOutput)
 	}
-	if status.FinalGateStatus != "passed" || len(status.FinalGateRoleResults) != 3 {
+	if status.FinalGateStatus != "passed" || len(status.FinalGateRoleResults) != 4 {
 		t.Fatalf("expected final gate summary in status, got %+v", status)
 	}
 }
