@@ -1,6 +1,7 @@
 package gocli
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,6 +27,15 @@ func TestRepoScoutEnableWritesDefaultLocalPolicies(t *testing.T) {
 	}
 	if !strings.Contains(output, "Wrote scout policy") || !strings.Contains(output, "`nana start` will run") {
 		t.Fatalf("unexpected output: %q", output)
+	}
+	content, err := os.ReadFile(filepath.Join(repo, ".gitignore"))
+	if err != nil {
+		t.Fatalf("read .gitignore: %v", err)
+	}
+	for _, expected := range []string{".codex", ".codex/", ".codex-investigate", ".codex-investigate/"} {
+		if !strings.Contains(string(content), expected) {
+			t.Fatalf("expected %q in .gitignore:\n%s", expected, content)
+		}
 	}
 }
 

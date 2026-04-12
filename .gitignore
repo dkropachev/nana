@@ -12,7 +12,10 @@ dist/
 # Local agent/worktree artifacts (never commit)
 .claude/
 .claire/
+.codex
 .codex/
+.codex-investigate
+.codex-investigate/
 .agents/
 coverage/
 target/

@@ -189,6 +189,9 @@ func repoScoutEnable(cwd string, options repoScoutEnableOptions) error {
 	if err != nil {
 		return err
 	}
+	if _, err := ensureScoutRuntimeGitignore(repoPath); err != nil {
+		return err
+	}
 	written := []string{}
 	for _, role := range options.Roles {
 		path := repoScoutPolicyPath(repoPath, role, options.GithubPolicyPath)

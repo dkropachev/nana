@@ -470,11 +470,19 @@ func ensureScoutDefaultBranch(repoPath string) error {
 	if _, err := githubGitOutput(repoPath, "rev-parse", "--is-inside-work-tree"); err != nil {
 		return fmt.Errorf("scout auto mode requires a local git repo: %w", err)
 	}
+	gitignoreChanged, err := ensureScoutRuntimeGitignore(repoPath)
+	if err != nil {
+		return err
+	}
 	status, err := githubGitOutput(repoPath, "status", "--porcelain")
 	if err != nil {
 		return err
 	}
-	if dirty := scoutRelevantDirtyStatusLines(status); len(dirty) > 0 {
+	dirty := scoutRelevantDirtyStatusLines(status)
+	if gitignoreChanged {
+		dirty = withoutScoutGitignoreStatusLines(dirty)
+	}
+	if len(dirty) > 0 {
 		return fmt.Errorf("scout auto mode requires a clean worktree before switching to default branch")
 	}
 	defaultBranch, err := resolveScoutDefaultBranch(repoPath)
@@ -489,6 +497,51 @@ func ensureScoutDefaultBranch(repoPath string) error {
 		return nil
 	}
 	return githubRunGit(repoPath, "checkout", defaultBranch)
+}
+
+func ensureScoutRuntimeGitignore(repoPath string) (bool, error) {
+	path := filepath.Join(repoPath, ".gitignore")
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	content := string(existing)
+	lines := strings.Split(content, "\n")
+	missing := []string{}
+	for _, entry := range []string{".codex", ".codex/", ".codex-investigate", ".codex-investigate/"} {
+		if !gitignoreHasEntry(lines, entry) {
+			missing = append(missing, entry)
+		}
+	}
+	if len(missing) == 0 {
+		return false, nil
+	}
+	var builder strings.Builder
+	builder.WriteString(content)
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		builder.WriteString("\n")
+	}
+	if content != "" {
+		builder.WriteString("\n")
+	}
+	builder.WriteString("# Codex/NANA runtime state\n")
+	for _, entry := range missing {
+		builder.WriteString(entry)
+		builder.WriteString("\n")
+	}
+	if err := os.WriteFile(path, []byte(builder.String()), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func gitignoreHasEntry(lines []string, entry string) bool {
+	for _, line := range lines {
+		if strings.TrimSpace(line) == entry {
+			return true
+		}
+	}
+	return false
 }
 
 func scoutRelevantDirtyStatusLines(status string) []string {
@@ -509,6 +562,22 @@ func scoutRelevantDirtyStatusLines(status string) []string {
 		dirty = append(dirty, line)
 	}
 	return dirty
+}
+
+func withoutScoutGitignoreStatusLines(lines []string) []string {
+	filtered := []string{}
+	for _, line := range lines {
+		path := strings.TrimSpace(line)
+		if len(line) > 3 {
+			path = strings.TrimSpace(line[3:])
+		}
+		path = strings.Trim(path, `"`)
+		if path == ".gitignore" {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	return filtered
 }
 
 func resolveScoutDefaultBranch(repoPath string) (string, error) {
@@ -553,6 +622,9 @@ func commitScoutArtifactsToDefault(repoPath string) (bool, error) {
 
 func existingScoutArtifactRoots(repoPath string) []string {
 	paths := []string{}
+	if info, err := os.Stat(filepath.Join(repoPath, ".gitignore")); err == nil && !info.IsDir() {
+		paths = append(paths, ".gitignore")
+	}
 	for _, rel := range []string{".nana/improvements", ".nana/enhancements"} {
 		if info, err := os.Stat(filepath.Join(repoPath, rel)); err == nil && info.IsDir() {
 			paths = append(paths, rel)
