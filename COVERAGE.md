@@ -29,7 +29,7 @@
 
 ## Detailed Feature Mapping
 
-### Agent Definitions / Role Catalog (29/29 = 100%)
+### Agent Definitions / Role Catalog (31/31 = 100%)
 
 | OMC Agent | NANA Status | Mechanism |
 |-----------|-----------|-----------|
@@ -46,6 +46,8 @@
 | executor | DONE | prompts/executor.md |
 | explore | DONE | prompts/explore.md |
 | git-master | DONE | prompts/git-master.md |
+| enhancement-scout | DONE | prompts/enhancement-scout.md |
+| improvement-scout | DONE | prompts/improvement-scout.md |
 | information-architect | DONE | prompts/information-architect.md |
 | performance-reviewer | DONE | prompts/performance-reviewer.md |
 | planner | DONE | prompts/planner.md |

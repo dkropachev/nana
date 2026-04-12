@@ -142,6 +142,9 @@ Most users should think of NANA as **better task routing + better workflow + bet
 | `nana investigate "..."` | source-backed investigation with proof-linked JSON reports and validator enforcement |
 | `nana investigate onboard` | bootstrap the dedicated investigate Codex config |
 | `nana investigate doctor` | ask Codex to probe the MCPs configured in the investigate config |
+| `nana start` | run supported repo startup automation, including scout roles declared by repo policy |
+| `nana improve [owner/repo]` | run the improvement-scout role for UX/perf proposals and route them by repo policy |
+| `nana enhance [owner/repo]` | run the enhancement-scout role for forward-looking repo proposals with the same policy routing |
 | `nana work start --task "..."` | long-running local plan execution in a managed sandbox with iterative verify/review/hardening |
 | `nana work start --task "..." --grouping-policy path` | force deterministic path-based validation grouping |
 | `nana work logs --last` | inspect the current iteration logs and verification artifacts in one view |
@@ -264,6 +267,37 @@ Repo profile:
 - the profile records detected verification shape, commit-style heuristics, PR template presence, workflow files, CODEOWNERS presence, review-rule summary, and warnings for ambiguous signals
 - low-confidence repo-native signals fall back to generic commit/PR behavior rather than blocking execution
 - `nana work explain --last` shows the effective policy, repo profile, GitHub control-plane reviewers, review-request state, merge state, and next action for the active run
+
+## Improvement Proposals
+
+`nana improve` runs the `improvement-scout` role to inspect a repo and produce evidence-backed UX/performance improvement proposals. `nana enhance` runs the `enhancement-scout` role for grounded repo-forward enhancements. `nana start` auto-runs the scout roles declared by repo policy. Local repo runs always keep drafts under `.nana/improvements/<run-id>/` or `.nana/enhancements/<run-id>/`.
+
+For GitHub targets, repo policy controls whether proposals stay local or become issues:
+
+```json
+{
+  "version": 1,
+  "issue_destination": "target",
+  "labels": ["improvement", "ux", "perf"]
+}
+```
+
+```json
+{
+  "version": 1,
+  "issue_destination": "fork",
+  "fork_repo": "my-user/widget",
+  "labels": ["improvement"]
+}
+```
+
+Policy files:
+- `.nana/improvement-policy.json`
+- `.github/nana-improvement-policy.json`
+- `.nana/enhancement-policy.json`
+- `.github/nana-enhancement-policy.json`
+
+`.nana/...` takes precedence. Improvement labels are normalized to include `improvement` and `improvement-scout` while excluding `enhancement`. Enhancement labels include `enhancement` and `enhancement-scout`. Both scout roles emit at most 5 proposals per run and are capped at 5 open GitHub issues at a time.
 
 ## PR Review Rules
 

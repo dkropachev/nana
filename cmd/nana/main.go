@@ -35,6 +35,9 @@ Go-native commands:
   nana hooks
   nana doctor
   nana investigate
+  nana start
+  nana improve
+  nana enhance
   nana repo onboard
   nana work
 `
@@ -201,6 +204,21 @@ func main() {
 			exitWithError(err)
 		}
 		return
+	case "start":
+		if err := gocli.Start(mustGetwd(), args[1:]); err != nil {
+			exitWithError(err)
+		}
+		return
+	case "improve":
+		if err := gocli.Improve(mustGetwd(), args[1:]); err != nil {
+			exitWithError(err)
+		}
+		return
+	case "enhance":
+		if err := gocli.Enhance(mustGetwd(), args[1:]); err != nil {
+			exitWithError(err)
+		}
+		return
 	case "work":
 		if err := gocli.Work(mustGetwd(), args[1:]); err != nil {
 			exitWithError(err)
@@ -289,6 +307,15 @@ func handleNestedHelp(args []string) bool {
 		return true
 	case "repo":
 		mustHandleHelp(gocli.Repo(cwd, []string{"help"}))
+		return true
+	case "start":
+		mustHandleHelp(gocli.Start(cwd, []string{"help"}))
+		return true
+	case "improve":
+		mustHandleHelp(gocli.Improve(cwd, []string{"help"}))
+		return true
+	case "enhance":
+		mustHandleHelp(gocli.Enhance(cwd, []string{"help"}))
 		return true
 	case "work":
 		mustHandleHelp(gocli.Work(cwd, []string{"help"}))

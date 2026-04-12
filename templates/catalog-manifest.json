@@ -386,6 +386,16 @@
       "canonical": "designer"
     },
     {
+      "name": "improvement-scout",
+      "category": "product",
+      "status": "active"
+    },
+    {
+      "name": "enhancement-scout",
+      "category": "product",
+      "status": "active"
+    },
+    {
       "name": "information-architect",
       "category": "product",
       "status": "merged",
