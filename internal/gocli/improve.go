@@ -711,7 +711,7 @@ func runScoutRole(repoPath string, repoSlug string, focus []string, codexArgs []
 		fmt.Sprintf("- Treat proposals as %s.", scoutProposalNoun(role)),
 	}, "\n")
 	args := append([]string{"exec", "-C", repoPath}, codexArgs...)
-	args = append(args, task)
+	args = append(args, "--", task)
 	cmd := exec.Command("codex", args...)
 	cmd.Dir = repoPath
 	var stdout bytes.Buffer

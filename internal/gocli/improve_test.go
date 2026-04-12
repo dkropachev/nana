@@ -146,6 +146,36 @@ func TestScoutLocalFromFileAllowsPolicyCapUpToFifty(t *testing.T) {
 	}
 }
 
+func TestImproveRunsScoutPromptAfterOptionSeparator(t *testing.T) {
+	repo := t.TempDir()
+	fakeBin := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	argsPath := filepath.Join(t.TempDir(), "codex-args.txt")
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		`printf '%s\n' "$@" > "$FAKE_CODEX_ARGS_PATH"`,
+		`printf '{"version":1,"proposals":[]}\n'`,
+	}, "\n"))
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_ARGS_PATH", argsPath)
+
+	output, err := captureStdout(t, func() error {
+		return Improve(repo, nil)
+	})
+	if err != nil {
+		t.Fatalf("Improve: %v\n%s", err, output)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read fake codex args: %v", err)
+	}
+	if !strings.Contains(string(args), "\n--\n---\n") {
+		t.Fatalf("expected option separator before frontmatter prompt, got:\n%s", args)
+	}
+}
+
 func TestImproveLocalFromFileWritesArtifactsAndKeepsLocal(t *testing.T) {
 	repo := t.TempDir()
 	inputPath := filepath.Join(repo, "proposals.json")

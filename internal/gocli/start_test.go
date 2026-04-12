@@ -1,6 +1,7 @@
 package gocli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -193,6 +194,37 @@ func TestStartBareLocalScoutPoliciesLoopsForeverUntilStopped(t *testing.T) {
 	}
 	if !strings.Contains(output, "Cycle 1/forever") || !strings.Contains(output, "Cycle 2/forever") {
 		t.Fatalf("expected forever cycle output, got %q", output)
+	}
+}
+
+func TestStartForeverContinuesAfterCycleError(t *testing.T) {
+	oldSleep := startLoopSleep
+	oldContinue := startLoopContinue
+	runCount := 0
+	startLoopSleep = func(duration time.Duration) {}
+	startLoopContinue = func() bool { return runCount < 2 }
+	defer func() {
+		startLoopSleep = oldSleep
+		startLoopContinue = oldContinue
+	}()
+
+	output, err := captureStdout(t, func() error {
+		return runStartLoop(startRuntimeOptions{Forever: true, Interval: time.Second}, func() error {
+			runCount++
+			if runCount == 1 {
+				return fmt.Errorf("temporary failure")
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		t.Fatalf("runStartLoop: %v", err)
+	}
+	if runCount != 2 {
+		t.Fatalf("expected retry after cycle error, got %d run(s)", runCount)
+	}
+	if !strings.Contains(output, "Cycle 1 failed: temporary failure") || !strings.Contains(output, "Cycle 2/forever") {
+		t.Fatalf("unexpected output: %q", output)
 	}
 }
 

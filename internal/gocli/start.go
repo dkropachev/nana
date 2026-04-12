@@ -281,7 +281,10 @@ func runStartLoop(runtime startRuntimeOptions, runOnce func() error) error {
 			fmt.Fprintf(os.Stdout, "[start] Cycle %d/%d.\n", cycle, runtime.Cycles)
 		}
 		if err := runOnce(); err != nil {
-			return err
+			if !runtime.Forever {
+				return err
+			}
+			fmt.Fprintf(os.Stdout, "[start] Cycle %d failed: %v\n", cycle, err)
 		}
 		if !runtime.Forever && cycle >= runtime.Cycles {
 			return nil
