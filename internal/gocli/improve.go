@@ -474,7 +474,7 @@ func ensureScoutDefaultBranch(repoPath string) error {
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(status) != "" {
+	if dirty := scoutRelevantDirtyStatusLines(status); len(dirty) > 0 {
 		return fmt.Errorf("scout auto mode requires a clean worktree before switching to default branch")
 	}
 	defaultBranch, err := resolveScoutDefaultBranch(repoPath)
@@ -489,6 +489,26 @@ func ensureScoutDefaultBranch(repoPath string) error {
 		return nil
 	}
 	return githubRunGit(repoPath, "checkout", defaultBranch)
+}
+
+func scoutRelevantDirtyStatusLines(status string) []string {
+	dirty := []string{}
+	for _, line := range strings.Split(status, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		path := strings.TrimSpace(line)
+		if len(line) > 3 {
+			path = strings.TrimSpace(line[3:])
+		}
+		path = strings.Trim(path, `"`)
+		if path == ".codex" || strings.HasPrefix(path, ".codex/") || path == ".codex-investigate" || strings.HasPrefix(path, ".codex-investigate/") {
+			continue
+		}
+		dirty = append(dirty, line)
+	}
+	return dirty
 }
 
 func resolveScoutDefaultBranch(repoPath string) (string, error) {

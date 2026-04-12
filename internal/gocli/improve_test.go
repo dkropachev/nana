@@ -439,6 +439,37 @@ func TestStartAutoModeUsesOriginHeadDefaultBranch(t *testing.T) {
 	}
 }
 
+func TestStartAutoModeIgnoresCodexRuntimeDirectory(t *testing.T) {
+	repo := t.TempDir()
+	runScoutTestGit(t, repo, "init", "-b", "main")
+	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir .nana: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".nana", "improvement-policy.json"), []byte(`{"version":1,"mode":"auto"}`), 0o644); err != nil {
+		t.Fatalf("write improvement policy: %v", err)
+	}
+	runScoutTestGit(t, repo, "add", ".")
+	runScoutTestGit(t, repo, "commit", "-m", "init")
+	if err := os.MkdirAll(filepath.Join(repo, ".codex"), 0o755); err != nil {
+		t.Fatalf("mkdir .codex: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".codex", "config.toml"), []byte("model = \"gpt-5.4\"\n"), 0o644); err != nil {
+		t.Fatalf("write .codex config: %v", err)
+	}
+	inputPath := filepath.Join(t.TempDir(), "proposals.json")
+	if err := os.WriteFile(inputPath, []byte(scoutProposalJSON(1, "docs")), 0o644); err != nil {
+		t.Fatalf("write proposals: %v", err)
+	}
+	if _, err := captureStdout(t, func() error {
+		return Start(repo, []string{"--from-file", inputPath})
+	}); err != nil {
+		t.Fatalf("Start(): %v", err)
+	}
+	if status := scoutTestGitOutput(t, repo, "status", "--porcelain"); !strings.Contains(status, "?? .codex/") {
+		t.Fatalf("expected .codex to remain untracked, got %q", status)
+	}
+}
+
 func TestStartGithubRepoDestinationPublishesBothScoutsToTargetRepo(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	repo := createScoutPolicyGitRepo(t, "repo", "")
