@@ -25,12 +25,12 @@ Behavior:
   - runs the improvement-scout role against the selected repo
   - local repos always keep proposals under .nana/improvements/
   - GitHub repos read .nana/improvement-policy.json or .github/nana-improvement-policy.json from the repo checkout
-  - GitHub policy issue_destination controls publication: local, target, or fork
+  - GitHub policy issue_destination controls publication: local, repo/target, or fork
   - emits at most 5 proposals per run
   - created issues are labeled with improvement-scout, never enhancement, and count toward that role's 5-open-issue cap
 
 Policy example:
-  {"version":1,"issue_destination":"target","labels":["improvement","ux","perf"]}
+  {"version":1,"issue_destination":"repo","labels":["improvement","ux","perf"]}
   {"version":1,"issue_destination":"fork","fork_repo":"my-user/widget","labels":["improvement"]}
 `
 
@@ -44,12 +44,12 @@ Behavior:
   - runs the enhancement-scout role against the selected repo
   - local repos always keep proposals under .nana/enhancements/
   - GitHub repos read .nana/enhancement-policy.json or .github/nana-enhancement-policy.json from the repo checkout
-  - GitHub policy issue_destination controls publication: local, target, or fork
+  - GitHub policy issue_destination controls publication: local, repo/target, or fork
   - emits at most 5 proposals per run
   - created issues are labeled with enhancement-scout and count toward that role's 5-open-issue cap
 
 Policy example:
-  {"version":1,"issue_destination":"target","labels":["enhancement"]}
+  {"version":1,"issue_destination":"repo","labels":["enhancement"]}
   {"version":1,"issue_destination":"fork","fork_repo":"my-user/widget","labels":["enhancement"]}
 `
 
@@ -65,6 +65,8 @@ Behavior:
   - runs enhancement-scout when .nana/enhancement-policy.json or .github/nana-enhancement-policy.json exists
   - local repos keep proposals under .nana/improvements/ or .nana/enhancements/
   - GitHub targets follow their scout policy issue_destination
+  - local repos with mode "auto" in every supported scout policy commit generated artifacts to the default branch
+  - auto mode requires a clean worktree and an existing local default branch
   - exits cleanly when the repo does not declare supported scout policies
 `
 
@@ -90,6 +92,7 @@ type ImproveOptions struct {
 
 type improvementPolicy struct {
 	Version          int      `json:"version"`
+	Mode             string   `json:"mode,omitempty"`
 	IssueDestination string   `json:"issue_destination,omitempty"`
 	ForkRepo         string   `json:"fork_repo,omitempty"`
 	Labels           []string `json:"labels,omitempty"`
@@ -376,10 +379,28 @@ func runScoutStart(cwd string, options ImproveOptions) error {
 		fmt.Fprintf(os.Stdout, "[start] No supported scout policies found in %s; nothing to run.\n", repoPath)
 		return nil
 	}
+	_, githubTarget := normalizeImproveGithubRepo(options.Target)
+	autoLocal := !githubTarget && scoutStartAutoMode(repoPath, roles)
+	if autoLocal {
+		if err := ensureScoutDefaultBranch(repoPath); err != nil {
+			return err
+		}
+	}
 	for _, role := range roles {
 		fmt.Fprintf(os.Stdout, "[start] %s supported; running.\n", role)
 		if err := runScout(cwd, options, role); err != nil {
 			return err
+		}
+	}
+	if autoLocal {
+		committed, err := commitScoutArtifactsToDefault(repoPath)
+		if err != nil {
+			return err
+		}
+		if committed {
+			fmt.Fprintln(os.Stdout, "[start] Committed scout artifacts to default branch.")
+		} else {
+			fmt.Fprintln(os.Stdout, "[start] No scout artifact changes to commit on default branch.")
 		}
 	}
 	return nil
@@ -429,6 +450,79 @@ func scoutPolicyExists(repoPath string, role string) bool {
 		}
 	}
 	return false
+}
+
+func scoutStartAutoMode(repoPath string, roles []string) bool {
+	if len(roles) == 0 {
+		return false
+	}
+	for _, role := range roles {
+		policy := readScoutPolicy(repoPath, role)
+		if strings.ToLower(strings.TrimSpace(policy.Mode)) != "auto" {
+			return false
+		}
+	}
+	return true
+}
+
+func ensureScoutDefaultBranch(repoPath string) error {
+	if _, err := githubGitOutput(repoPath, "rev-parse", "--is-inside-work-tree"); err != nil {
+		return fmt.Errorf("scout auto mode requires a local git repo: %w", err)
+	}
+	status, err := githubGitOutput(repoPath, "status", "--porcelain")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(status) != "" {
+		return fmt.Errorf("scout auto mode requires a clean worktree before switching to default branch")
+	}
+	if err := githubRunGit(repoPath, "show-ref", "--verify", "--quiet", "refs/heads/default"); err != nil {
+		return fmt.Errorf("scout auto mode requires a local default branch")
+	}
+	current, err := githubGitOutput(repoPath, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(current) == "default" {
+		return nil
+	}
+	return githubRunGit(repoPath, "checkout", "default")
+}
+
+func commitScoutArtifactsToDefault(repoPath string) (bool, error) {
+	paths := existingScoutArtifactRoots(repoPath)
+	if len(paths) == 0 {
+		return false, nil
+	}
+	addArgs := append([]string{"add", "-f", "--"}, paths...)
+	if err := githubRunGit(repoPath, addArgs...); err != nil {
+		return false, err
+	}
+	diffArgs := append([]string{"diff", "--cached", "--quiet", "--"}, paths...)
+	if scoutGitQuiet(repoPath, diffArgs...) {
+		return false, nil
+	}
+	if err := githubRunGit(repoPath, "commit", "-m", "Record scout startup artifacts"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func existingScoutArtifactRoots(repoPath string) []string {
+	paths := []string{}
+	for _, rel := range []string{".nana/improvements", ".nana/enhancements"} {
+		if info, err := os.Stat(filepath.Join(repoPath, rel)); err == nil && info.IsDir() {
+			paths = append(paths, rel)
+		}
+	}
+	return paths
+}
+
+func scoutGitQuiet(repoPath string, args ...string) bool {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = repoPath
+	cmd.Env = githubGitEnv()
+	return cmd.Run() == nil
 }
 
 func normalizeImproveGithubRepo(target string) (string, bool) {
@@ -523,6 +617,9 @@ func mergeImprovementPolicy(target *improvementPolicy, source improvementPolicy)
 	if source.Version != 0 {
 		target.Version = source.Version
 	}
+	if strings.TrimSpace(source.Mode) != "" {
+		target.Mode = source.Mode
+	}
 	if strings.TrimSpace(source.IssueDestination) != "" {
 		target.IssueDestination = source.IssueDestination
 	}
@@ -539,7 +636,7 @@ func mergeImprovementPolicy(target *improvementPolicy, source improvementPolicy)
 
 func normalizeImprovementDestination(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case improvementDestinationTarget:
+	case improvementDestinationTarget, "repo":
 		return improvementDestinationTarget
 	case improvementDestinationFork:
 		return improvementDestinationFork

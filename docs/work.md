@@ -99,14 +99,15 @@ GitHub target behavior:
 - `.github/nana-improvement-policy.json` and `.nana/improvement-policy.json` are read for `improvement-scout`
 - `.github/nana-enhancement-policy.json` and `.nana/enhancement-policy.json` are read for `enhancement-scout`
 - `.nana/...` takes precedence over `.github/...`
-- `issue_destination` controls publication: `local`, `target`, or `fork`
+- `issue_destination` controls publication: `local`, `repo`/`target`, or `fork`
 - scout issue labels include the role label
 - each scout role emits at most 5 proposals per run and is capped at 5 open GitHub issues at a time
+- local `mode: "auto"` in every supported scout policy makes `nana start` switch to the `default` branch and commit generated scout artifacts there; this requires a clean worktree and an existing local `default` branch
 
 Policy examples:
 
 ```json
-{"version":1,"issue_destination":"target","labels":["improvement","ux","perf"]}
+{"version":1,"mode":"auto","issue_destination":"repo","labels":["improvement","ux","perf"]}
 ```
 
 ```json

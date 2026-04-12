@@ -277,7 +277,8 @@ For GitHub targets, repo policy controls whether proposals stay local or become 
 ```json
 {
   "version": 1,
-  "issue_destination": "target",
+  "mode": "auto",
+  "issue_destination": "repo",
   "labels": ["improvement", "ux", "perf"]
 }
 ```
@@ -298,6 +299,8 @@ Policy files:
 - `.github/nana-enhancement-policy.json`
 
 `.nana/...` takes precedence. Improvement labels are normalized to include `improvement` and `improvement-scout` while excluding `enhancement`. Enhancement labels include `enhancement` and `enhancement-scout`. Both scout roles emit at most 5 proposals per run and are capped at 5 open GitHub issues at a time.
+
+For GitHub targets, `issue_destination: "repo"` publishes to the target repo and `issue_destination: "fork"` publishes to `fork_repo`. For local repos, `nana start` treats `mode: "auto"` in every supported scout policy as permission to switch to the local `default` branch and commit generated scout artifacts there. Auto mode requires a clean worktree and an existing local `default` branch.
 
 ## PR Review Rules
 

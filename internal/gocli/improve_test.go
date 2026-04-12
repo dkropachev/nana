@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -256,6 +257,143 @@ func TestStartNoSupportedPoliciesIsNoop(t *testing.T) {
 	}
 }
 
+func TestStartAutoModeCommitsBothScoutsToDefaultBranch(t *testing.T) {
+	repo := t.TempDir()
+	runScoutTestGit(t, repo, "init", "-b", "default")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("# widget\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir .nana: %v", err)
+	}
+	autoPolicy := []byte(`{"version":1,"mode":"auto"}`)
+	if err := os.WriteFile(filepath.Join(repo, ".nana", "improvement-policy.json"), autoPolicy, 0o644); err != nil {
+		t.Fatalf("write improvement policy: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".nana", "enhancement-policy.json"), autoPolicy, 0o644); err != nil {
+		t.Fatalf("write enhancement policy: %v", err)
+	}
+	runScoutTestGit(t, repo, "add", ".")
+	runScoutTestGit(t, repo, "commit", "-m", "init")
+	runScoutTestGit(t, repo, "checkout", "-b", "feature")
+
+	inputPath := filepath.Join(t.TempDir(), "proposals.json")
+	if err := os.WriteFile(inputPath, []byte(scoutProposalJSON(2, "docs")), 0o644); err != nil {
+		t.Fatalf("write proposals: %v", err)
+	}
+	output, err := captureStdout(t, func() error {
+		return Start(repo, []string{"--from-file", inputPath})
+	})
+	if err != nil {
+		t.Fatalf("Start(): %v", err)
+	}
+	if !strings.Contains(output, "Committed scout artifacts to default branch") {
+		t.Fatalf("missing auto commit output: %q", output)
+	}
+	if branch := strings.TrimSpace(scoutTestGitOutput(t, repo, "rev-parse", "--abbrev-ref", "HEAD")); branch != "default" {
+		t.Fatalf("expected checkout on default branch, got %q", branch)
+	}
+	if subject := strings.TrimSpace(scoutTestGitOutput(t, repo, "log", "-1", "--pretty=%s")); subject != "Record scout startup artifacts" {
+		t.Fatalf("expected scout artifact commit, got %q", subject)
+	}
+	tree := scoutTestGitOutput(t, repo, "ls-tree", "-r", "--name-only", "default")
+	for _, expected := range []string{".nana/improvements/", ".nana/enhancements/"} {
+		if !strings.Contains(tree, expected) {
+			t.Fatalf("expected %s in default branch tree:\n%s", expected, tree)
+		}
+	}
+	if status := strings.TrimSpace(scoutTestGitOutput(t, repo, "status", "--porcelain")); status != "" {
+		t.Fatalf("expected clean repo after auto commit, got %q", status)
+	}
+}
+
+func TestStartAutoModeCommitsSingleScoutToDefaultBranch(t *testing.T) {
+	repo := t.TempDir()
+	runScoutTestGit(t, repo, "init", "-b", "default")
+	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir .nana: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("# widget\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".nana", "improvement-policy.json"), []byte(`{"version":1,"mode":"auto"}`), 0o644); err != nil {
+		t.Fatalf("write improvement policy: %v", err)
+	}
+	runScoutTestGit(t, repo, "add", ".")
+	runScoutTestGit(t, repo, "commit", "-m", "init")
+	runScoutTestGit(t, repo, "checkout", "-b", "feature")
+	inputPath := filepath.Join(t.TempDir(), "proposals.json")
+	if err := os.WriteFile(inputPath, []byte(scoutProposalJSON(1, "docs")), 0o644); err != nil {
+		t.Fatalf("write proposals: %v", err)
+	}
+	if _, err := captureStdout(t, func() error {
+		return Start(repo, []string{"--from-file", inputPath})
+	}); err != nil {
+		t.Fatalf("Start(): %v", err)
+	}
+	tree := scoutTestGitOutput(t, repo, "ls-tree", "-r", "--name-only", "default")
+	if !strings.Contains(tree, ".nana/improvements/") {
+		t.Fatalf("expected improvement artifacts on default branch:\n%s", tree)
+	}
+	if strings.Contains(tree, ".nana/enhancements/") {
+		t.Fatalf("did not expect enhancement artifacts:\n%s", tree)
+	}
+}
+
+func TestStartGithubRepoDestinationPublishesBothScoutsToTargetRepo(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	repo := createScoutPolicyGitRepo(t, "repo", "")
+	inputPath := filepath.Join(t.TempDir(), "proposals.json")
+	if err := os.WriteFile(inputPath, []byte(scoutProposalJSON(2, "docs")), 0o644); err != nil {
+		t.Fatalf("write proposals: %v", err)
+	}
+	posts := []string{}
+	server := scoutGithubServer(t, repo, &posts)
+	defer server.Close()
+	t.Setenv("GITHUB_API_URL", server.URL)
+	t.Setenv("GH_TOKEN", "token")
+
+	output, err := captureStdout(t, func() error {
+		return Start(".", []string{"acme/widget", "--from-file", inputPath})
+	})
+	if err != nil {
+		t.Fatalf("Start(): %v", err)
+	}
+	if !strings.Contains(output, "improvement-scout supported") || !strings.Contains(output, "enhancement-scout supported") {
+		t.Fatalf("expected both scouts to run, got %q", output)
+	}
+	if got := strings.Join(posts, ","); got != "/repos/acme/widget/issues,/repos/acme/widget/issues,/repos/acme/widget/issues,/repos/acme/widget/issues" {
+		t.Fatalf("expected target repo issue posts, got %q", got)
+	}
+}
+
+func TestStartGithubForkDestinationPublishesBothScoutsToForkRepo(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	repo := createScoutPolicyGitRepo(t, "fork", "me/widget")
+	inputPath := filepath.Join(t.TempDir(), "proposals.json")
+	if err := os.WriteFile(inputPath, []byte(scoutProposalJSON(2, "docs")), 0o644); err != nil {
+		t.Fatalf("write proposals: %v", err)
+	}
+	posts := []string{}
+	server := scoutGithubServer(t, repo, &posts)
+	defer server.Close()
+	t.Setenv("GITHUB_API_URL", server.URL)
+	t.Setenv("GH_TOKEN", "token")
+
+	output, err := captureStdout(t, func() error {
+		return Start(".", []string{"acme/widget", "--from-file", inputPath})
+	})
+	if err != nil {
+		t.Fatalf("Start(): %v", err)
+	}
+	if !strings.Contains(output, "improvement-scout supported") || !strings.Contains(output, "enhancement-scout supported") {
+		t.Fatalf("expected both scouts to run, got %q", output)
+	}
+	if got := strings.Join(posts, ","); got != "/repos/me/widget/issues,/repos/me/widget/issues,/repos/me/widget/issues,/repos/me/widget/issues" {
+		t.Fatalf("expected fork repo issue posts, got %q", got)
+	}
+}
+
 func TestPublishImprovementIssuesUsesForkPolicyAndImprovementLabels(t *testing.T) {
 	t.Setenv("GH_TOKEN", "token")
 	var capturedPath string
@@ -401,4 +539,84 @@ func openIssuesJSON(count int) string {
 	}
 	content, _ := json.Marshal(issues)
 	return string(content)
+}
+
+func createScoutPolicyGitRepo(t *testing.T, destination string, forkRepo string) string {
+	t.Helper()
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir .nana: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("# widget\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	forkLine := ""
+	if forkRepo != "" {
+		forkLine = fmt.Sprintf(`,"fork_repo":%q`, forkRepo)
+	}
+	policy := []byte(fmt.Sprintf(`{"version":1,"issue_destination":%q%s}`, destination, forkLine))
+	if err := os.WriteFile(filepath.Join(repo, ".nana", "improvement-policy.json"), policy, 0o644); err != nil {
+		t.Fatalf("write improvement policy: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".nana", "enhancement-policy.json"), policy, 0o644); err != nil {
+		t.Fatalf("write enhancement policy: %v", err)
+	}
+	runScoutTestGit(t, repo, "init", "-b", "main")
+	runScoutTestGit(t, repo, "add", ".")
+	runScoutTestGit(t, repo, "commit", "-m", "init")
+	return repo
+}
+
+func scoutGithubServer(t *testing.T, repo string, posts *[]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget":
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"name":"widget","full_name":"acme/widget","clone_url":%q,"default_branch":"main","html_url":"https://github.com/acme/widget"}`, repo)))
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/issues"):
+			if !strings.Contains(r.URL.RawQuery, "labels=improvement-scout") && !strings.Contains(r.URL.RawQuery, "labels=enhancement-scout") {
+				t.Fatalf("unexpected cap query: %s?%s", r.URL.Path, r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/issues"):
+			*posts = append(*posts, r.URL.Path)
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"html_url":"https://github.example%s/1"}`, r.URL.Path)))
+		default:
+			t.Fatalf("unexpected route: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+	}))
+}
+
+func runScoutTestGit(t *testing.T, repo string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Test",
+		"GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=Test",
+		"GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, output)
+	}
+}
+
+func scoutTestGitOutput(t *testing.T, repo string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Test",
+		"GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=Test",
+		"GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, output)
+	}
+	return string(output)
 }
