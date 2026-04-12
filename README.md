@@ -271,7 +271,7 @@ Repo profile:
 
 ## Improvement Proposals
 
-`nana improve` runs the `improvement-scout` role to inspect a repo and produce evidence-backed UX/performance improvement proposals. `nana enhance` runs the `enhancement-scout` role for grounded repo-forward enhancements. `nana start` also runs scout startup automation when scout-specific flags are provided or local scout policies are present. Local repo runs always keep drafts under `.nana/improvements/<run-id>/` or `.nana/enhancements/<run-id>/`.
+`nana improve` runs the `improvement-scout` role to inspect a repo and produce evidence-backed UX/performance improvement proposals. `nana enhance` runs the `enhancement-scout` role for grounded repo-forward enhancements. `nana start` also runs scout startup automation when scout-specific flags are provided or local scout policies are present. Bare `nana start` loops indefinitely until interrupted; use `--once` or `--cycles <n>` for bounded runs. Local repo runs always keep drafts under `.nana/improvements/<run-id>/` or `.nana/enhancements/<run-id>/`.
 
 For GitHub targets, repo policy controls whether proposals stay local or become issues:
 
@@ -319,7 +319,7 @@ Use `nana repo defaults set --repo-mode local|fork|repo --issue-pick manual|labe
 nana start
 ```
 
-Automatically onboarded repos use system defaults, meaning `repo-mode=local`, `issue-pick=manual`, and `pr-forward=approve` unless later configured. `nana start` scans all onboarded GitHub repos under `~/.nana/work/repos`, skips repos where `repo-mode` is `local` or `issue-pick` is `manual`, mirrors eligible source issues into your fork, prioritizes queued work by `P1` through `P5` labels plus inferred complexity, and starts at most three workers while respecting a ten-open-PR cap for fork publishing. When the managed source checkout declares scout policies, `nana start` runs those scouts after the first pickup pass and then refreshes issue pickup so scout-created proposals can be implemented in the same cycle. Use `--cycles <n>` to repeat the full onboarded-repo automation cycle more than once.
+Automatically onboarded repos use system defaults, meaning `repo-mode=local`, `issue-pick=manual`, and `pr-forward=approve` unless later configured. `nana start` scans all onboarded GitHub repos under `~/.nana/work/repos`, skips repos where `repo-mode` is `local` or `issue-pick` is `manual`, mirrors eligible source issues into your fork, prioritizes queued work by `P1` through `P5` labels plus inferred complexity, and starts at most three workers while respecting a ten-open-PR cap for fork publishing. When the managed source checkout declares scout policies, `nana start` runs those scouts after the first pickup pass and then refreshes issue pickup so scout-created proposals can be implemented in the same cycle. Bare `nana start` repeats forever at a one-minute interval; use `--once` for one pass, `--cycles <n>` for a bounded run, or `--interval <duration>` to change the sleep between endless cycles.
 
 Mode behavior:
 - `repo-mode local`: keep work on a local branch and do not open a PR

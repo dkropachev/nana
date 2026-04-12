@@ -6,21 +6,24 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const StartHelp = `nana start - Run automation for onboarded repositories
 
 Usage:
-  nana start [--repo <owner/repo>] [--parallel <n>] [--max-open-prs <n>] [--cycles <n>] [-- codex-args...]
+  nana start [--repo <owner/repo>] [--parallel <n>] [--max-open-prs <n>] [--once|--cycles <n>|--forever] [--interval <duration>] [-- codex-args...]
   nana start help
 
 Behavior:
+  - with no options, loops indefinitely until interrupted
   - scans onboarded GitHub repos under ~/.nana/work/repos
   - skips repos where repo-mode is local or issue-pick is manual
   - mirrors issues from the source repo into the fork and starts eligible workers
   - runs supported scouts from the managed source checkout when scout policies exist
   - mirrors again after scouts finish so scout-created proposals can be picked up for implementation
   - forwards PRs when pr-forward is auto: fork creates upstream PRs; repo attempts merge
+  - use --once or --cycles <n> for bounded runs
 `
 
 type startOptions struct {
@@ -28,45 +31,64 @@ type startOptions struct {
 	Parallel  int
 	MaxOpenPR int
 	Cycles    int
+	Forever   bool
+	Interval  time.Duration
 	CodexArgs []string
+}
+
+type startRuntimeOptions struct {
+	Cycles   int
+	Forever  bool
+	Interval time.Duration
 }
 
 var startRunStartWork = startWorkStart
 var startPromoteStartWork = startWorkPromote
 var startRunScoutStart = runScoutStart
+var startLoopSleep = time.Sleep
+var startLoopContinue = func() bool { return true }
 
 func Start(cwd string, args []string) error {
 	if len(args) > 0 && isHelpToken(args[0]) {
 		fmt.Fprint(os.Stdout, StartHelp)
 		return nil
 	}
-	if startShouldRunScouts(cwd, args) {
-		return StartScouts(cwd, args)
-	}
-	options, err := parseStartArgs(args)
+	cleanArgs, runtime, err := parseStartRuntimeArgs(args)
 	if err != nil {
 		return err
 	}
-	repos, err := resolveStartRepos(options.RepoSlug)
+	if len(args) == 0 {
+		runtime.Forever = true
+	}
+	if startShouldRunScouts(cwd, cleanArgs) {
+		return runStartLoop(runtime, func() error {
+			return StartScouts(cwd, cleanArgs)
+		})
+	}
+	options, err := parseStartArgs(cleanArgs)
 	if err != nil {
 		return err
 	}
-	if len(repos) == 0 {
-		fmt.Fprintln(os.Stdout, "[start] No onboarded repos with repo-mode fork/repo and issue-pick automation enabled.")
-		return nil
-	}
-	fmt.Fprintf(os.Stdout, "[start] Repos selected: %s\n", strings.Join(repos, ", "))
-	for cycle := 1; cycle <= options.Cycles; cycle++ {
-		if options.Cycles > 1 {
-			fmt.Fprintf(os.Stdout, "[start] Cycle %d/%d.\n", cycle, options.Cycles)
+	options.Cycles = runtime.Cycles
+	options.Forever = runtime.Forever
+	options.Interval = runtime.Interval
+	return runStartLoop(runtime, func() error {
+		repos, err := resolveStartRepos(options.RepoSlug)
+		if err != nil {
+			return err
 		}
+		if len(repos) == 0 {
+			fmt.Fprintln(os.Stdout, "[start] No onboarded repos with repo-mode fork/repo and issue-pick automation enabled.")
+			return nil
+		}
+		fmt.Fprintf(os.Stdout, "[start] Repos selected: %s\n", strings.Join(repos, ", "))
 		for _, repoSlug := range repos {
 			if err := runStartRepoCycle(cwd, repoSlug, options); err != nil {
 				return err
 			}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 func runStartRepoCycle(cwd string, repoSlug string, options startOptions) error {
@@ -155,6 +177,122 @@ func startShouldRunScouts(cwd string, args []string) bool {
 		}
 	}
 	return false
+}
+
+func parseStartRuntimeArgs(args []string) ([]string, startRuntimeOptions, error) {
+	runtime := startRuntimeOptions{Cycles: 1, Interval: time.Minute}
+	clean := []string{}
+	foreverSet := false
+	finiteSet := false
+	intervalSet := false
+	for index := 0; index < len(args); index++ {
+		token := args[index]
+		if token == "--" {
+			clean = append(clean, args[index:]...)
+			break
+		}
+		switch {
+		case token == "--forever" || token == "--loop":
+			runtime.Forever = true
+			foreverSet = true
+		case token == "--once":
+			runtime.Cycles = 1
+			finiteSet = true
+		case token == "--cycles":
+			value, err := requireStartFlagValue(args, index, token)
+			if err != nil {
+				return nil, startRuntimeOptions{}, err
+			}
+			parsed, err := parsePositiveInt(value, token)
+			if err != nil {
+				return nil, startRuntimeOptions{}, err
+			}
+			runtime.Cycles = parsed
+			finiteSet = true
+			index++
+		case strings.HasPrefix(token, "--cycles="):
+			parsed, err := parsePositiveInt(strings.TrimPrefix(token, "--cycles="), "--cycles")
+			if err != nil {
+				return nil, startRuntimeOptions{}, err
+			}
+			runtime.Cycles = parsed
+			finiteSet = true
+		case token == "--interval":
+			value, err := requireStartFlagValue(args, index, token)
+			if err != nil {
+				return nil, startRuntimeOptions{}, err
+			}
+			parsed, err := parseStartInterval(value)
+			if err != nil {
+				return nil, startRuntimeOptions{}, err
+			}
+			runtime.Interval = parsed
+			intervalSet = true
+			index++
+		case strings.HasPrefix(token, "--interval="):
+			parsed, err := parseStartInterval(strings.TrimPrefix(token, "--interval="))
+			if err != nil {
+				return nil, startRuntimeOptions{}, err
+			}
+			runtime.Interval = parsed
+			intervalSet = true
+		default:
+			clean = append(clean, token)
+		}
+	}
+	if foreverSet && finiteSet {
+		return nil, startRuntimeOptions{}, fmt.Errorf("Use either --forever/--loop or --once/--cycles, not both.")
+	}
+	if intervalSet && !finiteSet {
+		runtime.Forever = true
+	}
+	return clean, runtime, nil
+}
+
+func parseStartInterval(value string) (time.Duration, error) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return 0, fmt.Errorf("Invalid --interval value %q. Expected a positive duration such as 30s or 2m.", value)
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil {
+		if seconds <= 0 {
+			return 0, fmt.Errorf("Invalid --interval value %q. Expected a positive duration.", value)
+		}
+		return time.Duration(seconds) * time.Second, nil
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("Invalid --interval value %q. Expected a positive duration such as 30s or 2m.", value)
+	}
+	return parsed, nil
+}
+
+func runStartLoop(runtime startRuntimeOptions, runOnce func() error) error {
+	if runtime.Cycles <= 0 {
+		runtime.Cycles = 1
+	}
+	if runtime.Interval <= 0 {
+		runtime.Interval = time.Minute
+	}
+	for cycle := 1; ; cycle++ {
+		if runtime.Forever {
+			fmt.Fprintf(os.Stdout, "[start] Cycle %d/forever.\n", cycle)
+		} else if runtime.Cycles > 1 {
+			fmt.Fprintf(os.Stdout, "[start] Cycle %d/%d.\n", cycle, runtime.Cycles)
+		}
+		if err := runOnce(); err != nil {
+			return err
+		}
+		if !runtime.Forever && cycle >= runtime.Cycles {
+			return nil
+		}
+		if runtime.Forever && !startLoopContinue() {
+			return nil
+		}
+		if runtime.Forever {
+			startLoopSleep(runtime.Interval)
+		}
+	}
 }
 
 func startRepoValueLooksLikePath(value string) bool {

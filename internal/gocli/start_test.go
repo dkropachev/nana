@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStartRunsEnabledOnboardedReposAndSkipsManual(t *testing.T) {
@@ -151,6 +152,47 @@ func TestStartCyclesRepeatRepoAutomationCycle(t *testing.T) {
 	}
 	if !strings.Contains(output, "Cycle 1/2") || !strings.Contains(output, "Cycle 2/2") {
 		t.Fatalf("expected cycle progress output, got %q", output)
+	}
+}
+
+func TestStartBareLocalScoutPoliciesLoopsForeverUntilStopped(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir policy dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".nana", "improvement-policy.json"), []byte(`{"version":1}`), 0o644); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	oldScout := startRunScoutStart
+	oldSleep := startLoopSleep
+	oldContinue := startLoopContinue
+	runCount := 0
+	startRunScoutStart = func(cwd string, options ImproveOptions) error {
+		runCount++
+		if cwd != repo {
+			t.Fatalf("unexpected cwd: %s", cwd)
+		}
+		return nil
+	}
+	startLoopSleep = func(duration time.Duration) {}
+	startLoopContinue = func() bool { return runCount < 2 }
+	defer func() {
+		startRunScoutStart = oldScout
+		startLoopSleep = oldSleep
+		startLoopContinue = oldContinue
+	}()
+
+	output, err := captureStdout(t, func() error {
+		return Start(repo, nil)
+	})
+	if err != nil {
+		t.Fatalf("Start: %v\n%s", err, output)
+	}
+	if runCount != 2 {
+		t.Fatalf("expected two scout startup cycles before test stop, got %d", runCount)
+	}
+	if !strings.Contains(output, "Cycle 1/forever") || !strings.Contains(output, "Cycle 2/forever") {
+		t.Fatalf("expected forever cycle output, got %q", output)
 	}
 }
 

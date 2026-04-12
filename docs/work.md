@@ -13,7 +13,7 @@ nana work retrospective [--run-id <id> | --last | --global-last] [--repo <path>]
 nana work verify-refresh [--run-id <id> | --last | --global-last] [--repo <path>]
 nana work sync [--run-id <id> | --last] [--reviewer <login|@me>] [--resume-last] [-- codex-args...]
 nana work lane-exec --run-id <id>|--last --lane <alias> [--task <text>] [-- codex-args...]
-nana start [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [-- codex-args...]
+nana start [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [--once|--cycles <n>|--forever] [--interval <duration>] [-- codex-args...]
 nana improve [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [-- codex-args...]
 nana enhance [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [-- codex-args...]
 ```
@@ -98,7 +98,7 @@ Repo overrides still live in the source checkout:
 
 ## Improvement Runs
 
-`nana improve` inspects the selected repo for UX and performance improvement proposals. `nana enhance` uses the same flow for grounded enhancements that help the repo move forward. Top-level `nana start` runs scout startup automation when scout-specific flags are provided or local scout policies are present.
+`nana improve` inspects the selected repo for UX and performance improvement proposals. `nana enhance` uses the same flow for grounded enhancements that help the repo move forward. Top-level `nana start` runs scout startup automation when scout-specific flags are provided or local scout policies are present. Bare `nana start` loops indefinitely until interrupted; use `--once` or `--cycles <n>` for bounded runs.
 
 Local repo behavior:
 
@@ -141,7 +141,7 @@ nana repo explain owner/repo
 
 `repo-mode` controls how Nana works with the repository: `local` keeps changes on a local branch and is the default, `fork` pushes implementation work to your fork, and `repo` pushes implementation work to the target repo. For `fork` and `repo`, `issue-pick` controls automatic issue selection with `manual`, `label`, or `auto`; label mode picks issues with the single opt-in label `nana`, and also picks Nana-generated scout proposal issues labeled `improvement-scout` or `enhancement-scout`. `pr-forward` controls what happens after a PR exists: `approve` waits for approval, while `auto` goes forward automatically. In `fork` mode, going forward creates the matching PR on the target repo. In `repo` mode, going forward means merging the PR.
 
-A `nana start` automation run scans `~/.nana/work/repos`, skips repos where `repo-mode` is `local` or `issue-pick` is `manual`, mirrors eligible issues, prioritizes queued work by `P1` through `P5` labels and inferred complexity, and starts up to three workers without exceeding ten open PRs for fork publishing. If the managed source checkout has improvement or enhancement scout policies, the run then executes those scouts and performs a second issue pickup pass so newly created proposal issues can move into implementation in the same cycle. Use `--cycles <n>` to repeat that onboarded-repo cycle. State is persisted under `~/.nana/start/<owner>/<repo>/state.json`.
+A `nana start` automation run scans `~/.nana/work/repos`, skips repos where `repo-mode` is `local` or `issue-pick` is `manual`, mirrors eligible issues, prioritizes queued work by `P1` through `P5` labels and inferred complexity, and starts up to three workers without exceeding ten open PRs for fork publishing. If the managed source checkout has improvement or enhancement scout policies, the run then executes those scouts and performs a second issue pickup pass so newly created proposal issues can move into implementation in the same cycle. Bare `nana start` repeats forever at a one-minute interval; use `--once` for one pass, `--cycles <n>` for a bounded run, or `--interval <duration>` to change the sleep between endless cycles. State is persisted under `~/.nana/start/<owner>/<repo>/state.json`.
 
 
 ## Troubleshooting

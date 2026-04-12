@@ -159,7 +159,7 @@ func StartScouts(cwd string, args []string) error {
 	if err != nil {
 		return err
 	}
-	return runScoutStart(cwd, options)
+	return startRunScoutStart(cwd, options)
 }
 
 func parseImproveArgs(args []string) (ImproveOptions, error) {
