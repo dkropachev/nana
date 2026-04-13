@@ -1320,6 +1320,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 				return err
 			}
+			fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: implementing.\n", iteration, manifest.MaxIterations)
 			implementPrompt, err := buildLocalWorkImplementPrompt(manifest, iteration)
 			if err != nil {
 				return err
@@ -1350,12 +1351,14 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			if err := writeLocalWorkRuntimeState(manifest.RunID, state); err != nil {
 				return err
 			}
+			fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: implementation complete.\n", iteration, manifest.MaxIterations)
 		}
 
 		setLocalWorkProgress(&manifest, &state, "verify-refresh", "verify-refresh", 0)
 		if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 			return err
 		}
+		fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: refreshing verification plan.\n", iteration, manifest.MaxIterations)
 		plan, scriptsDir, err := refreshLocalWorkVerificationArtifactsInPlace(&manifest)
 		if err != nil {
 			return err
@@ -1378,6 +1381,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 				return err
 			}
+			fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: running verification.\n", iteration, manifest.MaxIterations)
 			initialVerification, err = runLocalVerification(manifest.SandboxRepoPath, plan, manifest.IntegrationPolicy == "always")
 			if err != nil {
 				return err
@@ -1389,6 +1393,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			if err := writeLocalWorkRuntimeState(manifest.RunID, state); err != nil {
 				return err
 			}
+			fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: verification %s.\n", iteration, manifest.MaxIterations, summarizeLocalVerification(initialVerification))
 		}
 
 		reviewPromptPath := filepath.Join(iterationDir, "review-prompt.md")
@@ -1406,6 +1411,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 				return err
 			}
+			fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: running review.\n", iteration, manifest.MaxIterations)
 			reviewPrompt, err := buildLocalWorkReviewPrompt(manifest)
 			if err != nil {
 				return err
@@ -1437,6 +1443,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			if err := writeLocalWorkRuntimeState(manifest.RunID, state); err != nil {
 				return err
 			}
+			fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: review findings=%d.\n", iteration, manifest.MaxIterations, len(initialFindings))
 		}
 
 		finalGateFindingsCount := 0
@@ -1467,6 +1474,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 					if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 						return err
 					}
+					fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: running final review gate (%d roles).\n", iteration, manifest.MaxIterations, len(localWorkFinalReviewGateRoles))
 					gateFindings, gateRoles, gateRoleResults, gateCount, err := runLocalWorkFinalReviewGate(manifest, codexArgs, iterationDir, "initial")
 					if err != nil {
 						manifest.Status = "failed"
@@ -1486,6 +1494,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 					} else {
 						finalGateStatus = "passed"
 					}
+					fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: final review gate %s findings=%d.\n", iteration, manifest.MaxIterations, finalGateStatus, gateCount)
 				}
 			}
 		}
@@ -1520,6 +1529,9 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 		}
 		if err := appendLocalWorkFindingHistory(manifest.RunID, buildFindingHistoryEvents(iteration, 0, "initial", validatedInitialFindings)); err != nil {
 			return err
+		}
+		if len(initialFilterResult.Findings) > 0 {
+			fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: validated findings=%d rejected=%d preexisting=%d.\n", iteration, manifest.MaxIterations, len(validatedInitialFindings), len(rejectedInitialFingerprints), len(preexistingInitialFindings))
 		}
 
 		finalVerification := initialVerification
@@ -1560,6 +1572,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 				if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 					return err
 				}
+				fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d round %d: hardening %d finding(s).\n", iteration, manifest.MaxIterations, round, len(finalFindings))
 				hardeningPrompt, err := buildLocalWorkHardeningPrompt(manifest, finalVerification, finalFindings)
 				if err != nil {
 					return err
@@ -1601,6 +1614,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 				if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 					return err
 				}
+				fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d round %d: running post-hardening verification.\n", iteration, manifest.MaxIterations, round)
 				finalVerification, err = runLocalVerification(manifest.SandboxRepoPath, plan, manifest.IntegrationPolicy == "always")
 				if err != nil {
 					return err
@@ -1612,6 +1626,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 				if err := writeLocalWorkRuntimeState(manifest.RunID, state); err != nil {
 					return err
 				}
+				fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d round %d: post-hardening verification %s.\n", iteration, manifest.MaxIterations, round, summarizeLocalVerification(finalVerification))
 			} else if err := readGithubJSON(postVerificationPath, &finalVerification); err != nil {
 				roundState.PostVerificationCompleted = false
 				round--
@@ -1629,6 +1644,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 				if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 					return err
 				}
+				fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d round %d: running post-hardening review.\n", iteration, manifest.MaxIterations, round)
 				finalReviewPrompt, err := buildLocalWorkReviewPrompt(manifest)
 				if err != nil {
 					return err
@@ -1688,6 +1704,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 						if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 							return err
 						}
+						fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d round %d: running final review gate (%d roles).\n", iteration, manifest.MaxIterations, round, len(localWorkFinalReviewGateRoles))
 						gateFindings, gateRoles, gateRoleResults, gateCount, err := runLocalWorkFinalReviewGate(manifest, codexArgs, iterationDir, fmt.Sprintf("round-%d", round))
 						if err != nil {
 							manifest.Status = "failed"
@@ -1707,6 +1724,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 						} else {
 							finalGateStatus = "passed"
 						}
+						fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d round %d: final review gate %s findings=%d.\n", iteration, manifest.MaxIterations, round, finalGateStatus, gateCount)
 					}
 				}
 			}
@@ -1853,6 +1871,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 				if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 					return err
 				}
+				fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: applying verified changes to source branch.\n", iteration, manifest.MaxIterations)
 				applyResult := applyLocalWorkFinalDiff(manifest)
 				manifest.FinalApplyStatus = applyResult.Status
 				manifest.FinalApplyCommitSHA = applyResult.CommitSHA
