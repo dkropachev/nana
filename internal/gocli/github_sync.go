@@ -138,7 +138,9 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 
 	prompt := fmt.Sprintf("Continue GitHub %s #%d for %s after new reviewer feedback", manifest.TargetKind, manifest.TargetNumber, manifest.RepoSlug)
 	finalPrompt := buildGithubFeedbackInstructions(manifest, actors, newFeedback) + "\n\nTask:\n" + prompt
-	execArgs := append([]string{"exec", "-C", manifest.SandboxRepoPath}, options.CodexArgs...)
+	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(options.CodexArgs)
+	finalPrompt = prefixCodexFastPrompt(finalPrompt, fastMode)
+	execArgs := append([]string{"exec", "-C", manifest.SandboxRepoPath}, normalizedCodexArgs...)
 	execArgs = append(execArgs, finalPrompt)
 	execArgs = injectModelInstructionsArgs(execArgs, sessionInstructionsPath)
 	cmd := exec.Command("codex", execArgs...)

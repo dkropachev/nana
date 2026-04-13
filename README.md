@@ -97,6 +97,12 @@ Launch NANA the recommended way:
 nana --madmax --high
 ```
 
+To have NANA start Codex by issuing the Codex `/fast` slash command first, use:
+
+```bash
+nana --fast
+```
+
 Then try the canonical workflow:
 
 ```text
@@ -122,7 +128,7 @@ Most users should think of NANA as **better task routing + better workflow + bet
 ## Start here if you are new
 
 1. Run `nana setup`
-2. Launch with `nana --madmax --high`
+2. Launch with `nana --madmax --high` for thorough work or `nana --fast` to start by issuing Codex `/fast`
 3. Use `$deep-interview "..."` when the request or boundaries are still unclear
 4. Use `$ralplan "..."` to approve the plan and review tradeoffs
 5. Continue with direct implementation, `nana review`, or `nana work`

@@ -667,7 +667,8 @@ func runInvestigateSimplePrompt(cwd string, codexHome string, prompt string, ali
 	}
 	defer removeSessionInstructionsFile(cwd, sessionID)
 
-	args := normalizeLocalWorkCodexArgs(nil)
+	args, fastMode := normalizeLocalWorkCodexArgsWithFast(nil)
+	prompt = prefixCodexFastPrompt(prompt, fastMode)
 	args = append([]string{"exec", "-C", cwd}, args...)
 	args = append(args, "-")
 	args = injectModelInstructionsArgs(args, sessionInstructionsPath)
@@ -896,7 +897,8 @@ func runInvestigateCodexPrompt(manifest investigateManifest, codexArgs []string,
 	}
 	defer removeSessionInstructionsFile(manifest.WorkspaceRoot, sessionID)
 
-	args := normalizeLocalWorkCodexArgs(codexArgs)
+	args, fastMode := normalizeLocalWorkCodexArgsWithFast(codexArgs)
+	prompt = prefixCodexFastPrompt(prompt, fastMode)
 	args = append([]string{"exec", "-C", manifest.WorkspaceRoot}, args...)
 	args = append(args, "-")
 	args = injectModelInstructionsArgs(args, sessionInstructionsPath)

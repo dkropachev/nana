@@ -210,7 +210,9 @@ func startGithubWork(options githubWorkStartOptions) error {
 	defer removeSessionInstructionsFile(sandboxPath, sessionID)
 	prompt := fmt.Sprintf("Implement GitHub %s #%d for %s", options.Target.kind, options.Target.number, options.Target.repoSlug)
 	finalPrompt := buildGithubStartInstructions(manifest) + "\n\nTask:\n" + prompt
-	execArgs := append([]string{"exec", "-C", sandboxRepoPath}, options.CodexArgs...)
+	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(options.CodexArgs)
+	finalPrompt = prefixCodexFastPrompt(finalPrompt, fastMode)
+	execArgs := append([]string{"exec", "-C", sandboxRepoPath}, normalizedCodexArgs...)
 	execArgs = append(execArgs, finalPrompt)
 	execArgs = injectModelInstructionsArgs(execArgs, sessionInstructionsPath)
 	cmd := exec.Command("codex", execArgs...)

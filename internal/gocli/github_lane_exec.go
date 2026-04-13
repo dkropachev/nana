@@ -95,7 +95,9 @@ func executeGithubLane(runID string, useLast bool, laneAlias string, task string
 		prompt = fmt.Sprintf("Execute the %s lane for %s %s #%d", lane.Alias, manifest.RepoSlug, manifest.TargetKind, manifest.TargetNumber)
 	}
 	finalPrompt := instructions + "\n\nTask:\n" + prompt
-	args := append([]string{"exec", "-C", manifest.SandboxRepoPath}, codexArgs...)
+	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(codexArgs)
+	finalPrompt = prefixCodexFastPrompt(finalPrompt, fastMode)
+	args := append([]string{"exec", "-C", manifest.SandboxRepoPath}, normalizedCodexArgs...)
 	args = append(args, finalPrompt)
 
 	sessionID := fmt.Sprintf("lane-%d", time.Now().UnixNano())

@@ -919,7 +919,9 @@ func runScoutRole(repoPath string, repoSlug string, focus []string, codexArgs []
 		"- Return only the JSON output contract.",
 		fmt.Sprintf("- Treat proposals as %s.", scoutProposalNoun(role)),
 	}, "\n")
-	args := append([]string{"exec", "-C", repoPath}, codexArgs...)
+	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(codexArgs)
+	task = prefixCodexFastPrompt(task, fastMode)
+	args := append([]string{"exec", "-C", repoPath}, normalizedCodexArgs...)
 	args = append(args, "--", task)
 	cmd := exec.Command("codex", args...)
 	cmd.Dir = repoPath

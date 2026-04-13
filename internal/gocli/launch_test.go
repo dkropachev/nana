@@ -97,6 +97,32 @@ func TestNormalizeCodexLaunchArgs(t *testing.T) {
 	}
 }
 
+func TestNormalizeCodexLaunchArgsWithFast(t *testing.T) {
+	normalized, fast := NormalizeCodexLaunchArgsWithFast([]string{CodexFastFlag, "--model", "gpt-5.4"})
+	if !fast {
+		t.Fatal("expected fast mode")
+	}
+	if strings.Join(normalized, "\x00") != strings.Join([]string{"--model", "gpt-5.4"}, "\x00") {
+		t.Fatalf("unexpected normalized args: %#v", normalized)
+	}
+}
+
+func TestInjectCodexFastSlashCommand(t *testing.T) {
+	got := injectCodexFastSlashCommand([]string{"exec", "-C", "/repo", "do work"}, true)
+	want := []string{"exec", "-C", "/repo", "/fast\n\ndo work"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("injectCodexFastSlashCommand() = %#v, want %#v", got, want)
+	}
+}
+
+func TestInjectCodexFastSlashCommandWithoutPrompt(t *testing.T) {
+	got := injectCodexFastSlashCommand([]string{"--model", "gpt-5.4"}, true)
+	want := []string{"--model", "gpt-5.4", "/fast"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("injectCodexFastSlashCommand() = %#v, want %#v", got, want)
+	}
+}
+
 func TestParseNotifyTempContract(t *testing.T) {
 	parsed := ParseNotifyTempContract(
 		[]string{
@@ -208,12 +234,12 @@ func TestExecCreatesSessionInstructionsAndCleansUp(t *testing.T) {
 	}
 
 	output, err := captureStdout(t, func() error {
-		return Exec(cwd, []string{"--model", "gpt-5", "say hi"})
+		return Exec(cwd, []string{"--fast", "--model", "gpt-5", "say hi"})
 	})
 	if err != nil {
 		t.Fatalf("Exec(): %v", err)
 	}
-	if !strings.Contains(output, "fake-codex:exec --model gpt-5 say hi ") {
+	if !strings.Contains(output, "fake-codex:exec --model gpt-5 /fast") || !strings.Contains(output, "say hi ") {
 		t.Fatalf("unexpected codex invocation: %q", output)
 	}
 	if !strings.Contains(output, "instructions-path:") {

@@ -15,6 +15,7 @@ import (
 const (
 	MadmaxFlag         = "--madmax"
 	CodexBypassFlag    = "--dangerously-bypass-approvals-and-sandbox"
+	CodexFastFlag      = "--fast"
 	HighReasoningFlag  = "--high"
 	XHighReasoningFlag = "--xhigh"
 	SparkFlag          = "--spark"
@@ -121,10 +122,16 @@ func ResolveCLIInvocation(args []string) CLIInvocation {
 }
 
 func NormalizeCodexLaunchArgs(args []string) []string {
+	normalized, _ := NormalizeCodexLaunchArgsWithFast(args)
+	return normalized
+}
+
+func NormalizeCodexLaunchArgsWithFast(args []string) ([]string, bool) {
 	normalized := make([]string, 0, len(args)+2)
 	wantsBypass := false
 	hasBypass := false
 	reasoningMode := ""
+	fastMode := false
 
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
@@ -137,6 +144,8 @@ func NormalizeCodexLaunchArgs(args []string) []string {
 				normalized = append(normalized, arg)
 				hasBypass = true
 			}
+		case arg == CodexFastFlag:
+			fastMode = true
 		case arg == HighReasoningFlag:
 			reasoningMode = "high"
 		case arg == XHighReasoningFlag:
@@ -165,7 +174,7 @@ func NormalizeCodexLaunchArgs(args []string) []string {
 		normalized = append(normalized, ConfigFlag, fmt.Sprintf(`%s="%s"`, ReasoningKey, reasoningMode))
 	}
 
-	return normalized
+	return normalized, fastMode
 }
 
 func Launch(cwd string, args []string) error {
@@ -198,13 +207,80 @@ func runCodexLaunch(cwd string, commandPrefix []string, rawArgs []string) error 
 	}
 
 	codexHome := ResolveCodexHomeForLaunch(launchCwd)
-	normalized := NormalizeCodexLaunchArgs(parsedNotify.PassthroughArgs)
+	normalized, fastMode := NormalizeCodexLaunchArgsWithFast(parsedNotify.PassthroughArgs)
 	codexArgs := append(append([]string{}, commandPrefix...), normalized...)
+	codexArgs = injectCodexFastSlashCommand(codexArgs, fastMode)
 	repoRoot := resolvePackageRoot()
 	if err := MaybeCheckAndPromptUpdate(repoRoot, launchCwd); err != nil {
 		fmt.Fprintf(os.Stderr, "[nana-go] update warning: %v\n", err)
 	}
 	return runCodexSession(launchCwd, codexArgs, parsedNotify.Contract, codexHome)
+}
+
+func prefixCodexFastPrompt(prompt string, fast bool) string {
+	if !fast {
+		return prompt
+	}
+	trimmed := strings.TrimSpace(prompt)
+	if trimmed == "" {
+		return "/fast"
+	}
+	if strings.HasPrefix(trimmed, "/fast") {
+		return prompt
+	}
+	return "/fast\n\n" + prompt
+}
+
+func injectCodexFastSlashCommand(args []string, fast bool) []string {
+	if !fast {
+		return args
+	}
+	out := append([]string{}, args...)
+	if len(out) == 0 {
+		return []string{"/fast"}
+	}
+	promptIndex := findCodexPromptArgIndex(out)
+	if promptIndex < 0 {
+		return append(out, "/fast")
+	}
+	out[promptIndex] = prefixCodexFastPrompt(out[promptIndex], true)
+	return out
+}
+
+func findCodexPromptArgIndex(args []string) int {
+	start := 0
+	if len(args) > 0 {
+		switch args[0] {
+		case "exec", "review", "resume", "fork", "cloud":
+			start = 1
+		}
+	}
+	for index := start; index < len(args); index++ {
+		arg := args[index]
+		if arg == "--" {
+			if index+1 < len(args) {
+				return index + 1
+			}
+			return -1
+		}
+		if strings.HasPrefix(arg, "-") {
+			if codexOptionTakesValue(arg) && index+1 < len(args) {
+				index++
+			}
+			continue
+		}
+		return index
+	}
+	return -1
+}
+
+func codexOptionTakesValue(arg string) bool {
+	switch arg {
+	case "-c", "--config", "-i", "--image", "-m", "--model", "-p", "--profile", "-s", "--sandbox", "-a", "--ask-for-approval", "-C", "--cd", "--add-dir", "--output-format", "--input-format", "--json-schema", "--settings", "--agent", "--agents", "--system-prompt", "--append-system-prompt", "--mcp-config", "--name", "-n", "--session-id":
+		return true
+	default:
+		return false
+	}
 }
 
 func runCodexSession(cwd string, codexArgs []string, notifyContract NotifyTempContract, codexHome string) error {

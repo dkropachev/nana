@@ -163,7 +163,7 @@ func TestImproveRunsScoutPromptAfterOptionSeparator(t *testing.T) {
 	t.Setenv("FAKE_CODEX_ARGS_PATH", argsPath)
 
 	output, err := captureStdout(t, func() error {
-		return Improve(repo, nil)
+		return Improve(repo, []string{"--", "--fast"})
 	})
 	if err != nil {
 		t.Fatalf("Improve: %v\n%s", err, output)
@@ -175,8 +175,11 @@ func TestImproveRunsScoutPromptAfterOptionSeparator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fake codex args: %v", err)
 	}
-	if !strings.Contains(string(args), "\n--\n---\n") {
+	if !strings.Contains(string(args), "\n--\n/fast\n\n---\n") {
 		t.Fatalf("expected option separator before frontmatter prompt, got:\n%s", args)
+	}
+	if !strings.Contains(string(args), "\n/fast\n\n---\n") {
+		t.Fatalf("expected --fast to inject /fast before prompt, got:\n%s", args)
 	}
 }
 

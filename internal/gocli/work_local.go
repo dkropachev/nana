@@ -2680,7 +2680,8 @@ func runLocalWorkCodexPrompt(manifest localWorkManifest, codexArgs []string, pro
 	}
 	defer removeSessionInstructionsFile(manifest.SandboxPath, sessionID)
 
-	normalizedCodexArgs := normalizeLocalWorkCodexArgs(codexArgs)
+	normalizedCodexArgs, fastMode := normalizeLocalWorkCodexArgsWithFast(codexArgs)
+	prompt = prefixCodexFastPrompt(prompt, fastMode)
 	args := append([]string{"exec", "-C", manifest.SandboxRepoPath}, normalizedCodexArgs...)
 	args = append(args, "-")
 	args = injectModelInstructionsArgs(args, sessionInstructionsPath)
@@ -2701,11 +2702,16 @@ func runLocalWorkCodexPrompt(manifest localWorkManifest, codexArgs []string, pro
 }
 
 func normalizeLocalWorkCodexArgs(args []string) []string {
-	normalized := NormalizeCodexLaunchArgs(args)
+	normalized, _ := normalizeLocalWorkCodexArgsWithFast(args)
+	return normalized
+}
+
+func normalizeLocalWorkCodexArgsWithFast(args []string) ([]string, bool) {
+	normalized, fastMode := NormalizeCodexLaunchArgsWithFast(args)
 	if !hasCodexExecutionPolicyArg(normalized) {
 		normalized = append([]string{CodexBypassFlag}, normalized...)
 	}
-	return normalized
+	return normalized, fastMode
 }
 
 func hasCodexExecutionPolicyArg(args []string) bool {

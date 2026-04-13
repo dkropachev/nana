@@ -446,7 +446,9 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 	instructions := buildGithubStartInstructions(manifest)
 	prompt := fmt.Sprintf("Resume GitHub %s #%d for %s", manifest.TargetKind, manifest.TargetNumber, manifest.RepoSlug)
 	finalPrompt := instructions + "\n\nTask:\n" + prompt
-	execArgs := append([]string{"exec", "-C", manifest.SandboxRepoPath}, options.CodexArgs...)
+	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(options.CodexArgs)
+	finalPrompt = prefixCodexFastPrompt(finalPrompt, fastMode)
+	execArgs := append([]string{"exec", "-C", manifest.SandboxRepoPath}, normalizedCodexArgs...)
 	execArgs = append(execArgs, finalPrompt)
 	execArgs = injectModelInstructionsArgs(execArgs, sessionInstructionsPath)
 	cmd := exec.Command("codex", execArgs...)
