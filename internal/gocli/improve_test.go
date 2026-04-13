@@ -399,8 +399,14 @@ func TestStartAutoModeCommitsBothScoutsToDefaultBranch(t *testing.T) {
 	if branch := strings.TrimSpace(scoutTestGitOutput(t, repo, "rev-parse", "--abbrev-ref", "HEAD")); branch != "main" {
 		t.Fatalf("expected checkout on default branch, got %q", branch)
 	}
-	if subject := strings.TrimSpace(scoutTestGitOutput(t, repo, "log", "-1", "--pretty=%s")); subject != "Record scout startup artifacts" {
+	if subject := strings.TrimSpace(scoutTestGitOutput(t, repo, "log", "-1", "--pretty=%s")); subject != "Record 4 scout proposals: Proposal 1" {
 		t.Fatalf("expected scout artifact commit, got %q", subject)
+	}
+	body := scoutTestGitOutput(t, repo, "log", "-1", "--pretty=%B")
+	for _, expected := range []string{"Scout proposals:", "- Improvement: Proposal 1", "- Improvement: Proposal 2", "- Enhancement: Proposal 1", "- Enhancement: Proposal 2", "Artifact: .nana/improvements/", "Artifact: .nana/enhancements/"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("expected commit body to contain %q:\n%s", expected, body)
+		}
 	}
 	tree := scoutTestGitOutput(t, repo, "ls-tree", "-r", "--name-only", "main")
 	for _, expected := range []string{".nana/improvements/", ".nana/enhancements/"} {

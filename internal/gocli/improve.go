@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -628,10 +629,112 @@ func commitScoutArtifactsToDefault(repoPath string) (bool, error) {
 	if scoutGitQuiet(repoPath, diffArgs...) {
 		return false, nil
 	}
-	if err := githubRunGit(repoPath, "commit", "-m", "Record scout startup artifacts"); err != nil {
+	message, err := buildScoutArtifactCommitMessage(repoPath)
+	if err != nil {
+		return false, err
+	}
+	messageFile, err := os.CreateTemp("", "nana-scout-commit-*.txt")
+	if err != nil {
+		return false, err
+	}
+	messagePath := messageFile.Name()
+	if _, err := messageFile.WriteString(message); err != nil {
+		_ = messageFile.Close()
+		_ = os.Remove(messagePath)
+		return false, err
+	}
+	if err := messageFile.Close(); err != nil {
+		_ = os.Remove(messagePath)
+		return false, err
+	}
+	defer os.Remove(messagePath)
+	if err := githubRunGit(repoPath, "commit", "-F", messagePath); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+type scoutCommitItem struct {
+	Role     string
+	Title    string
+	Artifact string
+}
+
+func buildScoutArtifactCommitMessage(repoPath string) (string, error) {
+	items, err := stagedScoutCommitItems(repoPath)
+	if err != nil {
+		return "", err
+	}
+	if len(items) == 0 {
+		return "Record scout startup artifacts\n", nil
+	}
+	subject := fmt.Sprintf("Record scout proposal: %s", items[0].Title)
+	if len(items) > 1 {
+		subject = fmt.Sprintf("Record %d scout proposals: %s", len(items), items[0].Title)
+	}
+	lines := []string{truncateCommitSubject(subject), "", "Scout proposals:"}
+	for _, item := range items {
+		lines = append(lines, fmt.Sprintf("- %s: %s", scoutIssueHeading(item.Role), item.Title))
+		lines = append(lines, fmt.Sprintf("  Artifact: %s", item.Artifact))
+	}
+	return strings.Join(lines, "\n") + "\n", nil
+}
+
+func stagedScoutCommitItems(repoPath string) ([]scoutCommitItem, error) {
+	output, err := githubGitOutput(repoPath, "diff", "--cached", "--name-only", "--", ".nana/improvements", ".nana/enhancements")
+	if err != nil {
+		return nil, err
+	}
+	staged := map[string]bool{}
+	for _, line := range strings.Split(output, "\n") {
+		path := strings.TrimSpace(filepath.ToSlash(line))
+		if path != "" {
+			staged[path] = true
+		}
+	}
+	items := []scoutCommitItem{}
+	for _, role := range []string{improvementScoutRole, enhancementScoutRole} {
+		matches, err := filepath.Glob(filepath.Join(repoPath, ".nana", scoutArtifactRoot(role), "*", "proposals.json"))
+		if err != nil {
+			return nil, err
+		}
+		sort.Strings(matches)
+		for _, path := range matches {
+			rel, err := filepath.Rel(repoPath, path)
+			if err != nil {
+				return nil, err
+			}
+			rel = filepath.ToSlash(rel)
+			if !staged[rel] {
+				continue
+			}
+			var report improvementReport
+			if err := readGithubJSON(path, &report); err != nil {
+				continue
+			}
+			artifact := filepath.ToSlash(filepath.Dir(rel))
+			for _, proposal := range report.Proposals {
+				title := strings.TrimSpace(proposal.Title)
+				if title == "" {
+					continue
+				}
+				items = append(items, scoutCommitItem{Role: role, Title: title, Artifact: artifact})
+			}
+		}
+	}
+	return items, nil
+}
+
+func truncateCommitSubject(subject string) string {
+	const limit = 72
+	subject = strings.TrimSpace(strings.ReplaceAll(subject, "\n", " "))
+	if len(subject) <= limit {
+		return subject
+	}
+	if limit <= 3 {
+		return subject[:limit]
+	}
+	return strings.TrimSpace(subject[:limit-3]) + "..."
 }
 
 func existingScoutArtifactRoots(repoPath string) []string {
