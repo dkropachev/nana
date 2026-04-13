@@ -40,18 +40,18 @@ var startRunLocalScoutWork = func(repoPath string, task string, codexArgs []stri
 	return runLocalWorkCommand(repoPath, args)
 }
 
-func runLocalScoutDiscoveredItems(repoPath string, codexArgs []string) error {
+func runLocalScoutDiscoveredItems(repoPath string, codexArgs []string) (bool, error) {
 	items, err := listLocalScoutDiscoveredItems(repoPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if len(items) == 0 {
 		fmt.Fprintln(os.Stdout, "[start] Local discovered items: none found.")
-		return nil
+		return false, nil
 	}
 	state, statePath, err := readLocalScoutPickupState(repoPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 	pending := []localScoutDiscoveredItem{}
 	for _, item := range items {
@@ -62,7 +62,7 @@ func runLocalScoutDiscoveredItems(repoPath string, codexArgs []string) error {
 	}
 	if len(pending) == 0 {
 		fmt.Fprintf(os.Stdout, "[start] Local discovered items: 0 pending (%d already picked).\n", len(items))
-		return nil
+		return false, nil
 	}
 	item := pending[0]
 	fmt.Fprintf(os.Stdout, "[start] Local discovered items: %d pending; working on: %s\n", len(pending), item.Title)
@@ -74,7 +74,7 @@ func runLocalScoutDiscoveredItems(repoPath string, codexArgs []string) error {
 		ProposalID: item.ID,
 	}
 	if err := writeLocalScoutPickupState(statePath, state); err != nil {
-		return err
+		return false, err
 	}
 	if err := startRunLocalScoutWork(repoPath, formatLocalScoutWorkTask(item), codexArgs); err != nil {
 		record := state.Items[item.ID]
@@ -83,10 +83,10 @@ func runLocalScoutDiscoveredItems(repoPath string, codexArgs []string) error {
 		record.UpdatedAt = ISOTimeNow()
 		state.Items[item.ID] = record
 		if writeErr := writeLocalScoutPickupState(statePath, state); writeErr != nil {
-			return writeErr
+			return true, writeErr
 		}
 		fmt.Fprintf(os.Stdout, "[start] Local discovered item failed: %s: %v\n", item.Title, err)
-		return nil
+		return true, nil
 	}
 	record := state.Items[item.ID]
 	record.Status = "completed"
@@ -96,10 +96,10 @@ func runLocalScoutDiscoveredItems(repoPath string, codexArgs []string) error {
 	}
 	state.Items[item.ID] = record
 	if err := writeLocalScoutPickupState(statePath, state); err != nil {
-		return err
+		return true, err
 	}
 	fmt.Fprintf(os.Stdout, "[start] Local discovered item completed: %s\n", item.Title)
-	return nil
+	return true, nil
 }
 
 func listLocalScoutDiscoveredItems(repoPath string) ([]localScoutDiscoveredItem, error) {

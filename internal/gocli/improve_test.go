@@ -273,6 +273,44 @@ func TestStartRunsOnlySupportedScoutRoles(t *testing.T) {
 	}
 }
 
+func TestStartAutoModePicksExistingLocalDiscoveryBeforeRunningScouts(t *testing.T) {
+	repo := t.TempDir()
+	runScoutTestGit(t, repo, "init", "-b", "main")
+	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir .nana: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".nana", "improvement-policy.json"), []byte(`{"version":1,"mode":"auto"}`), 0o644); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	writeScoutPickupFixture(t, repo, improvementScoutRole, "Existing local item", "Handle existing item")
+	runScoutTestGit(t, repo, "add", ".")
+	runScoutTestGit(t, repo, "commit", "-m", "init")
+
+	oldRun := startRunLocalScoutWork
+	defer func() { startRunLocalScoutWork = oldRun }()
+	picked := []string{}
+	startRunLocalScoutWork = func(repoPath string, task string, codexArgs []string) error {
+		picked = append(picked, task)
+		return nil
+	}
+
+	output, err := captureStdout(t, func() error {
+		return Start(repo, []string{"--once"})
+	})
+	if err != nil {
+		t.Fatalf("Start(): %v\n%s", err, output)
+	}
+	if len(picked) != 1 || !strings.Contains(picked[0], "Existing local item") {
+		t.Fatalf("expected existing item pickup before scouts, got %#v", picked)
+	}
+	if !strings.Contains(output, "Local discovered items: 1 pending; working on: Existing local item") {
+		t.Fatalf("missing pickup output: %q", output)
+	}
+	if strings.Contains(output, "improvement-scout supported; running") {
+		t.Fatalf("scouts should not run when an existing local item was picked first: %q", output)
+	}
+}
+
 func TestStartRunsBothSupportedScoutRoles(t *testing.T) {
 	repo := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {

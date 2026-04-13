@@ -25,11 +25,17 @@ func TestRunLocalScoutDiscoveredItemsPicksOnePendingProposal(t *testing.T) {
 	}
 	defer func() { startRunLocalScoutWork = oldRun }()
 
+	picked := false
 	output, err := captureStdout(t, func() error {
-		return runLocalScoutDiscoveredItems(repo, []string{"--model", "gpt-5.4"})
+		var runErr error
+		picked, runErr = runLocalScoutDiscoveredItems(repo, []string{"--model", "gpt-5.4"})
+		return runErr
 	})
 	if err != nil {
 		t.Fatalf("runLocalScoutDiscoveredItems: %v", err)
+	}
+	if !picked {
+		t.Fatalf("expected proposal to be picked")
 	}
 	if len(tasks) != 1 || !strings.Contains(tasks[0], "Implement local scout proposal: Improve help text") || !strings.Contains(tasks[0], "Source artifact: .nana/improvements/improve-test") {
 		t.Fatalf("unexpected tasks: %#v", tasks)
@@ -50,14 +56,20 @@ func TestRunLocalScoutDiscoveredItemsPicksOnePendingProposal(t *testing.T) {
 		}
 	}
 
+	secondPicked := true
 	secondOutput, err := captureStdout(t, func() error {
-		return runLocalScoutDiscoveredItems(repo, nil)
+		var runErr error
+		secondPicked, runErr = runLocalScoutDiscoveredItems(repo, nil)
+		return runErr
 	})
 	if err != nil {
 		t.Fatalf("second runLocalScoutDiscoveredItems: %v", err)
 	}
 	if len(tasks) != 1 {
 		t.Fatalf("proposal should not be picked twice, tasks=%#v", tasks)
+	}
+	if secondPicked {
+		t.Fatalf("expected second run to pick nothing")
 	}
 	if !strings.Contains(secondOutput, "Local discovered items: 0 pending (1 already picked).") {
 		t.Fatalf("unexpected second output: %q", secondOutput)
@@ -75,14 +87,20 @@ func TestRunLocalScoutDiscoveredItemsMarksFailureWithoutRetry(t *testing.T) {
 	}
 	defer func() { startRunLocalScoutWork = oldRun }()
 
+	picked := false
 	output, err := captureStdout(t, func() error {
-		return runLocalScoutDiscoveredItems(repo, nil)
+		var runErr error
+		picked, runErr = runLocalScoutDiscoveredItems(repo, nil)
+		return runErr
 	})
 	if err != nil {
 		t.Fatalf("runLocalScoutDiscoveredItems: %v", err)
 	}
 	if attempts != 1 || !strings.Contains(output, "Local discovered item failed: Add benchmark target: work failed") {
 		t.Fatalf("unexpected failure behavior attempts=%d output=%q", attempts, output)
+	}
+	if !picked {
+		t.Fatalf("failed work still counts as picked for this cycle")
 	}
 	state, _, err := readLocalScoutPickupState(repo)
 	if err != nil {
@@ -94,7 +112,8 @@ func TestRunLocalScoutDiscoveredItemsMarksFailureWithoutRetry(t *testing.T) {
 		}
 	}
 	if _, err := captureStdout(t, func() error {
-		return runLocalScoutDiscoveredItems(repo, nil)
+		_, runErr := runLocalScoutDiscoveredItems(repo, nil)
+		return runErr
 	}); err != nil {
 		t.Fatalf("second runLocalScoutDiscoveredItems: %v", err)
 	}

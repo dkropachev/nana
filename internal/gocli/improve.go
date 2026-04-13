@@ -387,6 +387,15 @@ func runScoutStart(cwd string, options ImproveOptions) error {
 			return err
 		}
 	}
+	if autoLocal && strings.TrimSpace(options.FromFile) == "" {
+		picked, err := startRunLocalScoutPickup(repoPath, options.CodexArgs)
+		if err != nil {
+			return err
+		}
+		if picked {
+			return nil
+		}
+	}
 	for _, role := range roles {
 		fmt.Fprintf(os.Stdout, "[start] %s supported; running.\n", role)
 		if err := runScout(cwd, options, role); err != nil {
@@ -405,7 +414,7 @@ func runScoutStart(cwd string, options ImproveOptions) error {
 		}
 	}
 	if autoLocal && strings.TrimSpace(options.FromFile) == "" {
-		if err := startRunLocalScoutPickup(repoPath, options.CodexArgs); err != nil {
+		if _, err := startRunLocalScoutPickup(repoPath, options.CodexArgs); err != nil {
 			return err
 		}
 	}
