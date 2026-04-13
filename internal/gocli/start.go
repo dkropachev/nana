@@ -12,28 +12,33 @@ import (
 const StartHelp = `nana start - Run automation for onboarded repositories
 
 Usage:
-  nana start [--repo <owner/repo>] [--parallel <n>] [--max-open-prs <n>] [--once|--cycles <n>|--forever] [--interval <duration>] [-- codex-args...]
+  nana start [--repo <owner/repo>] [--parallel <n>] [--per-repo-workers <n>] [--max-open-prs <n>] [--once|--cycles <n>|--forever] [--interval <duration>] [-- codex-args...]
   nana start help
 
 Behavior:
   - with no options, loops indefinitely until interrupted
   - scans onboarded GitHub repos under ~/.nana/work/repos
   - skips repos where repo-mode is local or issue-pick is manual
-  - mirrors issues from the source repo into the fork and starts eligible workers
+  - --parallel limits how many repos may be active at once
+  - --per-repo-workers limits how many workers a repo may use at once
+  - uses separate per-repo service and implementation queues that share the repo worker budget
+  - triages issues before implementation pickup and persists triage results locally
   - runs supported scouts from the managed source checkout when scout policies exist
-  - mirrors again after scouts finish so scout-created proposals can be picked up for implementation
   - forwards PRs when pr-forward is auto: fork creates upstream PRs; repo attempts merge
   - use --once or --cycles <n> for bounded runs
 `
 
+const startDefaultGlobalParallel = 3
+
 type startOptions struct {
-	RepoSlug  string
-	Parallel  int
-	MaxOpenPR int
-	Cycles    int
-	Forever   bool
-	Interval  time.Duration
-	CodexArgs []string
+	RepoSlug       string
+	Parallel       int
+	PerRepoWorkers int
+	MaxOpenPR      int
+	Cycles         int
+	Forever        bool
+	Interval       time.Duration
+	CodexArgs      []string
 }
 
 type startRuntimeOptions struct {
@@ -46,6 +51,7 @@ var startRunStartWork = startWorkStart
 var startPromoteStartWork = startWorkPromote
 var startRunScoutStart = runScoutStart
 var startRunLocalScoutPickup = runLocalScoutDiscoveredItems
+var startRunRepoCycle = runStartRepoCycle
 var startLoopSleep = time.Sleep
 var startLoopContinue = func() bool { return true }
 
@@ -83,12 +89,7 @@ func Start(cwd string, args []string) error {
 			return nil
 		}
 		fmt.Fprintf(os.Stdout, "[start] Repos selected: %s\n", strings.Join(repos, ", "))
-		for _, repoSlug := range repos {
-			if err := runStartRepoCycle(cwd, repoSlug, options); err != nil {
-				return err
-			}
-		}
-		return nil
+		return runStartRepoCycles(cwd, repos, options)
 	})
 }
 
@@ -115,20 +116,19 @@ func runStartRepoCycle(cwd string, repoSlug string, options startOptions) error 
 	if repoMode == "local" || issuePickMode == "manual" {
 		return nil
 	}
-	workOptions := startWorkOptions{RepoSlug: repoSlug, Parallel: options.Parallel, MaxOpenPR: options.MaxOpenPR, ForkIssuesMode: forkMode, ImplementMode: implementMode, PublishTarget: publishTarget, RepoMode: repoMode, IssuePickMode: issuePickMode, PRForwardMode: prForwardMode, CodexArgs: options.CodexArgs}
-	if err := startRunStartWork(workOptions); err != nil {
-		return err
+	workOptions := startWorkOptions{
+		RepoSlug:       repoSlug,
+		Parallel:       options.PerRepoWorkers,
+		MaxOpenPR:      options.MaxOpenPR,
+		ForkIssuesMode: forkMode,
+		ImplementMode:  implementMode,
+		PublishTarget:  publishTarget,
+		RepoMode:       repoMode,
+		IssuePickMode:  issuePickMode,
+		PRForwardMode:  prForwardMode,
+		CodexArgs:      options.CodexArgs,
 	}
-	if !startRepoHasScoutPolicies(repoSlug) {
-		return nil
-	}
-	fmt.Fprintf(os.Stdout, "[start] %s: scout policies found; running scouts before next issue pickup.\n", repoSlug)
-	scoutOptions := ImproveOptions{Target: repoSlug, Focus: []string{"ux", "perf"}, CodexArgs: append([]string{}, options.CodexArgs...)}
-	if err := startRunScoutStart(cwd, scoutOptions); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stdout, "[start] %s: scouts finished; refreshing issue queue.\n", repoSlug)
-	return startRunStartWork(workOptions)
+	return runStartRepoSchedulerCycle(cwd, repoSlug, workOptions, options)
 }
 
 func startRepoHasScoutPolicies(repoSlug string) bool {
@@ -167,9 +167,9 @@ func startShouldRunScouts(cwd string, args []string) bool {
 			if startRepoValueLooksLikePath(strings.TrimPrefix(token, "--repo=")) {
 				return true
 			}
-		case token == "--parallel", token == "--max-open-prs", token == "--cycles":
+		case token == "--parallel", token == "--per-repo-workers", token == "--max-open-prs", token == "--cycles":
 			index++
-		case strings.HasPrefix(token, "--parallel="), strings.HasPrefix(token, "--max-open-prs="), strings.HasPrefix(token, "--cycles="):
+		case strings.HasPrefix(token, "--parallel="), strings.HasPrefix(token, "--per-repo-workers="), strings.HasPrefix(token, "--max-open-prs="), strings.HasPrefix(token, "--cycles="):
 			continue
 		case strings.HasPrefix(token, "-"):
 			continue
@@ -314,7 +314,7 @@ func startRepoValueLooksLikePath(value string) bool {
 }
 
 func parseStartArgs(args []string) (startOptions, error) {
-	options := startOptions{Parallel: startWorkDefaultParallel, MaxOpenPR: startWorkDefaultOpenPRCap, Cycles: 1}
+	options := startOptions{Parallel: startDefaultGlobalParallel, PerRepoWorkers: startWorkDefaultParallel, MaxOpenPR: startWorkDefaultOpenPRCap, Cycles: 1}
 	passthroughIndex := len(args)
 	for index, token := range args {
 		if token == "--" {
@@ -362,6 +362,23 @@ func parseStartArgs(args []string) (startOptions, error) {
 				return startOptions{}, err
 			}
 			options.Parallel = parsed
+		case token == "--per-repo-workers":
+			value, err := requireStartFlagValue(parseArgs, index, token)
+			if err != nil {
+				return startOptions{}, err
+			}
+			parsed, err := parsePositiveInt(value, token)
+			if err != nil {
+				return startOptions{}, err
+			}
+			options.PerRepoWorkers = parsed
+			index++
+		case strings.HasPrefix(token, "--per-repo-workers="):
+			parsed, err := parsePositiveInt(strings.TrimPrefix(token, "--per-repo-workers="), "--per-repo-workers")
+			if err != nil {
+				return startOptions{}, err
+			}
+			options.PerRepoWorkers = parsed
 		case token == "--max-open-prs":
 			value, err := requireStartFlagValue(parseArgs, index, token)
 			if err != nil {

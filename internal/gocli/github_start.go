@@ -10,14 +10,14 @@ import (
 	"time"
 )
 
-func startGithubWork(options githubWorkStartOptions) error {
+func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error) {
 	apiBaseURL := strings.TrimSpace(os.Getenv("GITHUB_API_URL"))
 	if apiBaseURL == "" {
 		apiBaseURL = "https://api.github.com"
 	}
 	token, err := resolveGithubToken()
 	if err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	reviewer := strings.TrimSpace(options.Reviewer)
 	if reviewer == "@me" {
@@ -30,21 +30,21 @@ func startGithubWork(options githubWorkStartOptions) error {
 	}
 	target, err := githubFetchTargetContext(options.Target, apiBaseURL, token)
 	if err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	now := time.Now().UTC()
 	paths := githubManagedPaths(options.Target.repoSlug)
 	repoMeta, err := ensureGithubManagedRepoMetadata(paths, target, now)
 	if err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	if err := ensureGithubSourceClone(paths, repoMeta); err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 
 	repoVerificationPlan := detectGithubVerificationPlan(paths.SourcePath)
 	if err := writeGithubJSON(paths.RepoVerificationPlanPath, repoVerificationPlan); err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	settings, _ := readGithubRepoSettings(paths.RepoSettingsPath)
 	if settings == nil {
@@ -65,7 +65,7 @@ func startGithubWork(options githubWorkStartOptions) error {
 		settings.Version = 4
 	}
 	if err := writeGithubJSON(paths.RepoSettingsPath, settings); err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	repoMode := normalizeGithubRepoMode(options.RepoMode)
 	publishTarget := normalizeGithubPublishTarget(options.PublishTarget)
@@ -94,11 +94,11 @@ func startGithubWork(options githubWorkStartOptions) error {
 	createPROnComplete := publishTarget != "local-branch"
 	profile, profilePath, err := refreshGithubRepoProfile(repoMeta.RepoSlug, paths.SourcePath, repoVerificationPlan, settings.DefaultConsiderations, now)
 	if err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	policy, err := resolveGithubWorkPolicy(paths.SourcePath)
 	if err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	effectiveReviewerPolicy := resolveGithubEffectiveReviewerPolicy(repoMeta.RepoSlug)
 
@@ -115,16 +115,16 @@ func startGithubWork(options githubWorkStartOptions) error {
 	sandboxPath := filepath.Join(paths.RepoRoot, "sandboxes", sandboxID)
 	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
 	if err := os.MkdirAll(filepath.Join(paths.RepoRoot, "runs", runID), 0o755); err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	if err := cloneGithubSourceToSandbox(paths.SourcePath, sandboxRepoPath); err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	verificationPlan := detectGithubVerificationPlan(sandboxRepoPath)
 	runDir := filepath.Join(paths.RepoRoot, "runs", runID)
 	verificationScriptsDir, err := writeGithubVerificationScripts(sandboxPath, sandboxRepoPath, verificationPlan, runID)
 	if err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	pipeline := buildGithubPipeline(activeConsiderations, roleLayout)
 	convertedPipeline := convertGithubLanes(pipeline)
@@ -177,35 +177,35 @@ func startGithubWork(options githubWorkStartOptions) error {
 	}
 	manifest.ControlPlaneReviewers, err = buildGithubControlPlaneReviewers(manifest, reviewerOverride, apiBaseURL, token)
 	if err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	manifest.NeedsHuman, manifest.NeedsHumanReason, manifest.NextAction = determineGithubHumanGateState(manifest.Policy, manifest.CreatePROnComplete)
 	manifestPath := filepath.Join(runDir, "manifest.json")
 	if err := writeGithubJSON(manifestPath, manifest); err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	startInstructionsPath := filepath.Join(runDir, "start-instructions.md")
 	if err := os.WriteFile(startInstructionsPath, []byte(buildGithubStartInstructions(manifest)), 0o644); err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	if err := writeGithubJSON(filepath.Join(paths.RepoRoot, "latest-run.json"), map[string]string{"repo_root": paths.RepoRoot, "run_id": runID}); err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	if err := writeGithubJSON(githubWorkLatestRunPath(), map[string]string{"repo_root": paths.RepoRoot, "run_id": runID}); err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 
 	laneCodexHome, err := ensureGithubLaneCodexHome(sandboxPath, "leader")
 	if err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	sessionID := fmt.Sprintf("start-%d", time.Now().UnixNano())
 	sessionInstructionsPath, err := writeSessionModelInstructions(sandboxPath, sessionID, laneCodexHome)
 	if err != nil {
-		return err
+		return githubWorkManifest{}, err
 	}
 	defer removeSessionInstructionsFile(sandboxPath, sessionID)
 	prompt := fmt.Sprintf("Implement GitHub %s #%d for %s", options.Target.kind, options.Target.number, options.Target.repoSlug)
@@ -235,7 +235,7 @@ func startGithubWork(options githubWorkStartOptions) error {
 	if stderr.Len() > 0 {
 		fmt.Fprint(os.Stdout, stderr.String())
 	}
-	return runErr
+	return manifest, runErr
 }
 
 func buildGithubRunID(now time.Time) string {

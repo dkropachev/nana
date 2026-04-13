@@ -20,14 +20,14 @@ func TestStartWorkStartCreatesForkCopiesIssuesPrioritizesAndStartsWithinCaps(t *
 	started := []string{}
 	var startedMu sync.Mutex
 	oldRunner := startWorkRunGithubWork
-	startWorkRunGithubWork = func(issueURL string, publishTarget string, codexArgs []string) error {
+	startWorkRunGithubWork = func(issueURL string, publishTarget string, codexArgs []string) (startWorkLaunchResult, error) {
 		startedMu.Lock()
 		defer startedMu.Unlock()
 		started = append(started, issueURL+"|"+publishTarget)
 		if !reflect.DeepEqual(codexArgs, []string{"--model", "gpt-5.4"}) {
 			t.Fatalf("unexpected codex args: %#v", codexArgs)
 		}
-		return nil
+		return startWorkLaunchResult{}, nil
 	}
 	defer func() { startWorkRunGithubWork = oldRunner }()
 
@@ -113,9 +113,9 @@ func TestStartWorkStartHonorsOpenPRCap(t *testing.T) {
 	t.Setenv("GH_TOKEN", "token")
 	oldRunner := startWorkRunGithubWork
 	runnerCalls := 0
-	startWorkRunGithubWork = func(issueURL string, publishTarget string, codexArgs []string) error {
+	startWorkRunGithubWork = func(issueURL string, publishTarget string, codexArgs []string) (startWorkLaunchResult, error) {
 		runnerCalls++
-		return nil
+		return startWorkLaunchResult{}, nil
 	}
 	defer func() { startWorkRunGithubWork = oldRunner }()
 
@@ -169,6 +169,262 @@ func TestStartWorkLabelModeTreatsScoutProposalsAsAutomationOptIn(t *testing.T) {
 	}
 	if startWorkAutomationAllowsIssue("labeled", []string{"enhancement"}, "implement") {
 		t.Fatalf("generic enhancement label should not opt into labeled implementation")
+	}
+}
+
+func TestStartWorkBuildImplementationQueueRequiresFreshPriorityAndHonorsManualP0(t *testing.T) {
+	state := &startWorkState{
+		Issues: map[string]startWorkIssueState{
+			"1": {
+				SourceNumber:   1,
+				ForkNumber:     101,
+				State:          "open",
+				Status:         startWorkStatusQueued,
+				Labels:         []string{"nana", "P0"},
+				Priority:       0,
+				PrioritySource: "manual_label",
+				Complexity:     3,
+			},
+			"2": {
+				SourceNumber:      2,
+				ForkNumber:        102,
+				State:             "open",
+				Status:            startWorkStatusQueued,
+				Labels:            []string{"nana"},
+				Priority:          2,
+				PrioritySource:    "triage",
+				Complexity:        2,
+				SourceFingerprint: "fp-2",
+				TriageFingerprint: "fp-2",
+				TriageStatus:      startWorkTriageCompleted,
+			},
+			"3": {
+				SourceNumber:      3,
+				ForkNumber:        103,
+				State:             "open",
+				Status:            startWorkStatusQueued,
+				Labels:            []string{"nana"},
+				Priority:          1,
+				PrioritySource:    "triage",
+				Complexity:        1,
+				SourceFingerprint: "fp-3-new",
+				TriageFingerprint: "fp-3-old",
+				TriageStatus:      startWorkTriageCompleted,
+			},
+		},
+	}
+	queue, skipped := startWorkBuildImplementationQueue(state, startWorkOptions{ImplementMode: "labeled", MaxOpenPR: 10}, 0)
+	if skipped != "" {
+		t.Fatalf("unexpected skipped reason: %s", skipped)
+	}
+	if got := []int{queue[0].SourceNumber, queue[1].SourceNumber}; !reflect.DeepEqual(got, []int{1, 2}) {
+		t.Fatalf("expected manual P0 then fresh triage order, got %#v", got)
+	}
+}
+
+func TestStartRepoCoordinatorBuildsSeparateServiceQueueWithDependencies(t *testing.T) {
+	coordinator := &startRepoCoordinator{
+		repoSlug: "acme/widget",
+		cycleID:  "cycle-1",
+		workOptions: startWorkOptions{
+			ImplementMode: "labeled",
+		},
+		state: &startWorkState{
+			Issues: map[string]startWorkIssueState{
+				"1": {
+					SourceNumber:      1,
+					ForkNumber:        101,
+					State:             "open",
+					Status:            startWorkStatusQueued,
+					Labels:            []string{"nana"},
+					SourceFingerprint: "fp-1",
+					TriageStatus:      startWorkTriageQueued,
+				},
+				"2": {
+					SourceNumber:      2,
+					ForkNumber:        102,
+					State:             "open",
+					Status:            startWorkStatusQueued,
+					Labels:            []string{"nana", "P1"},
+					Priority:          1,
+					PrioritySource:    "manual_label",
+					SourceFingerprint: "fp-2",
+					TriageStatus:      startWorkTriageCompleted,
+				},
+			},
+			ServiceTasks: map[string]startWorkServiceTask{},
+		},
+		running:    map[string]startRepoTask{},
+		scoutRoles: []string{improvementScoutRole},
+	}
+	if err := coordinator.syncServiceTasks(); err != nil {
+		t.Fatalf("syncServiceTasks: %v", err)
+	}
+	queue := coordinator.buildServiceQueue()
+	if len(queue) != 1 {
+		t.Fatalf("expected only ready scout task before dependencies clear, got %#v", queue)
+	}
+	if queue[0].Kind != startTaskKindScout {
+		t.Fatalf("unexpected ready service queue ordering: %#v", queue)
+	}
+	syncTask := coordinator.state.ServiceTasks[startServiceTaskKey(startTaskKindIssueSync, coordinator.cycleID)]
+	if syncTask.Kind != startTaskKindIssueSync || len(syncTask.DependencyKeys) != 1 || syncTask.DependencyKeys[0] != startServiceTaskKey(startTaskKindScout, improvementScoutRole) {
+		t.Fatalf("unexpected issue-sync task: %+v", syncTask)
+	}
+	triageTask := coordinator.state.ServiceTasks[startServiceTaskKey(startTaskKindTriage, "1")]
+	if len(triageTask.DependencyKeys) != 1 || triageTask.DependencyKeys[0] != syncTask.ID {
+		t.Fatalf("expected triage task to depend on issue sync, got %+v", triageTask)
+	}
+}
+
+func TestReadStartWorkStateRequeuesRunningServiceTasks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	state := startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: "acme/widget",
+		UpdatedAt:  "now",
+		Issues:     map[string]startWorkIssueState{},
+		ServiceTasks: map[string]startWorkServiceTask{
+			"triage:1": {
+				ID:     "triage:1",
+				Kind:   startTaskKindTriage,
+				Queue:  startTaskQueueService,
+				Status: startWorkServiceTaskRunning,
+			},
+		},
+	}
+	if err := writeStartWorkState(state); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	loaded, err := readStartWorkState("acme/widget")
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	if loaded.ServiceTasks["triage:1"].Status != startWorkServiceTaskQueued {
+		t.Fatalf("expected running service task to requeue, got %+v", loaded.ServiceTasks["triage:1"])
+	}
+}
+
+func TestStartRepoCoordinatorQueuesReconcileForStaleInProgressIssue(t *testing.T) {
+	coordinator := &startRepoCoordinator{
+		repoSlug: "acme/widget",
+		cycleID:  "cycle-1",
+		workOptions: startWorkOptions{
+			ImplementMode: "labeled",
+		},
+		state: &startWorkState{
+			Issues: map[string]startWorkIssueState{
+				"1": {
+					SourceNumber: 1,
+					ForkNumber:   101,
+					State:        "open",
+					Status:       startWorkStatusInProgress,
+					Labels:       []string{"nana", "P1"},
+					LastRunID:    "gh-1",
+				},
+			},
+			ServiceTasks: map[string]startWorkServiceTask{},
+		},
+		running: map[string]startRepoTask{},
+	}
+	if err := coordinator.syncServiceTasks(); err != nil {
+		t.Fatalf("syncServiceTasks: %v", err)
+	}
+	task, ok := coordinator.state.ServiceTasks[startServiceTaskKey(startTaskKindReconcile, "1")]
+	if !ok {
+		t.Fatalf("expected reconcile task to be created")
+	}
+	if task.Status != startWorkServiceTaskQueued || task.RunID != "gh-1" {
+		t.Fatalf("unexpected reconcile task: %+v", task)
+	}
+}
+
+func TestStartRepoCoordinatorRetriesTriageTaskBeforeFailing(t *testing.T) {
+	coordinator := &startRepoCoordinator{
+		repoSlug: "acme/widget",
+		state: &startWorkState{
+			Issues: map[string]startWorkIssueState{
+				"1": {
+					SourceNumber:   1,
+					ForkNumber:     101,
+					State:          "open",
+					Status:         startWorkStatusQueued,
+					Labels:         []string{"nana"},
+					TriageStatus:   startWorkTriageRunning,
+					TriageError:    "",
+					PrioritySource: "",
+					UpdatedAt:      "now",
+				},
+			},
+			ServiceTasks: map[string]startWorkServiceTask{
+				"triage:1": {
+					ID:       "triage:1",
+					Kind:     startTaskKindTriage,
+					Queue:    startTaskQueueService,
+					Status:   startWorkServiceTaskRunning,
+					IssueKey: "1",
+					Attempts: 1,
+				},
+			},
+		},
+	}
+	if err := coordinator.applyTaskResult(startRepoTaskResult{
+		Task: startRepoTask{Key: "triage:1", Kind: startTaskKindTriage, IssueKey: "1"},
+		Err:  fmt.Errorf("temporary triage failure"),
+	}); err != nil {
+		t.Fatalf("applyTaskResult: %v", err)
+	}
+	if got := coordinator.state.ServiceTasks["triage:1"].Status; got != startWorkServiceTaskQueued {
+		t.Fatalf("expected triage task to requeue, got %s", got)
+	}
+	if got := coordinator.state.Issues["1"].TriageStatus; got != startWorkTriageQueued {
+		t.Fatalf("expected issue triage state to requeue, got %s", got)
+	}
+}
+
+func TestStartRepoCoordinatorReconcileRequeuesWhileMetadataIsPending(t *testing.T) {
+	coordinator := &startRepoCoordinator{
+		repoSlug: "acme/widget",
+		state: &startWorkState{
+			Issues: map[string]startWorkIssueState{
+				"1": {
+					SourceNumber: 1,
+					ForkNumber:   101,
+					State:        "open",
+					Status:       startWorkStatusReconciling,
+					LastRunID:    "gh-1",
+				},
+			},
+			ServiceTasks: map[string]startWorkServiceTask{
+				"reconcile:1": {
+					ID:       "reconcile:1",
+					Kind:     startTaskKindReconcile,
+					Queue:    startTaskQueueService,
+					Status:   startWorkServiceTaskRunning,
+					IssueKey: "1",
+					Attempts: 1,
+					RunID:    "gh-1",
+				},
+			},
+		},
+	}
+	if err := coordinator.applyTaskResult(startRepoTaskResult{
+		Task: startRepoTask{Key: "reconcile:1", Kind: startTaskKindReconcile, IssueKey: "1"},
+		Reconcile: &startWorkReconcileResult{
+			Status:        startWorkStatusReconciling,
+			BlockedReason: "waiting for publication state",
+			RunID:         "gh-1",
+			ShouldRetry:   true,
+		},
+	}); err != nil {
+		t.Fatalf("applyTaskResult: %v", err)
+	}
+	if got := coordinator.state.ServiceTasks["reconcile:1"].Status; got != startWorkServiceTaskQueued {
+		t.Fatalf("expected reconcile task to requeue, got %s", got)
+	}
+	if got := coordinator.state.Issues["1"].Status; got != startWorkStatusReconciling {
+		t.Fatalf("expected issue to stay reconciling, got %s", got)
 	}
 }
 

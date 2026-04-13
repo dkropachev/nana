@@ -443,9 +443,9 @@ func repoExplain(args []string) error {
 	fmt.Fprintf(os.Stdout, "[repo] implement: %s\n", implementMode)
 	fmt.Fprintf(os.Stdout, "[repo] publish: %s\n", publishTarget)
 	fmt.Fprintf(os.Stdout, "[repo] Start participation: %t\n", githubRepoAutomationEnabled(settings))
-	fmt.Fprintln(os.Stdout, "[repo] `nana start` mirrors eligible issues, starts eligible workers, and forwards PRs when pr-forward is auto.")
+	fmt.Fprintln(os.Stdout, "[repo] `nana start` mirrors eligible issues, triages them locally, runs persistent per-repo service and implementation queues, schedules scout -> issue-sync -> triage dependencies, reconciles implementation runs, and forwards PRs when pr-forward is auto.")
 	fmt.Fprintln(os.Stdout, "[repo] label issue-pick mode requires the single opt-in label: nana")
-	fmt.Fprintf(os.Stdout, "[repo] Defaults: parallel=%d open_fork_pr_cap=%d\n", startWorkDefaultParallel, startWorkDefaultOpenPRCap)
+	fmt.Fprintf(os.Stdout, "[repo] Defaults: global_parallel=%d per_repo_workers=%d open_fork_pr_cap=%d\n", startDefaultGlobalParallel, startWorkDefaultParallel, startWorkDefaultOpenPRCap)
 	if state != nil {
 		promoted, reused, activeSkips := startWorkPromotionCounts(state)
 		fmt.Fprintf(os.Stdout, "[repo] Fork repo: %s\n", defaultString(state.ForkRepo, "(none)"))

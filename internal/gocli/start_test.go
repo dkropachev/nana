@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -19,25 +20,18 @@ func TestStartRunsEnabledOnboardedReposAndSkipsManual(t *testing.T) {
 	if err := writeGithubJSON(githubRepoSettingsPath("acme/manual"), githubRepoSettings{Version: 6, RepoMode: "local", IssuePickMode: "manual", PRForwardMode: "approve"}); err != nil {
 		t.Fatalf("write manual settings: %v", err)
 	}
-	if err := writeGithubJSON(startWorkStatePath("acme/enabled"), startWorkState{Version: startWorkStateVersion, SourceRepo: "acme/enabled", UpdatedAt: "now", Issues: map[string]startWorkIssueState{}}); err != nil {
-		t.Fatalf("write fork state: %v", err)
+	oldRun := startRunRepoCycle
+	type repoRun struct {
+		repoSlug string
+		options  startOptions
 	}
-
-	oldRun := startRunStartWork
-	oldPromote := startPromoteStartWork
-	runs := []startWorkOptions{}
-	promotes := []startWorkOptions{}
-	startRunStartWork = func(options startWorkOptions) error {
-		runs = append(runs, options)
-		return nil
-	}
-	startPromoteStartWork = func(options startWorkOptions) error {
-		promotes = append(promotes, options)
+	runs := []repoRun{}
+	startRunRepoCycle = func(cwd string, repoSlug string, options startOptions) error {
+		runs = append(runs, repoRun{repoSlug: repoSlug, options: options})
 		return nil
 	}
 	defer func() {
-		startRunStartWork = oldRun
-		startPromoteStartWork = oldPromote
+		startRunRepoCycle = oldRun
 	}()
 
 	output, err := captureStdout(t, func() error {
@@ -46,14 +40,11 @@ func TestStartRunsEnabledOnboardedReposAndSkipsManual(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v\n%s", err, output)
 	}
-	if len(runs) != 1 || runs[0].RepoSlug != "acme/enabled" {
+	if len(runs) != 1 || runs[0].repoSlug != "acme/enabled" {
 		t.Fatalf("expected one enabled run, got %#v", runs)
 	}
-	if runs[0].RepoMode != "fork" || runs[0].IssuePickMode != "label" || runs[0].PRForwardMode != "auto" || runs[0].ForkIssuesMode != "labeled" || runs[0].ImplementMode != "labeled" || runs[0].PublishTarget != "fork" || runs[0].Parallel != 2 || runs[0].MaxOpenPR != 7 || !reflect.DeepEqual(runs[0].CodexArgs, []string{"--model", "gpt-5.4"}) {
+	if runs[0].options.RepoSlug != "" || runs[0].options.Parallel != 2 || runs[0].options.PerRepoWorkers != startWorkDefaultParallel || runs[0].options.MaxOpenPR != 7 || !reflect.DeepEqual(runs[0].options.CodexArgs, []string{"--model", "gpt-5.4"}) {
 		t.Fatalf("unexpected run options: %#v", runs[0])
-	}
-	if len(promotes) != 1 || promotes[0].RepoSlug != "acme/enabled" {
-		t.Fatalf("expected existing fork state to promote first, got %#v", promotes)
 	}
 	if strings.Contains(output, "acme/manual") {
 		t.Fatalf("manual repo should not be selected, output=%q", output)
@@ -74,32 +65,17 @@ func TestStartRunsScoutsBetweenIssuePickupPasses(t *testing.T) {
 		t.Fatalf("write policy: %v", err)
 	}
 
-	oldRun := startRunStartWork
-	oldPromote := startPromoteStartWork
-	oldScout := startRunScoutStart
+	oldRun := startRunRepoCycle
 	events := []string{}
-	startRunStartWork = func(options startWorkOptions) error {
-		events = append(events, "work:"+options.RepoSlug)
-		if options.PublishTarget != "fork" || options.ForkIssuesMode != "auto" || options.ImplementMode != "auto" {
-			t.Fatalf("unexpected work options: %#v", options)
-		}
-		return nil
-	}
-	startPromoteStartWork = func(options startWorkOptions) error {
-		events = append(events, "promote:"+options.RepoSlug)
-		return nil
-	}
-	startRunScoutStart = func(cwd string, options ImproveOptions) error {
-		events = append(events, "scout:"+options.Target)
-		if options.Target != "acme/cycled" || strings.Join(options.Focus, ",") != "ux,perf" {
-			t.Fatalf("unexpected scout options: %#v", options)
+	startRunRepoCycle = func(cwd string, repoSlug string, options startOptions) error {
+		events = append(events, "repo:"+repoSlug)
+		if repoSlug != "acme/cycled" || options.Parallel != startDefaultGlobalParallel || options.PerRepoWorkers != startWorkDefaultParallel {
+			t.Fatalf("unexpected repo cycle options: repo=%s options=%#v", repoSlug, options)
 		}
 		return nil
 	}
 	defer func() {
-		startRunStartWork = oldRun
-		startPromoteStartWork = oldPromote
-		startRunScoutStart = oldScout
+		startRunRepoCycle = oldRun
 	}()
 
 	output, err := captureStdout(t, func() error {
@@ -108,12 +84,9 @@ func TestStartRunsScoutsBetweenIssuePickupPasses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v\n%s", err, output)
 	}
-	expected := []string{"work:acme/cycled", "scout:acme/cycled", "work:acme/cycled"}
+	expected := []string{"repo:acme/cycled"}
 	if !reflect.DeepEqual(events, expected) {
-		t.Fatalf("expected issue pickup, scouts, issue pickup; got %#v", events)
-	}
-	if !strings.Contains(output, "scouts finished; refreshing issue queue") {
-		t.Fatalf("expected scout refresh output, got %q", output)
+		t.Fatalf("expected repo cycle dispatch, got %#v", events)
 	}
 }
 
@@ -123,23 +96,14 @@ func TestStartCyclesRepeatRepoAutomationCycle(t *testing.T) {
 	if err := writeGithubJSON(githubRepoSettingsPath("acme/repeat"), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve", ForkIssuesMode: "auto", ImplementMode: "auto", PublishTarget: "repo"}); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
-	oldRun := startRunStartWork
-	oldPromote := startPromoteStartWork
-	oldScout := startRunScoutStart
+	oldRun := startRunRepoCycle
 	runCount := 0
-	startRunStartWork = func(options startWorkOptions) error {
+	startRunRepoCycle = func(cwd string, repoSlug string, options startOptions) error {
 		runCount++
 		return nil
 	}
-	startPromoteStartWork = func(options startWorkOptions) error { return nil }
-	startRunScoutStart = func(cwd string, options ImproveOptions) error {
-		t.Fatal("scouts should not run without policy files")
-		return nil
-	}
 	defer func() {
-		startRunStartWork = oldRun
-		startPromoteStartWork = oldPromote
-		startRunScoutStart = oldScout
+		startRunRepoCycle = oldRun
 	}()
 
 	output, err := captureStdout(t, func() error {
@@ -153,6 +117,66 @@ func TestStartCyclesRepeatRepoAutomationCycle(t *testing.T) {
 	}
 	if !strings.Contains(output, "Cycle 1/2") || !strings.Contains(output, "Cycle 2/2") {
 		t.Fatalf("expected cycle progress output, got %q", output)
+	}
+}
+
+func TestStartLimitsCrossRepoConcurrency(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, repoSlug := range []string{"acme/one", "acme/two", "acme/three"} {
+		if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve", ForkIssuesMode: "auto", ImplementMode: "auto", PublishTarget: "repo"}); err != nil {
+			t.Fatalf("write settings for %s: %v", repoSlug, err)
+		}
+	}
+	oldRun := startRunRepoCycle
+	gate := make(chan struct{})
+	entered := make(chan string, 3)
+	var mu sync.Mutex
+	current := 0
+	maxSeen := 0
+	startRunRepoCycle = func(cwd string, repoSlug string, options startOptions) error {
+		mu.Lock()
+		current++
+		if current > maxSeen {
+			maxSeen = current
+		}
+		mu.Unlock()
+		entered <- repoSlug
+		<-gate
+		mu.Lock()
+		current--
+		mu.Unlock()
+		return nil
+	}
+	defer func() {
+		startRunRepoCycle = oldRun
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- Start(".", []string{"--once", "--parallel", "2"})
+	}()
+
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		select {
+		case repoSlug := <-entered:
+			seen[repoSlug] = true
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for active repos")
+		}
+	}
+	select {
+	case repoSlug := <-entered:
+		t.Fatalf("expected third repo to wait for a global slot, got %s", repoSlug)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(gate)
+	if err := <-done; err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if maxSeen != 2 {
+		t.Fatalf("expected max global concurrency 2, got %d", maxSeen)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 type githubCommandResult struct {
 	LegacyArgs []string
 	Handled    bool
+	RunID      string
 }
 
 type githubWorkManifest struct {
@@ -159,10 +160,11 @@ func GithubWorkCommand(cwd string, args []string) (githubCommandResult, error) {
 		if err != nil {
 			return githubCommandResult{}, err
 		}
-		if err := startGithubWork(options); err != nil {
+		run, err := startGithubWork(options)
+		if err != nil {
 			return githubCommandResult{}, err
 		}
-		return githubCommandResult{Handled: true}, nil
+		return githubCommandResult{Handled: true, RunID: run.RunID}, nil
 	case "sync":
 		options, err := parseGithubWorkSyncArgs(args)
 		if err != nil {
@@ -250,10 +252,11 @@ func GithubIssue(cwd string, args []string) (githubCommandResult, error) {
 		if err != nil {
 			return githubCommandResult{}, err
 		}
-		if err := startGithubWork(options); err != nil {
+		run, err := startGithubWork(options)
+		if err != nil {
 			return githubCommandResult{}, err
 		}
-		return githubCommandResult{Handled: true}, nil
+		return githubCommandResult{Handled: true, RunID: run.RunID}, nil
 	case "investigate":
 		if len(rest) == 0 {
 			return githubCommandResult{}, fmt.Errorf("Usage: nana issue investigate <github-issue-url> [work start flags...]")

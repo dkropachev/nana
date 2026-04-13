@@ -25,14 +25,25 @@ Use:
 `
 
 const (
-	startWorkStateVersion      = 1
-	startWorkDefaultParallel   = 3
-	startWorkDefaultOpenPRCap  = 10
-	startWorkStatusQueued      = "queued"
-	startWorkStatusInProgress  = "in_progress"
-	startWorkStatusCopied      = "copied"
-	startWorkStatusPromoted    = "promoted"
-	startWorkStatusNotActioned = "not_actioned"
+	startWorkStateVersion         = 2
+	startWorkDefaultParallel      = 3
+	startWorkDefaultOpenPRCap     = 10
+	startWorkStatusQueued         = "queued"
+	startWorkStatusInProgress     = "in_progress"
+	startWorkStatusReconciling    = "reconciling"
+	startWorkStatusCompleted      = "completed"
+	startWorkStatusBlocked        = "blocked"
+	startWorkStatusCopied         = "copied"
+	startWorkStatusPromoted       = "promoted"
+	startWorkStatusNotActioned    = "not_actioned"
+	startWorkTriageQueued         = "queued"
+	startWorkTriageRunning        = "running"
+	startWorkTriageCompleted      = "completed"
+	startWorkTriageFailed         = "failed"
+	startWorkServiceTaskQueued    = "queued"
+	startWorkServiceTaskRunning   = "running"
+	startWorkServiceTaskCompleted = "completed"
+	startWorkServiceTaskFailed    = "failed"
 )
 
 type startWorkOptions struct {
@@ -58,6 +69,7 @@ type startWorkState struct {
 	CreatedAt      string                            `json:"created_at,omitempty"`
 	UpdatedAt      string                            `json:"updated_at"`
 	Issues         map[string]startWorkIssueState    `json:"issues"`
+	ServiceTasks   map[string]startWorkServiceTask   `json:"service_tasks,omitempty"`
 	Preferences    startWorkPreferences              `json:"preferences"`
 	LastRun        *startWorkLastRun                 `json:"last_run,omitempty"`
 	Promotions     map[string]startWorkPromotion     `json:"promotions,omitempty"`
@@ -65,17 +77,32 @@ type startWorkState struct {
 }
 
 type startWorkIssueState struct {
-	SourceNumber int      `json:"source_number"`
-	ForkNumber   int      `json:"fork_number,omitempty"`
-	SourceURL    string   `json:"source_url,omitempty"`
-	ForkURL      string   `json:"fork_url,omitempty"`
-	Title        string   `json:"title"`
-	State        string   `json:"state"`
-	Labels       []string `json:"labels,omitempty"`
-	Priority     int      `json:"priority"`
-	Complexity   int      `json:"complexity"`
-	Status       string   `json:"status"`
-	UpdatedAt    string   `json:"updated_at"`
+	SourceNumber      int      `json:"source_number"`
+	ForkNumber        int      `json:"fork_number,omitempty"`
+	SourceURL         string   `json:"source_url,omitempty"`
+	SourceBody        string   `json:"source_body,omitempty"`
+	ForkURL           string   `json:"fork_url,omitempty"`
+	Title             string   `json:"title"`
+	State             string   `json:"state"`
+	Labels            []string `json:"labels,omitempty"`
+	SourceFingerprint string   `json:"source_fingerprint,omitempty"`
+	Priority          int      `json:"priority"`
+	PrioritySource    string   `json:"priority_source,omitempty"`
+	Complexity        int      `json:"complexity"`
+	Status            string   `json:"status"`
+	TriageStatus      string   `json:"triage_status,omitempty"`
+	TriageRationale   string   `json:"triage_rationale,omitempty"`
+	TriageFingerprint string   `json:"triage_fingerprint,omitempty"`
+	TriageUpdatedAt   string   `json:"triage_updated_at,omitempty"`
+	TriageError       string   `json:"triage_error,omitempty"`
+	LastRunID         string   `json:"last_run_id,omitempty"`
+	LastRunUpdatedAt  string   `json:"last_run_updated_at,omitempty"`
+	LastRunError      string   `json:"last_run_error,omitempty"`
+	PublishedPRNumber int      `json:"published_pr_number,omitempty"`
+	PublishedPRURL    string   `json:"published_pr_url,omitempty"`
+	PublicationState  string   `json:"publication_state,omitempty"`
+	BlockedReason     string   `json:"blocked_reason,omitempty"`
+	UpdatedAt         string   `json:"updated_at"`
 }
 
 type startWorkPreferences struct {
@@ -92,12 +119,16 @@ type startWorkRepoPrefs struct {
 }
 
 type startWorkLastRun struct {
-	StartedIssueNumbers []int  `json:"started_issue_numbers,omitempty"`
-	SkippedReason       string `json:"skipped_reason,omitempty"`
-	OpenForkPRs         int    `json:"open_fork_prs"`
-	ParallelLimit       int    `json:"parallel_limit"`
-	OpenPRCap           int    `json:"open_pr_cap"`
-	UpdatedAt           string `json:"updated_at"`
+	StartedIssueNumbers        []int  `json:"started_issue_numbers,omitempty"`
+	SkippedReason              string `json:"skipped_reason,omitempty"`
+	OpenForkPRs                int    `json:"open_fork_prs"`
+	ParallelLimit              int    `json:"parallel_limit"`
+	GlobalParallelLimit        int    `json:"global_parallel_limit,omitempty"`
+	RepoWorkerLimit            int    `json:"repo_worker_limit,omitempty"`
+	OpenPRCap                  int    `json:"open_pr_cap"`
+	ServiceStartedCount        int    `json:"service_started_count,omitempty"`
+	ImplementationStartedCount int    `json:"implementation_started_count,omitempty"`
+	UpdatedAt                  string `json:"updated_at"`
 }
 
 type startWorkPromotion struct {
@@ -114,6 +145,25 @@ type startWorkPromotionSkip struct {
 	Reason       string `json:"reason"`
 	HeadRef      string `json:"head_ref,omitempty"`
 	SkippedAt    string `json:"skipped_at"`
+}
+
+type startWorkServiceTask struct {
+	ID             string   `json:"id"`
+	Kind           string   `json:"kind"`
+	Queue          string   `json:"queue"`
+	Status         string   `json:"status"`
+	IssueKey       string   `json:"issue_key,omitempty"`
+	ScoutRole      string   `json:"scout_role,omitempty"`
+	Generation     string   `json:"generation,omitempty"`
+	Fingerprint    string   `json:"fingerprint,omitempty"`
+	RunID          string   `json:"run_id,omitempty"`
+	DependencyKeys []string `json:"dependency_keys,omitempty"`
+	Attempts       int      `json:"attempts,omitempty"`
+	LastError      string   `json:"last_error,omitempty"`
+	ResultSummary  string   `json:"result_summary,omitempty"`
+	StartedAt      string   `json:"started_at,omitempty"`
+	CompletedAt    string   `json:"completed_at,omitempty"`
+	UpdatedAt      string   `json:"updated_at,omitempty"`
 }
 
 type startWorkIssuePayload struct {
@@ -147,7 +197,11 @@ type startWorkPullPayload struct {
 	} `json:"base"`
 }
 
-var startWorkRunGithubWork = func(issueURL string, publishTarget string, codexArgs []string) error {
+type startWorkLaunchResult struct {
+	RunID string
+}
+
+var startWorkRunGithubWork = func(issueURL string, publishTarget string, codexArgs []string) (startWorkLaunchResult, error) {
 	args := []string{"start", issueURL}
 	if publishTarget == "local-branch" {
 		args = append(args, "--local-only")
@@ -158,8 +212,8 @@ var startWorkRunGithubWork = func(issueURL string, publishTarget string, codexAr
 		args = append(args, "--")
 		args = append(args, codexArgs...)
 	}
-	_, err := GithubWorkCommand("", args)
-	return err
+	result, err := GithubWorkCommand("", args)
+	return startWorkLaunchResult{RunID: result.RunID}, err
 }
 
 func StartWork(cwd string, args []string) error {
@@ -417,30 +471,69 @@ func requireStartWorkFlagValue(args []string, index int, flag string) (string, e
 }
 
 func startWorkStart(options startWorkOptions) error {
+	options, state, openPRCount, created, err := startWorkSyncRepoState(options)
+	if err != nil {
+		return err
+	}
+	started, skippedReason, err := startStartWorkQueue(state, options, openPRCount)
+	if err != nil {
+		return err
+	}
+	state.LastRun = &startWorkLastRun{
+		StartedIssueNumbers:        started,
+		SkippedReason:              skippedReason,
+		OpenForkPRs:                openPRCount,
+		ParallelLimit:              options.Parallel,
+		RepoWorkerLimit:            options.Parallel,
+		OpenPRCap:                  options.MaxOpenPR,
+		ImplementationStartedCount: len(started),
+		UpdatedAt:                  time.Now().UTC().Format(time.RFC3339),
+	}
+	state.UpdatedAt = state.LastRun.UpdatedAt
+	if err := writeStartWorkState(*state); err != nil {
+		return err
+	}
+
+	if created {
+		fmt.Fprintf(os.Stdout, "[start] Created fork %s for %s.\n", state.ForkRepo, options.RepoSlug)
+	} else {
+		fmt.Fprintf(os.Stdout, "[start] Using fork %s for %s.\n", state.ForkRepo, options.RepoSlug)
+	}
+	fmt.Fprintf(os.Stdout, "[start] Mirrored issues: %d. Open fork PRs: %d/%d.\n", len(state.Issues), openPRCount, options.MaxOpenPR)
+	if skippedReason != "" {
+		fmt.Fprintf(os.Stdout, "[start] Queue start skipped: %s.\n", skippedReason)
+	} else {
+		fmt.Fprintf(os.Stdout, "[start] Started fork issue workers: %s.\n", joinIntsOrNone(started))
+	}
+	fmt.Fprintf(os.Stdout, "[start] State: %s\n", startWorkStatePath(options.RepoSlug))
+	return nil
+}
+
+func startWorkSyncRepoState(options startWorkOptions) (startWorkOptions, *startWorkState, int, bool, error) {
 	apiBaseURL := defaultGithubAPIBaseURL()
 	token, err := resolveGithubToken()
 	if err != nil {
-		return err
+		return options, nil, 0, false, err
 	}
 	viewer, err := githubCurrentViewer(apiBaseURL, token)
 	if err != nil {
-		return err
+		return options, nil, 0, false, err
 	}
 	sourceRepo, err := startWorkFetchRepo(options.RepoSlug, apiBaseURL, token)
 	if err != nil {
-		return err
+		return options, nil, 0, false, err
 	}
 	forkRepo, created, err := ensureGithubFork(options.RepoSlug, sourceRepo.Name, viewer, apiBaseURL, token)
 	if err != nil {
-		return err
+		return options, nil, 0, false, err
 	}
 	if err := ensureStartWorkForkReady(forkRepo.FullName, apiBaseURL, token); err != nil {
-		return err
+		return options, nil, 0, false, err
 	}
 
 	state, err := readStartWorkState(options.RepoSlug)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		return options, nil, 0, false, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	if state == nil {
@@ -454,6 +547,9 @@ func startWorkStart(options startWorkOptions) error {
 	state.UpdatedAt = now
 	if state.Issues == nil {
 		state.Issues = map[string]startWorkIssueState{}
+	}
+	if state.ServiceTasks == nil {
+		state.ServiceTasks = map[string]startWorkServiceTask{}
 	}
 	if state.Promotions == nil {
 		state.Promotions = map[string]startWorkPromotion{}
@@ -475,37 +571,15 @@ func startWorkStart(options startWorkOptions) error {
 	options.PublishTarget = defaultString(normalizeGithubPublishTarget(options.PublishTarget), repoModeToPublishTarget(options.RepoMode))
 
 	if err := mirrorStartWorkIssues(state, forkRepo.FullName, options.ForkIssuesMode, apiBaseURL, token); err != nil {
-		return err
+		return options, nil, 0, false, err
 	}
 	refreshStartWorkPreferences(state)
 
 	openPRs, err := listStartWorkPulls(forkRepo.FullName, "open", apiBaseURL, token)
 	if err != nil {
-		return err
+		return options, nil, 0, false, err
 	}
-	started, skippedReason, err := startStartWorkQueue(state, options, len(openPRs))
-	if err != nil {
-		return err
-	}
-	state.LastRun = &startWorkLastRun{StartedIssueNumbers: started, SkippedReason: skippedReason, OpenForkPRs: len(openPRs), ParallelLimit: options.Parallel, OpenPRCap: options.MaxOpenPR, UpdatedAt: time.Now().UTC().Format(time.RFC3339)}
-	state.UpdatedAt = state.LastRun.UpdatedAt
-	if err := writeStartWorkState(*state); err != nil {
-		return err
-	}
-
-	if created {
-		fmt.Fprintf(os.Stdout, "[start] Created fork %s for %s.\n", forkRepo.FullName, options.RepoSlug)
-	} else {
-		fmt.Fprintf(os.Stdout, "[start] Using fork %s for %s.\n", forkRepo.FullName, options.RepoSlug)
-	}
-	fmt.Fprintf(os.Stdout, "[start] Mirrored issues: %d. Open fork PRs: %d/%d.\n", len(state.Issues), len(openPRs), options.MaxOpenPR)
-	if skippedReason != "" {
-		fmt.Fprintf(os.Stdout, "[start] Queue start skipped: %s.\n", skippedReason)
-	} else {
-		fmt.Fprintf(os.Stdout, "[start] Started fork issue workers: %s.\n", joinIntsOrNone(started))
-	}
-	fmt.Fprintf(os.Stdout, "[start] State: %s\n", startWorkStatePath(options.RepoSlug))
-	return nil
+	return options, state, len(openPRs), created, nil
 }
 
 func mirrorStartWorkIssues(state *startWorkState, forkRepo string, forkIssuesMode string, apiBaseURL string, token string) error {
@@ -527,7 +601,8 @@ func mirrorStartWorkIssues(state *startWorkState, forkRepo string, forkIssuesMod
 			continue
 		}
 		existing := state.Issues[key]
-		priority := startWorkPriority(labels)
+		sourceFingerprint := startWorkIssueFingerprint(issue, labels)
+		priority, prioritySource, triageStatus, triageRationale, triageFingerprint, triageUpdatedAt, triageError := startWorkResolvePriority(existing, issue, labels, sourceFingerprint)
 		complexity := startWorkComplexity(labels)
 		status := existing.Status
 		if status == "" {
@@ -536,7 +611,27 @@ func mirrorStartWorkIssues(state *startWorkState, forkRepo string, forkIssuesMod
 		if issue.State != "open" && (status == startWorkStatusQueued || status == startWorkStatusCopied) {
 			status = startWorkStatusNotActioned
 		}
-		updated := startWorkIssueState{SourceNumber: issue.Number, ForkNumber: existing.ForkNumber, SourceURL: issue.HTMLURL, ForkURL: existing.ForkURL, Title: issue.Title, State: issue.State, Labels: labels, Priority: priority, Complexity: complexity, Status: status, UpdatedAt: time.Now().UTC().Format(time.RFC3339)}
+		updated := startWorkIssueState{
+			SourceNumber:      issue.Number,
+			ForkNumber:        existing.ForkNumber,
+			SourceURL:         issue.HTMLURL,
+			SourceBody:        issue.Body,
+			ForkURL:           existing.ForkURL,
+			Title:             issue.Title,
+			State:             issue.State,
+			Labels:            labels,
+			SourceFingerprint: sourceFingerprint,
+			Priority:          priority,
+			PrioritySource:    prioritySource,
+			Complexity:        complexity,
+			Status:            status,
+			TriageStatus:      triageStatus,
+			TriageRationale:   triageRationale,
+			TriageFingerprint: triageFingerprint,
+			TriageUpdatedAt:   triageUpdatedAt,
+			TriageError:       triageError,
+			UpdatedAt:         time.Now().UTC().Format(time.RFC3339),
+		}
 		if updated.ForkNumber == 0 {
 			created, err := createStartWorkIssue(forkRepo, issue, labels, apiBaseURL, token)
 			if err != nil {
@@ -557,39 +652,15 @@ func mirrorStartWorkIssues(state *startWorkState, forkRepo string, forkIssuesMod
 }
 
 func startStartWorkQueue(state *startWorkState, options startWorkOptions, openForkPRs int) ([]int, string, error) {
-	if options.ImplementMode == "manual" {
-		return nil, "issue-pick mode is manual", nil
+	queue, skippedReason := startWorkBuildImplementationQueue(state, options, openForkPRs)
+	inProgress := startWorkImplementationInProgress(state)
+	if skippedReason != "" {
+		return nil, skippedReason, nil
 	}
-	if openForkPRs >= options.MaxOpenPR {
-		return nil, fmt.Sprintf("open fork PR cap reached (%d/%d)", openForkPRs, options.MaxOpenPR), nil
-	}
-	inProgress := 0
-	queue := []startWorkIssueState{}
-	for _, issue := range state.Issues {
-		if issue.Status == startWorkStatusInProgress {
-			inProgress++
-			continue
-		}
-		if issue.Status == startWorkStatusQueued && issue.State == "open" && issue.ForkNumber > 0 && startWorkAutomationAllowsIssue(options.ImplementMode, issue.Labels, "implement") {
-			queue = append(queue, issue)
-		}
-	}
-	available := min(options.Parallel-inProgress, options.MaxOpenPR-openForkPRs)
+	available := options.Parallel - inProgress
 	if available <= 0 {
-		return nil, fmt.Sprintf("parallel or open PR capacity exhausted (in_progress=%d, open_prs=%d)", inProgress, openForkPRs), nil
+		return nil, fmt.Sprintf("repo worker capacity exhausted (in_progress=%d)", inProgress), nil
 	}
-	if len(queue) == 0 {
-		return nil, "no queued fork issues", nil
-	}
-	slices.SortFunc(queue, func(a, b startWorkIssueState) int {
-		if a.Priority != b.Priority {
-			return a.Priority - b.Priority
-		}
-		if a.Complexity != b.Complexity {
-			return a.Complexity - b.Complexity
-		}
-		return a.SourceNumber - b.SourceNumber
-	})
 	if available > len(queue) {
 		available = len(queue)
 	}
@@ -610,7 +681,7 @@ func startStartWorkQueue(state *startWorkState, options startWorkOptions, openFo
 			if options.PublishTarget == "fork" {
 				issueURL = issue.ForkURL
 			}
-			if err := startWorkRunGithubWork(issueURL, options.PublishTarget, options.CodexArgs); err != nil {
+			if _, err := startWorkRunGithubWork(issueURL, options.PublishTarget, options.CodexArgs); err != nil {
 				errs <- fmt.Errorf("source issue #%d fork issue #%d: %w", issue.SourceNumber, issue.ForkNumber, err)
 			}
 		}(issue)
@@ -757,16 +828,76 @@ func startWorkStatus(options startWorkOptions) error {
 		return json.NewEncoder(os.Stdout).Encode(state)
 	}
 	counts := map[string]int{}
+	triageCounts := map[string]int{}
+	serviceTaskCounts := map[string]int{}
+	serviceTaskByKind := map[string]map[string]int{}
+	blockedReasons := map[string]int{}
 	for _, issue := range state.Issues {
 		counts[issue.Status]++
+		triageCounts[issue.TriageStatus]++
+		if issue.Status == startWorkStatusBlocked {
+			blockedReasons[defaultString(strings.TrimSpace(issue.BlockedReason), "(unspecified)")]++
+		}
+	}
+	for _, task := range state.ServiceTasks {
+		serviceTaskCounts[task.Status]++
+		if serviceTaskByKind[task.Kind] == nil {
+			serviceTaskByKind[task.Kind] = map[string]int{}
+		}
+		serviceTaskByKind[task.Kind][task.Status]++
 	}
 	fmt.Fprintf(os.Stdout, "[start] Source: %s\n", state.SourceRepo)
 	fmt.Fprintf(os.Stdout, "[start] Fork: %s\n", state.ForkRepo)
-	fmt.Fprintf(os.Stdout, "[start] Issues: queued=%d in_progress=%d promoted=%d not_actioned=%d total=%d\n", counts[startWorkStatusQueued], counts[startWorkStatusInProgress], counts[startWorkStatusPromoted], counts[startWorkStatusNotActioned], len(state.Issues))
+	fmt.Fprintf(
+		os.Stdout,
+		"[start] Issues: queued=%d in_progress=%d reconciling=%d completed=%d blocked=%d promoted=%d not_actioned=%d total=%d\n",
+		counts[startWorkStatusQueued],
+		counts[startWorkStatusInProgress],
+		counts[startWorkStatusReconciling],
+		counts[startWorkStatusCompleted],
+		counts[startWorkStatusBlocked],
+		counts[startWorkStatusPromoted],
+		counts[startWorkStatusNotActioned],
+		len(state.Issues),
+	)
+	fmt.Fprintf(os.Stdout, "[start] Triage: queued=%d running=%d completed=%d failed=%d\n", triageCounts[startWorkTriageQueued], triageCounts[startWorkTriageRunning], triageCounts[startWorkTriageCompleted], triageCounts[startWorkTriageFailed])
+	fmt.Fprintf(os.Stdout, "[start] Service tasks: queued=%d running=%d completed=%d failed=%d\n", serviceTaskCounts[startWorkServiceTaskQueued], serviceTaskCounts[startWorkServiceTaskRunning], serviceTaskCounts[startWorkServiceTaskCompleted], serviceTaskCounts[startWorkServiceTaskFailed])
+	if len(serviceTaskByKind) > 0 {
+		kinds := make([]string, 0, len(serviceTaskByKind))
+		for kind := range serviceTaskByKind {
+			kinds = append(kinds, kind)
+		}
+		slices.Sort(kinds)
+		parts := make([]string, 0, len(kinds))
+		for _, kind := range kinds {
+			countByStatus := serviceTaskByKind[kind]
+			parts = append(parts, fmt.Sprintf("%s(q=%d r=%d c=%d f=%d)", kind, countByStatus[startWorkServiceTaskQueued], countByStatus[startWorkServiceTaskRunning], countByStatus[startWorkServiceTaskCompleted], countByStatus[startWorkServiceTaskFailed]))
+		}
+		fmt.Fprintf(os.Stdout, "[start] Service task detail: %s\n", strings.Join(parts, " "))
+	}
+	if len(blockedReasons) > 0 {
+		reasons := make([]string, 0, len(blockedReasons))
+		for reason, count := range blockedReasons {
+			reasons = append(reasons, fmt.Sprintf("%s (%d)", reason, count))
+		}
+		slices.Sort(reasons)
+		fmt.Fprintf(os.Stdout, "[start] Blocked reasons: %s\n", strings.Join(reasons, "; "))
+	}
 	promoted, reused, activeSkips := startWorkPromotionCounts(state)
 	fmt.Fprintf(os.Stdout, "[start] Forwarding: promoted=%d reused=%d active_skips=%d\n", promoted, reused, activeSkips)
 	if state.LastRun != nil {
-		fmt.Fprintf(os.Stdout, "[start] Last run: started=%s open_prs=%d/%d skipped=%s\n", joinIntsOrNone(state.LastRun.StartedIssueNumbers), state.LastRun.OpenForkPRs, state.LastRun.OpenPRCap, defaultString(state.LastRun.SkippedReason, "(none)"))
+		fmt.Fprintf(
+			os.Stdout,
+			"[start] Last run: started=%s service_started=%d implementation_started=%d open_prs=%d/%d global_parallel=%d repo_workers=%d skipped=%s\n",
+			joinIntsOrNone(state.LastRun.StartedIssueNumbers),
+			state.LastRun.ServiceStartedCount,
+			state.LastRun.ImplementationStartedCount,
+			state.LastRun.OpenForkPRs,
+			state.LastRun.OpenPRCap,
+			state.LastRun.GlobalParallelLimit,
+			defaultInt(state.LastRun.RepoWorkerLimit, state.LastRun.ParallelLimit),
+			defaultString(state.LastRun.SkippedReason, "(none)"),
+		)
 	}
 	if len(state.PromotionSkips) > 0 {
 		reasons := []string{}
@@ -950,18 +1081,77 @@ func startWorkIssueLabelNames(labels []githubLabel) []string {
 	return uniqueStrings(out)
 }
 
-func startWorkPriority(labels []string) int {
-	priority := 5
+func startWorkIssueFingerprint(issue startWorkIssuePayload, labels []string) string {
+	return sha256Hex(strings.Join([]string{
+		strconv.Itoa(issue.Number),
+		strings.TrimSpace(issue.Title),
+		strings.TrimSpace(issue.Body),
+		strings.TrimSpace(issue.State),
+		strings.Join(labels, ","),
+	}, "\n"))
+}
+
+func startWorkResolvePriority(existing startWorkIssueState, issue startWorkIssuePayload, labels []string, sourceFingerprint string) (int, string, string, string, string, string, string) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if priority, ok := startWorkManualPriority(labels); ok {
+		label := startWorkPriorityLabel(priority)
+		return priority, "manual_label", startWorkTriageCompleted, "manual priority label " + label, sourceFingerprint, now, ""
+	}
+	priority := existing.Priority
+	if priority <= 0 || priority > 5 {
+		priority = 5
+	}
+	prioritySource := existing.PrioritySource
+	triageStatus := existing.TriageStatus
+	triageRationale := existing.TriageRationale
+	triageFingerprint := existing.TriageFingerprint
+	triageUpdatedAt := existing.TriageUpdatedAt
+	triageError := existing.TriageError
+	if triageStatus == startWorkTriageRunning {
+		triageStatus = startWorkTriageQueued
+	}
+	if strings.TrimSpace(triageFingerprint) != sourceFingerprint {
+		triageStatus = startWorkTriageQueued
+		triageError = ""
+		if prioritySource == "" {
+			prioritySource = "triage"
+		}
+	}
+	if strings.TrimSpace(triageStatus) == "" {
+		triageStatus = startWorkTriageQueued
+	}
+	return priority, prioritySource, triageStatus, triageRationale, triageFingerprint, triageUpdatedAt, triageError
+}
+
+func startWorkManualPriority(labels []string) (int, bool) {
+	best := 6
 	for _, label := range labels {
 		upper := strings.ToUpper(strings.TrimSpace(label))
-		if len(upper) == 2 && upper[0] == 'P' && upper[1] >= '1' && upper[1] <= '5' {
+		if len(upper) == 2 && upper[0] == 'P' && upper[1] >= '0' && upper[1] <= '5' {
 			parsed := int(upper[1] - '0')
-			if parsed < priority {
-				priority = parsed
+			if parsed < best {
+				best = parsed
 			}
 		}
 	}
-	return priority
+	if best == 6 {
+		return 0, false
+	}
+	return best, true
+}
+
+func startWorkPriorityLabel(priority int) string {
+	if priority < 0 || priority > 5 {
+		return "P5"
+	}
+	return fmt.Sprintf("P%d", priority)
+}
+
+func startWorkPriority(labels []string) int {
+	if priority, ok := startWorkManualPriority(labels); ok && priority > 0 {
+		return priority
+	}
+	return 5
 }
 
 func startWorkComplexity(labels []string) int {
@@ -982,6 +1172,73 @@ func startWorkComplexity(labels []string) int {
 		}
 	}
 	return complexity
+}
+
+func startWorkImplementationInProgress(state *startWorkState) int {
+	if state == nil {
+		return 0
+	}
+	count := 0
+	for _, issue := range state.Issues {
+		if issue.Status == startWorkStatusInProgress {
+			count++
+		}
+	}
+	return count
+}
+
+func startWorkIssueReadyForImplementation(issue startWorkIssueState, options startWorkOptions) bool {
+	if issue.Status != startWorkStatusQueued || issue.State != "open" || issue.ForkNumber <= 0 {
+		return false
+	}
+	if !startWorkAutomationAllowsIssue(options.ImplementMode, issue.Labels, "implement") {
+		return false
+	}
+	if !startWorkIssueHasFreshPriority(issue) {
+		return false
+	}
+	return true
+}
+
+func startWorkIssueHasFreshPriority(issue startWorkIssueState) bool {
+	if strings.TrimSpace(issue.PrioritySource) == "manual_label" {
+		return true
+	}
+	if issue.TriageStatus != startWorkTriageCompleted {
+		return false
+	}
+	if strings.TrimSpace(issue.SourceFingerprint) == "" {
+		return false
+	}
+	return strings.TrimSpace(issue.TriageFingerprint) == strings.TrimSpace(issue.SourceFingerprint)
+}
+
+func startWorkBuildImplementationQueue(state *startWorkState, options startWorkOptions, openForkPRs int) ([]startWorkIssueState, string) {
+	if options.ImplementMode == "manual" {
+		return nil, "issue-pick mode is manual"
+	}
+	if openForkPRs >= options.MaxOpenPR {
+		return nil, fmt.Sprintf("open fork PR cap reached (%d/%d)", openForkPRs, options.MaxOpenPR)
+	}
+	queue := []startWorkIssueState{}
+	for _, issue := range state.Issues {
+		if startWorkIssueReadyForImplementation(issue, options) {
+			queue = append(queue, issue)
+		}
+	}
+	if len(queue) == 0 {
+		return nil, "no queued fork issues"
+	}
+	slices.SortFunc(queue, func(a, b startWorkIssueState) int {
+		if a.Priority != b.Priority {
+			return a.Priority - b.Priority
+		}
+		if a.Complexity != b.Complexity {
+			return a.Complexity - b.Complexity
+		}
+		return a.SourceNumber - b.SourceNumber
+	})
+	return queue, ""
 }
 
 func refreshStartWorkPreferences(state *startWorkState) {
@@ -1046,11 +1303,48 @@ func readStartWorkState(repoSlug string) (*startWorkState, error) {
 	if state.Issues == nil {
 		state.Issues = map[string]startWorkIssueState{}
 	}
+	if state.ServiceTasks == nil {
+		state.ServiceTasks = map[string]startWorkServiceTask{}
+	}
 	if state.Promotions == nil {
 		state.Promotions = map[string]startWorkPromotion{}
 	}
 	if state.PromotionSkips == nil {
 		state.PromotionSkips = map[string]startWorkPromotionSkip{}
+	}
+	if state.Version < startWorkStateVersion {
+		state.Version = startWorkStateVersion
+	}
+	for key, task := range state.ServiceTasks {
+		if task.Status == startWorkServiceTaskRunning {
+			task.Status = startWorkServiceTaskQueued
+			task.StartedAt = ""
+			state.ServiceTasks[key] = task
+		}
+	}
+	for key, issue := range state.Issues {
+		if issue.Priority < 0 || issue.Priority > 5 {
+			issue.Priority = 5
+		}
+		if issue.TriageStatus == startWorkTriageRunning {
+			issue.TriageStatus = startWorkTriageQueued
+		}
+		if issue.PrioritySource == "" {
+			if priority, ok := startWorkManualPriority(issue.Labels); ok {
+				issue.Priority = priority
+				issue.PrioritySource = "manual_label"
+				issue.TriageStatus = startWorkTriageCompleted
+			} else if issue.TriageStatus == "" {
+				issue.TriageStatus = startWorkTriageQueued
+			}
+		}
+		if issue.Status == "" {
+			issue.Status = startWorkStatusQueued
+		}
+		if issue.Status == startWorkStatusInProgress && strings.TrimSpace(issue.LastRunID) == "" && strings.TrimSpace(issue.LastRunError) != "" {
+			issue.Status = startWorkStatusReconciling
+		}
+		state.Issues[key] = issue
 	}
 	return &state, nil
 }
@@ -1090,4 +1384,11 @@ func joinIntsOrNone(values []int) string {
 		parts = append(parts, strconv.Itoa(value))
 	}
 	return strings.Join(parts, ", ")
+}
+
+func defaultInt(value int, fallback int) int {
+	if value != 0 {
+		return value
+	}
+	return fallback
 }
