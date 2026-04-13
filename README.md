@@ -103,6 +103,12 @@ To have NANA start Codex by issuing the Codex `/fast` slash command first, use:
 nana --fast
 ```
 
+NANA's generated Codex config defaults to extra-high reasoning. Control the user-level default used by future `nana setup` runs with:
+
+```bash
+nana reasoning xhigh
+```
+
 Then try the canonical workflow:
 
 ```text

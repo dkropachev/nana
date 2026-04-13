@@ -12,7 +12,13 @@ var reasoningModes = map[string]bool{
 }
 
 const ReasoningKey = "model_reasoning_effort"
-const ReasoningUsage = "Usage: nana reasoning <low|medium|high|xhigh>"
+const ReasoningUsage = "Usage: nana reasoning [low|medium|high|xhigh]\nSets the current Codex config and NANA user-level default used by future `nana setup` runs."
+
+type nanaUserConfig struct {
+	Version                int    `json:"version"`
+	DefaultReasoningEffort string `json:"default_reasoning_effort,omitempty"`
+	UpdatedAt              string `json:"updated_at,omitempty"`
+}
 
 func Status(cwd string) error {
 	refs, err := ListModeStateFilesWithScopePreference(cwd)
@@ -141,17 +147,21 @@ func Cancel(cwd string) error {
 func Reasoning(args []string) error {
 	configPath := CodexConfigPath()
 	if len(args) == 0 {
+		defaultMode := defaultNanaReasoningMode()
 		content, err := os.ReadFile(configPath)
 		if err != nil {
 			fmt.Fprintf(os.Stdout, "%s is not set (%s does not exist).\n", ReasoningKey, configPath)
+			fmt.Fprintf(os.Stdout, "NANA default %s: %s\n", ReasoningKey, defaultMode)
 			fmt.Fprintln(os.Stdout, ReasoningUsage)
 			return nil
 		}
 		if current := ReadTopLevelTomlString(string(content), ReasoningKey); current != "" {
 			fmt.Fprintf(os.Stdout, "Current %s: %s\n", ReasoningKey, current)
+			fmt.Fprintf(os.Stdout, "NANA default %s: %s\n", ReasoningKey, defaultMode)
 			return nil
 		}
 		fmt.Fprintf(os.Stdout, "%s is not set in %s.\n", ReasoningKey, configPath)
+		fmt.Fprintf(os.Stdout, "NANA default %s: %s\n", ReasoningKey, defaultMode)
 		fmt.Fprintln(os.Stdout, ReasoningUsage)
 		return nil
 	}
@@ -172,6 +182,41 @@ func Reasoning(args []string) error {
 	if err := os.WriteFile(configPath, []byte(updated), 0o644); err != nil {
 		return err
 	}
+	if err := writeNanaReasoningDefault(mode); err != nil {
+		return err
+	}
 	fmt.Fprintf(os.Stdout, "Set %s=%q in %s\n", ReasoningKey, mode, configPath)
+	fmt.Fprintf(os.Stdout, "Set NANA default %s=%q in %s\n", ReasoningKey, mode, nanaUserConfigPath())
 	return nil
+}
+
+func defaultNanaReasoningMode() string {
+	config, err := readNanaUserConfig()
+	if err == nil && reasoningModes[config.DefaultReasoningEffort] {
+		return config.DefaultReasoningEffort
+	}
+	return "xhigh"
+}
+
+func writeNanaReasoningDefault(mode string) error {
+	config, _ := readNanaUserConfig()
+	config.Version = 1
+	config.DefaultReasoningEffort = mode
+	config.UpdatedAt = ISOTimeNow()
+	return writeGithubJSON(nanaUserConfigPath(), config)
+}
+
+func readNanaUserConfig() (nanaUserConfig, error) {
+	var config nanaUserConfig
+	if err := readGithubJSON(nanaUserConfigPath(), &config); err != nil {
+		return nanaUserConfig{Version: 1}, err
+	}
+	if config.Version == 0 {
+		config.Version = 1
+	}
+	return config, nil
+}
+
+func nanaUserConfigPath() string {
+	return filepath.Join(githubNanaHome(), "config.json")
 }

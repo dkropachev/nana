@@ -86,12 +86,22 @@ func TestReasoning(t *testing.T) {
 	if !strings.Contains(string(content), `model_reasoning_effort = "high"`) {
 		t.Fatalf("unexpected config: %s", content)
 	}
+	var userConfig nanaUserConfig
+	if err := readGithubJSON(filepath.Join(home, ".nana", "config.json"), &userConfig); err != nil {
+		t.Fatalf("read nana config: %v", err)
+	}
+	if userConfig.DefaultReasoningEffort != "high" {
+		t.Fatalf("unexpected nana default: %#v", userConfig)
+	}
 	output, err := captureStdout(t, func() error { return Reasoning(nil) })
 	if err != nil {
 		t.Fatalf("Reasoning(read): %v", err)
 	}
 	if !strings.Contains(output, "Current model_reasoning_effort: high") {
 		t.Fatalf("unexpected reasoning output: %q", output)
+	}
+	if !strings.Contains(output, "NANA default model_reasoning_effort: high") {
+		t.Fatalf("missing nana default in output: %q", output)
 	}
 }
 

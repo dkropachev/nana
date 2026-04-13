@@ -342,6 +342,8 @@ func ensureNanaDirectories(cwd string, options SetupOptions) error {
 
 func writeSetupConfig(configPath string, options SetupOptions) error {
 	content := strings.Join([]string{
+		fmt.Sprintf(`model_reasoning_effort = "%s"`, defaultNanaReasoningMode()),
+		"",
 		"[agents]",
 		"max_threads = 6",
 		"max_depth = 2",

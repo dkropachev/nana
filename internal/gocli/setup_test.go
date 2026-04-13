@@ -69,6 +69,9 @@ func TestSetupProjectWritesLocalAssets(t *testing.T) {
 		t.Fatalf("write template: %v", err)
 	}
 
+	if _, err := captureStdout(t, func() error { return Reasoning([]string{"high"}) }); err != nil {
+		t.Fatalf("Reasoning(): %v", err)
+	}
 	if _, err := captureStdout(t, func() error { return Setup(repoRoot, cwd, []string{"--scope", "project"}) }); err != nil {
 		t.Fatalf("Setup(): %v", err)
 	}
@@ -94,7 +97,7 @@ func TestSetupProjectWritesLocalAssets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read config: %v", err)
 	}
-	if !strings.Contains(string(config), "[agents]") || !strings.Contains(string(config), `USE_NANA_EXPLORE_CMD = "1"`) {
+	if !strings.Contains(string(config), `model_reasoning_effort = "high"`) || !strings.Contains(string(config), "[agents]") || !strings.Contains(string(config), `USE_NANA_EXPLORE_CMD = "1"`) {
 		t.Fatalf("unexpected config content: %q", string(config))
 	}
 	agentsMd, err := os.ReadFile(filepath.Join(cwd, "AGENTS.md"))
