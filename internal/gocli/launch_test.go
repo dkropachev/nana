@@ -66,6 +66,16 @@ func TestNormalizeCodexLaunchArgs(t *testing.T) {
 			want: []string{ConfigFlag, `model_reasoning_effort="high"`},
 		},
 		{
+			name: "effort flag becomes config",
+			args: []string{"--effort", "xhigh"},
+			want: []string{ConfigFlag, `model_reasoning_effort="xhigh"`},
+		},
+		{
+			name: "effort equals becomes config",
+			args: []string{"--effort=low"},
+			want: []string{ConfigFlag, `model_reasoning_effort="low"`},
+		},
+		{
 			name: "xhigh madmax composes",
 			args: []string{XHighReasoningFlag, MadmaxFlag},
 			want: []string{CodexBypassFlag, ConfigFlag, `model_reasoning_effort="xhigh"`},

@@ -106,8 +106,10 @@ nana --fast
 NANA's generated Codex config defaults to extra-high reasoning. Control the user-level default used by future `nana setup` runs with:
 
 ```bash
-nana reasoning xhigh
+nana config set --effort xhigh
 ```
+
+Use a one-off Codex effort for a launch with `--effort`, for example `nana --effort xhigh` or `nana exec --effort high "..."`.
 
 Then try the canonical workflow:
 

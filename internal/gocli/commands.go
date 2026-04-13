@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 var reasoningModes = map[string]bool{
@@ -13,6 +14,10 @@ var reasoningModes = map[string]bool{
 
 const ReasoningKey = "model_reasoning_effort"
 const ReasoningUsage = "Usage: nana reasoning [low|medium|high|xhigh]\nSets the current Codex config and NANA user-level default used by future `nana setup` runs."
+const ConfigUsage = `Usage:
+  nana config show
+  nana config set --effort <low|medium|high|xhigh>
+  nana config --effort <low|medium|high|xhigh>`
 
 type nanaUserConfig struct {
 	Version                int    `json:"version"`
@@ -166,9 +171,9 @@ func Reasoning(args []string) error {
 		return nil
 	}
 
-	mode := args[0]
-	if !reasoningModes[mode] {
-		return fmt.Errorf("invalid reasoning mode %q. expected one of: low, medium, high, xhigh.\n%s", mode, ReasoningUsage)
+	mode, err := parseReasoningModeArg(args, ReasoningUsage)
+	if err != nil {
+		return err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
@@ -188,6 +193,66 @@ func Reasoning(args []string) error {
 	fmt.Fprintf(os.Stdout, "Set %s=%q in %s\n", ReasoningKey, mode, configPath)
 	fmt.Fprintf(os.Stdout, "Set NANA default %s=%q in %s\n", ReasoningKey, mode, nanaUserConfigPath())
 	return nil
+}
+
+func Config(args []string) error {
+	if len(args) == 0 || args[0] == "show" {
+		config, _ := readNanaUserConfig()
+		fmt.Fprintf(os.Stdout, "NANA config: %s\n", nanaUserConfigPath())
+		fmt.Fprintf(os.Stdout, "default %s: %s\n", ReasoningKey, defaultString(config.DefaultReasoningEffort, defaultNanaReasoningMode()))
+		return nil
+	}
+	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		fmt.Fprintln(os.Stdout, ConfigUsage)
+		return nil
+	}
+	setArgs := args
+	if args[0] == "set" {
+		setArgs = args[1:]
+	}
+	mode, err := parseReasoningModeArg(setArgs, ConfigUsage)
+	if err != nil {
+		return err
+	}
+	if err := writeNanaReasoningDefault(mode); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "Set NANA default %s=%q in %s\n", ReasoningKey, mode, nanaUserConfigPath())
+	return nil
+}
+
+func parseReasoningModeArg(args []string, usage string) (string, error) {
+	if len(args) == 0 {
+		return "", fmt.Errorf("missing effort value\n%s", usage)
+	}
+	if len(args) == 1 && reasoningModes[args[0]] {
+		return args[0], nil
+	}
+	for index := 0; index < len(args); index++ {
+		token := args[index]
+		switch {
+		case token == "--effort":
+			if index+1 >= len(args) {
+				return "", fmt.Errorf("missing value after --effort\n%s", usage)
+			}
+			mode := strings.TrimSpace(args[index+1])
+			if !reasoningModes[mode] {
+				return "", fmt.Errorf("invalid effort %q. expected one of: low, medium, high, xhigh.\n%s", mode, usage)
+			}
+			return mode, nil
+		case strings.HasPrefix(token, "--effort="):
+			mode := strings.TrimSpace(strings.TrimPrefix(token, "--effort="))
+			if !reasoningModes[mode] {
+				return "", fmt.Errorf("invalid effort %q. expected one of: low, medium, high, xhigh.\n%s", mode, usage)
+			}
+			return mode, nil
+		default:
+			if reasoningModes[token] {
+				return token, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("invalid reasoning arguments %q\n%s", strings.Join(args, " "), usage)
 }
 
 func defaultNanaReasoningMode() string {

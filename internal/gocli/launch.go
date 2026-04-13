@@ -146,6 +146,20 @@ func NormalizeCodexLaunchArgsWithFast(args []string) ([]string, bool) {
 			}
 		case arg == CodexFastFlag:
 			fastMode = true
+		case arg == "--effort":
+			if index+1 < len(args) && reasoningModes[strings.TrimSpace(args[index+1])] {
+				reasoningMode = strings.TrimSpace(args[index+1])
+				index++
+			} else {
+				normalized = append(normalized, arg)
+			}
+		case strings.HasPrefix(arg, "--effort="):
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--effort="))
+			if reasoningModes[value] {
+				reasoningMode = value
+			} else {
+				normalized = append(normalized, arg)
+			}
 		case arg == HighReasoningFlag:
 			reasoningMode = "high"
 		case arg == XHighReasoningFlag:

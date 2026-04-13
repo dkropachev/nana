@@ -21,6 +21,7 @@ Go-native commands:
   nana version
   nana status
   nana cancel
+  nana config
   nana reasoning
   nana account <subcommand>
   nana cleanup
@@ -96,6 +97,11 @@ func main() {
 		return
 	case "reasoning":
 		if err := gocli.Reasoning(args[1:]); err != nil {
+			exitWithError(err)
+		}
+		return
+	case "config":
+		if err := gocli.Config(args[1:]); err != nil {
 			exitWithError(err)
 		}
 		return
@@ -271,6 +277,9 @@ func handleNestedHelp(args []string) bool {
 	switch command {
 	case "cleanup":
 		mustHandleHelp(gocli.Cleanup([]string{"--help"}))
+		return true
+	case "config":
+		mustHandleHelp(gocli.Config([]string{"--help"}))
 		return true
 	case "ask":
 		mustHandleHelp(gocli.Ask(repoRoot, cwd, []string{"--help"}))
