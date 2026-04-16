@@ -27,8 +27,8 @@ Behavior:
   - local repos always keep proposals under .nana/improvements/
   - scout policy is stored in Nana-managed runtime state outside the source checkout
   - GitHub policy issue_destination controls publication: local, repo/target, or fork
-  - emits 5 proposals per run by default; policy max_issues can raise the cap up to 50
-  - created issues are labeled with improvement-scout, never enhancement, and count toward that role's open-issue cap
+  - emits every grounded proposal it finds
+  - created issues are labeled with improvement-scout, never enhancement
 
 Policy example:
   {"version":1,"issue_destination":"repo","labels":["improvement","ux","perf"]}
@@ -46,8 +46,8 @@ Behavior:
   - local repos always keep proposals under .nana/enhancements/
   - scout policy is stored in Nana-managed runtime state outside the source checkout
   - GitHub policy issue_destination controls publication: local, repo/target, or fork
-  - emits 5 proposals per run by default; policy max_issues can raise the cap up to 50
-  - created issues are labeled with enhancement-scout and count toward that role's open-issue cap
+  - emits every grounded proposal it finds
+  - created issues are labeled with enhancement-scout
 
 Policy example:
   {"version":1,"issue_destination":"repo","labels":["enhancement"]}
@@ -65,7 +65,7 @@ Behavior:
   - performs a short preflight before the long audit to detect the best UI surface and audit mode
   - local repos keep findings under .nana/ui-findings/
   - GitHub policy issue_destination controls publication: local, repo/target, or fork
-  - policy max_issues limits emitted findings; --session-limit overrides policy session_limit for this run only
+  - emits every grounded finding it finds; --session-limit overrides policy session_limit for this run only
   - prints whether the audit is live-browser or repo-only fallback before the full run starts
 
 Policy example:
@@ -102,8 +102,6 @@ const (
 	improvementScoutRole     = "improvement-scout"
 	enhancementScoutRole     = "enhancement-scout"
 	uiScoutRole              = "ui-scout"
-	defaultScoutIssueCap     = 5
-	maxScoutIssueCap         = 50
 	defaultScoutSessionLimit = 4
 	maxScoutSessionLimit     = 6
 )
@@ -508,10 +506,6 @@ func runScout(cwd string, options ImproveOptions, role string) (err error) {
 	results, err := publishScoutIssues(repoSlug, report.Proposals, policy, options.DryRun, role)
 	if err != nil {
 		return err
-	}
-	if len(results) == 0 {
-		fmt.Fprintf(os.Stdout, "[%s] Open issue cap reached for %s; no issues created.\n", prefix, role)
-		return nil
 	}
 	for _, result := range results {
 		if result.DryRun {
@@ -981,10 +975,9 @@ func ensureImproveGithubCheckout(repoSlug string) (string, error) {
 func defaultScoutPolicy() scoutPolicy {
 	return scoutPolicy{
 		Version:          1,
-		Schedule:         scoutScheduleAlways,
+		Schedule:         scoutScheduleWhenResolved,
 		IssueDestination: improvementDestinationLocal,
 		Labels:           []string{},
-		MaxIssues:        defaultScoutIssueCap,
 	}
 }
 
@@ -1008,11 +1001,6 @@ func readScoutPolicy(repoPath string, role string) scoutPolicy {
 	policy.IssueDestination = normalizeScoutDestination(policy.IssueDestination)
 	policy.Schedule = effectiveScoutSchedule(policy)
 	policy.Labels = normalizeScoutLabels(policy.Labels, role)
-	if policy.MaxIssues <= 0 {
-		policy.MaxIssues = defaultScoutIssueCap
-	} else if policy.MaxIssues > maxScoutIssueCap {
-		policy.MaxIssues = maxScoutIssueCap
-	}
 	policy.SessionLimit = effectiveScoutSessionLimit(policy, role)
 	return policy
 }
@@ -1035,9 +1023,6 @@ func mergeScoutPolicy(target *scoutPolicy, source scoutPolicy) {
 	}
 	if source.Labels != nil {
 		target.Labels = source.Labels
-	}
-	if source.MaxIssues > 0 {
-		target.MaxIssues = source.MaxIssues
 	}
 	if source.SessionLimit > 0 {
 		target.SessionLimit = source.SessionLimit
@@ -1114,7 +1099,6 @@ func runScoutRole(runtime scoutExecutionRuntime, repoSlug string, focus []string
 		fmt.Sprintf("- Inspect repo: %s", repoLabel),
 		fmt.Sprintf("- Focus: %s", strings.Join(focus, ", ")),
 		fmt.Sprintf("- Artifact directory: %s", runtime.ArtifactDir),
-		fmt.Sprintf("- Max findings/issues to emit: %d", effectiveScoutMaxIssues(policy)),
 		"- Return only the JSON output contract.",
 		fmt.Sprintf("- Treat results as %s.", scoutProposalNoun(role)),
 	}
@@ -1297,16 +1281,8 @@ func normalizeImprovementProposals(proposals []scoutFinding, policy scoutPolicy)
 }
 
 func normalizeScoutProposals(proposals []scoutFinding, policy scoutPolicy, role string) []scoutFinding {
-	limit := len(proposals)
-	maxIssues := effectiveScoutMaxIssues(policy)
-	if maxIssues < limit {
-		limit = maxIssues
-	}
-	out := make([]scoutFinding, 0, limit)
+	out := make([]scoutFinding, 0, len(proposals))
 	for _, proposal := range proposals {
-		if len(out) >= limit {
-			break
-		}
 		proposal.Title = strings.TrimSpace(proposal.Title)
 		proposal.Summary = strings.TrimSpace(proposal.Summary)
 		if proposal.Title == "" || proposal.Summary == "" {
@@ -1516,18 +1492,6 @@ func publishScoutIssues(repoSlug string, proposals []scoutFinding, policy scoutP
 	if !validRepoSlug(targetRepo) {
 		return nil, fmt.Errorf("invalid %s issue target repo: %s", role, targetRepo)
 	}
-	maxIssues := effectiveScoutMaxIssues(policy)
-	openCount, err := countOpenScoutIssues(apiBaseURL, token, targetRepo, role)
-	if err != nil {
-		return nil, err
-	}
-	remaining := maxIssues - openCount
-	if remaining <= 0 {
-		return []scoutIssueResult{}, nil
-	}
-	if len(proposals) > remaining {
-		proposals = proposals[:remaining]
-	}
 	results := make([]scoutIssueResult, 0, len(proposals))
 	for _, proposal := range proposals {
 		proposal.Labels = normalizeScoutLabels(append(append([]string{}, policy.Labels...), proposal.Labels...), role)
@@ -1550,16 +1514,6 @@ func publishScoutIssues(repoSlug string, proposals []scoutFinding, policy scoutP
 		results = append(results, scoutIssueResult{Title: title, URL: created.HTMLURL})
 	}
 	return results, nil
-}
-
-func effectiveScoutMaxIssues(policy scoutPolicy) int {
-	if policy.MaxIssues <= 0 {
-		return defaultScoutIssueCap
-	}
-	if policy.MaxIssues > maxScoutIssueCap {
-		return maxScoutIssueCap
-	}
-	return policy.MaxIssues
 }
 
 func countOpenScoutIssues(apiBaseURL string, token string, repoSlug string, role string) (int, error) {

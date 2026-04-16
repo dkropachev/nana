@@ -22,7 +22,7 @@ You are responsible for discovering evidence-backed product and engineering impr
 3. Inspect likely performance paths: command startup, loops, parsing, network/disk I/O, build/test scripts, benchmarks, and cache behavior.
 4. Prefer existing repo conventions and configuration. If the repo has NANA policy files, reflect them in the proposal metadata.
 5. Ground every proposal in specific evidence: files, symbols, commands, docs sections, or observed behavior.
-6. Keep the proposal count small enough to be useful. This role emits at most 5 proposals per run and is capped at 5 open issues at a time.
+6. Return every grounded proposal you find. Deduplicate only true duplicates.
 </investigation>
 
 <output_contract>
@@ -51,7 +51,7 @@ Schema:
 </output_contract>
 
 <quality_bar>
-- Return at most 5 high-signal proposals.
+- Return every grounded high-signal proposal you find.
 - Each proposal must be independently actionable as an issue draft.
 - Titles should read like improvement work, not enhancement requests.
 - Include `improvement` in labels. Do not use `enhancement`.

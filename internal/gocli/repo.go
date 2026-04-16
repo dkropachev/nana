@@ -17,7 +17,7 @@ Usage:
   nana repo onboard <owner/repo> [--repo-mode disabled|local|fork|repo] [--issue-pick manual|label|auto] [--pr-forward approve|auto]
   nana repo drop <owner/repo>
   nana repo config <owner/repo> [--repo-mode disabled|local|fork|repo] [--issue-pick manual|label|auto] [--pr-forward approve|auto]
-  nana repo scout enable [--repo <path>] [--role improvement|enhancement|both] [--mode auto|manual] [--issue-destination local|repo|fork] [--fork-repo <owner/repo>] [--labels <a,b>] [--max-issues <1-50>] [--github]
+  nana repo scout enable [--repo <path>] [--role improvement|enhancement|both] [--mode auto|manual] [--issue-destination local|repo|fork] [--fork-repo <owner/repo>] [--labels <a,b>] [--github]
   nana repo defaults set [--repo-mode disabled|local|fork|repo] [--issue-pick manual|label|auto] [--pr-forward approve|auto]
   nana repo defaults show [--json]
   nana repo explain <owner/repo> [--json]

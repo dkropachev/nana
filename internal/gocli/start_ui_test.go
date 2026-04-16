@@ -45,7 +45,6 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 		Schedule:         scoutScheduleWeekly,
 		IssueDestination: improvementDestinationLocal,
 		Labels:           []string{"ux"},
-		MaxIssues:        7,
 	}); err != nil {
 		t.Fatalf("write improvement policy: %v", err)
 	}
@@ -56,7 +55,6 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 		IssueDestination: improvementDestinationFork,
 		ForkRepo:         "me/widget",
 		Labels:           []string{"forward"},
-		MaxIssues:        2,
 	}); err != nil {
 		t.Fatalf("write enhancement policy: %v", err)
 	}
@@ -65,7 +63,6 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 		Mode:         "manual",
 		Schedule:     scoutScheduleWhenResolved,
 		Labels:       []string{"qa"},
-		MaxIssues:    3,
 		SessionLimit: 5,
 	}); err != nil {
 		t.Fatalf("write ui policy: %v", err)
@@ -158,7 +155,7 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 	if !overview.Repos[0].StartParticipation || overview.Repos[0].ForkIssuesMode != "auto" || overview.Repos[0].PublishTarget != "fork" {
 		t.Fatalf("unexpected repo config summary: %+v", overview.Repos[0])
 	}
-	if !overview.Repos[0].Scouts.Improvement.Enabled || overview.Repos[0].Scouts.Improvement.MaxIssues != 7 || overview.Repos[0].Scouts.Improvement.Schedule != scoutScheduleWeekly {
+	if !overview.Repos[0].Scouts.Improvement.Enabled || overview.Repos[0].Scouts.Improvement.Schedule != scoutScheduleWeekly {
 		t.Fatalf("unexpected improvement scout summary: %+v", overview.Repos[0].Scouts.Improvement)
 	}
 	if strings.HasPrefix(overview.Repos[0].Scouts.Improvement.PolicyPath, sourcePath+string(filepath.Separator)) {
@@ -167,14 +164,14 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 	if !overview.Repos[0].Scouts.Enhancement.Enabled || overview.Repos[0].Scouts.Enhancement.IssueDestination != "fork" || overview.Repos[0].Scouts.Enhancement.ForkRepo != "me/widget" || overview.Repos[0].Scouts.Enhancement.Schedule != scoutScheduleDaily {
 		t.Fatalf("unexpected enhancement scout summary: %+v", overview.Repos[0].Scouts.Enhancement)
 	}
-	if !overview.Repos[0].Scouts.UI.Enabled || overview.Repos[0].Scouts.UI.SessionLimit != 5 || overview.Repos[0].Scouts.UI.MaxIssues != 3 || overview.Repos[0].Scouts.UI.Schedule != scoutScheduleWhenResolved {
+	if !overview.Repos[0].Scouts.UI.Enabled || overview.Repos[0].Scouts.UI.SessionLimit != 5 || overview.Repos[0].Scouts.UI.Schedule != scoutScheduleWhenResolved {
 		t.Fatalf("unexpected ui scout summary: %+v", overview.Repos[0].Scouts.UI)
 	}
 	if overview.Repos[0].ScoutsByRole["ui"].SessionLimit != 5 || overview.Repos[0].ScoutsByRole["enhancement"].IssueDestination != "fork" || overview.Repos[0].ScoutsByRole["improvement"].Schedule != scoutScheduleWeekly {
 		t.Fatalf("expected role-keyed scout configs, got %+v", overview.Repos[0].ScoutsByRole)
 	}
 
-	settingsBody := strings.NewReader(`{"repo_mode":"repo","issue_pick_mode":"label","pr_forward_mode":"auto","fork_issues_mode":"labeled","implement_mode":"auto","publish_target":"repo","scouts":{"improvement":{"enabled":true,"mode":"manual","schedule":"daily","issue_destination":"repo","fork_repo":"","labels":["ux"],"max_issues":4},"enhancement":{"enabled":false,"mode":"auto","schedule":"always","issue_destination":"local","fork_repo":"","labels":[],"max_issues":5},"ui":{"enabled":true,"mode":"manual","schedule":"weekly","issue_destination":"local","fork_repo":"","labels":["qa"],"max_issues":3,"session_limit":6}}}`)
+	settingsBody := strings.NewReader(`{"repo_mode":"repo","issue_pick_mode":"label","pr_forward_mode":"auto","fork_issues_mode":"labeled","implement_mode":"auto","publish_target":"repo","scouts":{"improvement":{"enabled":true,"mode":"manual","schedule":"daily","issue_destination":"repo","fork_repo":"","labels":["ux"]},"enhancement":{"enabled":false,"mode":"auto","schedule":"always","issue_destination":"local","fork_repo":"","labels":[]},"ui":{"enabled":true,"mode":"manual","schedule":"weekly","issue_destination":"local","fork_repo":"","labels":["qa"],"session_limit":6}}}`)
 	settingsRequest, err := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/repos/"+repoSlug+"/settings", settingsBody)
 	if err != nil {
 		t.Fatalf("new settings request: %v", err)
@@ -194,13 +191,13 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 	if settingsPayload.Repo.RepoMode != "repo" || settingsPayload.Repo.IssuePickMode != "label" || settingsPayload.Repo.PRForwardMode != "auto" || settingsPayload.Repo.ForkIssuesMode != "labeled" || settingsPayload.Repo.ImplementMode != "auto" || settingsPayload.Repo.PublishTarget != "repo" || !settingsPayload.Repo.StartParticipation {
 		t.Fatalf("unexpected settings payload: %+v", settingsPayload.Repo)
 	}
-	if !settingsPayload.Repo.Scouts.Improvement.Enabled || settingsPayload.Repo.Scouts.Improvement.IssueDestination != "repo" || settingsPayload.Repo.Scouts.Improvement.MaxIssues != 4 || settingsPayload.Repo.Scouts.Improvement.Schedule != scoutScheduleDaily {
+	if !settingsPayload.Repo.Scouts.Improvement.Enabled || settingsPayload.Repo.Scouts.Improvement.IssueDestination != "repo" || settingsPayload.Repo.Scouts.Improvement.Schedule != scoutScheduleDaily {
 		t.Fatalf("unexpected patched improvement scout: %+v", settingsPayload.Repo.Scouts.Improvement)
 	}
 	if settingsPayload.Repo.Scouts.Enhancement.Enabled {
 		t.Fatalf("expected enhancement scout to be disabled, got %+v", settingsPayload.Repo.Scouts.Enhancement)
 	}
-	if !settingsPayload.Repo.Scouts.UI.Enabled || settingsPayload.Repo.Scouts.UI.SessionLimit != 6 || settingsPayload.Repo.Scouts.UI.MaxIssues != 3 || settingsPayload.Repo.Scouts.UI.Schedule != scoutScheduleWeekly {
+	if !settingsPayload.Repo.Scouts.UI.Enabled || settingsPayload.Repo.Scouts.UI.SessionLimit != 6 || settingsPayload.Repo.Scouts.UI.Schedule != scoutScheduleWeekly {
 		t.Fatalf("unexpected patched ui scout: %+v", settingsPayload.Repo.Scouts.UI)
 	}
 	if settingsPayload.Repo.ScoutsByRole["ui"].SessionLimit != 6 || settingsPayload.Repo.ScoutsByRole["improvement"].Schedule != scoutScheduleDaily {
@@ -216,14 +213,14 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 	if err := readGithubJSON(repoScoutPolicyPath(sourcePath, improvementScoutRole, false), &patchedImprovementPolicy); err != nil {
 		t.Fatalf("read patched improvement policy: %v", err)
 	}
-	if patchedImprovementPolicy.Mode != "manual" || patchedImprovementPolicy.Schedule != scoutScheduleDaily || patchedImprovementPolicy.IssueDestination != improvementDestinationTarget || patchedImprovementPolicy.MaxIssues != 4 {
+	if patchedImprovementPolicy.Mode != "manual" || patchedImprovementPolicy.Schedule != scoutScheduleDaily || patchedImprovementPolicy.IssueDestination != improvementDestinationTarget {
 		t.Fatalf("unexpected patched improvement policy: %+v", patchedImprovementPolicy)
 	}
 	var patchedUIPolicy improvementPolicy
 	if err := readGithubJSON(repoScoutPolicyPath(sourcePath, uiScoutRole, false), &patchedUIPolicy); err != nil {
 		t.Fatalf("read patched ui policy: %v", err)
 	}
-	if patchedUIPolicy.Mode != "manual" || patchedUIPolicy.Schedule != scoutScheduleWeekly || patchedUIPolicy.MaxIssues != 3 || patchedUIPolicy.SessionLimit != 6 {
+	if patchedUIPolicy.Mode != "manual" || patchedUIPolicy.Schedule != scoutScheduleWeekly || patchedUIPolicy.SessionLimit != 6 {
 		t.Fatalf("unexpected patched ui policy: %+v", patchedUIPolicy)
 	}
 
@@ -1741,7 +1738,6 @@ func TestStartUIAPIScoutItemsAndActions(t *testing.T) {
 		Version:          1,
 		IssueDestination: improvementDestinationLocal,
 		Labels:           []string{"improvement"},
-		MaxIssues:        5,
 	}); err != nil {
 		t.Fatalf("write policy: %v", err)
 	}
@@ -2077,7 +2073,6 @@ func TestStartUIScoutQueuePlannedPickupWriteFailureInvalidatesOverviewCache(t *t
 		Version:          1,
 		IssueDestination: improvementDestinationLocal,
 		Labels:           []string{"improvement"},
-		MaxIssues:        5,
 	}); err != nil {
 		t.Fatalf("write policy: %v", err)
 	}
@@ -2388,12 +2383,14 @@ func TestStartUIOverviewCacheInvalidatesWhenScoutPolicyChanges(t *testing.T) {
 	if len(overview.Repos) != 1 || overview.Repos[0].Scouts.Improvement.Enabled {
 		t.Fatalf("expected scout to start disabled, got %+v", overview.Repos)
 	}
+	if overview.Repos[0].Scouts.Improvement.Schedule != scoutScheduleWhenResolved {
+		t.Fatalf("expected disabled scout default schedule to be when-resolved, got %+v", overview.Repos[0].Scouts.Improvement)
+	}
 
 	if err := writeGithubJSON(repoScoutPolicyPath(sourcePath, improvementScoutRole, false), improvementPolicy{
 		Version:          1,
 		Mode:             "auto",
 		IssueDestination: improvementDestinationLocal,
-		MaxIssues:        6,
 	}); err != nil {
 		t.Fatalf("write improvement policy: %v", err)
 	}
@@ -2405,8 +2402,11 @@ func TestStartUIOverviewCacheInvalidatesWhenScoutPolicyChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildOverview refreshed: %v", err)
 	}
-	if !refreshed.Repos[0].Scouts.Improvement.Enabled || refreshed.Repos[0].Scouts.Improvement.MaxIssues != 6 {
+	if !refreshed.Repos[0].Scouts.Improvement.Enabled {
 		t.Fatalf("expected scout policy change to refresh overview, got %+v", refreshed.Repos[0].Scouts.Improvement)
+	}
+	if refreshed.Repos[0].Scouts.Improvement.Schedule != scoutScheduleWhenResolved {
+		t.Fatalf("expected missing scout schedule to default to when-resolved, got %+v", refreshed.Repos[0].Scouts.Improvement)
 	}
 }
 

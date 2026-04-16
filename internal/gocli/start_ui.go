@@ -269,7 +269,6 @@ type startUIRepoScoutConfig struct {
 	IssueDestination string   `json:"issue_destination,omitempty"`
 	ForkRepo         string   `json:"fork_repo,omitempty"`
 	Labels           []string `json:"labels,omitempty"`
-	MaxIssues        int      `json:"max_issues,omitempty"`
 	SessionLimit     int      `json:"session_limit,omitempty"`
 }
 
@@ -317,7 +316,7 @@ func startUIScoutCatalog() []startUIScoutCatalogEntry {
 			Role:                 spec.Role,
 			ConfigKey:            spec.ConfigKey,
 			DisplayLabel:         spec.DisplayLabel,
-			DefaultSchedule:      scoutScheduleAlways,
+			DefaultSchedule:      scoutScheduleWhenResolved,
 			DefaultSessionLimit:  defaultScoutSessionLimit,
 			SupportsSessionLimit: spec.SupportsSessionLimit,
 			UsesPreflight:        spec.UsesPreflight,
@@ -420,7 +419,6 @@ type startUIScoutItem struct {
 	PreflightReason   string   `json:"preflight_reason,omitempty"`
 	Destination       string   `json:"destination"`
 	ForkRepo          string   `json:"fork_repo,omitempty"`
-	MaxIssues         int      `json:"max_issues,omitempty"`
 	Status            string   `json:"status"`
 	RunID             string   `json:"run_id,omitempty"`
 	PlannedItemID     string   `json:"planned_item_id,omitempty"`
@@ -2693,10 +2691,9 @@ func startUIDefaultRepoScoutConfig(repoPath string, role string) startUIRepoScou
 		Enabled:          false,
 		PolicyPath:       startUIRepoScoutPolicyPath(repoPath, role, ""),
 		Mode:             "auto",
-		Schedule:         scoutScheduleAlways,
+		Schedule:         scoutScheduleWhenResolved,
 		IssueDestination: "local",
 		Labels:           normalizeScoutLabels(nil, role),
-		MaxIssues:        defaultScoutIssueCap,
 	}
 	if scoutRoleSupportsSessionLimit(role) {
 		config.SessionLimit = defaultScoutSessionLimit
@@ -2737,7 +2734,6 @@ func loadStartUIRepoScoutConfig(repoPath string, role string) startUIRepoScoutCo
 	config.IssueDestination = startUIScoutDestinationLabel(policy.IssueDestination)
 	config.ForkRepo = strings.TrimSpace(policy.ForkRepo)
 	config.Labels = append([]string{}, normalizeScoutLabels(policy.Labels, role)...)
-	config.MaxIssues = effectiveScoutMaxIssues(policy)
 	config.SessionLimit = effectiveScoutSessionLimit(policy, role)
 	return config
 }
@@ -3155,10 +3151,6 @@ func buildStartUIRepoScoutWritePlan(repoPath string, role string, request *start
 	if destination != improvementDestinationFork {
 		forkRepo = ""
 	}
-	maxIssues, err := parseStartUIRepoScoutMaxIssues(request.MaxIssues)
-	if err != nil {
-		return startUIRepoScoutWritePlan{}, err
-	}
 	policy := scoutPolicy{
 		Version:          1,
 		Mode:             mode,
@@ -3166,7 +3158,6 @@ func buildStartUIRepoScoutWritePlan(repoPath string, role string, request *start
 		IssueDestination: destination,
 		ForkRepo:         forkRepo,
 		Labels:           normalizeScoutLabels(request.Labels, role),
-		MaxIssues:        maxIssues,
 	}
 	if scoutRoleSupportsSessionLimit(role) {
 		sessionLimit, err := parseStartUIRepoScoutSessionLimit(request.SessionLimit)
@@ -3193,7 +3184,7 @@ func parseStartUIRepoScoutMode(value string) (string, error) {
 }
 
 func parseStartUIRepoScoutSchedule(value string) (string, error) {
-	normalized, err := parseRepoScoutSchedule(defaultString(value, scoutScheduleAlways))
+	normalized, err := parseRepoScoutSchedule(defaultString(value, scoutScheduleWhenResolved))
 	if err != nil {
 		return "", err
 	}
@@ -3211,16 +3202,6 @@ func parseStartUIRepoScoutDestination(value string) (string, error) {
 	default:
 		return "", fmt.Errorf("invalid scout destination %q; expected local, repo, or fork", value)
 	}
-}
-
-func parseStartUIRepoScoutMaxIssues(value int) (int, error) {
-	if value <= 0 {
-		return defaultScoutIssueCap, nil
-	}
-	if value > maxScoutIssueCap {
-		return 0, fmt.Errorf("invalid scout max_issues %d; expected 1-%d", value, maxScoutIssueCap)
-	}
-	return value, nil
 }
 
 func parseStartUIRepoScoutSessionLimit(value int) (int, error) {
@@ -3304,10 +3285,9 @@ func listStartUIScoutItems(repoSlug string) ([]startUIScoutItem, error) {
 			relArtifactDir, _ := filepath.Rel(repoPath, artifactDir)
 			relArtifactDir = filepath.ToSlash(relArtifactDir)
 			policyPath := filepath.Join(artifactDir, "policy.json")
-			policy := scoutPolicy{Version: 1, IssueDestination: improvementDestinationLocal, MaxIssues: defaultScoutIssueCap}
+			policy := scoutPolicy{Version: 1, IssueDestination: improvementDestinationLocal}
 			_ = readGithubJSON(policyPath, &policy)
 			policy.IssueDestination = normalizeScoutDestination(policy.IssueDestination)
-			policy.MaxIssues = effectiveScoutMaxIssues(policy)
 			relPolicyPath := ""
 			if _, err := os.Stat(policyPath); err == nil {
 				relPolicyPath, _ = filepath.Rel(repoPath, policyPath)
@@ -3378,7 +3358,6 @@ func listStartUIScoutItems(repoSlug string) ([]startUIScoutItem, error) {
 					PreflightReason:   strings.TrimSpace(preflight.Reason),
 					Destination:       startUIScoutDestinationLabel(policy.IssueDestination),
 					ForkRepo:          strings.TrimSpace(policy.ForkRepo),
-					MaxIssues:         policy.MaxIssues,
 					Status:            status,
 				}
 				if record, ok := pickupState.Items[itemID]; ok {

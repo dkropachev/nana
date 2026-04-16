@@ -157,3 +157,34 @@ func TestScoutScheduleDecisionWhenResolvedUsesLocalOutstandingItems(t *testing.T
 		t.Fatalf("expected rerun once local scout items are resolved, got %+v", decision)
 	}
 }
+
+func TestScoutScheduleDecisionDefaultsToWhenResolvedForUnsetSchedule(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := createLocalWorkRepoAt(t, filepath.Join(t.TempDir(), "repo"))
+	proposal := improvementProposal{
+		Title:   "Clarify help text",
+		Area:    "UX",
+		Summary: "Make help output clearer.",
+	}
+	report := scoutReport{
+		Version:   1,
+		Repo:      "widget",
+		Proposals: []scoutFinding{proposal},
+	}
+	artifactDir := filepath.Join(repo, ".nana", scoutArtifactRoot(improvementScoutRole), "improve-1")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	if err := writeGithubJSON(filepath.Join(artifactDir, "proposals.json"), report); err != nil {
+		t.Fatalf("write report: %v", err)
+	}
+
+	decision, err := scoutScheduleDecisionForRole(repo, "", improvementScoutRole, scoutPolicy{Version: 1}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("scoutScheduleDecisionForRole: %v", err)
+	}
+	if decision.Due || !strings.Contains(decision.Reason, "waiting for 1 previously reported Improvement item") {
+		t.Fatalf("expected unset schedule to default to when-resolved, got %+v", decision)
+	}
+}

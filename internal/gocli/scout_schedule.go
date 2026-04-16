@@ -30,14 +30,14 @@ type scoutScheduleDecision struct {
 func effectiveScoutSchedule(policy scoutPolicy) string {
 	normalized := normalizeScoutSchedule(policy.Schedule)
 	if normalized == "" {
-		return scoutScheduleAlways
+		return scoutScheduleWhenResolved
 	}
 	return normalized
 }
 
 func normalizeScoutSchedule(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", scoutScheduleAlways:
+	case scoutScheduleAlways:
 		return scoutScheduleAlways
 	case scoutScheduleDaily:
 		return scoutScheduleDaily

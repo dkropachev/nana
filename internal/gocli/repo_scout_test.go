@@ -1,6 +1,7 @@
 package gocli
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -26,7 +27,7 @@ func TestRepoScoutEnableWritesDefaultLocalPolicies(t *testing.T) {
 		if err := readGithubJSON(path, &policy); err != nil {
 			t.Fatalf("read policy %s: %v", path, err)
 		}
-		if policy.Version != 1 || policy.Mode != "auto" || policy.IssueDestination != improvementDestinationLocal {
+		if policy.Version != 1 || policy.Mode != "auto" || policy.Schedule != scoutScheduleWhenResolved || policy.IssueDestination != improvementDestinationLocal {
 			t.Fatalf("unexpected %s policy: %#v", role, policy)
 		}
 	}
@@ -80,7 +81,7 @@ func TestRepoScoutEnableWritesGithubEnhancementForkPolicy(t *testing.T) {
 	t.Setenv("HOME", home)
 	repo := t.TempDir()
 	output, err := captureStdout(t, func() error {
-		return Repo(repo, []string{"scout", "enable", "--github", "--role", "enhancement", "--mode", "manual", "--issue-destination", "fork", "--fork-repo", "me/widget", "--labels", "Roadmap,UX", "--max-issues", "2"})
+		return Repo(repo, []string{"scout", "enable", "--github", "--role", "enhancement", "--mode", "manual", "--issue-destination", "fork", "--fork-repo", "me/widget", "--labels", "Roadmap,UX"})
 	})
 	if err != nil {
 		t.Fatalf("Repo(scout enable): %v\n%s", err, output)
@@ -90,7 +91,7 @@ func TestRepoScoutEnableWritesGithubEnhancementForkPolicy(t *testing.T) {
 	if err := readGithubJSON(path, &policy); err != nil {
 		t.Fatalf("read policy: %v", err)
 	}
-	if policy.Version != 1 || policy.Mode != "manual" || policy.IssueDestination != improvementDestinationFork || policy.ForkRepo != "me/widget" || policy.MaxIssues != 2 {
+	if policy.Version != 1 || policy.Mode != "manual" || policy.IssueDestination != improvementDestinationFork || policy.ForkRepo != "me/widget" {
 		t.Fatalf("unexpected policy: %#v", policy)
 	}
 	if got := strings.Join(policy.Labels, ","); got != "enhancement,enhancement-scout,roadmap,ux" {
@@ -106,7 +107,7 @@ func TestRepoScoutEnablePreservesExistingUnspecifiedFields(t *testing.T) {
 	t.Setenv("HOME", home)
 	repo := t.TempDir()
 	path := repoScoutPolicyPath(repo, improvementScoutRole, false)
-	if err := writeGithubJSON(path, improvementPolicy{Version: 1, Mode: "manual", IssueDestination: improvementDestinationFork, ForkRepo: "me/widget", Labels: []string{"custom"}, MaxIssues: 3}); err != nil {
+	if err := writeGithubJSON(path, improvementPolicy{Version: 1, Mode: "manual", IssueDestination: improvementDestinationFork, ForkRepo: "me/widget", Labels: []string{"custom"}}); err != nil {
 		t.Fatalf("write existing policy: %v", err)
 	}
 	if _, err := captureStdout(t, func() error {
@@ -118,7 +119,7 @@ func TestRepoScoutEnablePreservesExistingUnspecifiedFields(t *testing.T) {
 	if err := readGithubJSON(path, &policy); err != nil {
 		t.Fatalf("read policy: %v", err)
 	}
-	if policy.Mode != "manual" || policy.IssueDestination != improvementDestinationFork || policy.ForkRepo != "me/widget" || policy.MaxIssues != 3 {
+	if policy.Mode != "manual" || policy.IssueDestination != improvementDestinationFork || policy.ForkRepo != "me/widget" {
 		t.Fatalf("unexpected preserved fields: %#v", policy)
 	}
 	if got := strings.Join(policy.Labels, ","); got != "improvement,improvement-scout,docs" {
@@ -138,28 +139,28 @@ func TestRepoScoutEnableRequiresForkRepoForForkDestination(t *testing.T) {
 	}
 }
 
-func TestRepoScoutEnableAllowsMaxIssuesUpToFifty(t *testing.T) {
+func TestRepoScoutEnableDropsLegacyMaxIssuesField(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	repo := t.TempDir()
+	path := repoScoutPolicyPath(repo, improvementScoutRole, false)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir scout dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(`{"version":1,"mode":"manual","issue_destination":"local","max_issues":9}`), 0o644); err != nil {
+		t.Fatalf("write legacy policy: %v", err)
+	}
 	if _, err := captureStdout(t, func() error {
-		return Repo(repo, []string{"scout", "enable", "--role", "improvement", "--max-issues", "50"})
+		return Repo(repo, []string{"scout", "enable", "--role", "improvement", "--labels", "docs"})
 	}); err != nil {
 		t.Fatalf("Repo(scout enable): %v", err)
 	}
-	var policy improvementPolicy
-	if err := readGithubJSON(repoScoutPolicyPath(repo, improvementScoutRole, false), &policy); err != nil {
+	content, err := os.ReadFile(path)
+	if err != nil {
 		t.Fatalf("read policy: %v", err)
 	}
-	if policy.MaxIssues != 50 {
-		t.Fatalf("expected max issues 50, got %#v", policy)
-	}
-	err := Repo(repo, []string{"scout", "enable", "--role", "improvement", "--max-issues", "51"})
-	if err == nil {
-		t.Fatal("expected max issues validation error")
-	}
-	if !strings.Contains(err.Error(), "1 to 50") {
-		t.Fatalf("unexpected error: %v", err)
+	if strings.Contains(string(content), "max_issues") {
+		t.Fatalf("expected max_issues to be dropped, got %s", content)
 	}
 }
 
@@ -168,7 +169,7 @@ func TestRepoScoutEnableWritesUIScoutSessionLimit(t *testing.T) {
 	t.Setenv("HOME", home)
 	repo := t.TempDir()
 	if _, err := captureStdout(t, func() error {
-		return Repo(repo, []string{"scout", "enable", "--role", "ui", "--mode", "manual", "--labels", "qa", "--max-issues", "3", "--session-limit", "6"})
+		return Repo(repo, []string{"scout", "enable", "--role", "ui", "--mode", "manual", "--labels", "qa", "--session-limit", "6"})
 	}); err != nil {
 		t.Fatalf("Repo(scout enable): %v", err)
 	}
@@ -176,7 +177,7 @@ func TestRepoScoutEnableWritesUIScoutSessionLimit(t *testing.T) {
 	if err := readGithubJSON(repoScoutPolicyPath(repo, uiScoutRole, false), &policy); err != nil {
 		t.Fatalf("read ui policy: %v", err)
 	}
-	if policy.Mode != "manual" || policy.MaxIssues != 3 || policy.SessionLimit != 6 {
+	if policy.Mode != "manual" || policy.SessionLimit != 6 {
 		t.Fatalf("unexpected ui policy: %#v", policy)
 	}
 	if got := strings.Join(policy.Labels, ","); got != "ui,ui-scout,qa" {

@@ -14,7 +14,6 @@ type scoutPolicy struct {
 	IssueDestination string   `json:"issue_destination,omitempty"`
 	ForkRepo         string   `json:"fork_repo,omitempty"`
 	Labels           []string `json:"labels,omitempty"`
-	MaxIssues        int      `json:"max_issues,omitempty"`
 	SessionLimit     int      `json:"session_limit,omitempty"`
 }
 

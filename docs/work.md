@@ -121,8 +121,9 @@ GitHub target behavior:
 - `.nana/...` takes precedence over `.github/...`
 - `issue_destination` controls publication: `local`, `repo`/`target`, or `fork`
 - `schedule` controls reruns: `always`, `daily`, `weekly`, or `when_resolved`
+- when `schedule` is omitted, scouts default to `when_resolved` and rerun only after their previously reported local or GitHub issues are completed or dropped
 - scout issue labels include the role label
-- scout policy defaults to 5 proposals per run and allows `max_issues` up to 50
+- scouts return and publish every grounded proposal or finding they produce
 - `ui-scout` also accepts `session_limit` to cap parallel page-audit sessions
 - direct `nana ui-scout` runs perform a short preflight first and persist `preflight.json` beside the findings artifact
 - local `mode: "auto"` in every supported scout policy makes `nana start` switch to the repo's default branch, commit generated scout artifacts there, and run `nana work start --task ...` for one pending local discovered item per cycle; this requires a clean worktree and a resolvable local default branch

@@ -46,12 +46,9 @@ func TestImprovementPolicyPrecedenceAndLabels(t *testing.T) {
 	if strings.Join(policy.Labels, ",") != "improvement,improvement-scout,perf" {
 		t.Fatalf("expected normalized improvement labels, got %#v", policy.Labels)
 	}
-	if policy.MaxIssues != defaultScoutIssueCap {
-		t.Fatalf("expected default max issue cap of %d, got %#v", defaultScoutIssueCap, policy)
-	}
 }
 
-func TestScoutLocalFromFileUsesDefaultCapForBothRoles(t *testing.T) {
+func TestScoutLocalFromFileKeepsAllProposalsForBothRoles(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		run        func(string, []string) error
@@ -86,8 +83,8 @@ func TestScoutLocalFromFileUsesDefaultCapForBothRoles(t *testing.T) {
 			if err != nil {
 				t.Fatalf("run scout: %v", err)
 			}
-			if !strings.Contains(output, "Keeping 5 proposal(s) local by policy") {
-				t.Fatalf("expected capped local output, got %q", output)
+			if !strings.Contains(output, "Keeping 7 proposal(s) local by policy") {
+				t.Fatalf("expected uncapped local output, got %q", output)
 			}
 			matches, err := filepath.Glob(filepath.Join(repo, ".nana", tc.root, tc.globPrefix, "proposals.json"))
 			if err != nil || len(matches) != 1 {
@@ -97,8 +94,8 @@ func TestScoutLocalFromFileUsesDefaultCapForBothRoles(t *testing.T) {
 			if err := readGithubJSON(matches[0], &report); err != nil {
 				t.Fatalf("read report: %v", err)
 			}
-			if len(report.Proposals) != 5 {
-				t.Fatalf("expected 5 capped proposals, got %d", len(report.Proposals))
+			if len(report.Proposals) != 7 {
+				t.Fatalf("expected 7 proposals, got %d", len(report.Proposals))
 			}
 			draftPath := filepath.Join(filepath.Dir(matches[0]), "issue-drafts.md")
 			draft, err := os.ReadFile(draftPath)
@@ -112,7 +109,7 @@ func TestScoutLocalFromFileUsesDefaultCapForBothRoles(t *testing.T) {
 	}
 }
 
-func TestScoutLocalFromFileAllowsPolicyCapUpToFifty(t *testing.T) {
+func TestScoutLocalFromFileIgnoresLegacyMaxIssuesPolicy(t *testing.T) {
 	repo := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
 		t.Fatalf("mkdir .nana: %v", err)
@@ -130,8 +127,8 @@ func TestScoutLocalFromFileAllowsPolicyCapUpToFifty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Improve: %v", err)
 	}
-	if !strings.Contains(output, "Keeping 10 proposal(s) local by policy") {
-		t.Fatalf("expected max_issues 10 output, got %q", output)
+	if !strings.Contains(output, "Keeping 12 proposal(s) local by policy") {
+		t.Fatalf("expected uncapped output, got %q", output)
 	}
 	matches, err := filepath.Glob(filepath.Join(repo, ".nana", "improvements", "improve-*", "proposals.json"))
 	if err != nil || len(matches) != 1 {
@@ -141,8 +138,15 @@ func TestScoutLocalFromFileAllowsPolicyCapUpToFifty(t *testing.T) {
 	if err := readGithubJSON(matches[0], &report); err != nil {
 		t.Fatalf("read report: %v", err)
 	}
-	if len(report.Proposals) != 10 {
-		t.Fatalf("expected 10 capped proposals, got %d", len(report.Proposals))
+	if len(report.Proposals) != 12 {
+		t.Fatalf("expected 12 proposals, got %d", len(report.Proposals))
+	}
+	policyArtifact, err := os.ReadFile(filepath.Join(filepath.Dir(matches[0]), "policy.json"))
+	if err != nil {
+		t.Fatalf("read policy artifact: %v", err)
+	}
+	if strings.Contains(string(policyArtifact), "max_issues") {
+		t.Fatalf("expected legacy max_issues to be dropped from artifacts, got %s", policyArtifact)
 	}
 }
 
@@ -751,14 +755,6 @@ func TestPublishImprovementIssuesUsesForkPolicyAndImprovementLabels(t *testing.T
 	var capturedPath string
 	var capturedPayload map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			if r.URL.Path != "/repos/me/widget/issues" || !strings.Contains(r.URL.RawQuery, "labels=improvement-scout") {
-				t.Fatalf("unexpected open issue cap request: %s?%s", r.URL.Path, r.URL.RawQuery)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[]`))
-			return
-		}
 		capturedPath = r.URL.Path
 		if r.Method != http.MethodPost {
 			t.Fatalf("expected POST, got %s", r.Method)
@@ -807,31 +803,23 @@ func TestPublishImprovementIssuesUsesForkPolicyAndImprovementLabels(t *testing.T
 	}
 }
 
-func TestPublishScoutIssuesEnforcesOpenIssueCapBoundaries(t *testing.T) {
+func TestPublishScoutIssuesPublishesAllProposals(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
-		openIssues  int
 		proposals   int
 		dryRun      bool
 		wantResults int
 		wantPosts   int
 	}{
-		{name: "zero open creates up to five", openIssues: 0, proposals: 6, wantResults: 5, wantPosts: 5},
-		{name: "four open creates one", openIssues: 4, proposals: 2, wantResults: 1, wantPosts: 1},
-		{name: "four open dry run returns one without post", openIssues: 4, proposals: 3, dryRun: true, wantResults: 1, wantPosts: 0},
-		{name: "five open creates none", openIssues: 5, proposals: 2, wantResults: 0, wantPosts: 0},
+		{name: "publishes every proposal", proposals: 6, wantResults: 6, wantPosts: 6},
+		{name: "publishes all when already small", proposals: 2, wantResults: 2, wantPosts: 2},
+		{name: "dry run returns every proposal without post", proposals: 3, dryRun: true, wantResults: 3, wantPosts: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("GH_TOKEN", "token")
 			postCount := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.Method {
-				case http.MethodGet:
-					if r.URL.Path != "/repos/acme/widget/issues" || !strings.Contains(r.URL.RawQuery, "labels=enhancement-scout") {
-						t.Fatalf("unexpected open issue cap request: %s?%s", r.URL.Path, r.URL.RawQuery)
-					}
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(openIssuesJSON(tc.openIssues)))
 				case http.MethodPost:
 					postCount++
 					w.Header().Set("Content-Type", "application/json")

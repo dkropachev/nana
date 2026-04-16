@@ -11,13 +11,13 @@ import (
 const RepoScoutHelp = `nana repo scout - Manage scout startup policies
 
 Usage:
-  nana repo scout enable [--repo <path>] [--role improvement|enhancement|ui|both|all] [--mode auto|manual] [--schedule always|daily|weekly|when-resolved] [--issue-destination local|repo|fork] [--fork-repo <owner/repo>] [--labels <a,b>] [--max-issues <1-50>] [--session-limit <1-6>]
+  nana repo scout enable [--repo <path>] [--role improvement|enhancement|ui|both|all] [--mode auto|manual] [--schedule always|daily|weekly|when-resolved] [--issue-destination local|repo|fork] [--fork-repo <owner/repo>] [--labels <a,b>] [--session-limit <1-6>]
 
 Behavior:
   - writes scout policy to Nana-managed runtime state outside the source checkout
   - preserves existing policy fields unless the matching flag is supplied
   - default role is both (improvement + enhancement); use --role ui or --role all to manage ui-scout
-  - default new-policy mode is auto; default new-policy issue destination is local
+  - default new-policy mode is auto; default schedule is when-resolved; default new-policy issue destination is local
   - schedule controls when startup reruns the scout: always, daily, weekly, or after all reported issues are fixed or dropped
   - ui-scout accepts a session-limit that caps parallel page-audit sessions
 `
@@ -35,8 +35,6 @@ type repoScoutEnableOptions struct {
 	ForkRepoSet      bool
 	Labels           []string
 	LabelsSet        bool
-	MaxIssues        int
-	MaxIssuesSet     bool
 	SessionLimit     int
 	SessionLimitSet  bool
 	GithubPolicyPath bool
@@ -175,25 +173,6 @@ func parseRepoScoutEnableArgs(args []string) (repoScoutEnableOptions, error) {
 		case strings.HasPrefix(token, "--labels="):
 			options.Labels = parseRepoScoutLabels(strings.TrimPrefix(token, "--labels="))
 			options.LabelsSet = true
-		case token == "--max-issues":
-			value, err := requireRepoScoutValue(args, index, token)
-			if err != nil {
-				return repoScoutEnableOptions{}, err
-			}
-			parsed, err := parseRepoScoutMaxIssues(value)
-			if err != nil {
-				return repoScoutEnableOptions{}, err
-			}
-			options.MaxIssues = parsed
-			options.MaxIssuesSet = true
-			index++
-		case strings.HasPrefix(token, "--max-issues="):
-			parsed, err := parseRepoScoutMaxIssues(strings.TrimPrefix(token, "--max-issues="))
-			if err != nil {
-				return repoScoutEnableOptions{}, err
-			}
-			options.MaxIssues = parsed
-			options.MaxIssuesSet = true
 		case token == "--session-limit":
 			value, err := requireRepoScoutValue(args, index, token)
 			if err != nil {
@@ -245,7 +224,7 @@ func repoScoutEnable(cwd string, options repoScoutEnableOptions) error {
 			policy.Mode = defaultString(options.Mode, "auto")
 		}
 		if options.ScheduleSet || strings.TrimSpace(policy.Schedule) == "" {
-			policy.Schedule = defaultString(options.Schedule, scoutScheduleAlways)
+			policy.Schedule = defaultString(options.Schedule, scoutScheduleWhenResolved)
 		}
 		if options.DestinationSet || strings.TrimSpace(policy.IssueDestination) == "" {
 			policy.IssueDestination = defaultString(options.IssueDestination, improvementDestinationLocal)
@@ -255,9 +234,6 @@ func repoScoutEnable(cwd string, options repoScoutEnableOptions) error {
 		}
 		if options.LabelsSet {
 			policy.Labels = normalizeScoutLabels(options.Labels, role)
-		}
-		if options.MaxIssuesSet {
-			policy.MaxIssues = options.MaxIssues
 		}
 		if options.SessionLimitSet && scoutRoleSupportsSessionLimit(role) {
 			policy.SessionLimit = options.SessionLimit
@@ -418,14 +394,6 @@ func parseRepoScoutLabels(value string) []string {
 		}
 	}
 	return uniqueStrings(labels)
-}
-
-func parseRepoScoutMaxIssues(value string) (int, error) {
-	parsed, err := strconv.Atoi(strings.TrimSpace(value))
-	if err != nil || parsed < 1 || parsed > maxScoutIssueCap {
-		return 0, fmt.Errorf("Invalid --max-issues value %q. Expected an integer from 1 to %d.", value, maxScoutIssueCap)
-	}
-	return parsed, nil
 }
 
 func parseRepoScoutSessionLimit(value string) (int, error) {

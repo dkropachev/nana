@@ -750,9 +750,9 @@
 
   const SCOUT_ROLE_ORDER = ["improvement", "enhancement", "ui"];
   const SCOUT_ROLE_META = {
-    improvement: { label: "Improvement Scout", defaultSessionLimit: 0 },
-    enhancement: { label: "Enhancement Scout", defaultSessionLimit: 0 },
-    ui: { label: "UI Scout", defaultSessionLimit: 4 },
+    improvement: { label: "Improvement Scout", defaultSchedule: "when_resolved", defaultSessionLimit: 0 },
+    enhancement: { label: "Enhancement Scout", defaultSchedule: "when_resolved", defaultSessionLimit: 0 },
+    ui: { label: "UI Scout", defaultSchedule: "when_resolved", defaultSessionLimit: 4 },
   };
 
   function normalizeScoutRoleKey(roleKey) {
@@ -772,6 +772,7 @@
       role: `${roleKey}-scout`,
       config_key: roleKey,
       display_label: SCOUT_ROLE_META[roleKey].label,
+      default_schedule: SCOUT_ROLE_META[roleKey].defaultSchedule,
       default_session_limit: SCOUT_ROLE_META[roleKey].defaultSessionLimit,
       supports_session_limit: SCOUT_ROLE_META[roleKey].defaultSessionLimit > 0,
     }));
@@ -783,6 +784,7 @@
     if (match) {
       return {
         label: defaultString(match.display_label, SCOUT_ROLE_META[key] ? SCOUT_ROLE_META[key].label : key),
+        defaultSchedule: defaultString(match.default_schedule, SCOUT_ROLE_META[key] ? SCOUT_ROLE_META[key].defaultSchedule : "when_resolved"),
         defaultSessionLimit: Number(match.default_session_limit) > 0 ? Number(match.default_session_limit) : 0,
         supportsSessionLimit: Boolean(match.supports_session_limit),
       };
@@ -802,15 +804,16 @@
 
   function repoScoutSnapshot(role, config) {
     const labels = Array.isArray(config && config.labels) ? config.labels.filter((label) => String(label || "").trim()) : [];
-    const defaultSessionLimit = repoScoutMeta(role).defaultSessionLimit;
+    const meta = repoScoutMeta(role);
+    const defaultSessionLimit = meta.defaultSessionLimit;
     return {
       enabled: Boolean(config && config.enabled),
       policy_path: defaultString(config && config.policy_path, ""),
       mode: defaultString(config && config.mode, "auto"),
+      schedule: defaultString(config && config.schedule, defaultString(meta.defaultSchedule, "when_resolved")),
       issue_destination: defaultString(config && config.issue_destination, "local"),
       fork_repo: defaultString(config && config.fork_repo, ""),
       labels,
-      max_issues: Number(config && config.max_issues) > 0 ? Number(config.max_issues) : 5,
       session_limit: Number(config && config.session_limit) > 0 ? Number(config.session_limit) : defaultSessionLimit,
     };
   }
@@ -3674,6 +3677,13 @@
           { value: "auto", label: "Auto" },
           { value: "manual", label: "Manual" },
         ];
+      case "schedule":
+        return [
+          { value: "when_resolved", label: "When Resolved" },
+          { value: "always", label: "Always" },
+          { value: "daily", label: "Daily" },
+          { value: "weekly", label: "Weekly" },
+        ];
       case "issue_destination":
         return [
           { value: "local", label: "Local" },
@@ -3716,10 +3726,6 @@
     switch (configFieldName(field)) {
       case "enabled":
         return String(value || "") === "true";
-      case "max_issues": {
-        const parsed = Number.parseInt(String(value || "").trim(), 10);
-        return Number.isFinite(parsed) ? parsed : 0;
-      }
       case "labels":
         return String(value || "")
           .split(",")
@@ -3774,9 +3780,9 @@
         <div class="config-grid">
           ${renderConfigSelect(`scouts_by_role.${roleKey}.enabled`, "Enabled", String(Boolean(scout.enabled)), configFieldOptions("enabled"))}
           ${renderConfigSelect(`scouts_by_role.${roleKey}.mode`, "Mode", scout.mode, configFieldOptions("mode"))}
+          ${renderConfigSelect(`scouts_by_role.${roleKey}.schedule`, "Schedule", scout.schedule || defaultString(repoScoutMeta(roleKey, repo).defaultSchedule, "when_resolved"), configFieldOptions("schedule"))}
           ${renderConfigSelect(`scouts_by_role.${roleKey}.issue_destination`, "Destination", scout.issue_destination, configFieldOptions("issue_destination"))}
           ${renderConfigInput(`scouts_by_role.${roleKey}.fork_repo`, "Fork Repo", scout.fork_repo || "", { placeholder: "owner/repo", disabled: forkDisabled })}
-          ${renderConfigInput(`scouts_by_role.${roleKey}.max_issues`, "Max Issues", String(scout.max_issues || 5), { type: "number", min: 1, max: 50 })}
           ${sessionLimitField}
           ${renderConfigInput(`scouts_by_role.${roleKey}.labels`, "Labels", (scout.labels || []).join(", "), { placeholder: "comma,separated,labels" })}
         </div>

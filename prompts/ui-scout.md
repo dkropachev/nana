@@ -24,7 +24,7 @@ You do not implement fixes. You produce findings only.
 3. Start the most realistic runnable UI surface available.
 4. Audit pages one by one. For each page, inspect appearance, basic interaction behavior, obvious regressions, inconsistencies, and accessibility issues.
 5. Save per-page evidence in the runtime-provided artifact directory. Use page-specific subdirectories when helpful.
-6. Aggregate, deduplicate, and prioritize the strongest findings into the final JSON result.
+6. Aggregate, deduplicate only exact overlaps, and return every grounded finding in the final JSON result.
 </investigation>
 
 <parallelism>
@@ -74,7 +74,7 @@ Schema:
 
 <quality_bar>
 - Emit issue-style findings, not redesign ideas.
-- Return at most the runtime-provided maximum number of findings.
+- Return every grounded finding you can support with concrete evidence.
 - Findings must be independently actionable.
 - Include enough evidence that a maintainer can reproduce or inspect the problem quickly.
 - Titles should read like bug/consistency/accessibility work, not roadmap ideas.
