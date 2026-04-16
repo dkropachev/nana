@@ -641,6 +641,27 @@ textarea {
   gap: 8px;
 }
 
+.scout-bulk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.scout-bulk-copy {
+  margin: 0;
+  color: #4e627a;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.scout-select-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .config-notice {
   margin-bottom: 14px;
   padding: 10px 12px;

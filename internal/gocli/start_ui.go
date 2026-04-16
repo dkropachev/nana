@@ -219,6 +219,17 @@ type startUIIssueSearchRequest struct {
 	Query string `json:"query,omitempty"`
 }
 
+type startUIScoutBatchActionRequest struct {
+	Action  string   `json:"action,omitempty"`
+	ItemIDs []string `json:"item_ids,omitempty"`
+}
+
+type startUIScoutActionResult struct {
+	ItemID string `json:"item_id"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
 type startUIIssueSearchResponse struct {
 	Query          string                     `json:"query"`
 	EffectiveQuery string                     `json:"effective_query"`
@@ -433,6 +444,10 @@ type startUIScoutItemsResponse struct {
 	Repo         startUIRepoSummary         `json:"repo"`
 	ScoutCatalog []startUIScoutCatalogEntry `json:"scout_catalog,omitempty"`
 	Items        []startUIScoutItem         `json:"items"`
+	Action       string                     `json:"action,omitempty"`
+	Results      []startUIScoutActionResult `json:"results,omitempty"`
+	SuccessCount int                        `json:"success_count,omitempty"`
+	FailureCount int                        `json:"failure_count,omitempty"`
 }
 
 type startUIWorkItemFixRequest struct {
@@ -1077,6 +1092,19 @@ func (h *startUIAPI) handleRepoRoute(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSONResponse(w, map[string]any{"state": state, "planned_item": item})
+	case r.Method == http.MethodPost && tail == "scout-items/batch":
+		var payload startUIScoutBatchActionRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		response, err := mutateStartUIScoutItems(repoSlug, payload.ItemIDs, payload.Action)
+		h.invalidateOverviewCache()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSONResponse(w, response)
 	case r.Method == http.MethodPost && strings.HasPrefix(tail, "scout-items/"):
 		itemID, action, ok := parseStartUIScoutItemRoute(tail)
 		if !ok {
@@ -3501,6 +3529,66 @@ func mutateStartUIScoutItem(repoSlug string, itemID string, action string) (star
 		return startUIScoutItemsResponse{}, fmt.Errorf("unsupported scout item action %q", action)
 	}
 	return loadStartUIScoutItems(repoSlug)
+}
+
+func mutateStartUIScoutItems(repoSlug string, itemIDs []string, action string) (startUIScoutItemsResponse, error) {
+	normalizedAction := strings.TrimSpace(action)
+	if normalizedAction == "" {
+		return startUIScoutItemsResponse{}, fmt.Errorf("scout batch action is required")
+	}
+	uniqueIDs := make([]string, 0, len(itemIDs))
+	seen := make(map[string]struct{}, len(itemIDs))
+	for _, itemID := range itemIDs {
+		trimmed := strings.TrimSpace(itemID)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		uniqueIDs = append(uniqueIDs, trimmed)
+	}
+	if len(uniqueIDs) == 0 {
+		return startUIScoutItemsResponse{}, fmt.Errorf("at least one scout item is required")
+	}
+
+	results := make([]startUIScoutActionResult, 0, len(uniqueIDs))
+	successCount := 0
+	failureCount := 0
+	var lastPayload startUIScoutItemsResponse
+	loaded := false
+	for _, itemID := range uniqueIDs {
+		payload, err := mutateStartUIScoutItem(repoSlug, itemID, normalizedAction)
+		if err != nil {
+			results = append(results, startUIScoutActionResult{
+				ItemID: itemID,
+				Status: "error",
+				Error:  err.Error(),
+			})
+			failureCount++
+			continue
+		}
+		lastPayload = payload
+		loaded = true
+		results = append(results, startUIScoutActionResult{
+			ItemID: itemID,
+			Status: "ok",
+		})
+		successCount++
+	}
+	if !loaded {
+		payload, err := loadStartUIScoutItems(repoSlug)
+		if err != nil {
+			return startUIScoutItemsResponse{}, err
+		}
+		lastPayload = payload
+	}
+	lastPayload.Action = normalizedAction
+	lastPayload.Results = results
+	lastPayload.SuccessCount = successCount
+	lastPayload.FailureCount = failureCount
+	return lastPayload, nil
 }
 
 func loadStartUIWorkRunLogContent(runID string, relativePath string, tail int) (map[string]any, error) {
