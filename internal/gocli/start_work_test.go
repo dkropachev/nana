@@ -577,6 +577,80 @@ func TestStartRepoCoordinatorReconcileRequeuesWhileMetadataIsPending(t *testing.
 	}
 }
 
+func TestStartRepoCoordinatorApplyTaskResultPreservesExternallyAddedPlannedItems(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	initial := startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: "acme/widget",
+		UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+		Issues: map[string]startWorkIssueState{
+			"1": {
+				SourceNumber: 1,
+				State:        "open",
+				Status:       startWorkStatusQueued,
+				TriageStatus: startWorkTriageQueued,
+			},
+		},
+		ServiceTasks: map[string]startWorkServiceTask{
+			"triage:1": {
+				ID:       "triage:1",
+				Kind:     startTaskKindTriage,
+				Queue:    startTaskQueueService,
+				Status:   startWorkServiceTaskRunning,
+				IssueKey: "1",
+				Attempts: 1,
+			},
+		},
+	}
+	if err := writeStartWorkState(initial); err != nil {
+		t.Fatalf("write initial state: %v", err)
+	}
+
+	coordinator := &startRepoCoordinator{
+		repoSlug: "acme/widget",
+		cycleID:  "cycle-1",
+		state: &startWorkState{
+			Issues:       map[string]startWorkIssueState{"1": initial.Issues["1"]},
+			ServiceTasks: map[string]startWorkServiceTask{"triage:1": initial.ServiceTasks["triage:1"]},
+		},
+	}
+
+	external, err := readStartWorkState("acme/widget")
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	external.PlannedItems = map[string]startWorkPlannedItem{
+		"planned-1": {
+			ID:        "planned-1",
+			RepoSlug:  "acme/widget",
+			Title:     "Queued from UI",
+			Priority:  3,
+			State:     startPlannedItemQueued,
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	if err := writeStartWorkState(*external); err != nil {
+		t.Fatalf("write external state: %v", err)
+	}
+
+	if err := coordinator.applyTaskResult(startRepoTaskResult{
+		Task: startRepoTask{Key: "triage:1", Kind: startTaskKindTriage, IssueKey: "1"},
+		Err:  fmt.Errorf("temporary triage failure"),
+	}); err != nil {
+		t.Fatalf("applyTaskResult: %v", err)
+	}
+
+	refreshed, err := readStartWorkState("acme/widget")
+	if err != nil {
+		t.Fatalf("read refreshed state: %v", err)
+	}
+	if _, ok := refreshed.PlannedItems["planned-1"]; !ok {
+		t.Fatalf("expected externally added planned item to survive coordinator write, got %+v", refreshed.PlannedItems)
+	}
+}
+
 func TestRunStartWorkIssueReconcileRefreshesPublishedPRCIState(t *testing.T) {
 	serverState := struct {
 		headSHA string

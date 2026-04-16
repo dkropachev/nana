@@ -32,6 +32,61 @@ type localScoutDiscoveredItem struct {
 	Proposal scoutFinding
 }
 
+func reconcileLocalScoutPickupPlannedItems(repoPath string, repoSlug string) (bool, error) {
+	if strings.TrimSpace(repoPath) == "" || strings.TrimSpace(repoSlug) == "" {
+		return false, nil
+	}
+	state, statePath, err := readLocalScoutPickupState(repoPath)
+	if err != nil {
+		return false, err
+	}
+	workState, err := readStartWorkState(repoSlug)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	updated := false
+	for itemID, record := range state.Items {
+		plannedItemID := strings.TrimSpace(record.PlannedItemID)
+		if plannedItemID == "" {
+			continue
+		}
+		plannedItem, ok := workState.PlannedItems[plannedItemID]
+		if !ok {
+			continue
+		}
+		nextStatus := record.Status
+		nextError := record.Error
+		nextRunID := record.RunID
+		switch strings.TrimSpace(plannedItem.State) {
+		case startPlannedItemQueued, startPlannedItemLaunching, startPlannedItemLaunched:
+			nextStatus = "completed"
+			nextError = ""
+			if strings.TrimSpace(plannedItem.LaunchRunID) != "" {
+				nextRunID = strings.TrimSpace(plannedItem.LaunchRunID)
+			}
+		case startPlannedItemFailed:
+			nextStatus = "failed"
+			nextError = strings.TrimSpace(plannedItem.LastError)
+		}
+		if nextStatus == record.Status && nextError == record.Error && nextRunID == record.RunID {
+			continue
+		}
+		record.Status = nextStatus
+		record.Error = nextError
+		record.RunID = nextRunID
+		record.UpdatedAt = defaultString(strings.TrimSpace(plannedItem.UpdatedAt), ISOTimeNow())
+		state.Items[itemID] = record
+		updated = true
+	}
+	if !updated {
+		return false, nil
+	}
+	return true, writeLocalScoutPickupState(statePath, state)
+}
+
 var startRunLocalScoutWork = func(repoPath string, task string, codexArgs []string) error {
 	args := []string{"start", "--repo", repoPath, "--task", task}
 	if len(codexArgs) > 0 {

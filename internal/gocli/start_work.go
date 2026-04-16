@@ -259,6 +259,30 @@ type startWorkLaunchResult struct {
 
 var startWorkStateFileMu sync.Mutex
 
+func writeStartWorkStatePreservingPlannedItems(state startWorkState) error {
+	startWorkStateFileMu.Lock()
+	defer startWorkStateFileMu.Unlock()
+	repoSlug := strings.TrimSpace(state.SourceRepo)
+	if repoSlug != "" {
+		current, err := readStartWorkStateUnlocked(repoSlug)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return err
+			}
+		} else {
+			if state.PlannedItems == nil {
+				state.PlannedItems = map[string]startWorkPlannedItem{}
+			}
+			for itemID, item := range current.PlannedItems {
+				if _, ok := state.PlannedItems[itemID]; !ok {
+					state.PlannedItems[itemID] = item
+				}
+			}
+		}
+	}
+	return writeStartWorkStateUnlocked(state)
+}
+
 var startWorkRunGithubWork = func(issueURL string, publishTarget string, codexArgs []string) (startWorkLaunchResult, error) {
 	args := []string{"start", issueURL}
 	if publishTarget == "local-branch" {

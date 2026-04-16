@@ -71,6 +71,22 @@ type startRepoCoordinator struct {
 	lastSkippedReason   string
 }
 
+func (c *startRepoCoordinator) withPersistedStateLock(fn func() error) error {
+	startWorkStateFileMu.Lock()
+	defer startWorkStateFileMu.Unlock()
+	if strings.TrimSpace(c.repoSlug) != "" {
+		state, err := readStartWorkStateUnlocked(c.repoSlug)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return err
+			}
+		} else {
+			c.state = state
+		}
+	}
+	return fn()
+}
+
 var startRunIssueTriage = func(repoSlug string, issue startWorkIssueState, codexArgs []string) (startWorkTriageResult, error) {
 	return runStartWorkIssueTriage(repoSlug, issue, codexArgs)
 }
@@ -88,7 +104,7 @@ var startRunIssueSync = func(options startWorkOptions) error {
 	if err != nil {
 		return err
 	}
-	return writeStartWorkState(*state)
+	return writeStartWorkStatePreservingPlannedItems(*state)
 }
 
 var startRunPlannedItemLaunch = func(cwd string, repoSlug string, workOptions startWorkOptions, item startWorkPlannedItem) (startPlannedLaunchResult, error) {
@@ -226,6 +242,25 @@ func (c *startRepoCoordinator) refreshRepoState() error {
 }
 
 func (c *startRepoCoordinator) syncServiceTasks() error {
+	startWorkStateFileMu.Lock()
+	defer startWorkStateFileMu.Unlock()
+	if strings.TrimSpace(c.repoSlug) != "" {
+		persisted, err := readStartWorkStateUnlocked(c.repoSlug)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return err
+			}
+		} else {
+			if c.state.PlannedItems == nil {
+				c.state.PlannedItems = map[string]startWorkPlannedItem{}
+			}
+			for itemID, item := range persisted.PlannedItems {
+				if _, ok := c.state.PlannedItems[itemID]; !ok {
+					c.state.PlannedItems[itemID] = item
+				}
+			}
+		}
+	}
 	if c.state.ServiceTasks == nil {
 		c.state.ServiceTasks = map[string]startWorkServiceTask{}
 	}
@@ -339,9 +374,9 @@ func (c *startRepoCoordinator) syncServiceTasks() error {
 		}
 	}
 	if mutated {
-		return writeStartWorkState(*c.state)
+		return writeStartWorkStateUnlocked(*c.state)
 	}
-	return writeStartWorkState(*c.state)
+	return writeStartWorkStateUnlocked(*c.state)
 }
 
 func (c *startRepoCoordinator) upsertServiceTask(desired startWorkServiceTask, now string) bool {
@@ -520,36 +555,38 @@ func (c *startRepoCoordinator) shouldQueueReconcile(issueKey string, issue start
 }
 
 func (c *startRepoCoordinator) markTaskStarted(task startRepoTask) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	switch task.Kind {
-	case startTaskKindIssue:
-		issue := c.state.Issues[task.IssueKey]
-		issue.Status = startWorkStatusInProgress
-		issue.BlockedReason = ""
-		issue.LastRunError = ""
-		issue.LastRunUpdatedAt = now
-		issue.UpdatedAt = now
-		c.state.Issues[task.IssueKey] = issue
-		c.startedIssueNumbers = append(c.startedIssueNumbers, issue.SourceNumber)
-		c.implStartedCount++
-	case startTaskKindPlannedLaunch:
-		item := c.state.PlannedItems[task.PlannedItemID]
-		item.State = startPlannedItemLaunching
-		item.LastError = ""
-		item.UpdatedAt = now
-		c.state.PlannedItems[task.PlannedItemID] = item
-	default:
-		serviceTask := c.state.ServiceTasks[task.Key]
-		serviceTask.Status = startWorkServiceTaskRunning
-		serviceTask.Attempts++
-		serviceTask.StartedAt = now
-		serviceTask.UpdatedAt = now
-		serviceTask.LastError = ""
-		serviceTask.WaitCycle = ""
-		c.state.ServiceTasks[task.Key] = serviceTask
-		c.serviceStartedCount++
-	}
-	return writeStartWorkState(*c.state)
+	return c.withPersistedStateLock(func() error {
+		now := time.Now().UTC().Format(time.RFC3339)
+		switch task.Kind {
+		case startTaskKindIssue:
+			issue := c.state.Issues[task.IssueKey]
+			issue.Status = startWorkStatusInProgress
+			issue.BlockedReason = ""
+			issue.LastRunError = ""
+			issue.LastRunUpdatedAt = now
+			issue.UpdatedAt = now
+			c.state.Issues[task.IssueKey] = issue
+			c.startedIssueNumbers = append(c.startedIssueNumbers, issue.SourceNumber)
+			c.implStartedCount++
+		case startTaskKindPlannedLaunch:
+			item := c.state.PlannedItems[task.PlannedItemID]
+			item.State = startPlannedItemLaunching
+			item.LastError = ""
+			item.UpdatedAt = now
+			c.state.PlannedItems[task.PlannedItemID] = item
+		default:
+			serviceTask := c.state.ServiceTasks[task.Key]
+			serviceTask.Status = startWorkServiceTaskRunning
+			serviceTask.Attempts++
+			serviceTask.StartedAt = now
+			serviceTask.UpdatedAt = now
+			serviceTask.LastError = ""
+			serviceTask.WaitCycle = ""
+			c.state.ServiceTasks[task.Key] = serviceTask
+			c.serviceStartedCount++
+		}
+		return writeStartWorkStateUnlocked(*c.state)
+	})
 }
 
 func (c *startRepoCoordinator) launchTask(task startRepoTask, results chan<- startRepoTaskResult) {
@@ -592,219 +629,221 @@ func (c *startRepoCoordinator) launchTask(task startRepoTask, results chan<- sta
 }
 
 func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	switch result.Task.Kind {
-	case startTaskKindIssue:
-		issue := c.state.Issues[result.Task.IssueKey]
-		if result.Launch != nil {
-			issue.LastRunID = strings.TrimSpace(result.Launch.RunID)
-		}
-		issue.LastRunUpdatedAt = now
-		if result.Err != nil {
-			issue.LastRunError = result.Err.Error()
-		} else {
-			issue.LastRunError = ""
-		}
-		issue.Status = startWorkStatusReconciling
-		issue.UpdatedAt = now
-		c.state.Issues[result.Task.IssueKey] = issue
-		serviceTask := c.state.ServiceTasks[startServiceTaskKey(startTaskKindReconcile, result.Task.IssueKey)]
-		serviceTask.ID = startServiceTaskKey(startTaskKindReconcile, result.Task.IssueKey)
-		serviceTask.Kind = startTaskKindReconcile
-		serviceTask.Queue = startTaskQueueService
-		serviceTask.Status = startWorkServiceTaskQueued
-		serviceTask.IssueKey = result.Task.IssueKey
-		serviceTask.Fingerprint = issue.SourceFingerprint
-		serviceTask.RunID = issue.LastRunID
-		serviceTask.WaitCycle = ""
-		serviceTask.UpdatedAt = now
-		c.state.ServiceTasks[serviceTask.ID] = serviceTask
-		if err := writeStartWorkState(*c.state); err != nil {
-			return err
-		}
-		if result.Err != nil {
-			return fmt.Errorf("%s %s: %w", c.repoSlug, result.Task.Key, result.Err)
-		}
-		return nil
-	case startTaskKindIssueSync:
-		serviceTask := c.state.ServiceTasks[result.Task.Key]
-		if result.Err != nil {
-			return c.handleServiceTaskFailure(serviceTask, result.Err, now)
-		}
-		serviceTask.Status = startWorkServiceTaskCompleted
-		serviceTask.ResultSummary = "synced"
-		serviceTask.WaitCycle = ""
-		serviceTask.CompletedAt = now
-		serviceTask.UpdatedAt = now
-		c.state.ServiceTasks[result.Task.Key] = serviceTask
-		c.refreshState = true
-	case startTaskKindTriage:
-		serviceTask := c.state.ServiceTasks[result.Task.Key]
-		issue := c.state.Issues[result.Task.IssueKey]
-		if result.Err != nil {
-			if serviceTask.Attempts < serviceTaskRetryLimit(serviceTask.Kind) {
-				serviceTask.Status = startWorkServiceTaskQueued
-				serviceTask.LastError = result.Err.Error()
-				serviceTask.ResultSummary = "retrying"
-				serviceTask.WaitCycle = ""
-				serviceTask.StartedAt = ""
-				serviceTask.UpdatedAt = now
-				c.state.ServiceTasks[result.Task.Key] = serviceTask
-				issue.TriageStatus = startWorkTriageQueued
-				issue.TriageError = result.Err.Error()
-				issue.TriageUpdatedAt = now
-				issue.UpdatedAt = now
-				c.state.Issues[result.Task.IssueKey] = issue
-				return writeStartWorkState(*c.state)
+	return c.withPersistedStateLock(func() error {
+		now := time.Now().UTC().Format(time.RFC3339)
+		switch result.Task.Kind {
+		case startTaskKindIssue:
+			issue := c.state.Issues[result.Task.IssueKey]
+			if result.Launch != nil {
+				issue.LastRunID = strings.TrimSpace(result.Launch.RunID)
 			}
-			serviceTask.Status = startWorkServiceTaskFailed
-			serviceTask.LastError = result.Err.Error()
+			issue.LastRunUpdatedAt = now
+			if result.Err != nil {
+				issue.LastRunError = result.Err.Error()
+			} else {
+				issue.LastRunError = ""
+			}
+			issue.Status = startWorkStatusReconciling
+			issue.UpdatedAt = now
+			c.state.Issues[result.Task.IssueKey] = issue
+			serviceTask := c.state.ServiceTasks[startServiceTaskKey(startTaskKindReconcile, result.Task.IssueKey)]
+			serviceTask.ID = startServiceTaskKey(startTaskKindReconcile, result.Task.IssueKey)
+			serviceTask.Kind = startTaskKindReconcile
+			serviceTask.Queue = startTaskQueueService
+			serviceTask.Status = startWorkServiceTaskQueued
+			serviceTask.IssueKey = result.Task.IssueKey
+			serviceTask.Fingerprint = issue.SourceFingerprint
+			serviceTask.RunID = issue.LastRunID
+			serviceTask.WaitCycle = ""
+			serviceTask.UpdatedAt = now
+			c.state.ServiceTasks[serviceTask.ID] = serviceTask
+			if err := writeStartWorkStateUnlocked(*c.state); err != nil {
+				return err
+			}
+			if result.Err != nil {
+				return fmt.Errorf("%s %s: %w", c.repoSlug, result.Task.Key, result.Err)
+			}
+			return nil
+		case startTaskKindIssueSync:
+			serviceTask := c.state.ServiceTasks[result.Task.Key]
+			if result.Err != nil {
+				return c.handleServiceTaskFailure(serviceTask, result.Err, now)
+			}
+			serviceTask.Status = startWorkServiceTaskCompleted
+			serviceTask.ResultSummary = "synced"
 			serviceTask.WaitCycle = ""
 			serviceTask.CompletedAt = now
 			serviceTask.UpdatedAt = now
 			c.state.ServiceTasks[result.Task.Key] = serviceTask
-			issue.TriageStatus = startWorkTriageFailed
-			issue.TriageError = result.Err.Error()
-			issue.TriageUpdatedAt = now
-			issue.UpdatedAt = now
-			c.state.Issues[result.Task.IssueKey] = issue
-			if err := writeStartWorkState(*c.state); err != nil {
-				return err
-			}
-			return fmt.Errorf("%s %s: %w", c.repoSlug, result.Task.Key, result.Err)
-		}
-		serviceTask.Status = startWorkServiceTaskCompleted
-		serviceTask.ResultSummary = startWorkPriorityLabel(result.Triage.Priority)
-		serviceTask.WaitCycle = ""
-		serviceTask.CompletedAt = now
-		serviceTask.UpdatedAt = now
-		serviceTask.Fingerprint = issue.SourceFingerprint
-		c.state.ServiceTasks[result.Task.Key] = serviceTask
-		issue.Priority = result.Triage.Priority
-		issue.PrioritySource = "triage"
-		issue.TriageStatus = startWorkTriageCompleted
-		issue.TriageRationale = result.Triage.Rationale
-		issue.TriageFingerprint = issue.SourceFingerprint
-		issue.TriageUpdatedAt = now
-		issue.TriageError = ""
-		issue.UpdatedAt = now
-		c.state.Issues[result.Task.IssueKey] = issue
-	case startTaskKindReconcile:
-		serviceTask := c.state.ServiceTasks[result.Task.Key]
-		issue := c.state.Issues[result.Task.IssueKey]
-		if result.Err != nil {
-			if serviceTask.Attempts < serviceTaskRetryLimit(serviceTask.Kind) {
-				serviceTask.Status = startWorkServiceTaskQueued
+			c.refreshState = true
+		case startTaskKindTriage:
+			serviceTask := c.state.ServiceTasks[result.Task.Key]
+			issue := c.state.Issues[result.Task.IssueKey]
+			if result.Err != nil {
+				if serviceTask.Attempts < serviceTaskRetryLimit(serviceTask.Kind) {
+					serviceTask.Status = startWorkServiceTaskQueued
+					serviceTask.LastError = result.Err.Error()
+					serviceTask.ResultSummary = "retrying"
+					serviceTask.WaitCycle = ""
+					serviceTask.StartedAt = ""
+					serviceTask.UpdatedAt = now
+					c.state.ServiceTasks[result.Task.Key] = serviceTask
+					issue.TriageStatus = startWorkTriageQueued
+					issue.TriageError = result.Err.Error()
+					issue.TriageUpdatedAt = now
+					issue.UpdatedAt = now
+					c.state.Issues[result.Task.IssueKey] = issue
+					return writeStartWorkStateUnlocked(*c.state)
+				}
+				serviceTask.Status = startWorkServiceTaskFailed
 				serviceTask.LastError = result.Err.Error()
-				serviceTask.ResultSummary = "retrying"
-				serviceTask.StartedAt = ""
+				serviceTask.WaitCycle = ""
+				serviceTask.CompletedAt = now
 				serviceTask.UpdatedAt = now
 				c.state.ServiceTasks[result.Task.Key] = serviceTask
-				issue.Status = startWorkStatusReconciling
-				issue.BlockedReason = ""
+				issue.TriageStatus = startWorkTriageFailed
+				issue.TriageError = result.Err.Error()
+				issue.TriageUpdatedAt = now
 				issue.UpdatedAt = now
 				c.state.Issues[result.Task.IssueKey] = issue
-				return writeStartWorkState(*c.state)
+				if err := writeStartWorkStateUnlocked(*c.state); err != nil {
+					return err
+				}
+				return fmt.Errorf("%s %s: %w", c.repoSlug, result.Task.Key, result.Err)
 			}
-			serviceTask.Status = startWorkServiceTaskFailed
-			serviceTask.LastError = result.Err.Error()
+			serviceTask.Status = startWorkServiceTaskCompleted
+			serviceTask.ResultSummary = startWorkPriorityLabel(result.Triage.Priority)
+			serviceTask.WaitCycle = ""
 			serviceTask.CompletedAt = now
 			serviceTask.UpdatedAt = now
+			serviceTask.Fingerprint = issue.SourceFingerprint
 			c.state.ServiceTasks[result.Task.Key] = serviceTask
-			issue.Status = startWorkStatusBlocked
-			issue.BlockedReason = result.Err.Error()
+			issue.Priority = result.Triage.Priority
+			issue.PrioritySource = "triage"
+			issue.TriageStatus = startWorkTriageCompleted
+			issue.TriageRationale = result.Triage.Rationale
+			issue.TriageFingerprint = issue.SourceFingerprint
+			issue.TriageUpdatedAt = now
+			issue.TriageError = ""
 			issue.UpdatedAt = now
 			c.state.Issues[result.Task.IssueKey] = issue
-			if err := writeStartWorkState(*c.state); err != nil {
-				return err
-			}
-			return fmt.Errorf("%s %s: %w", c.repoSlug, result.Task.Key, result.Err)
-		}
-		if result.Reconcile != nil && result.Reconcile.ShouldRetry {
-			if serviceTask.Attempts < serviceTaskRetryLimit(serviceTask.Kind) {
-				serviceTask.Status = startWorkServiceTaskQueued
-				serviceTask.LastError = result.Reconcile.BlockedReason
-				serviceTask.ResultSummary = "waiting"
-				serviceTask.WaitCycle = c.cycleID
-				serviceTask.StartedAt = ""
+		case startTaskKindReconcile:
+			serviceTask := c.state.ServiceTasks[result.Task.Key]
+			issue := c.state.Issues[result.Task.IssueKey]
+			if result.Err != nil {
+				if serviceTask.Attempts < serviceTaskRetryLimit(serviceTask.Kind) {
+					serviceTask.Status = startWorkServiceTaskQueued
+					serviceTask.LastError = result.Err.Error()
+					serviceTask.ResultSummary = "retrying"
+					serviceTask.StartedAt = ""
+					serviceTask.UpdatedAt = now
+					c.state.ServiceTasks[result.Task.Key] = serviceTask
+					issue.Status = startWorkStatusReconciling
+					issue.BlockedReason = ""
+					issue.UpdatedAt = now
+					c.state.Issues[result.Task.IssueKey] = issue
+					return writeStartWorkStateUnlocked(*c.state)
+				}
+				serviceTask.Status = startWorkServiceTaskFailed
+				serviceTask.LastError = result.Err.Error()
+				serviceTask.CompletedAt = now
 				serviceTask.UpdatedAt = now
-				serviceTask.RunID = result.Reconcile.RunID
 				c.state.ServiceTasks[result.Task.Key] = serviceTask
-				issue.Status = startWorkStatusReconciling
-				issue.BlockedReason = ""
-				issue.LastRunID = result.Reconcile.RunID
-				issue.LastRunUpdatedAt = now
+				issue.Status = startWorkStatusBlocked
+				issue.BlockedReason = result.Err.Error()
 				issue.UpdatedAt = now
 				c.state.Issues[result.Task.IssueKey] = issue
-				return writeStartWorkState(*c.state)
+				if err := writeStartWorkStateUnlocked(*c.state); err != nil {
+					return err
+				}
+				return fmt.Errorf("%s %s: %w", c.repoSlug, result.Task.Key, result.Err)
 			}
-			issue.Status = startWorkStatusBlocked
-			issue.BlockedReason = defaultString(result.Reconcile.BlockedReason, "reconcile retries exhausted")
-		}
-		serviceTask.Status = startWorkServiceTaskCompleted
-		serviceTask.ResultSummary = result.Reconcile.Status
-		serviceTask.WaitCycle = ""
-		serviceTask.CompletedAt = now
-		serviceTask.UpdatedAt = now
-		serviceTask.RunID = result.Reconcile.RunID
-		c.state.ServiceTasks[result.Task.Key] = serviceTask
-		issue.Status = result.Reconcile.Status
-		issue.BlockedReason = result.Reconcile.BlockedReason
-		issue.LastRunID = result.Reconcile.RunID
-		issue.LastRunUpdatedAt = now
-		issue.PublishedPRNumber = result.Reconcile.PublishedPRNumber
-		issue.PublishedPRURL = result.Reconcile.PublishedPRURL
-		issue.PublicationState = result.Reconcile.PublicationState
-		issue.UpdatedAt = now
-		c.state.Issues[result.Task.IssueKey] = issue
-	case startTaskKindScout:
-		serviceTask := c.state.ServiceTasks[result.Task.Key]
-		if result.Err != nil {
-			return c.handleServiceTaskFailure(serviceTask, result.Err, now)
-		}
-		serviceTask.Status = startWorkServiceTaskCompleted
-		serviceTask.WaitCycle = ""
-		serviceTask.CompletedAt = now
-		serviceTask.UpdatedAt = now
-		c.state.ServiceTasks[result.Task.Key] = serviceTask
-		c.refreshState = true
-	case startTaskKindPlannedLaunch:
-		serviceTask := c.state.ServiceTasks[result.Task.Key]
-		item := c.state.PlannedItems[result.Task.PlannedItemID]
-		if result.Err != nil {
-			serviceTask.Status = startWorkServiceTaskFailed
-			serviceTask.LastError = result.Err.Error()
+			if result.Reconcile != nil && result.Reconcile.ShouldRetry {
+				if serviceTask.Attempts < serviceTaskRetryLimit(serviceTask.Kind) {
+					serviceTask.Status = startWorkServiceTaskQueued
+					serviceTask.LastError = result.Reconcile.BlockedReason
+					serviceTask.ResultSummary = "waiting"
+					serviceTask.WaitCycle = c.cycleID
+					serviceTask.StartedAt = ""
+					serviceTask.UpdatedAt = now
+					serviceTask.RunID = result.Reconcile.RunID
+					c.state.ServiceTasks[result.Task.Key] = serviceTask
+					issue.Status = startWorkStatusReconciling
+					issue.BlockedReason = ""
+					issue.LastRunID = result.Reconcile.RunID
+					issue.LastRunUpdatedAt = now
+					issue.UpdatedAt = now
+					c.state.Issues[result.Task.IssueKey] = issue
+					return writeStartWorkStateUnlocked(*c.state)
+				}
+				issue.Status = startWorkStatusBlocked
+				issue.BlockedReason = defaultString(result.Reconcile.BlockedReason, "reconcile retries exhausted")
+			}
+			serviceTask.Status = startWorkServiceTaskCompleted
+			serviceTask.ResultSummary = result.Reconcile.Status
+			serviceTask.WaitCycle = ""
+			serviceTask.CompletedAt = now
+			serviceTask.UpdatedAt = now
+			serviceTask.RunID = result.Reconcile.RunID
+			c.state.ServiceTasks[result.Task.Key] = serviceTask
+			issue.Status = result.Reconcile.Status
+			issue.BlockedReason = result.Reconcile.BlockedReason
+			issue.LastRunID = result.Reconcile.RunID
+			issue.LastRunUpdatedAt = now
+			issue.PublishedPRNumber = result.Reconcile.PublishedPRNumber
+			issue.PublishedPRURL = result.Reconcile.PublishedPRURL
+			issue.PublicationState = result.Reconcile.PublicationState
+			issue.UpdatedAt = now
+			c.state.Issues[result.Task.IssueKey] = issue
+		case startTaskKindScout:
+			serviceTask := c.state.ServiceTasks[result.Task.Key]
+			if result.Err != nil {
+				return c.handleServiceTaskFailure(serviceTask, result.Err, now)
+			}
+			serviceTask.Status = startWorkServiceTaskCompleted
+			serviceTask.WaitCycle = ""
 			serviceTask.CompletedAt = now
 			serviceTask.UpdatedAt = now
 			c.state.ServiceTasks[result.Task.Key] = serviceTask
-			item.State = startPlannedItemFailed
-			item.LastError = result.Err.Error()
+			c.refreshState = true
+		case startTaskKindPlannedLaunch:
+			serviceTask := c.state.ServiceTasks[result.Task.Key]
+			item := c.state.PlannedItems[result.Task.PlannedItemID]
+			if result.Err != nil {
+				serviceTask.Status = startWorkServiceTaskFailed
+				serviceTask.LastError = result.Err.Error()
+				serviceTask.CompletedAt = now
+				serviceTask.UpdatedAt = now
+				c.state.ServiceTasks[result.Task.Key] = serviceTask
+				item.State = startPlannedItemFailed
+				item.LastError = result.Err.Error()
+				item.UpdatedAt = now
+				c.state.PlannedItems[result.Task.PlannedItemID] = item
+				if err := writeStartWorkStateUnlocked(*c.state); err != nil {
+					return err
+				}
+				return fmt.Errorf("%s %s: %w", c.repoSlug, result.Task.Key, result.Err)
+			}
+			serviceTask.Status = startWorkServiceTaskCompleted
+			serviceTask.CompletedAt = now
+			serviceTask.UpdatedAt = now
+			serviceTask.ResultSummary = defaultString(result.PlannedLaunch.Status, "launched")
+			serviceTask.RunID = result.PlannedLaunch.RunID
+			c.state.ServiceTasks[result.Task.Key] = serviceTask
+			item.State = startPlannedItemLaunched
+			item.LaunchRunID = result.PlannedLaunch.RunID
+			item.LaunchIssueNumber = result.PlannedLaunch.IssueNumber
+			item.LaunchIssueURL = result.PlannedLaunch.IssueURL
+			item.LaunchResult = defaultString(result.PlannedLaunch.Result, result.PlannedLaunch.Status)
+			item.LastError = ""
 			item.UpdatedAt = now
 			c.state.PlannedItems[result.Task.PlannedItemID] = item
-			if err := writeStartWorkState(*c.state); err != nil {
-				return err
-			}
-			return fmt.Errorf("%s %s: %w", c.repoSlug, result.Task.Key, result.Err)
+			c.refreshState = true
+		default:
+			return fmt.Errorf("unknown start task kind %s", result.Task.Kind)
 		}
-		serviceTask.Status = startWorkServiceTaskCompleted
-		serviceTask.CompletedAt = now
-		serviceTask.UpdatedAt = now
-		serviceTask.ResultSummary = defaultString(result.PlannedLaunch.Status, "launched")
-		serviceTask.RunID = result.PlannedLaunch.RunID
-		c.state.ServiceTasks[result.Task.Key] = serviceTask
-		item.State = startPlannedItemLaunched
-		item.LaunchRunID = result.PlannedLaunch.RunID
-		item.LaunchIssueNumber = result.PlannedLaunch.IssueNumber
-		item.LaunchIssueURL = result.PlannedLaunch.IssueURL
-		item.LaunchResult = defaultString(result.PlannedLaunch.Result, result.PlannedLaunch.Status)
-		item.LastError = ""
-		item.UpdatedAt = now
-		c.state.PlannedItems[result.Task.PlannedItemID] = item
-		c.refreshState = true
-	default:
-		return fmt.Errorf("unknown start task kind %s", result.Task.Kind)
-	}
-	return writeStartWorkState(*c.state)
+		return writeStartWorkStateUnlocked(*c.state)
+	})
 }
 
 func (c *startRepoCoordinator) serviceTaskReady(task startWorkServiceTask) bool {
@@ -843,7 +882,7 @@ func (c *startRepoCoordinator) handleServiceTaskFailure(task startWorkServiceTas
 		task.StartedAt = ""
 		task.UpdatedAt = now
 		c.state.ServiceTasks[task.ID] = task
-		return writeStartWorkState(*c.state)
+		return writeStartWorkStateUnlocked(*c.state)
 	}
 	task.Status = startWorkServiceTaskFailed
 	task.LastError = taskErr.Error()
@@ -851,7 +890,7 @@ func (c *startRepoCoordinator) handleServiceTaskFailure(task startWorkServiceTas
 	task.CompletedAt = now
 	task.UpdatedAt = now
 	c.state.ServiceTasks[task.ID] = task
-	if err := writeStartWorkState(*c.state); err != nil {
+	if err := writeStartWorkStateUnlocked(*c.state); err != nil {
 		return err
 	}
 	return fmt.Errorf("%s %s: %w", c.repoSlug, task.ID, taskErr)
@@ -861,20 +900,22 @@ func (c *startRepoCoordinator) persistLastRun() error {
 	if c.state == nil {
 		return nil
 	}
-	c.state.LastRun = &startWorkLastRun{
-		StartedIssueNumbers:        append([]int{}, c.startedIssueNumbers...),
-		SkippedReason:              c.lastSkippedReason,
-		OpenForkPRs:                c.openPRs,
-		ParallelLimit:              c.workOptions.Parallel,
-		GlobalParallelLimit:        c.globalOptions.Parallel,
-		RepoWorkerLimit:            c.workOptions.Parallel,
-		OpenPRCap:                  c.workOptions.MaxOpenPR,
-		ServiceStartedCount:        c.serviceStartedCount,
-		ImplementationStartedCount: c.implStartedCount,
-		UpdatedAt:                  time.Now().UTC().Format(time.RFC3339),
-	}
-	c.state.UpdatedAt = c.state.LastRun.UpdatedAt
-	return writeStartWorkState(*c.state)
+	return c.withPersistedStateLock(func() error {
+		c.state.LastRun = &startWorkLastRun{
+			StartedIssueNumbers:        append([]int{}, c.startedIssueNumbers...),
+			SkippedReason:              c.lastSkippedReason,
+			OpenForkPRs:                c.openPRs,
+			ParallelLimit:              c.workOptions.Parallel,
+			GlobalParallelLimit:        c.globalOptions.Parallel,
+			RepoWorkerLimit:            c.workOptions.Parallel,
+			OpenPRCap:                  c.workOptions.MaxOpenPR,
+			ServiceStartedCount:        c.serviceStartedCount,
+			ImplementationStartedCount: c.implStartedCount,
+			UpdatedAt:                  time.Now().UTC().Format(time.RFC3339),
+		}
+		c.state.UpdatedAt = c.state.LastRun.UpdatedAt
+		return writeStartWorkStateUnlocked(*c.state)
+	})
 }
 
 func startRepoSupportedScoutRoles(repoSlug string) []string {

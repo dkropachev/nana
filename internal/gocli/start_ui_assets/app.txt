@@ -935,6 +935,12 @@
     return (state.scoutItems.selectedItemIDs || []).filter((itemID) => state.scoutItems.items.some((item) => item.id === itemID));
   }
 
+  function allScoutItemIDs() {
+    return state.scoutItems.items
+      .map((item) => String(item.id || ""))
+      .filter(Boolean);
+  }
+
   function setSelectedScoutItemIDs(itemIDs) {
     const allowed = new Set(state.scoutItems.items.map((item) => item.id));
     const seen = new Set();
@@ -944,6 +950,18 @@
       seen.add(id);
       return true;
     });
+  }
+
+  function selectAllScoutItems() {
+    const itemIDs = allScoutItemIDs();
+    setSelectedScoutItemIDs(itemIDs);
+    if (itemIDs.length && !itemIDs.includes(state.scoutItems.selectedItemID)) {
+      state.scoutItems.selectedItemID = itemIDs[0];
+    }
+  }
+
+  function clearScoutItemSelection() {
+    setSelectedScoutItemIDs([]);
   }
 
   function toggleScoutItemSelection(itemID, checked) {
@@ -3627,6 +3645,8 @@
     const selectedIDs = selectedScoutItemIDs();
     const selectedSet = new Set(selectedIDs);
     const selectedCount = selectedIDs.length;
+    const totalCount = allScoutItemIDs().length;
+    const allSelected = totalCount > 0 && selectedCount === totalCount;
     const queueableCount = scoutActionableSelection("queue-planned").length;
     const dismissibleCount = scoutActionableSelection("dismiss").length;
     const resettableCount = scoutActionableSelection("reset").length;
@@ -3645,7 +3665,7 @@
           <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-bulk-action="queue-planned" ${queueableCount ? "" : "disabled"}>Queue Selected (${escapeHTML(String(queueableCount))})</button>
           <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-bulk-action="dismiss" ${dismissibleCount ? "" : "disabled"}>Dismiss Selected (${escapeHTML(String(dismissibleCount))})</button>
           <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-bulk-action="reset" ${resettableCount ? "" : "disabled"}>Reset Selected (${escapeHTML(String(resettableCount))})</button>
-          <p class="scout-bulk-copy">${escapeHTML(String(selectedCount))} selected</p>
+          <p class="scout-bulk-copy">${escapeHTML(allSelected ? `All ${selectedCount} selected` : `${selectedCount} selected`)}</p>
         </div>
         <div id="repo-scout-grid"></div>
         <div id="repo-scout-detail" class="scout-detail"></div>
@@ -5209,14 +5229,14 @@
 
       const scoutSelectAllButton = event.target.closest("[data-scout-select-all]");
       if (scoutSelectAllButton) {
-        setSelectedScoutItemIDs(state.scoutItems.items.map((item) => item.id));
+        selectAllScoutItems();
         renderRepoScoutsPage(selectedRepoSummary());
         return;
       }
 
       const scoutClearButton = event.target.closest("[data-scout-clear-selection]");
       if (scoutClearButton) {
-        setSelectedScoutItemIDs([]);
+        clearScoutItemSelection();
         renderRepoScoutsPage(selectedRepoSummary());
         return;
       }

@@ -3293,6 +3293,9 @@ func listStartUIScoutItems(repoSlug string) ([]startUIScoutItem, error) {
 		}
 		return nil, err
 	}
+	if _, err := reconcileLocalScoutPickupPlannedItems(repoPath, repoSlug); err != nil {
+		return nil, err
+	}
 	pickupState := localScoutPickupState{Version: 1, Items: map[string]localScoutPickupItem{}}
 	if state, _, err := readLocalScoutPickupState(repoPath); err == nil {
 		pickupState = state
@@ -3494,7 +3497,7 @@ func mutateStartUIScoutItem(repoSlug string, itemID string, action string) (star
 			return startUIScoutItemsResponse{}, err
 		}
 		state.Items[itemID] = localScoutPickupItem{
-			Status:        "planned",
+			Status:        "completed",
 			Title:         selected.Title,
 			Artifact:      selected.ArtifactPath,
 			PlannedItemID: plannedItem.ID,
