@@ -34,10 +34,11 @@ Automation mode behavior:
   - with no options, loops indefinitely until interrupted
   - scans onboarded GitHub repos under ~/.nana/work/repos
   - skips repos where repo-mode is disabled/local or issue-pick is manual
-  - --parallel limits how many repos may be active at once
-  - --per-repo-workers limits how many workers a repo may use at once
+  - --parallel limits total workers across all selected repos (default: 10)
+  - all selected repos share one automation worker queue
+  - --per-repo-workers is accepted as a deprecated alias for --parallel
   - --interval controls the target time between cycle starts in forever mode
-  - uses separate per-repo service and implementation queues that share the repo worker budget
+  - service and implementation tasks all consume the shared worker budget
   - triages issues before implementation pickup and persists triage results locally
   - runs supported scouts from the managed source checkout when scout policies exist
   - forwards PRs when pr-forward is auto: fork creates upstream PRs; repo attempts merge
@@ -52,7 +53,7 @@ Scout mode behavior:
   - GitHub targets follow their scout policy issue_destination
 `
 
-const startDefaultGlobalParallel = 3
+const startDefaultGlobalParallel = 10
 
 type startOptions struct {
 	RepoSlug       string
@@ -79,6 +80,7 @@ var startPromoteStartWork = startWorkPromote
 var startRunScoutStart = runScoutStart
 var startRunLocalScoutPickup = runLocalScoutDiscoveredItems
 var startRunRepoCycle = runStartRepoCycle
+var startRunRepoCyclesBatch = runStartRepoCyclesSharedWorkers
 var startLoopNow = time.Now
 var startLoopSleep = time.Sleep
 var startLoopContinue = func() bool { return true }
@@ -134,7 +136,7 @@ func Start(cwd string, args []string) error {
 				return nil
 			}
 			fmt.Fprintf(os.Stdout, "[start] Repos selected: %s\n", strings.Join(repos, ", "))
-			return runStartRepoCycles(cwd, repos, options)
+			return startRunRepoCyclesBatch(cwd, repos, options)
 		}
 	}
 	printStartModeBanner(mode)
@@ -172,7 +174,12 @@ func printStartModeBanner(mode startExecutionMode) {
 	}
 }
 
-func runStartRepoCycle(cwd string, repoSlug string, options startOptions) error {
+type preparedStartRepoCycle struct {
+	repoSlug    string
+	workOptions startWorkOptions
+}
+
+func prepareStartRepoCycle(repoSlug string, options startOptions) (*preparedStartRepoCycle, error) {
 	settings, _ := readGithubRepoSettings(githubRepoSettingsPath(repoSlug))
 	forkMode := "manual"
 	implementMode := "manual"
@@ -188,28 +195,31 @@ func runStartRepoCycle(cwd string, repoSlug string, options startOptions) error 
 	if repoMode == "fork" && prForwardMode == "auto" {
 		if _, err := os.Stat(startWorkStatePath(repoSlug)); err == nil {
 			if err := startPromoteStartWork(startWorkOptions{RepoSlug: repoSlug}); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
 	if !githubRepoModeAllowsDevelopment(repoMode) || issuePickMode == "manual" {
-		return nil
+		return nil, nil
 	}
-	workOptions := startWorkOptions{
-		RepoSlug:       repoSlug,
-		Parallel:       options.PerRepoWorkers,
-		MaxOpenPR:      options.MaxOpenPR,
-		ForkIssuesMode: forkMode,
-		ImplementMode:  implementMode,
-		PublishTarget:  publishTarget,
-		RepoMode:       repoMode,
-		IssuePickMode:  issuePickMode,
-		PRForwardMode:  prForwardMode,
-		CodexArgs:      options.CodexArgs,
-	}
-	if err := runStartRepoSchedulerCycle(cwd, repoSlug, workOptions, options); err != nil {
-		return err
-	}
+	return &preparedStartRepoCycle{
+		repoSlug: repoSlug,
+		workOptions: startWorkOptions{
+			RepoSlug:       repoSlug,
+			Parallel:       options.Parallel,
+			MaxOpenPR:      options.MaxOpenPR,
+			ForkIssuesMode: forkMode,
+			ImplementMode:  implementMode,
+			PublishTarget:  publishTarget,
+			RepoMode:       repoMode,
+			IssuePickMode:  issuePickMode,
+			PRForwardMode:  prForwardMode,
+			CodexArgs:      options.CodexArgs,
+		},
+	}, nil
+}
+
+func finalizeStartRepoCycle(repoSlug string, options startOptions) error {
 	if _, err := syncGithubWorkItems(workItemSyncCommandOptions{
 		RepoSlug:  repoSlug,
 		Limit:     50,
@@ -224,6 +234,20 @@ func runStartRepoCycle(cwd string, repoSlug string, options startOptions) error 
 		fmt.Fprintf(os.Stdout, "[start] %s: auto-started work items=%d\n", repoSlug, started)
 	}
 	return nil
+}
+
+func runStartRepoCycle(cwd string, repoSlug string, options startOptions) error {
+	prepared, err := prepareStartRepoCycle(repoSlug, options)
+	if err != nil {
+		return err
+	}
+	if prepared == nil {
+		return nil
+	}
+	if err := runStartRepoSchedulerCycle(cwd, repoSlug, prepared.workOptions, options); err != nil {
+		return err
+	}
+	return finalizeStartRepoCycle(repoSlug, options)
 }
 
 func startRepoHasScoutPolicies(repoSlug string) bool {
@@ -419,7 +443,7 @@ func startRepoValueLooksLikePath(value string) bool {
 func parseStartArgs(args []string) (startOptions, error) {
 	options := startOptions{
 		Parallel:       startDefaultGlobalParallel,
-		PerRepoWorkers: startWorkDefaultParallel,
+		PerRepoWorkers: startDefaultGlobalParallel,
 		MaxOpenPR:      startWorkDefaultOpenPRCap,
 		Cycles:         1,
 		UIAPIPort:      startUIDefaultAPIPort,
@@ -465,6 +489,7 @@ func parseStartArgs(args []string) (startOptions, error) {
 				return startOptions{}, err
 			}
 			options.Parallel = parsed
+			options.PerRepoWorkers = parsed
 			index++
 		case strings.HasPrefix(token, "--parallel="):
 			parsed, err := parsePositiveInt(strings.TrimPrefix(token, "--parallel="), "--parallel")
@@ -472,6 +497,7 @@ func parseStartArgs(args []string) (startOptions, error) {
 				return startOptions{}, err
 			}
 			options.Parallel = parsed
+			options.PerRepoWorkers = parsed
 		case token == "--per-repo-workers":
 			value, err := requireStartFlagValue(parseArgs, index, token)
 			if err != nil {
@@ -481,6 +507,7 @@ func parseStartArgs(args []string) (startOptions, error) {
 			if err != nil {
 				return startOptions{}, err
 			}
+			options.Parallel = parsed
 			options.PerRepoWorkers = parsed
 			index++
 		case strings.HasPrefix(token, "--per-repo-workers="):
@@ -488,6 +515,7 @@ func parseStartArgs(args []string) (startOptions, error) {
 			if err != nil {
 				return startOptions{}, err
 			}
+			options.Parallel = parsed
 			options.PerRepoWorkers = parsed
 		case token == "--max-open-prs":
 			value, err := requireStartFlagValue(parseArgs, index, token)

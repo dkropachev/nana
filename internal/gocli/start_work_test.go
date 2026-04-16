@@ -353,6 +353,71 @@ func TestStartRepoCoordinatorQueuesDuePlannedLaunchTask(t *testing.T) {
 	}
 }
 
+func TestStartRepoCoordinatorDoesNotQueueUnscheduledPlannedLaunchTask(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	coordinator := &startRepoCoordinator{
+		repoSlug: repoSlug,
+		cycleID:  "cycle-1",
+		workOptions: startWorkOptions{
+			ImplementMode: "labeled",
+		},
+		state: &startWorkState{
+			Version:    startWorkStateVersion,
+			SourceRepo: repoSlug,
+			UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+			Issues:     map[string]startWorkIssueState{},
+			ServiceTasks: map[string]startWorkServiceTask{
+				startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1"): {
+					ID:            startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1"),
+					Kind:          startTaskKindPlannedLaunch,
+					Queue:         startTaskQueueService,
+					Status:        startWorkServiceTaskQueued,
+					PlannedItemID: "planned-1",
+				},
+			},
+			PlannedItems: map[string]startWorkPlannedItem{
+				"planned-1": {
+					ID:        "planned-1",
+					RepoSlug:  repoSlug,
+					Title:     "Manual launch only",
+					Priority:  2,
+					State:     startPlannedItemQueued,
+					CreatedAt: time.Now().UTC().Format(time.RFC3339),
+					UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+				},
+			},
+		},
+	}
+	if err := coordinator.syncServiceTasks(); err != nil {
+		t.Fatalf("syncServiceTasks: %v", err)
+	}
+	if len(coordinator.buildServiceQueue()) != 0 {
+		t.Fatalf("expected no planned launch tasks for unscheduled item, got %#v", coordinator.buildServiceQueue())
+	}
+	if _, ok := coordinator.state.ServiceTasks[startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1")]; ok {
+		t.Fatalf("expected stale planned-launch task to be removed, got %+v", coordinator.state.ServiceTasks)
+	}
+}
+
+func TestStartWorkPlannedItemDueRequiresExplicitSchedule(t *testing.T) {
+	now := time.Now().UTC()
+	if startWorkPlannedItemDue(startWorkPlannedItem{State: startPlannedItemQueued}, now) {
+		t.Fatal("expected unscheduled planned item to stay queued until launched explicitly")
+	}
+	if startWorkPlannedItemDue(startWorkPlannedItem{State: startPlannedItemQueued, ScheduleAt: "not-a-time"}, now) {
+		t.Fatal("expected invalid schedule to avoid auto-launch")
+	}
+	if !startWorkPlannedItemDue(startWorkPlannedItem{
+		State:      startPlannedItemQueued,
+		ScheduleAt: now.Add(-time.Minute).Format(time.RFC3339),
+	}, now) {
+		t.Fatal("expected past scheduled item to be due")
+	}
+}
+
 func TestStartRepoCoordinatorPersistsStateWhenNoTasksAreQueued(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -526,31 +591,43 @@ func TestStartRepoCoordinatorRetriesTriageTaskBeforeFailing(t *testing.T) {
 }
 
 func TestStartRepoCoordinatorReconcileRequeuesWhileMetadataIsPending(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	initial := startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: "acme/widget",
+		UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+		Issues: map[string]startWorkIssueState{
+			"1": {
+				SourceNumber: 1,
+				ForkNumber:   101,
+				State:        "open",
+				Status:       startWorkStatusReconciling,
+				LastRunID:    "gh-1",
+			},
+		},
+		ServiceTasks: map[string]startWorkServiceTask{
+			"reconcile:1": {
+				ID:       "reconcile:1",
+				Kind:     startTaskKindReconcile,
+				Queue:    startTaskQueueService,
+				Status:   startWorkServiceTaskRunning,
+				IssueKey: "1",
+				Attempts: 1,
+				RunID:    "gh-1",
+			},
+		},
+		PlannedItems: map[string]startWorkPlannedItem{},
+	}
+	if err := writeStartWorkState(initial); err != nil {
+		t.Fatalf("write initial state: %v", err)
+	}
+
 	coordinator := &startRepoCoordinator{
 		repoSlug: "acme/widget",
 		cycleID:  "cycle-1",
-		state: &startWorkState{
-			Issues: map[string]startWorkIssueState{
-				"1": {
-					SourceNumber: 1,
-					ForkNumber:   101,
-					State:        "open",
-					Status:       startWorkStatusReconciling,
-					LastRunID:    "gh-1",
-				},
-			},
-			ServiceTasks: map[string]startWorkServiceTask{
-				"reconcile:1": {
-					ID:       "reconcile:1",
-					Kind:     startTaskKindReconcile,
-					Queue:    startTaskQueueService,
-					Status:   startWorkServiceTaskRunning,
-					IssueKey: "1",
-					Attempts: 1,
-					RunID:    "gh-1",
-				},
-			},
-		},
+		state:    &initial,
 	}
 	if err := coordinator.applyTaskResult(startRepoTaskResult{
 		Task: startRepoTask{Key: "reconcile:1", Kind: startTaskKindReconcile, IssueKey: "1"},

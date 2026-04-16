@@ -625,7 +625,8 @@ func repoExplain(args []string) error {
 		"labeled_fork_labels":        []string{"nana"},
 		"labeled_implement_labels":   []string{"nana"},
 		"open_pr_cap":                startWorkDefaultOpenPRCap,
-		"parallel_limit":             startWorkDefaultParallel,
+		"max_workers":                startDefaultGlobalParallel,
+		"parallel_limit":             startDefaultGlobalParallel,
 		"is_enabled_for_start":       githubRepoAutomationEnabled(settings),
 		"start_promotes_before_work": true,
 	}
@@ -660,9 +661,9 @@ func repoExplain(args []string) error {
 	if repoMode == "disabled" {
 		fmt.Fprintln(os.Stdout, "[repo] disabled mode keeps the repo onboarded for observation only; Nana will not launch work until repo-mode changes.")
 	}
-	fmt.Fprintln(os.Stdout, "[repo] `nana start` mirrors eligible issues, triages them locally, runs persistent per-repo service and implementation queues, schedules scout -> issue-sync -> triage dependencies, reconciles implementation runs, and forwards PRs when pr-forward is auto.")
+	fmt.Fprintln(os.Stdout, "[repo] `nana start` mirrors eligible issues, triages them locally, runs one shared worker queue across all selected repos, schedules scout -> issue-sync -> triage dependencies, reconciles implementation runs, and forwards PRs when pr-forward is auto.")
 	fmt.Fprintln(os.Stdout, "[repo] label issue-pick mode requires the single opt-in label: nana")
-	fmt.Fprintf(os.Stdout, "[repo] Defaults: global_parallel=%d per_repo_workers=%d open_fork_pr_cap=%d\n", startDefaultGlobalParallel, startWorkDefaultParallel, startWorkDefaultOpenPRCap)
+	fmt.Fprintf(os.Stdout, "[repo] Defaults: max_workers=%d open_fork_pr_cap=%d\n", startDefaultGlobalParallel, startWorkDefaultOpenPRCap)
 	if state != nil {
 		promoted, reused, activeSkips := startWorkPromotionCounts(state)
 		fmt.Fprintf(os.Stdout, "[repo] Fork repo: %s\n", defaultString(state.ForkRepo, "(none)"))

@@ -18,6 +18,9 @@ type startPlannedLaunchResult struct {
 }
 
 var startLaunchPlannedItem = launchStartPlannedItem
+var startLaunchScheduledPlannedItem = launchStartPlannedItemScheduled
+var startRunScheduledPlannedLocalWork = runLocalWorkCommand
+var startRunScheduledPlannedGithubWork = GithubWorkCommand
 
 func launchStartPlannedItem(cwd string, repoSlug string, workOptions startWorkOptions, item startWorkPlannedItem) (startPlannedLaunchResult, error) {
 	if normalizeGithubRepoMode(workOptions.RepoMode) == "disabled" {
@@ -35,6 +38,22 @@ func launchStartPlannedItem(cwd string, repoSlug string, workOptions startWorkOp
 	}
 }
 
+func launchStartPlannedItemScheduled(cwd string, repoSlug string, workOptions startWorkOptions, item startWorkPlannedItem) (startPlannedLaunchResult, error) {
+	if normalizeGithubRepoMode(workOptions.RepoMode) == "disabled" {
+		return startPlannedLaunchResult{}, fmt.Errorf("repo %s is configured with repo-mode disabled; change it before launching planned items", repoSlug)
+	}
+	switch resolveStartPlannedLaunchKind(item, workOptions) {
+	case "local_work":
+		return launchStartPlannedLocalWorkScheduled(repoSlug, item, workOptions.CodexArgs)
+	case "github_issue":
+		return launchStartPlannedGithubIssue(repoSlug, item)
+	case "tracked_issue":
+		return launchStartPlannedTrackedIssueScheduled(repoSlug, item, workOptions.CodexArgs)
+	default:
+		return startPlannedLaunchResult{}, fmt.Errorf("unsupported planned item launch kind %q", item.LaunchKind)
+	}
+}
+
 func resolveStartPlannedLaunchKind(item startWorkPlannedItem, workOptions startWorkOptions) string {
 	switch strings.TrimSpace(item.LaunchKind) {
 	case "local_work", "github_issue", "tracked_issue":
@@ -46,24 +65,32 @@ func resolveStartPlannedLaunchKind(item startWorkPlannedItem, workOptions startW
 	return "github_issue"
 }
 
-func launchStartPlannedLocalWork(repoSlug string, item startWorkPlannedItem, codexArgs []string) (startPlannedLaunchResult, error) {
+func resolveStartPlannedRepoPath(repoSlug string) (string, error) {
 	repoPath := githubManagedPaths(repoSlug).SourcePath
-	if info, err := os.Stat(repoPath); err != nil || !info.IsDir() {
-		var checkoutErr error
-		repoPath, checkoutErr = ensureImproveGithubCheckout(repoSlug)
-		if checkoutErr != nil {
-			return startPlannedLaunchResult{}, checkoutErr
-		}
+	if info, err := os.Stat(repoPath); err == nil && info.IsDir() {
+		return repoPath, nil
+	}
+	return ensureImproveGithubCheckout(repoSlug)
+}
+
+func startPlannedLocalWorkTask(item startWorkPlannedItem) string {
+	task := strings.TrimSpace(item.Title)
+	if strings.TrimSpace(item.Description) != "" {
+		task += "\n\n" + strings.TrimSpace(item.Description)
+	}
+	return task
+}
+
+func launchStartPlannedLocalWork(repoSlug string, item startWorkPlannedItem, codexArgs []string) (startPlannedLaunchResult, error) {
+	repoPath, err := resolveStartPlannedRepoPath(repoSlug)
+	if err != nil {
+		return startPlannedLaunchResult{}, err
 	}
 	executablePath, err := os.Executable()
 	if err != nil {
 		return startPlannedLaunchResult{}, err
 	}
-	task := strings.TrimSpace(item.Title)
-	if strings.TrimSpace(item.Description) != "" {
-		task += "\n\n" + strings.TrimSpace(item.Description)
-	}
-	args := []string{"work", "start", "--repo", repoPath, "--task", task}
+	args := []string{"work", "start", "--repo", repoPath, "--task", startPlannedLocalWorkTask(item)}
 	if len(codexArgs) > 0 {
 		args = append(args, "--")
 		args = append(args, codexArgs...)
@@ -94,18 +121,33 @@ func launchStartPlannedLocalWork(repoSlug string, item startWorkPlannedItem, cod
 	}, nil
 }
 
+func launchStartPlannedLocalWorkScheduled(repoSlug string, item startWorkPlannedItem, codexArgs []string) (startPlannedLaunchResult, error) {
+	repoPath, err := resolveStartPlannedRepoPath(repoSlug)
+	if err != nil {
+		return startPlannedLaunchResult{}, err
+	}
+	args := []string{"start", "--repo", repoPath, "--task", startPlannedLocalWorkTask(item)}
+	if len(codexArgs) > 0 {
+		args = append(args, "--")
+		args = append(args, codexArgs...)
+	}
+	if err := startRunScheduledPlannedLocalWork(repoPath, args); err != nil {
+		return startPlannedLaunchResult{}, err
+	}
+	return startPlannedLaunchResult{
+		Status: "completed",
+		Result: "local work completed",
+	}, nil
+}
+
 func launchStartPlannedTrackedIssue(repoSlug string, item startWorkPlannedItem) (startPlannedLaunchResult, error) {
 	targetURL := strings.TrimSpace(item.TargetURL)
 	if targetURL == "" {
 		return startPlannedLaunchResult{}, fmt.Errorf("planned item %s is missing target_url for tracked issue launch", item.ID)
 	}
-	repoPath := githubManagedPaths(repoSlug).SourcePath
-	if info, err := os.Stat(repoPath); err != nil || !info.IsDir() {
-		var checkoutErr error
-		repoPath, checkoutErr = ensureImproveGithubCheckout(repoSlug)
-		if checkoutErr != nil {
-			return startPlannedLaunchResult{}, checkoutErr
-		}
+	repoPath, err := resolveStartPlannedRepoPath(repoSlug)
+	if err != nil {
+		return startPlannedLaunchResult{}, err
 	}
 	executablePath, err := os.Executable()
 	if err != nil {
@@ -134,6 +176,31 @@ func launchStartPlannedTrackedIssue(repoSlug string, item startWorkPlannedItem) 
 	return startPlannedLaunchResult{
 		Status: "spawned",
 		Result: "tracked issue work started; logs at " + logPath,
+	}, nil
+}
+
+func launchStartPlannedTrackedIssueScheduled(repoSlug string, item startWorkPlannedItem, codexArgs []string) (startPlannedLaunchResult, error) {
+	targetURL := strings.TrimSpace(item.TargetURL)
+	if targetURL == "" {
+		return startPlannedLaunchResult{}, fmt.Errorf("planned item %s is missing target_url for tracked issue launch", item.ID)
+	}
+	repoPath, err := resolveStartPlannedRepoPath(repoSlug)
+	if err != nil {
+		return startPlannedLaunchResult{}, err
+	}
+	args := []string{"start", targetURL}
+	if len(codexArgs) > 0 {
+		args = append(args, "--")
+		args = append(args, codexArgs...)
+	}
+	run, err := startRunScheduledPlannedGithubWork(repoPath, args)
+	if err != nil {
+		return startPlannedLaunchResult{}, err
+	}
+	return startPlannedLaunchResult{
+		Status: "completed",
+		Result: "tracked issue work completed",
+		RunID:  run.RunID,
 	}, nil
 }
 

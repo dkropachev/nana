@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -51,6 +50,11 @@ type startRepoTaskResult struct {
 	Launch        *startWorkLaunchResult
 	PlannedLaunch *startPlannedLaunchResult
 	Err           error
+}
+
+type startRepoTaskCompletion struct {
+	repoSlug string
+	result   startRepoTaskResult
 }
 
 type startRepoCoordinator struct {
@@ -99,8 +103,10 @@ var startRunIssueReconcile = func(repoSlug string, publishTarget string, issue s
 	return runStartWorkIssueReconcile(repoSlug, publishTarget, issue)
 }
 
+var startSyncRepoState = startWorkSyncRepoState
+
 var startRunIssueSync = func(options startWorkOptions) error {
-	_, state, _, _, err := startWorkSyncRepoState(options)
+	_, state, _, _, err := startSyncRepoState(options)
 	if err != nil {
 		return err
 	}
@@ -108,35 +114,84 @@ var startRunIssueSync = func(options startWorkOptions) error {
 }
 
 var startRunPlannedItemLaunch = func(cwd string, repoSlug string, workOptions startWorkOptions, item startWorkPlannedItem) (startPlannedLaunchResult, error) {
-	return startLaunchPlannedItem(cwd, repoSlug, workOptions, item)
+	return startLaunchScheduledPlannedItem(cwd, repoSlug, workOptions, item)
 }
 
-func runStartRepoCycles(cwd string, repos []string, options startOptions) error {
-	parallel := options.Parallel
-	if parallel <= 0 {
-		parallel = 1
+func runStartRepoCyclesSharedWorkers(cwd string, repos []string, options startOptions) error {
+	maxWorkers := options.Parallel
+	if maxWorkers <= 0 {
+		maxWorkers = 1
 	}
-	sem := make(chan struct{}, parallel)
 	errs := []string{}
-	var errsMu sync.Mutex
-	var wg sync.WaitGroup
+	repoOrder := []string{}
+	coordinators := map[string]*startRepoCoordinator{}
 	for _, repoSlug := range repos {
-		repoSlug := repoSlug
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() {
-				<-sem
-			}()
-			if err := startRunRepoCycle(cwd, repoSlug, options); err != nil {
-				errsMu.Lock()
-				errs = append(errs, fmt.Sprintf("%s: %v", repoSlug, err))
-				errsMu.Unlock()
-			}
-		}()
+		prepared, err := prepareStartRepoCycle(repoSlug, options)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", repoSlug, err))
+			continue
+		}
+		if prepared == nil {
+			continue
+		}
+		repoOrder = append(repoOrder, repoSlug)
+		coordinators[repoSlug] = newStartRepoCoordinator(cwd, repoSlug, prepared.workOptions, options)
 	}
-	wg.Wait()
+	results := make(chan startRepoTaskCompletion, maxWorkers)
+	running := 0
+	nextRepoIndex := 0
+	for {
+		for running < maxWorkers {
+			repoSlug, coordinator, task, ok, err := nextStartRepoTask(repoOrder, coordinators, nextRepoIndex)
+			if err != nil {
+				errs = append(errs, err.Error())
+				delete(coordinators, repoSlug)
+				repoOrder = slices.DeleteFunc(repoOrder, func(candidate string) bool {
+					return candidate == repoSlug
+				})
+				if nextRepoIndex >= len(repoOrder) {
+					nextRepoIndex = 0
+				}
+				continue
+			}
+			if !ok {
+				break
+			}
+			nextRepoIndex = nextStartRepoIndex(repoOrder, repoSlug)
+			if err := coordinator.markTaskStarted(task); err != nil {
+				errs = append(errs, fmt.Sprintf("%s: %v", repoSlug, err))
+				delete(coordinators, repoSlug)
+				repoOrder = slices.DeleteFunc(repoOrder, func(candidate string) bool {
+					return candidate == repoSlug
+				})
+				if nextRepoIndex >= len(repoOrder) {
+					nextRepoIndex = 0
+				}
+				continue
+			}
+			coordinator.running[task.Key] = task
+			coordinator.launchTaskCompletion(task, results)
+			running++
+		}
+		if running == 0 {
+			break
+		}
+		completion := <-results
+		coordinator := coordinators[completion.repoSlug]
+		delete(coordinator.running, completion.result.Task.Key)
+		if err := coordinator.applyTaskResult(completion.result); err != nil {
+			errs = append(errs, err.Error())
+		}
+		running--
+	}
+	for _, repoSlug := range repoOrder {
+		if err := coordinators[repoSlug].completeRun(); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", repoSlug, err))
+		}
+		if err := finalizeStartRepoCycle(repoSlug, options); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", repoSlug, err))
+		}
+	}
 	if len(errs) == 0 {
 		return nil
 	}
@@ -144,8 +199,41 @@ func runStartRepoCycles(cwd string, repos []string, options startOptions) error 
 	return fmt.Errorf("start repo failures:\n%s", strings.Join(errs, "\n"))
 }
 
-func runStartRepoSchedulerCycle(cwd string, repoSlug string, workOptions startWorkOptions, options startOptions) error {
-	coordinator := &startRepoCoordinator{
+func nextStartRepoTask(repoOrder []string, coordinators map[string]*startRepoCoordinator, startIndex int) (string, *startRepoCoordinator, startRepoTask, bool, error) {
+	if len(repoOrder) == 0 {
+		return "", nil, startRepoTask{}, false, nil
+	}
+	for offset := 0; offset < len(repoOrder); offset++ {
+		repoSlug := repoOrder[(startIndex+offset)%len(repoOrder)]
+		coordinator := coordinators[repoSlug]
+		if coordinator == nil {
+			continue
+		}
+		task, ok, err := coordinator.nextTask()
+		if err != nil {
+			return repoSlug, coordinator, startRepoTask{}, false, fmt.Errorf("%s: %w", repoSlug, err)
+		}
+		if ok {
+			return repoSlug, coordinator, task, true, nil
+		}
+	}
+	return "", nil, startRepoTask{}, false, nil
+}
+
+func nextStartRepoIndex(repoOrder []string, repoSlug string) int {
+	if len(repoOrder) == 0 {
+		return 0
+	}
+	for index, candidate := range repoOrder {
+		if candidate == repoSlug {
+			return (index + 1) % len(repoOrder)
+		}
+	}
+	return 0
+}
+
+func newStartRepoCoordinator(cwd string, repoSlug string, workOptions startWorkOptions, options startOptions) *startRepoCoordinator {
+	return &startRepoCoordinator{
 		cwd:           cwd,
 		repoSlug:      repoSlug,
 		cycleID:       strconv.FormatInt(time.Now().UnixNano(), 10),
@@ -155,6 +243,10 @@ func runStartRepoSchedulerCycle(cwd string, repoSlug string, workOptions startWo
 		nextQueue:     startTaskQueueService,
 		refreshState:  true,
 	}
+}
+
+func runStartRepoSchedulerCycle(cwd string, repoSlug string, workOptions startWorkOptions, options startOptions) error {
+	coordinator := newStartRepoCoordinator(cwd, repoSlug, workOptions, options)
 	return coordinator.run()
 }
 
@@ -203,10 +295,9 @@ func (c *startRepoCoordinator) run() error {
 			errs = append(errs, err.Error())
 		}
 	}
-	if err := c.persistLastRun(); err != nil {
+	if err := c.completeRun(); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "[start] %s: service started=%d implementation started=%d.\n", c.repoSlug, c.serviceStartedCount, c.implStartedCount)
 	if len(errs) == 0 {
 		return nil
 	}
@@ -223,7 +314,7 @@ func (c *startRepoCoordinator) reloadPersistedState() error {
 }
 
 func (c *startRepoCoordinator) refreshRepoState() error {
-	updatedOptions, state, openPRs, _, err := startWorkSyncRepoState(c.workOptions)
+	updatedOptions, state, openPRs, _, err := startSyncRepoState(c.workOptions)
 	if err != nil {
 		return err
 	}
@@ -239,6 +330,25 @@ func (c *startRepoCoordinator) refreshRepoState() error {
 	}
 	c.refreshState = false
 	return nil
+}
+
+func (c *startRepoCoordinator) nextTask() (startRepoTask, bool, error) {
+	if c.refreshState {
+		if err := c.refreshRepoState(); err != nil {
+			return startRepoTask{}, false, err
+		}
+	} else {
+		if err := c.reloadPersistedState(); err != nil {
+			return startRepoTask{}, false, err
+		}
+	}
+	serviceQueue := c.buildServiceQueue()
+	implementationQueue, skippedReason := c.buildImplementationQueue()
+	if len(serviceQueue) == 0 && skippedReason != "" {
+		c.lastSkippedReason = skippedReason
+	}
+	task, _, _, ok := c.selectNextTask(serviceQueue, implementationQueue)
+	return task, ok, nil
 }
 
 func (c *startRepoCoordinator) syncServiceTasks() error {
@@ -264,7 +374,8 @@ func (c *startRepoCoordinator) syncServiceTasks() error {
 	if c.state.ServiceTasks == nil {
 		c.state.ServiceTasks = map[string]startWorkServiceTask{}
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
+	nowTime := time.Now().UTC()
+	now := nowTime.Format(time.RFC3339)
 	mutated := false
 	dueScoutRoles := map[string]bool{}
 	for _, role := range c.scoutRoles {
@@ -288,6 +399,13 @@ func (c *startRepoCoordinator) syncServiceTasks() error {
 			task.Generation = c.cycleID
 			c.state.ServiceTasks[key] = task
 			mutated = true
+		}
+		if task.Kind == startTaskKindPlannedLaunch {
+			item, ok := c.state.PlannedItems[task.PlannedItemID]
+			if !ok || !startWorkPlannedItemDue(item, nowTime) {
+				delete(c.state.ServiceTasks, key)
+				mutated = true
+			}
 		}
 	}
 	syncTaskID := startServiceTaskKey(startTaskKindIssueSync, c.cycleID)
@@ -359,7 +477,7 @@ func (c *startRepoCoordinator) syncServiceTasks() error {
 	slices.Sort(plannedIDs)
 	for _, itemID := range plannedIDs {
 		item := c.state.PlannedItems[itemID]
-		if !startWorkPlannedItemDue(item, time.Now().UTC()) {
+		if !startWorkPlannedItemDue(item, nowTime) {
 			continue
 		}
 		if c.upsertServiceTask(startWorkServiceTask{
@@ -591,41 +709,51 @@ func (c *startRepoCoordinator) markTaskStarted(task startRepoTask) error {
 
 func (c *startRepoCoordinator) launchTask(task startRepoTask, results chan<- startRepoTaskResult) {
 	go func() {
-		switch task.Kind {
-		case startTaskKindIssueSync:
-			results <- startRepoTaskResult{
-				Task: task,
-				Err:  startRunIssueSync(c.workOptions),
-			}
-		case startTaskKindTriage:
-			triage, err := startRunIssueTriage(c.repoSlug, task.Issue, c.workOptions.CodexArgs)
-			results <- startRepoTaskResult{Task: task, Triage: &triage, Err: err}
-		case startTaskKindScout:
-			results <- startRepoTaskResult{
-				Task: task,
-				Err: startRunScoutRole(c.cwd, ImproveOptions{
-					Target:    c.repoSlug,
-					Focus:     []string{"ux", "perf"},
-					CodexArgs: append([]string{}, c.workOptions.CodexArgs...),
-				}, task.ScoutRole),
-			}
-		case startTaskKindReconcile:
-			reconcile, err := startRunIssueReconcile(c.repoSlug, c.workOptions.PublishTarget, task.Issue)
-			results <- startRepoTaskResult{Task: task, Reconcile: &reconcile, Err: err}
-		case startTaskKindIssue:
-			issueURL := task.Issue.SourceURL
-			if c.workOptions.PublishTarget == "fork" {
-				issueURL = task.Issue.ForkURL
-			}
-			launch, err := startWorkRunGithubWork(issueURL, c.workOptions.PublishTarget, c.workOptions.CodexArgs)
-			results <- startRepoTaskResult{Task: task, Launch: &launch, Err: err}
-		case startTaskKindPlannedLaunch:
-			launch, err := startRunPlannedItemLaunch(c.cwd, c.repoSlug, c.workOptions, task.PlannedItem)
-			results <- startRepoTaskResult{Task: task, PlannedLaunch: &launch, Err: err}
-		default:
-			results <- startRepoTaskResult{Task: task, Err: fmt.Errorf("unknown task kind %s", task.Kind)}
-		}
+		results <- c.executeTask(task)
 	}()
+}
+
+func (c *startRepoCoordinator) launchTaskCompletion(task startRepoTask, results chan<- startRepoTaskCompletion) {
+	go func() {
+		results <- startRepoTaskCompletion{repoSlug: c.repoSlug, result: c.executeTask(task)}
+	}()
+}
+
+func (c *startRepoCoordinator) executeTask(task startRepoTask) startRepoTaskResult {
+	switch task.Kind {
+	case startTaskKindIssueSync:
+		return startRepoTaskResult{
+			Task: task,
+			Err:  startRunIssueSync(c.workOptions),
+		}
+	case startTaskKindTriage:
+		triage, err := startRunIssueTriage(c.repoSlug, task.Issue, c.workOptions.CodexArgs)
+		return startRepoTaskResult{Task: task, Triage: &triage, Err: err}
+	case startTaskKindScout:
+		return startRepoTaskResult{
+			Task: task,
+			Err: startRunScoutRole(c.cwd, ImproveOptions{
+				Target:    c.repoSlug,
+				Focus:     []string{"ux", "perf"},
+				CodexArgs: append([]string{}, c.workOptions.CodexArgs...),
+			}, task.ScoutRole),
+		}
+	case startTaskKindReconcile:
+		reconcile, err := startRunIssueReconcile(c.repoSlug, c.workOptions.PublishTarget, task.Issue)
+		return startRepoTaskResult{Task: task, Reconcile: &reconcile, Err: err}
+	case startTaskKindIssue:
+		issueURL := task.Issue.SourceURL
+		if c.workOptions.PublishTarget == "fork" {
+			issueURL = task.Issue.ForkURL
+		}
+		launch, err := startWorkRunGithubWork(issueURL, c.workOptions.PublishTarget, c.workOptions.CodexArgs)
+		return startRepoTaskResult{Task: task, Launch: &launch, Err: err}
+	case startTaskKindPlannedLaunch:
+		launch, err := startRunPlannedItemLaunch(c.cwd, c.repoSlug, c.workOptions, task.PlannedItem)
+		return startRepoTaskResult{Task: task, PlannedLaunch: &launch, Err: err}
+	default:
+		return startRepoTaskResult{Task: task, Err: fmt.Errorf("unknown task kind %s", task.Kind)}
+	}
 }
 
 func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error {
@@ -916,6 +1044,14 @@ func (c *startRepoCoordinator) persistLastRun() error {
 		c.state.UpdatedAt = c.state.LastRun.UpdatedAt
 		return writeStartWorkStateUnlocked(*c.state)
 	})
+}
+
+func (c *startRepoCoordinator) completeRun() error {
+	if err := c.persistLastRun(); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "[start] %s: service started=%d implementation started=%d.\n", c.repoSlug, c.serviceStartedCount, c.implStartedCount)
+	return nil
 }
 
 func startRepoSupportedScoutRoles(repoSlug string) []string {

@@ -991,14 +991,13 @@ func startWorkStatus(options startWorkOptions) error {
 	if state.LastRun != nil {
 		fmt.Fprintf(
 			os.Stdout,
-			"[start] Last run: started=%s service_started=%d implementation_started=%d open_prs=%d/%d global_parallel=%d repo_workers=%d skipped=%s\n",
+			"[start] Last run: started=%s service_started=%d implementation_started=%d open_prs=%d/%d max_workers=%d skipped=%s\n",
 			joinIntsOrNone(state.LastRun.StartedIssueNumbers),
 			state.LastRun.ServiceStartedCount,
 			state.LastRun.ImplementationStartedCount,
 			state.LastRun.OpenForkPRs,
 			state.LastRun.OpenPRCap,
-			state.LastRun.GlobalParallelLimit,
-			defaultInt(state.LastRun.RepoWorkerLimit, state.LastRun.ParallelLimit),
+			defaultInt(state.LastRun.GlobalParallelLimit, state.LastRun.ParallelLimit),
 			defaultString(state.LastRun.SkippedReason, "(none)"),
 		)
 	}
@@ -1531,7 +1530,7 @@ func startWorkPlannedItemDue(item startWorkPlannedItem, now time.Time) bool {
 	}
 	scheduled, ok := startWorkScheduleParsed(item.ScheduleAt)
 	if !ok {
-		return true
+		return false
 	}
 	return !scheduled.After(now)
 }
