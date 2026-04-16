@@ -59,7 +59,12 @@ const (
 	localWorkDefaultGroupingPolicy = "ai"
 	localWorkPathGroupingPolicy    = "path"
 	localWorkSingletonPolicy       = "singleton"
+	localWorkReadRetryAttempts     = 4
 )
+
+var localWorkReadRetryDelay = 200 * time.Millisecond
+var localWorkRetrySleep = time.Sleep
+var localWorkOpenReadStore = openLocalWorkReadDB
 
 var localWorkFinalReviewGateRoles = []string{
 	"quality-reviewer",
@@ -441,8 +446,32 @@ func openLocalWorkDB() (*localWorkDBStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	store := &localWorkDBStore{db: db}
 	if err := store.init(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+func openLocalWorkReadDB() (*localWorkDBStore, error) {
+	path := localWorkDBPath()
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return openLocalWorkDB()
+		}
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	store := &localWorkDBStore{db: db}
+	if err := store.prepareReadOnly(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -570,6 +599,70 @@ func (s *localWorkDBStore) init() error {
 		return err
 	}
 	return nil
+}
+
+func (s *localWorkDBStore) prepareReadOnly() error {
+	statements := []string{
+		`PRAGMA busy_timeout=15000;`,
+		`PRAGMA query_only=ON;`,
+	}
+	for _, stmt := range statements {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isLocalWorkDBLockError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(lower, "database is locked"):
+		return true
+	case strings.Contains(lower, "database table is locked"):
+		return true
+	case strings.Contains(lower, "database schema is locked"):
+		return true
+	case strings.Contains(lower, "sqlite_busy"):
+		return true
+	default:
+		return false
+	}
+}
+
+func withLocalWorkReadStore[T any](readFn func(*localWorkDBStore) (T, error)) (T, error) {
+	var zero T
+	attempts := localWorkReadRetryAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	for attempt := 1; attempt <= attempts; attempt++ {
+		store, err := localWorkOpenReadStore()
+		if err != nil {
+			if !isLocalWorkDBLockError(err) || attempt == attempts {
+				return zero, err
+			}
+			localWorkRetrySleep(localWorkReadRetryDelay)
+			continue
+		}
+		value, readErr := readFn(store)
+		closeErr := store.Close()
+		if readErr == nil && closeErr == nil {
+			return value, nil
+		}
+		err = readErr
+		if err == nil {
+			err = closeErr
+		}
+		if !isLocalWorkDBLockError(err) || attempt == attempts {
+			return zero, err
+		}
+		localWorkRetrySleep(localWorkReadRetryDelay)
+	}
+	return zero, fmt.Errorf("local work DB read retry exhausted")
 }
 
 func ensureSQLiteColumn(db *sql.DB, table string, column string, alter string) error {
@@ -827,33 +920,24 @@ func writeWorkRunIndex(entry workRunIndexEntry) error {
 }
 
 func readWorkRunIndex(runID string) (workRunIndexEntry, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return workRunIndexEntry{}, err
-	}
-	defer store.Close()
-	row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index WHERE run_id = ?`, runID)
-	return scanWorkRunIndexEntry(row)
+	return withLocalWorkReadStore(func(store *localWorkDBStore) (workRunIndexEntry, error) {
+		row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index WHERE run_id = ?`, runID)
+		return scanWorkRunIndexEntry(row)
+	})
 }
 
 func latestWorkRunIndex(backend string) (workRunIndexEntry, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return workRunIndexEntry{}, err
-	}
-	defer store.Close()
-	row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index WHERE backend = ? ORDER BY updated_at DESC LIMIT 1`, backend)
-	return scanWorkRunIndexEntry(row)
+	return withLocalWorkReadStore(func(store *localWorkDBStore) (workRunIndexEntry, error) {
+		row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index WHERE backend = ? ORDER BY updated_at DESC LIMIT 1`, backend)
+		return scanWorkRunIndexEntry(row)
+	})
 }
 
 func latestAnyWorkRunIndex() (workRunIndexEntry, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return workRunIndexEntry{}, err
-	}
-	defer store.Close()
-	row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index ORDER BY updated_at DESC LIMIT 1`)
-	return scanWorkRunIndexEntry(row)
+	return withLocalWorkReadStore(func(store *localWorkDBStore) (workRunIndexEntry, error) {
+		row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index ORDER BY updated_at DESC LIMIT 1`)
+		return scanWorkRunIndexEntry(row)
+	})
 }
 
 type workRunIndexScanner interface {
@@ -876,12 +960,9 @@ func scanWorkRunIndexEntry(row workRunIndexScanner) (workRunIndexEntry, error) {
 }
 
 func readLocalWorkManifestByRunID(runID string) (localWorkManifest, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return localWorkManifest{}, err
-	}
-	defer store.Close()
-	return store.readManifest(runID)
+	return withLocalWorkReadStore(func(store *localWorkDBStore) (localWorkManifest, error) {
+		return store.readManifest(runID)
+	})
 }
 
 func (s *localWorkDBStore) resolveRunID(cwd string, selection localWorkRunSelection) (string, error) {

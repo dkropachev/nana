@@ -1683,27 +1683,24 @@ func sameStartUIOverviewDependencySnapshot(left startUIOverviewDependencySnapsho
 }
 
 func addStartUIIndexedGithubManifestDependencies(add func(string)) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return
-	}
-	defer store.Close()
-
-	rows, err := store.db.Query(`SELECT backend, manifest_path FROM work_run_index ORDER BY updated_at DESC LIMIT ?`, startUIOverviewRunLimit)
-	if err != nil {
-		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var backend string
-		var manifestPath sql.NullString
-		if err := rows.Scan(&backend, &manifestPath); err != nil {
-			continue
+	_, _ = withLocalWorkReadStore(func(store *localWorkDBStore) (struct{}, error) {
+		rows, err := store.db.Query(`SELECT backend, manifest_path FROM work_run_index ORDER BY updated_at DESC LIMIT ?`, startUIOverviewRunLimit)
+		if err != nil {
+			return struct{}{}, err
 		}
-		if backend == "github" && manifestPath.Valid {
-			add(manifestPath.String)
+		defer rows.Close()
+		for rows.Next() {
+			var backend string
+			var manifestPath sql.NullString
+			if err := rows.Scan(&backend, &manifestPath); err != nil {
+				continue
+			}
+			if backend == "github" && manifestPath.Valid {
+				add(manifestPath.String)
+			}
 		}
-	}
+		return struct{}{}, rows.Err()
+	})
 }
 
 func addStartUIRepoTreeDependencies(root string, targetFile string, add func(string)) {
@@ -2779,32 +2776,29 @@ func loadStartUIWorkRuns(limit int) ([]startUIWorkRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return nil, err
-	}
-	defer store.Close()
-	rows, err := store.db.Query(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index ORDER BY updated_at DESC LIMIT ?`, limit)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer rows.Close()
-	runs := []startUIWorkRun{}
-	for rows.Next() {
-		entry, err := scanWorkRunIndexEntry(rows)
+	return withLocalWorkReadStore(func(store *localWorkDBStore) ([]startUIWorkRun, error) {
+		rows, err := store.db.Query(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index ORDER BY updated_at DESC LIMIT ?`, limit)
 		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, nil
+			}
 			return nil, err
 		}
-		run, err := startUIWorkRunFromIndex(entry, sourcePathIndex)
-		if err != nil {
-			continue
+		defer rows.Close()
+		runs := []startUIWorkRun{}
+		for rows.Next() {
+			entry, err := scanWorkRunIndexEntry(rows)
+			if err != nil {
+				return nil, err
+			}
+			run, err := startUIWorkRunFromIndex(entry, sourcePathIndex)
+			if err != nil {
+				continue
+			}
+			runs = append(runs, run)
 		}
-		runs = append(runs, run)
-	}
-	return runs, rows.Err()
+		return runs, rows.Err()
+	})
 }
 
 func loadStartUIWorkItems(limit int, includeHidden bool, onlyHidden bool) ([]startUIWorkItem, error) {
@@ -2817,45 +2811,52 @@ func loadStartUIWorkItemsWithHiddenCount(limit int) ([]startUIWorkItem, int, int
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	store, err := openLocalWorkDB()
+	pendingCount, err := withLocalWorkReadStore(func(store *localWorkDBStore) (int, error) {
+		pendingCount := 0
+		row := store.db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE hidden = 0 AND status IN (?, ?, ?, ?, ?)`,
+			workItemStatusQueued,
+			workItemStatusRunning,
+			workItemStatusDraftReady,
+			workItemStatusNeedsRouting,
+			workItemStatusFailed,
+		)
+		return pendingCount, row.Scan(&pendingCount)
+	})
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	defer store.Close()
-	pendingCount := 0
-	row := store.db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE hidden = 0 AND status IN (?, ?, ?, ?, ?)`,
-		workItemStatusQueued,
-		workItemStatusRunning,
-		workItemStatusDraftReady,
-		workItemStatusNeedsRouting,
-		workItemStatusFailed,
-	)
-	_ = row.Scan(&pendingCount)
 	return items, hiddenCount, pendingCount, nil
 }
 
 func loadStartUIWorkItemsInternal(limit int, includeHidden bool, onlyHidden bool) ([]startUIWorkItem, int, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return nil, 0, err
+	type workItemsResult struct {
+		items       []startUIWorkItem
+		hiddenCount int
 	}
-	defer store.Close()
-	items, err := store.listWorkItems(workItemListOptions{
-		Limit:         limit,
-		IncludeHidden: includeHidden,
-		OnlyHidden:    onlyHidden,
+	result, err := withLocalWorkReadStore(func(store *localWorkDBStore) (workItemsResult, error) {
+		items, err := store.listWorkItems(workItemListOptions{
+			Limit:         limit,
+			IncludeHidden: includeHidden,
+			OnlyHidden:    onlyHidden,
+		})
+		if err != nil {
+			return workItemsResult{}, err
+		}
+		hiddenCount := 0
+		row := store.db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE hidden = 1`)
+		if err := row.Scan(&hiddenCount); err != nil {
+			return workItemsResult{}, err
+		}
+		out := make([]startUIWorkItem, 0, len(items))
+		for _, item := range items {
+			out = append(out, startUIWorkItemFromItem(item))
+		}
+		return workItemsResult{items: out, hiddenCount: hiddenCount}, nil
 	})
 	if err != nil {
 		return nil, 0, err
 	}
-	hiddenCount := 0
-	row := store.db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE hidden = 1`)
-	_ = row.Scan(&hiddenCount)
-	out := make([]startUIWorkItem, 0, len(items))
-	for _, item := range items {
-		out = append(out, startUIWorkItemFromItem(item))
-	}
-	return out, hiddenCount, nil
+	return result.items, result.hiddenCount, nil
 }
 
 func startUIWorkItemFromItem(item workItem) startUIWorkItem {

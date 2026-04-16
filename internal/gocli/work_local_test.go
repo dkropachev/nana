@@ -2,12 +2,14 @@ package gocli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDetectGithubVerificationPlanForGoUsesCheckOnlyLint(t *testing.T) {
@@ -99,6 +101,50 @@ func TestDetectGithubVerificationPlanWarnsWhenUnitAndIntegrationAreMixed(t *test
 	}
 	if len(plan.Warnings) < 2 {
 		t.Fatalf("expected split and benchmark warnings, got %#v", plan.Warnings)
+	}
+}
+
+func TestReadWorkRunIndexRetriesWhenDatabaseIsLocked(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	if err := writeWorkRunIndex(workRunIndexEntry{
+		RunID:        "locked-run",
+		Backend:      "github",
+		RepoKey:      "acme/widget",
+		RepoSlug:     "acme/widget",
+		ManifestPath: filepath.Join(home, "manifest.json"),
+		UpdatedAt:    ISOTimeNow(),
+		TargetKind:   "issue",
+	}); err != nil {
+		t.Fatalf("writeWorkRunIndex: %v", err)
+	}
+
+	oldOpen := localWorkOpenReadStore
+	oldSleep := localWorkRetrySleep
+	attempts := 0
+	localWorkOpenReadStore = func() (*localWorkDBStore, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, fmt.Errorf("database is locked")
+		}
+		return openLocalWorkReadDB()
+	}
+	localWorkRetrySleep = func(time.Duration) {}
+	defer func() {
+		localWorkOpenReadStore = oldOpen
+		localWorkRetrySleep = oldSleep
+	}()
+
+	entry, err := readWorkRunIndex("locked-run")
+	if err != nil {
+		t.Fatalf("readWorkRunIndex: %v", err)
+	}
+	if entry.RunID != "locked-run" || entry.RepoSlug != "acme/widget" {
+		t.Fatalf("unexpected entry: %+v", entry)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected one retry before success, got %d attempts", attempts)
 	}
 }
 

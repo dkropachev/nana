@@ -546,45 +546,39 @@ func intakeWorkItemCommand(reader io.Reader) error {
 }
 
 func listWorkItems(options workItemListOptions) ([]workItem, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return nil, err
-	}
-	defer store.Close()
-	return store.listWorkItems(options)
+	return withLocalWorkReadStore(func(store *localWorkDBStore) ([]workItem, error) {
+		return store.listWorkItems(options)
+	})
 }
 
 func readWorkItemDetail(itemID string) (workItemDetail, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return workItemDetail{}, err
-	}
-	defer store.Close()
-	item, err := store.readWorkItem(itemID)
-	if err != nil {
-		return workItemDetail{}, err
-	}
-	events, err := store.readWorkItemEvents(itemID)
-	if err != nil {
-		return workItemDetail{}, err
-	}
-	links, err := store.readWorkItemLinks(itemID)
-	if err != nil {
-		return workItemDetail{}, err
-	}
-	var linkedRun *workRunIndexEntry
-	if strings.TrimSpace(item.LinkedRunID) != "" {
-		entry, err := readWorkRunIndex(item.LinkedRunID)
-		if err == nil {
-			linkedRun = &entry
+	return withLocalWorkReadStore(func(store *localWorkDBStore) (workItemDetail, error) {
+		item, err := store.readWorkItem(itemID)
+		if err != nil {
+			return workItemDetail{}, err
 		}
-	}
-	return workItemDetail{
-		Item:      item,
-		Events:    events,
-		Links:     links,
-		LinkedRun: linkedRun,
-	}, nil
+		events, err := store.readWorkItemEvents(itemID)
+		if err != nil {
+			return workItemDetail{}, err
+		}
+		links, err := store.readWorkItemLinks(itemID)
+		if err != nil {
+			return workItemDetail{}, err
+		}
+		var linkedRun *workRunIndexEntry
+		if strings.TrimSpace(item.LinkedRunID) != "" {
+			entry, err := readWorkRunIndex(item.LinkedRunID)
+			if err == nil {
+				linkedRun = &entry
+			}
+		}
+		return workItemDetail{
+			Item:      item,
+			Events:    events,
+			Links:     links,
+			LinkedRun: linkedRun,
+		}, nil
+	})
 }
 
 func enqueueWorkItem(input workItemInput, actor string) (workItem, bool, error) {
