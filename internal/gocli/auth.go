@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,6 +17,7 @@ const (
 	authRuntimeStateFileName = "auth-state.json"
 	authAccountsDirName      = "auth-accounts"
 	defaultAuthAccountName   = "primary"
+	autoAuthAccountPrefix    = "account"
 )
 
 var (
@@ -119,7 +121,7 @@ func Account(args []string) error {
 		fmt.Fprintln(os.Stdout, strings.TrimSpace(accountUsage()))
 		return nil
 	case "pull":
-		options, err := parseAccountImportOptions(args[1:], true)
+		options, err := parseAccountImportOptions(args[1:])
 		if err != nil {
 			return err
 		}
@@ -134,14 +136,11 @@ func Account(args []string) error {
 		}
 		return importManagedAccount(CodexHome(), options)
 	case "add":
-		options, err := parseAccountImportOptions(args[1:], false)
+		options, err := parseAccountImportOptions(args[1:])
 		if err != nil {
 			return err
 		}
-		if strings.TrimSpace(options.Source) == "" {
-			return fmt.Errorf("nana account add requires --from <path>\n%s", accountUsage())
-		}
-		return importManagedAccount(CodexHome(), options)
+		return addManagedAccount(CodexHome(), options)
 	case "list":
 		return listManagedAccounts(CodexHome())
 	case "status":
@@ -182,7 +181,7 @@ func AccountPull() error {
 func accountUsage() string {
 	return `Usage:
   nana account pull [name] [--from <path>] [--primary]
-  nana account add <name> --from <path> [--primary]
+  nana account add [name] [--primary] [--from <path>]
   nana account list
   nana account status
   nana account activate <name>
@@ -192,11 +191,13 @@ func accountUsage() string {
 
 Notes:
   - Managed account profiles live under CODEX_HOME.
+  - nana account add launches codex login --device-auth in an isolated temporary CODEX_HOME unless --from is provided.
+  - When no account name is provided, NANA picks one automatically.
   - The preferred profile is tried first. When it is cooling down, NANA falls back to the next enabled profile.
   - Live sessions only queue account changes; fallback and switch-back apply on the next NANA-managed restart boundary.`
 }
 
-func parseAccountImportOptions(args []string, allowDefaultName bool) (authImportOptions, error) {
+func parseAccountImportOptions(args []string) (authImportOptions, error) {
 	options := authImportOptions{}
 	for index := 0; index < len(args); index++ {
 		token := strings.TrimSpace(args[index])
@@ -222,14 +223,118 @@ func parseAccountImportOptions(args []string, allowDefaultName bool) (authImport
 		}
 	}
 
-	if options.Name == "" && allowDefaultName {
-		options.Name = defaultAuthAccountName
-	}
 	options.Name = normalizeManagedAuthName(options.Name)
-	if options.Name == "" {
-		return options, fmt.Errorf("account name is required\n%s", accountUsage())
-	}
 	return options, nil
+}
+
+func addManagedAccount(codexHome string, options authImportOptions) error {
+	if strings.TrimSpace(options.Name) == "" {
+		name, err := suggestManagedAuthAccountName(codexHome)
+		if err != nil {
+			return err
+		}
+		options.Name = name
+	}
+	if strings.TrimSpace(options.Source) != "" {
+		return importManagedAccount(codexHome, options)
+	}
+	return loginAndImportManagedAccount(codexHome, options)
+}
+
+func loginAndImportManagedAccount(codexHome string, options authImportOptions) error {
+	tempDir, err := newManagedAccountLoginTempDir(codexHome)
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tempDir)
+
+	authPath := filepath.Join(tempDir, "auth.json")
+	if err := runManagedAccountDeviceLogin(tempDir); err != nil {
+		if _, statErr := os.Stat(authPath); statErr == nil {
+			return fmt.Errorf("codex login exited with a non-zero status after writing credentials to %s; credentials were not imported: %w", authPath, err)
+		}
+		return fmt.Errorf("codex login exited with a non-zero status and no credentials were written to %s: %w", authPath, err)
+	}
+	if err := validateManagedAccountLoginProfile(authPath); err != nil {
+		return err
+	}
+
+	options.Source = authPath
+	return importManagedAccount(codexHome, options)
+}
+
+func newManagedAccountLoginTempDir(codexHome string) (string, error) {
+	parent := filepath.Join(codexHome, ".tmp")
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(parent, "account-login-")
+}
+
+func runManagedAccountDeviceLogin(codexHome string) error {
+	if _, err := exec.LookPath("codex"); err != nil {
+		return fmt.Errorf("codex is required: %w", err)
+	}
+
+	fmt.Fprintf(os.Stdout, "[nana] Starting `codex login --device-auth` with isolated CODEX_HOME %s\n", codexHome)
+	cmd := exec.Command("codex", "login", "--device-auth")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = buildCodexEnv(NotifyTempContract{}, codexHome)
+	return cmd.Run()
+}
+
+func validateManagedAccountLoginProfile(path string) error {
+	profile, err := readManagedAccountProfile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("codex login completed successfully but no credentials were written to %s", path)
+		}
+		return fmt.Errorf("codex login completed but credentials at %s could not be read: %w", path, err)
+	}
+	if !isChatGPTBackedAuthMode(profile.AuthMode) {
+		return fmt.Errorf("codex login completed but credentials at %s use unsupported auth mode %q", path, profile.AuthMode)
+	}
+	if profile.Tokens == nil {
+		return fmt.Errorf("codex login completed but credentials at %s are missing tokens", path)
+	}
+
+	missing := []string{}
+	if strings.TrimSpace(profile.Tokens.AccessToken) == "" {
+		missing = append(missing, "access_token")
+	}
+	if strings.TrimSpace(profile.Tokens.RefreshToken) == "" {
+		missing = append(missing, "refresh_token")
+	}
+	if strings.TrimSpace(profile.Tokens.AccountID) == "" {
+		missing = append(missing, "account_id")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("codex login completed but credentials at %s are missing %s", path, strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func suggestManagedAuthAccountName(codexHome string) (string, error) {
+	registry, err := loadManagedAuthRegistry(codexHome)
+	if err != nil {
+		return "", err
+	}
+	if len(registry.Accounts) == 0 {
+		return defaultAuthAccountName, nil
+	}
+
+	used := map[string]bool{}
+	for _, account := range registry.Accounts {
+		used[normalizeManagedAuthName(account.Name)] = true
+	}
+	for index := 2; ; index++ {
+		name := fmt.Sprintf("%s-%d", autoAuthAccountPrefix, index)
+		if !used[name] {
+			return name, nil
+		}
+	}
 }
 
 func importManagedAccount(codexHome string, options authImportOptions) error {

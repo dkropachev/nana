@@ -56,6 +56,159 @@ func TestAccountPullRegistersManagedPrimaryAccount(t *testing.T) {
 	}
 }
 
+func TestAccountAddLaunchesDeviceAuthAndAutoNamesPrimary(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".nana", "codex-home")
+	fakeCodex := installFakeCodexLogin(t)
+
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("FAKE_CODEX_WRITE_AUTH", "1")
+	t.Setenv("FAKE_CODEX_AUTH_CONTENT", chatgptProfileJSON("new-token", "new-refresh", "new-account"))
+
+	output, err := captureStdout(t, func() error { return Account([]string{"add"}) })
+	if err != nil {
+		t.Fatalf("Account(add): %v", err)
+	}
+	if !strings.Contains(output, `Registered Codex credentials as account "primary"`) {
+		t.Fatalf("unexpected output: %q", output)
+	}
+
+	argsRaw, err := os.ReadFile(fakeCodex.ArgsPath)
+	if err != nil {
+		t.Fatalf("read fake codex args: %v", err)
+	}
+	if got := strings.Fields(string(argsRaw)); strings.Join(got, "\x00") != strings.Join([]string{"login", "--device-auth"}, "\x00") {
+		t.Fatalf("unexpected fake codex args: %q", string(argsRaw))
+	}
+
+	loginHomeRaw, err := os.ReadFile(fakeCodex.CodexHomePath)
+	if err != nil {
+		t.Fatalf("read fake codex CODEX_HOME: %v", err)
+	}
+	loginHome := strings.TrimSpace(string(loginHomeRaw))
+	if loginHome == codexHome {
+		t.Fatalf("expected isolated login CODEX_HOME, got %q", loginHome)
+	}
+	if !strings.HasPrefix(loginHome, filepath.Join(codexHome, ".tmp")+string(os.PathSeparator)) {
+		t.Fatalf("expected login CODEX_HOME under %q, got %q", filepath.Join(codexHome, ".tmp"), loginHome)
+	}
+
+	registry, err := loadManagedAuthRegistry(codexHome)
+	if err != nil {
+		t.Fatalf("load registry: %v", err)
+	}
+	if registry.Preferred != "primary" || len(registry.Accounts) != 1 {
+		t.Fatalf("unexpected registry: %#v", registry)
+	}
+	profile, err := readManagedAccountProfile(managedAuthAccountPathForHome(codexHome, "primary"))
+	if err != nil {
+		t.Fatalf("read imported profile: %v", err)
+	}
+	if profile.Tokens == nil || profile.Tokens.AccessToken != "new-token" {
+		t.Fatalf("unexpected imported profile: %#v", profile)
+	}
+}
+
+func TestAccountAddUsesExplicitName(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".nana", "codex-home")
+	installFakeCodexLogin(t)
+
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("FAKE_CODEX_WRITE_AUTH", "1")
+	t.Setenv("FAKE_CODEX_AUTH_CONTENT", chatgptProfileJSON("named-token", "named-refresh", "named-account"))
+
+	output, err := captureStdout(t, func() error { return Account([]string{"add", "ops-team"}) })
+	if err != nil {
+		t.Fatalf("Account(add ops-team): %v", err)
+	}
+	if !strings.Contains(output, `Registered Codex credentials as account "ops-team"`) {
+		t.Fatalf("unexpected output: %q", output)
+	}
+
+	registry, err := loadManagedAuthRegistry(codexHome)
+	if err != nil {
+		t.Fatalf("load registry: %v", err)
+	}
+	if account := registry.account("ops-team"); account == nil {
+		t.Fatalf("expected named account, got %#v", registry)
+	}
+}
+
+func TestAccountAddAutoNamesAdditionalAccount(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".nana", "codex-home")
+	installFakeCodexLogin(t)
+	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
+		Preferred: "primary",
+		Accounts: map[string]managedAccountFixtureEntry{
+			"primary": {Profile: chatgptProfileJSON("primary-token", "primary-refresh", "primary-account")},
+		},
+		Active: "primary",
+	})
+
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("FAKE_CODEX_WRITE_AUTH", "1")
+	t.Setenv("FAKE_CODEX_AUTH_CONTENT", chatgptProfileJSON("secondary-token", "secondary-refresh", "secondary-account"))
+
+	output, err := captureStdout(t, func() error { return Account([]string{"add"}) })
+	if err != nil {
+		t.Fatalf("Account(add): %v", err)
+	}
+	if !strings.Contains(output, `Registered Codex credentials as account "account-2"`) {
+		t.Fatalf("unexpected output: %q", output)
+	}
+
+	registry, err := loadManagedAuthRegistry(codexHome)
+	if err != nil {
+		t.Fatalf("load registry: %v", err)
+	}
+	if account := registry.account("account-2"); account == nil {
+		t.Fatalf("expected auto-generated account-2, got %#v", registry)
+	}
+}
+
+func TestAccountAddFailsWhenDeviceLoginExitsNonZero(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".nana", "codex-home")
+	installFakeCodexLogin(t)
+
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("FAKE_CODEX_EXIT_CODE", "9")
+
+	_, err := captureStdout(t, func() error { return Account([]string{"add"}) })
+	if err == nil {
+		t.Fatal("expected login failure")
+	}
+	if !strings.Contains(err.Error(), "non-zero status") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), filepath.Join(".tmp", "")) {
+		t.Fatalf("expected temp auth path in error, got %v", err)
+	}
+}
+
+func TestAccountAddFailsWhenDeviceLoginWritesNoCredentials(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".nana", "codex-home")
+	installFakeCodexLogin(t)
+
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+
+	_, err := captureStdout(t, func() error { return Account([]string{"add"}) })
+	if err == nil {
+		t.Fatal("expected missing credentials failure")
+	}
+	if !strings.Contains(err.Error(), "no credentials were written") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestAccountStatusShowsUsageState(t *testing.T) {
 	codexHome := filepath.Join(t.TempDir(), ".codex")
 	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
@@ -865,4 +1018,42 @@ func intPtr(value int) *int {
 
 func formatInt(value int) string {
 	return strconv.Itoa(value)
+}
+
+type fakeCodexLoginPaths struct {
+	ArgsPath      string
+	CodexHomePath string
+}
+
+func installFakeCodexLogin(t *testing.T) fakeCodexLoginPaths {
+	t.Helper()
+	root := t.TempDir()
+	fakeBin := filepath.Join(root, "bin")
+	argsPath := filepath.Join(root, "codex-args.txt")
+	codexHomePath := filepath.Join(root, "codex-home.txt")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		`printf '%s\n' "$@" > "$FAKE_CODEX_ARGS_PATH"`,
+		`printf '%s\n' "$CODEX_HOME" > "$FAKE_CODEX_HOME_PATH"`,
+		`if [ "${FAKE_CODEX_WRITE_AUTH:-}" = "1" ]; then`,
+		`  mkdir -p "$CODEX_HOME"`,
+		`  printf '%s' "$FAKE_CODEX_AUTH_CONTENT" > "$CODEX_HOME/auth.json"`,
+		`fi`,
+		`exit "${FAKE_CODEX_EXIT_CODE:-0}"`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(fakeBin, "codex"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	t.Setenv("FAKE_CODEX_ARGS_PATH", argsPath)
+	t.Setenv("FAKE_CODEX_HOME_PATH", codexHomePath)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	return fakeCodexLoginPaths{
+		ArgsPath:      argsPath,
+		CodexHomePath: codexHomePath,
+	}
 }

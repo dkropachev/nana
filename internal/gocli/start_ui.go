@@ -4438,8 +4438,7 @@ func startUIScoutDestinationLabel(destination string) string {
 
 func startUIScoutStatusRank(status string) int {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "running":
-	case "in_progress":
+	case "running", "in_progress":
 		return 0
 	case "pending":
 		return 1
