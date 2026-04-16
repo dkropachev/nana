@@ -1822,7 +1822,7 @@ func TestStartUIAPIScoutItemsAndActions(t *testing.T) {
 	if err := json.NewDecoder(queueResponse.Body).Decode(&queuePayload); err != nil {
 		t.Fatalf("decode queue payload: %v", err)
 	}
-	if len(queuePayload.Items) != 1 || queuePayload.Items[0].Status != "completed" || queuePayload.Items[0].PlannedItemID == "" {
+	if len(queuePayload.Items) != 1 || queuePayload.Items[0].Status != "in_progress" || queuePayload.Items[0].PlannedItemID == "" {
 		t.Fatalf("unexpected queue payload: %+v", queuePayload)
 	}
 	if queuePayload.Repo.State == nil || len(queuePayload.Repo.State.PlannedItems) != 1 {
@@ -1912,15 +1912,15 @@ func TestStartUIAPIScoutItemsBatchAction(t *testing.T) {
 	if len(payload.Results) != 2 || payload.Results[0].Status != "ok" || payload.Results[1].Status != "ok" {
 		t.Fatalf("unexpected batch results: %+v", payload.Results)
 	}
-	if len(payload.Items) != 2 || payload.Items[0].Status != "completed" || payload.Items[1].Status != "completed" {
-		t.Fatalf("expected both scout items to be completed after queueing, got %+v", payload.Items)
+	if len(payload.Items) != 2 || payload.Items[0].Status != "in_progress" || payload.Items[1].Status != "in_progress" {
+		t.Fatalf("expected both scout items to be in_progress after queueing, got %+v", payload.Items)
 	}
 	if payload.Repo.State == nil || len(payload.Repo.State.PlannedItems) != 2 {
 		t.Fatalf("expected planned items in repo state, got %+v", payload.Repo.State)
 	}
 }
 
-func TestListStartUIScoutItemsMarksLaunchedPlannedScoutItemsCompleted(t *testing.T) {
+func TestListStartUIScoutItemsMarksDonePlannedScoutItemsCompleted(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -1975,7 +1975,7 @@ func TestListStartUIScoutItemsMarksLaunchedPlannedScoutItemsCompleted(t *testing
 				Title:      "Implement scout proposal: Improve help text",
 				LaunchKind: "local_work",
 				Priority:   3,
-				State:      startPlannedItemLaunched,
+				State:      "done",
 				UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
 				CreatedAt:  time.Now().UTC().Format(time.RFC3339),
 			},
@@ -1989,7 +1989,7 @@ func TestListStartUIScoutItemsMarksLaunchedPlannedScoutItemsCompleted(t *testing
 		t.Fatalf("list scout items: %v", err)
 	}
 	if len(items) != 1 || items[0].Status != "completed" {
-		t.Fatalf("expected launched planned scout item to reconcile as completed, got %+v", items)
+		t.Fatalf("expected done planned scout item to reconcile as completed, got %+v", items)
 	}
 	state, _, err := readLocalScoutPickupState(repo)
 	if err != nil {

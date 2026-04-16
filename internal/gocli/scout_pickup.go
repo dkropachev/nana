@@ -57,16 +57,20 @@ func reconcileLocalScoutPickupPlannedItems(repoPath string, repoSlug string) (bo
 		if !ok {
 			continue
 		}
+
+		plannedState := strings.TrimSpace(plannedItem.State)
 		nextStatus := record.Status
 		nextError := record.Error
 		nextRunID := record.RunID
-		switch strings.TrimSpace(plannedItem.State) {
+		switch plannedState {
 		case startPlannedItemQueued, startPlannedItemLaunching, startPlannedItemLaunched:
-			nextStatus = "completed"
+			nextStatus = "in_progress"
 			nextError = ""
 			if strings.TrimSpace(plannedItem.LaunchRunID) != "" {
 				nextRunID = strings.TrimSpace(plannedItem.LaunchRunID)
 			}
+		case "done":
+			nextStatus = "completed"
 		case startPlannedItemFailed:
 			nextStatus = "failed"
 			nextError = strings.TrimSpace(plannedItem.LastError)

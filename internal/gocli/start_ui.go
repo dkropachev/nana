@@ -3497,7 +3497,7 @@ func mutateStartUIScoutItem(repoSlug string, itemID string, action string) (star
 			return startUIScoutItemsResponse{}, err
 		}
 		state.Items[itemID] = localScoutPickupItem{
-			Status:        "completed",
+			Status:        "in_progress",
 			Title:         selected.Title,
 			Artifact:      selected.ArtifactPath,
 			PlannedItemID: plannedItem.ID,
@@ -4439,6 +4439,7 @@ func startUIScoutDestinationLabel(destination string) string {
 func startUIScoutStatusRank(status string) int {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "running":
+	case "in_progress":
 		return 0
 	case "pending":
 		return 1
