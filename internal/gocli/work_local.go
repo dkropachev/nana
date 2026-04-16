@@ -34,8 +34,8 @@ Usage:
 Behavior:
   - runs only against a local git repo in an isolated managed sandbox
   - infers a task from the current branch when --task and --plan-file are omitted
-  - commits verified sandbox changes back to the local source branch after completion
-  - never submits, publishes, pushes to remotes, or calls GitHub APIs
+  - syncs the local source branch before final apply, commits verified sandbox changes after completion, and pushes to the tracked remote when one exists
+  - never submits, publishes, opens PRs, or calls GitHub APIs
   - loops through implement -> verify -> self-review -> harden -> re-verify with capped hardening rounds
   - runs lint, compile/build, and unit tests every iteration; integration runs on the final pass by default
   - persists run artifacts under ~/.nana/work/
@@ -1432,6 +1432,8 @@ func retryBlockedLocalWorkFinalApply(manifest localWorkManifest) error {
 		return err
 	}
 	switch applyResult.Status {
+	case "pushed":
+		fmt.Fprintf(os.Stdout, "[local] Completed run %s; committed and pushed source branch %s at %s.\n", manifest.RunID, defaultString(manifest.SourceBranch, "HEAD"), applyResult.CommitSHA)
 	case "committed":
 		fmt.Fprintf(os.Stdout, "[local] Completed run %s; committed to source branch at %s.\n", manifest.RunID, applyResult.CommitSHA)
 	case "no-op":
@@ -2088,6 +2090,8 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			}
 			printLocalWorkRememberedFindings(os.Stdout, "Pre-existing issues excluded from propagation", manifest.PreexistingFindings)
 			switch manifest.FinalApplyStatus {
+			case "pushed":
+				fmt.Fprintf(os.Stdout, "[local] Completed run %s after %d iteration(s); committed and pushed source branch %s at %s.\n", manifest.RunID, iteration, defaultString(manifest.SourceBranch, "HEAD"), manifest.FinalApplyCommitSHA)
 			case "committed":
 				fmt.Fprintf(os.Stdout, "[local] Completed run %s after %d iteration(s); committed to source branch at %s.\n", manifest.RunID, iteration, manifest.FinalApplyCommitSHA)
 			case "no-op":

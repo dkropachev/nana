@@ -1112,10 +1112,18 @@ func TestLocalWorkCandidateAuditAllowsSourceFiles(t *testing.T) {
 	}
 }
 
-func TestApplyLocalWorkFinalDiffBlocksWhenSourceHeadChanged(t *testing.T) {
-	repo := createLocalWorkRepo(t)
+func TestApplyLocalWorkFinalDiffSyncsTrackedBranchWhenSourceHeadChanged(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	originBare := filepath.Join(home, "origin.git")
+	seedRepo := createLocalWorkRepoAt(t, filepath.Join(home, "seed"))
+	runLocalWorkTestGit(t, home, "init", "--bare", originBare)
+	runLocalWorkTestGit(t, seedRepo, "remote", "add", "origin", originBare)
+	runLocalWorkTestGit(t, seedRepo, "push", "-u", "origin", "main")
+	runLocalWorkTestGit(t, "", "--git-dir", originBare, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	repo := filepath.Join(home, "source")
+	runLocalWorkTestGit(t, home, "clone", originBare, repo)
 	baseline, err := githubGitOutput(repo, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatalf("read baseline: %v", err)
@@ -1134,15 +1142,15 @@ func TestApplyLocalWorkFinalDiffBlocksWhenSourceHeadChanged(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sandboxRepoPath, "README.md"), []byte("# local work\nsandbox change\n"), 0o644); err != nil {
 		t.Fatalf("write sandbox readme: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(repo, "source.txt"), []byte("source change\n"), 0o644); err != nil {
+
+	advanceRepo := filepath.Join(home, "advance")
+	runLocalWorkTestGit(t, home, "clone", originBare, advanceRepo)
+	if err := os.WriteFile(filepath.Join(advanceRepo, "source.txt"), []byte("source change\n"), 0o644); err != nil {
 		t.Fatalf("write source change: %v", err)
 	}
-	if err := githubRunGit(repo, "add", "source.txt"); err != nil {
-		t.Fatalf("git add source: %v", err)
-	}
-	if err := githubRunGit(repo, "commit", "-m", "source moved"); err != nil {
-		t.Fatalf("git commit source: %v", err)
-	}
+	runLocalWorkTestGit(t, advanceRepo, "add", "source.txt")
+	runLocalWorkTestGit(t, advanceRepo, "commit", "-m", "source moved")
+	runLocalWorkTestGit(t, advanceRepo, "push", "origin", "main")
 
 	result := applyLocalWorkFinalDiff(localWorkManifest{
 		RunID:           runID,
@@ -1151,9 +1159,28 @@ func TestApplyLocalWorkFinalDiffBlocksWhenSourceHeadChanged(t *testing.T) {
 		BaselineSHA:     strings.TrimSpace(baseline),
 		SandboxPath:     sandboxPath,
 		SandboxRepoPath: sandboxRepoPath,
+		SourceBranch:    "main",
 	})
-	if result.Status != "blocked-before-apply" || !strings.Contains(result.Error, "source checkout HEAD changed") {
-		t.Fatalf("expected HEAD-changed blocker, got %#v", result)
+	if result.Status != "pushed" || strings.TrimSpace(result.CommitSHA) == "" {
+		t.Fatalf("expected synced final apply to push successfully, got %#v", result)
+	}
+	readmeContent, err := os.ReadFile(filepath.Join(repo, "README.md"))
+	if err != nil {
+		t.Fatalf("read source README: %v", err)
+	}
+	if !strings.Contains(string(readmeContent), "sandbox change") {
+		t.Fatalf("expected source repo to contain sandbox change, got %q", string(readmeContent))
+	}
+	sourceContent, err := os.ReadFile(filepath.Join(repo, "source.txt"))
+	if err != nil {
+		t.Fatalf("read synced source file: %v", err)
+	}
+	if strings.TrimSpace(string(sourceContent)) != "source change" {
+		t.Fatalf("expected synced remote change preserved, got %q", string(sourceContent))
+	}
+	originHead := runLocalWorkTestGitOutput(t, "", "--git-dir", originBare, "rev-parse", "refs/heads/main")
+	if strings.TrimSpace(originHead) != strings.TrimSpace(result.CommitSHA) {
+		t.Fatalf("expected pushed commit on origin/main, origin=%q result=%q", originHead, result.CommitSHA)
 	}
 }
 
@@ -2589,6 +2616,43 @@ func createLocalWorkRepoAt(t *testing.T, repo string) string {
 		}
 	}
 	return repo
+}
+
+func runLocalWorkTestGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Test",
+		"GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=Test",
+		"GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, output)
+	}
+}
+
+func runLocalWorkTestGitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Test",
+		"GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=Test",
+		"GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, output)
+	}
+	return string(output)
 }
 
 func TestLocalWorkDBInitAddsRepoSlugColumnToWorkRunIndex(t *testing.T) {

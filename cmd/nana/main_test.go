@@ -548,8 +548,8 @@ func TestBinaryLocalWorkStartCommitsVerifiedSandboxResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("local work start failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "committed to source branch") {
-		t.Fatalf("expected committed completion output, got %q", output)
+	if !strings.Contains(string(output), "committed and pushed source branch") {
+		t.Fatalf("expected committed-and-pushed completion output, got %q", output)
 	}
 	subject := runGit(sourceRepo, "log", "-1", "--pretty=%s")
 	if !strings.HasPrefix(subject, "nana work: apply lw-") {
@@ -566,8 +566,12 @@ func TestBinaryLocalWorkStartCommitsVerifiedSandboxResult(t *testing.T) {
 		t.Fatalf("expected no source repo work runtime artifacts, err=%v", err)
 	}
 	originAfter := runGit(originBare, "rev-parse", "refs/heads/main")
-	if originAfter != originBefore {
-		t.Fatalf("local work should not push to remote, before=%s after=%s", originBefore, originAfter)
+	if originAfter == originBefore {
+		t.Fatalf("local work should push the tracked target branch, before=%s after=%s", originBefore, originAfter)
+	}
+	sourceHead := runGit(sourceRepo, "rev-parse", "HEAD")
+	if originAfter != sourceHead {
+		t.Fatalf("expected pushed remote HEAD to match local source HEAD, origin=%s source=%s", originAfter, sourceHead)
 	}
 }
 

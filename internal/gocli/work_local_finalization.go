@@ -8,6 +8,11 @@ import (
 	"strings"
 )
 
+type localWorkFinalApplyTarget struct {
+	RemoteName string
+	Branch     string
+}
+
 func runLocalWorkFinalReviewGate(manifest localWorkManifest, codexArgs []string, iterationDir string, phase string) ([]githubPullReviewFinding, []string, []localWorkFinalGateRoleResult, int, error) {
 	allFindings := []githubPullReviewFinding{}
 	rolesWithFindings := []string{}
@@ -130,15 +135,9 @@ func applyLocalWorkFinalDiff(manifest localWorkManifest) localWorkFinalApplyResu
 			Error:  "source checkout has local changes; commit, stash, or remove them and run nana work resume --run-id " + manifest.RunID,
 		}
 	}
-	sourceHead, err := githubGitOutput(manifest.RepoRoot, "rev-parse", "HEAD")
+	target, err := syncLocalWorkFinalApplyTarget(manifest)
 	if err != nil {
 		return localWorkFinalApplyResult{Status: "blocked-before-apply", Error: err.Error()}
-	}
-	if strings.TrimSpace(sourceHead) != strings.TrimSpace(manifest.BaselineSHA) {
-		return localWorkFinalApplyResult{
-			Status: "blocked-before-apply",
-			Error:  "source checkout HEAD changed since work started; restore " + strings.TrimSpace(manifest.BaselineSHA) + " or manually apply the sandbox diff from " + manifest.SandboxRepoPath,
-		}
 	}
 	diffOutput, err := githubGitOutput(manifest.SandboxRepoPath, "diff", "--binary", manifest.BaselineSHA)
 	if err != nil {
@@ -151,11 +150,8 @@ func applyLocalWorkFinalDiff(manifest localWorkManifest) localWorkFinalApplyResu
 	if strings.TrimSpace(diffOutput) == "" {
 		return localWorkFinalApplyResult{Status: "no-op"}
 	}
-	if err := githubRunGit(manifest.RepoRoot, "apply", "--check", "--index", patchPath); err != nil {
-		return localWorkFinalApplyResult{Status: "blocked-before-apply", Error: err.Error()}
-	}
-	if err := githubRunGit(manifest.RepoRoot, "apply", "--index", patchPath); err != nil {
-		return localWorkFinalApplyResult{Status: "blocked-before-apply", Error: err.Error()}
+	if err := githubRunGit(manifest.RepoRoot, "apply", "--3way", "--index", patchPath); err != nil {
+		return localWorkFinalApplyResult{Status: "blocked-before-apply", Error: fmt.Sprintf("final apply onto %s failed after syncing target branch: %v", localWorkFinalApplyTargetLabel(target, manifest.SourceBranch), err)}
 	}
 	if err := githubRunGit(manifest.RepoRoot, "commit", "-m", fmt.Sprintf("nana work: apply %s", manifest.RunID)); err != nil {
 		return localWorkFinalApplyResult{
@@ -167,7 +163,109 @@ func applyLocalWorkFinalDiff(manifest localWorkManifest) localWorkFinalApplyResu
 	if err != nil {
 		return localWorkFinalApplyResult{Status: "blocked-after-apply", Error: err.Error()}
 	}
+	if target.RemoteName != "" {
+		if err := pushLocalWorkFinalApplyTarget(manifest.RepoRoot, target); err != nil {
+			return localWorkFinalApplyResult{
+				Status:    "blocked-after-apply",
+				CommitSHA: strings.TrimSpace(commitSHA),
+				Error:     fmt.Sprintf("source checkout contains committed final-apply changes, but push to %s failed; inspect and push or reconcile manually: %v", localWorkFinalApplyTargetLabel(target, manifest.SourceBranch), err),
+			}
+		}
+		return localWorkFinalApplyResult{Status: "pushed", CommitSHA: strings.TrimSpace(commitSHA)}
+	}
 	return localWorkFinalApplyResult{Status: "committed", CommitSHA: strings.TrimSpace(commitSHA)}
+}
+
+func syncLocalWorkFinalApplyTarget(manifest localWorkManifest) (localWorkFinalApplyTarget, error) {
+	if err := checkoutLocalWorkSourceBranch(manifest.RepoRoot, manifest.SourceBranch); err != nil {
+		return localWorkFinalApplyTarget{}, err
+	}
+	target, err := resolveLocalWorkFinalApplyTarget(manifest.RepoRoot, manifest.SourceBranch)
+	if err != nil {
+		return localWorkFinalApplyTarget{}, err
+	}
+	if target.RemoteName == "" {
+		return target, nil
+	}
+	if err := githubRunGit(manifest.RepoRoot, "fetch", "--prune", target.RemoteName); err != nil {
+		return target, fmt.Errorf("failed to fetch target branch %s before final apply: %w", localWorkFinalApplyTargetLabel(target, manifest.SourceBranch), err)
+	}
+	if err := githubRunGit(manifest.RepoRoot, "pull", "--rebase", target.RemoteName, target.Branch); err != nil {
+		_ = githubRunGit(manifest.RepoRoot, "rebase", "--abort")
+		return target, fmt.Errorf("failed to sync target branch %s before final apply: %w", localWorkFinalApplyTargetLabel(target, manifest.SourceBranch), err)
+	}
+	return target, nil
+}
+
+func checkoutLocalWorkSourceBranch(repoPath string, sourceBranch string) error {
+	branch := strings.TrimSpace(sourceBranch)
+	if branch == "" || branch == "HEAD" {
+		return nil
+	}
+	currentBranch, err := githubGitOutput(repoPath, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(currentBranch) == branch {
+		return nil
+	}
+	return githubRunGit(repoPath, "checkout", branch)
+}
+
+func resolveLocalWorkFinalApplyTarget(repoPath string, sourceBranch string) (localWorkFinalApplyTarget, error) {
+	branch := strings.TrimSpace(sourceBranch)
+	if branch == "" || branch == "HEAD" {
+		return localWorkFinalApplyTarget{}, nil
+	}
+	if _, err := githubGitOutput(repoPath, "remote", "get-url", "origin"); err != nil {
+		return localWorkFinalApplyTarget{}, nil
+	}
+	upstream, err := githubGitOutput(repoPath, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+	if err == nil {
+		parts := strings.SplitN(strings.TrimSpace(upstream), "/", 2)
+		if len(parts) == 2 && strings.TrimSpace(parts[0]) != "" && strings.TrimSpace(parts[1]) != "" {
+			return localWorkFinalApplyTarget{RemoteName: strings.TrimSpace(parts[0]), Branch: strings.TrimSpace(parts[1])}, nil
+		}
+	}
+	return localWorkFinalApplyTarget{RemoteName: "origin", Branch: branch}, nil
+}
+
+func pushLocalWorkFinalApplyTarget(repoPath string, target localWorkFinalApplyTarget) error {
+	if target.RemoteName == "" || target.Branch == "" {
+		return nil
+	}
+	pushRef := fmt.Sprintf("HEAD:%s", target.Branch)
+	firstErr := githubRunGit(repoPath, "push", target.RemoteName, pushRef)
+	if firstErr == nil {
+		return nil
+	}
+	if err := githubRunGit(repoPath, "fetch", "--prune", target.RemoteName); err != nil {
+		return fmt.Errorf("initial push failed (%v) and fetch retry did not complete: %w", firstErr, err)
+	}
+	if err := githubRunGit(repoPath, "pull", "--rebase", target.RemoteName, target.Branch); err != nil {
+		_ = githubRunGit(repoPath, "rebase", "--abort")
+		return fmt.Errorf("initial push failed (%v) and automatic rebase retry on %s did not complete: %w", firstErr, localWorkFinalApplyTargetLabel(target, ""), err)
+	}
+	if err := githubRunGit(repoPath, "push", target.RemoteName, pushRef); err != nil {
+		return fmt.Errorf("initial push failed (%v) and retry push to %s also failed: %w", firstErr, localWorkFinalApplyTargetLabel(target, ""), err)
+	}
+	return nil
+}
+
+func localWorkFinalApplyTargetLabel(target localWorkFinalApplyTarget, fallbackBranch string) string {
+	branch := strings.TrimSpace(target.Branch)
+	if branch == "" {
+		branch = strings.TrimSpace(fallbackBranch)
+	}
+	remote := strings.TrimSpace(target.RemoteName)
+	switch {
+	case remote != "" && branch != "":
+		return remote + "/" + branch
+	case branch != "":
+		return branch
+	default:
+		return "the source branch"
+	}
 }
 
 func localWorkSandboxHasDiff(manifest localWorkManifest) (bool, error) {
@@ -282,9 +380,9 @@ func localWorkBlockedNextAction(manifest localWorkManifest) string {
 	case manifest.CandidateAuditStatus == "blocked-candidate-files":
 		return "remove generated/runtime files from the sandbox diff, then rerun or manually recover from " + manifest.SandboxRepoPath
 	case manifest.FinalApplyStatus == "blocked-before-apply":
-		return "clean or restore the source checkout, then run nana work resume --run-id " + manifest.RunID
+		return "clean or sync the source checkout, then run nana work resume --run-id " + manifest.RunID
 	case manifest.FinalApplyStatus == "blocked-after-apply":
-		return "inspect staged source checkout changes and either commit or reset them manually; resume will not retry this state"
+		return "inspect source checkout commits/changes and either commit, push, or reset them manually; resume will not retry this state"
 	default:
 		return "inspect the run retrospective and resolve the blocker before continuing"
 	}

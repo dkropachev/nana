@@ -29,7 +29,7 @@ Usage:
 Behavior:
   - local mode is selected when start does not receive a GitHub issue/PR URL
   - local mode uses --task, --plan-file, or an inferred task from the current branch
- - local mode commits verified sandbox changes back to the source branch after final review gates pass
+ - local mode syncs the target source branch, commits verified sandbox changes after final review gates pass, and pushes to the tracked remote when one exists
  - GitHub mode is selected when start receives a GitHub issue/PR URL
   - work items queue inbound GitHub, email, and Slack-style requests into a shared draft/submit workflow
   - authoritative runtime state lives under ~/.nana/work/
