@@ -1864,7 +1864,6 @@ func TestStartUIAPIScoutItemsBatchAction(t *testing.T) {
 		Version:          1,
 		IssueDestination: improvementDestinationLocal,
 		Labels:           []string{"improvement"},
-		MaxIssues:        5,
 	}); err != nil {
 		t.Fatalf("write improvement policy: %v", err)
 	}
@@ -1872,7 +1871,6 @@ func TestStartUIAPIScoutItemsBatchAction(t *testing.T) {
 		Version:          1,
 		IssueDestination: improvementDestinationLocal,
 		Labels:           []string{"enhancement"},
-		MaxIssues:        5,
 	}); err != nil {
 		t.Fatalf("write enhancement policy: %v", err)
 	}
