@@ -1,0 +1,69 @@
+# Runtime Compatibility Contract
+
+## Canonical ownership
+
+Go runtime core is the single semantic owner for:
+
+- authority
+- lifecycle/session state
+- dispatch/backlog
+- mailbox delivery state
+- replay/recovery
+- readiness/diagnostics
+- canonical mux operations
+
+JS, HUD, CLI, and tmux are thin delivery/observer adapters. They may read
+compatibility artifacts, but they MUST NOT define or mutate semantic truth on
+their own.
+
+Current migration follow-ups that still fall short of this target are tracked in
+`docs/qa/runtime-team-seam-audit-2026-04-01.md`.
+
+## Compatibility artifacts
+
+Legacy readers continue to read the same state files, but only as
+runtime-authored compatibility views.
+
+| Reader | Compatibility files | Compatibility guarantee |
+|---|---|---|
+| `nana team status` | `.nana/state/team/<team>/config.json`, `manifest.v2.json`, `tasks/*.json`, `approvals/*.json`, `workers/*` | Manifest-backed team config is authoritative when both config and manifest exist. |
+| `nana doctor --team` | `.nana/state/team/<team>/config.json`, `manifest.v2.json`, `workers/*/status.json`, `workers/*/heartbeat.json`, `.nana/state/hud-state.json` | Manifest-backed tmux/session identity is authoritative when both config and manifest exist. |
+| HUD readers | `.nana/state/session.json`, `.nana/state/sessions/<session>/team-state.json`, `.nana/state/team-state.json`, `.nana/state/verify-loop-state.json` | Session-scoped files are authoritative when a session is active; root files are compatibility fallback only. |
+
+## Runtime-authored files
+
+The runtime engine writes the following files via `persist()` and `write_compatibility_view()`:
+
+| File | Written by | Content |
+|---|---|---|
+| `snapshot.json` | `persist()` | Full `RuntimeSnapshot` — `schema_version`, `authority`, `backlog`, `replay`, `readiness` |
+| `events.json` | `persist()` | Append-only event log — array of `RuntimeEvent` values in `#[serde(tag = "event")]` format |
+| `authority.json` | `write_compatibility_view()` | `AuthoritySnapshot` section for TS readers |
+| `backlog.json` | `write_compatibility_view()` | `BacklogSnapshot` counts (`pending`, `notified`, `delivered`, `failed`) for TS readers |
+| `readiness.json` | `write_compatibility_view()` | `ReadinessSnapshot` (`ready`, `reasons`) for TS readers |
+| `replay.json` | `write_compatibility_view()` | `ReplaySnapshot` state for TS readers |
+| `dispatch.json` | `write_compatibility_view()` | Full `DispatchLog` (array of `DispatchRecord` entries) for team status readers |
+| `mailbox.json` | `write_compatibility_view()` | Full `MailboxLog` (array of `MailboxRecord` entries) for team/message readers |
+
+All files are written atomically to the configured `state_dir`. TS readers must treat these files as read-only; the Go runtime is the sole writer.
+
+## Thin-adapter rules
+
+1. Compatibility readers must ignore unknown fields and preserve their current
+   JSON envelopes.
+2. Legacy tmux typing is delivery only; it does not establish semantic truth.
+3. If runtime-authored compatibility files and legacy JS defaults disagree, the
+   runtime-authored file wins.
+4. JS file writes remain fallback-only for lanes where the bridge is disabled or
+   unavailable; they are not canonical when the Rust bridge succeeds.
+5. Unknown delivery failures are surfaced as adapter failures, not as semantic
+   owner changes.
+
+## Consumer matrix
+
+| Consumer | Responsibility |
+|---|---|
+| Team CLI | Read runtime-authored compatibility artifacts and render them faithfully. |
+| Doctor CLI | Report readiness from runtime-authored compatibility artifacts, then layer adapter health checks on top. |
+| HUD | Stay read-only and scope-aware. |
+| Notify/watchers | Deliver events; never become the semantic owner of the run. |

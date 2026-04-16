@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nana Assistant Workspace</title>
+  <link rel="stylesheet" href="/vendor/teryx.css">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <a class="skip-link" href="#workspace-main">Skip to main content</a>
+  <div id="app-live-region" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+  <main class="app-shell">
+    <aside class="app-sidebar">
+      <div class="sidebar-brand">
+        <p class="eyebrow">Nana</p>
+        <h1>Assistant Workspace</h1>
+        <p class="sidebar-copy">Home</p>
+      </div>
+      <div id="sidebar-nav" class="sidebar-nav">
+        <button class="nav-item nav-item-active" type="button">
+          <span class="nav-label">Home</span>
+        </button>
+      </div>
+    </aside>
+
+    <section id="workspace-main" class="app-main" tabindex="-1">
+      <header class="app-header">
+        <div class="header-copy">
+          <p class="eyebrow">Workspace</p>
+          <h2 id="page-title">Home</h2>
+          <p id="page-subtitle" class="subtitle">Waiting for state...</p>
+          <nav id="page-breadcrumb" class="breadcrumb-trail" aria-label="Breadcrumb"></nav>
+        </div>
+        <div class="header-actions">
+          <label class="quick-switch selector" for="quick-switch-input">
+            <span>Quick Switch</span>
+            <div class="quick-switch-row">
+              <input id="quick-switch-input" type="text" list="quick-switch-options" placeholder="Home, Repo: owner/repo, Run: abc123" autocomplete="off" />
+              <button id="quick-switch-button" class="tx-btn tx-btn-secondary" type="button">Go</button>
+            </div>
+            <datalist id="quick-switch-options"></datalist>
+          </label>
+          <p id="overview-updated" class="updated-copy">Waiting for state...</p>
+          <button id="refresh-button" class="tx-btn tx-btn-secondary" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <div id="page-tabs" class="page-tabs"></div>
+      <div id="page-body" class="page-body">
+        <section class="surface empty-surface">
+          <div class="status-pill">Loading operator state...</div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="confirm-dialog" class="confirm-dialog">
+    <form id="confirm-dialog-form" method="dialog" class="confirm-card">
+      <div class="confirm-head">
+        <p class="eyebrow">Confirm</p>
+        <h2 id="confirm-dialog-title">Confirm Action</h2>
+      </div>
+      <p id="confirm-dialog-message" class="subtitle">Review this action before continuing.</p>
+      <div class="confirm-actions">
+        <button id="confirm-dialog-cancel" class="tx-btn tx-btn-secondary" value="cancel">Cancel</button>
+        <button id="confirm-dialog-confirm" class="tx-btn tx-btn-primary" value="confirm">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script>
+    window.NANA_API_BASE = "__API_BASE__";
+  </script>
+  <script src="/vendor/xhtmlx.js"></script>
+  <script src="/vendor/teryx.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

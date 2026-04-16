@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "repo": "nana2",
+  "generated_at": "2026-04-13T16:33:00-04:00",
+  "proposals": [
+    {
+      "title": "Generate a CLI command reference and add it to the docs nav",
+      "area": "UX",
+      "summary": "Publish a command-reference page sourced from the existing help text and make the work/automation surfaces reachable from the static docs navigation.",
+      "rationale": "The repo already has a large, structured CLI surface, but the public docs stop at high-level pages. Users currently have to bounce between README and terminal help to discover how work, start, improve, enhance, and repo automation fit together.",
+      "evidence": "cmd/nana/main.go contains a substantial top-level helpText; internal/gocli/start.go defines StartHelp; internal/gocli/improve.go defines ImproveHelp and EnhanceHelp. Meanwhile docs/index.html, docs/getting-started.html, docs/agents.html, docs/skills.html, and docs/integrations.html share a primary nav with Home/Getting Started/Agents/Skills/Integrations only, even though docs/work.md exists and README.md links to it.",
+      "impact": "Improves onboarding and discoverability for the current product surface without adding new runtime behavior.",
+      "suggested_next_step": "Add one generated docs page for command reference from the existing help constants, then add CLI/Work links to the shared docs nav.",
+      "confidence": "high",
+      "files": [
+        "cmd/nana/main.go",
+        "internal/gocli/start.go",
+        "internal/gocli/improve.go",
+        "docs/index.html",
+        "docs/getting-started.html",
+        "docs/work.md"
+      ],
+      "labels": [
+        "enhancement",
+        "ux",
+        "docs"
+      ]
+    },
+    {
+      "title": "Make install and release docs version-aware",
+      "area": "UX",
+      "summary": "Replace placeholder download URLs and stale homepage release copy with generated install guidance tied to the current version and release manifest.",
+      "rationale": "First-run docs should be copy-pasteable and obviously current. The repo already generates the release metadata needed to keep install instructions and landing-page release text synchronized.",
+      "evidence": "docs/index.html still advertises \"What's New in 0.6.0\" and shows curl -L -o nana <release-binary-url>; docs/getting-started.html uses the same placeholder. VERSION is 0.11.12. .github/workflows/release.yml generates native-release-manifest.json, and internal/gocli/update.go already consumes the latest manifest URL from GitHub Releases.",
+      "impact": "Reduces install friction, increases trust that docs match the shipped binary, and avoids stale release messaging on the public docs site.",
+      "suggested_next_step": "Generate a canonical install snippet and current release summary from VERSION plus native-release-manifest.json, then reuse it in README.md, docs/index.html, and docs/getting-started.html.",
+      "confidence": "high",
+      "files": [
+        "docs/index.html",
+        "docs/getting-started.html",
+        "README.md",
+        "VERSION",
+        ".github/workflows/release.yml",
+        "internal/gocli/update.go"
+      ],
+      "labels": [
+        "enhancement",
+        "ux",
+        "docs"
+      ]
+    },
+    {
+      "title": "Document the default nana start web console",
+      "area": "UX",
+      "summary": "Add a dedicated operator guide for the loopback API and web console that nana start launches by default.",
+      "rationale": "The start UI already looks like a first-class operator surface, but it is only discoverable through help text and runtime stdout. That leaves a useful workflow under-explained for users adopting repo automation.",
+      "evidence": "internal/gocli/start.go says nana start \"launches loopback UI services by default: REST API + web console\"; internal/gocli/start_ui.go launches both servers and prints [start-ui] API and Web URLs; internal/gocli/start_ui_test.go covers overview, mutations, logs, scout items, and planned-item actions; docs/work.md and docs/getting-started.html do not provide a dedicated walkthrough for this UI.",
+      "impact": "Makes repo automation easier to operate, lowers confusion about the extra local ports, and helps users adopt an existing surface that already has meaningful test coverage.",
+      "suggested_next_step": "Add a focused docs section or page for the start UI with one end-to-end flow, then link it from nana help start and the docs nav.",
+      "confidence": "high",
+      "files": [
+        "internal/gocli/start.go",
+        "internal/gocli/start_ui.go",
+        "internal/gocli/start_ui_test.go",
+        "docs/work.md",
+        "docs/getting-started.html"
+      ],
+      "labels": [
+        "enhancement",
+        "ux"
+      ]
+    },
+    {
+      "title": "Cache or incrementalize start UI overview polling",
+      "area": "Perf",
+      "summary": "Reduce repeated filesystem and SQLite work in the default start UI by caching overview snapshots or invalidating them on state changes instead of rebuilding them on every SSE tick.",
+      "rationale": "The start web console is enabled by default, and its live event stream currently recomputes the full overview on a fixed interval even when nothing changed.",
+      "evidence": "internal/gocli/start_ui.go handleEvents calls buildEventsPayload() every 2 seconds per client. buildOverview() then calls listStartUIRepoSummaries(false), loadStartUIWorkRuns(10), loadStartUIWorkItemsWithHiddenCount(10), and HUD loading. listStartUIRepoSlugs() walks ~/.nana/start and onboarded repo state. docs/work.md describes nana start as a forever-running automation loop.",
+      "impact": "Cuts idle CPU and IO overhead for long-running sessions and should scale better as the number of onboarded repos and active work items grows.",
+      "suggested_next_step": "Add a synthetic multi-repo benchmark for buildOverview/buildEventsPayload, then introduce a cached snapshot invalidated by state-file or DB changes.",
+      "confidence": "medium",
+      "files": [
+        "internal/gocli/start_ui.go",
+        "internal/gocli/start_ui_test.go",
+        "docs/work.md"
+      ],
+      "labels": [
+        "enhancement",
+        "perf"
+      ]
+    },
+    {
+      "title": "Put existing Go benchmarks on a CI or scheduled regression track",
+      "area": "Perf",
+      "summary": "Start running the repo's existing Go benchmarks in automation and publish benchmem output for core CLI and runtime hot paths.",
+      "rationale": "The project already has targeted benchmarks for interactive paths, but performance regressions will currently slip until someone remembers to run them manually.",
+      "evidence": "Makefile exposes a benchmark target using go test -run=^$$ -bench=. -benchmem ./.... internal/gocli/runtime_benchmark_test.go benchmarks CLI invocation resolution, work-run index lookups, GitHub manifest resolution, and verification-plan detection. internal/gocli/session_test.go includes a session history benchmark. .github/workflows/ci.yml currently runs fmt, vet, test, docs, and build, but no benchmark job.",
+      "impact": "Improves confidence when shipping runtime changes and catches latency or allocation regressions before they accumulate in core workflows.",
+      "suggested_next_step": "Add a non-blocking benchmark workflow on PRs or a nightly schedule that runs go test -run=^$$ -bench=. -benchmem ./... and publishes the results as artifacts or step summaries.",
+      "confidence": "high",
+      "files": [
+        "Makefile",
+        "internal/gocli/runtime_benchmark_test.go",
+        "internal/gocli/session_test.go",
+        ".github/workflows/ci.yml"
+      ],
+      "labels": [
+        "enhancement",
+        "perf"
+      ]
+    }
+  ]
+}

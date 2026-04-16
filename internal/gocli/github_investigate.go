@@ -1,0 +1,673 @@
+package gocli
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+	"time"
+)
+
+var githubHotPathTokenSplitPattern = regexp.MustCompile(`[^A-Za-z0-9]+`)
+
+type githubManagedRepoPaths struct {
+	RepoRoot                 string
+	SourcePath               string
+	RepoMetaPath             string
+	RepoSettingsPath         string
+	RepoVerificationPlanPath string
+	RepoProfilePath          string
+	StartStatePath           string
+	ReviewRulesPath          string
+	PlannedRunsDir           string
+	ReviewsRoot              string
+}
+
+type githubManagedRepoMetadata struct {
+	Version       int    `json:"version"`
+	RepoName      string `json:"repo_name"`
+	RepoSlug      string `json:"repo_slug"`
+	RepoOwner     string `json:"repo_owner"`
+	CloneURL      string `json:"clone_url"`
+	DefaultBranch string `json:"default_branch"`
+	HTMLURL       string `json:"html_url"`
+	RepoRoot      string `json:"repo_root"`
+	SourcePath    string `json:"source_path"`
+	UpdatedAt     string `json:"updated_at"`
+}
+
+type githubRepositoryPayload struct {
+	Name          string `json:"name"`
+	FullName      string `json:"full_name"`
+	CloneURL      string `json:"clone_url"`
+	DefaultBranch string `json:"default_branch"`
+	HTMLURL       string `json:"html_url"`
+}
+
+type githubIssuePayload struct {
+	Title       string      `json:"title"`
+	State       string      `json:"state"`
+	User        githubActor `json:"user"`
+	PullRequest *struct {
+		URL string `json:"url"`
+	} `json:"pull_request,omitempty"`
+}
+
+type githubTargetContext struct {
+	Repository githubRepositoryPayload
+	Issue      githubIssuePayload
+}
+
+type githubVerificationPlan struct {
+	Version         int                            `json:"version,omitempty"`
+	Source          string                         `json:"source"`
+	Lint            []string                       `json:"lint"`
+	Compile         []string                       `json:"compile"`
+	Unit            []string                       `json:"unit"`
+	Integration     []string                       `json:"integration"`
+	Benchmarks      []string                       `json:"benchmarks,omitempty"`
+	Warnings        []string                       `json:"warnings,omitempty"`
+	PlanFingerprint string                         `json:"plan_fingerprint,omitempty"`
+	SourceFiles     []githubVerificationSourceFile `json:"source_files,omitempty"`
+}
+
+type githubVerificationSourceFile struct {
+	Path     string `json:"path"`
+	Checksum string `json:"checksum"`
+	Kind     string `json:"kind"`
+}
+
+type githubConsiderationInference struct {
+	Considerations []string
+}
+
+func githubInvestigateTarget(targetURL string) error {
+	target, err := parseGithubTargetURL(targetURL)
+	if err != nil {
+		return err
+	}
+	if target.kind != "issue" {
+		return fmt.Errorf("nana issue investigate expects a GitHub issue URL.\n%s", IssueHelp)
+	}
+
+	apiBaseURL := strings.TrimSpace(os.Getenv("GITHUB_API_URL"))
+	if apiBaseURL == "" {
+		apiBaseURL = "https://api.github.com"
+	}
+	token, err := resolveGithubToken()
+	if err != nil {
+		return err
+	}
+
+	context, err := githubFetchTargetContext(target, apiBaseURL, token)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	paths := githubManagedPaths(target.repoSlug)
+	repoMeta, err := ensureGithubManagedRepoMetadata(paths, context, now)
+	if err != nil {
+		return err
+	}
+	if err := ensureGithubSourceClone(paths, repoMeta); err != nil {
+		return err
+	}
+
+	verificationPlan := detectGithubVerificationPlan(paths.SourcePath)
+	if err := writeGithubJSON(paths.RepoVerificationPlanPath, verificationPlan); err != nil {
+		return err
+	}
+	trackedFiles := trackedRepoFiles(paths.SourcePath)
+
+	settings, _ := readGithubRepoSettings(paths.RepoSettingsPath)
+	if settings == nil {
+		inferred := inferGithubInitialRepoConsiderationsFromFiles(trackedFiles, repoMeta.RepoSlug, verificationPlan)
+		settings = &githubRepoSettings{
+			Version:               4,
+			DefaultConsiderations: inferred.Considerations,
+			DefaultRoleLayout:     "split",
+			UpdatedAt:             now.Format(time.RFC3339),
+		}
+	}
+	settings.HotPathAPIProfile = inferGithubHotPathProfileFromFiles(trackedFiles, now)
+	settings.UpdatedAt = now.Format(time.RFC3339)
+	if settings.Version == 0 {
+		settings.Version = 4
+	}
+	if settings.DefaultRoleLayout == "" {
+		settings.DefaultRoleLayout = "split"
+	}
+	if err := writeGithubJSON(paths.RepoSettingsPath, settings); err != nil {
+		return err
+	}
+	profile, profilePath, err := refreshGithubRepoProfile(repoMeta.RepoSlug, paths.SourcePath, verificationPlan, settings.DefaultConsiderations, now)
+	if err != nil {
+		return err
+	}
+	policy, err := resolveGithubWorkPolicy(paths.SourcePath)
+	if err != nil {
+		return err
+	}
+
+	considerations := settings.DefaultConsiderations
+	roleLayout := settings.DefaultRoleLayout
+	reviewRulesMode := settings.ReviewRulesMode
+	if reviewRulesMode == "" {
+		globalConfig, _ := readGithubReviewRulesGlobalConfig()
+		if globalConfig != nil && globalConfig.DefaultMode != "" {
+			reviewRulesMode = globalConfig.DefaultMode
+		} else {
+			reviewRulesMode = "manual"
+		}
+	}
+
+	fmt.Fprintf(os.Stdout, "[github] Investigated %s %s #%d\n", repoMeta.RepoSlug, target.kind, target.number)
+	fmt.Fprintf(os.Stdout, "[github] Title: %s\n", context.Issue.Title)
+	fmt.Fprintf(os.Stdout, "[github] Managed repo root: %s\n", paths.RepoRoot)
+	fmt.Fprintf(os.Stdout, "[github] Source path: %s\n", paths.SourcePath)
+	fmt.Fprintf(os.Stdout, "[github] Default branch: %s\n", repoMeta.DefaultBranch)
+	fmt.Fprintf(os.Stdout, "[github] Suggested considerations: %s\n", joinOrNone(considerations))
+	fmt.Fprintf(os.Stdout, "[github] Suggested role layout: %s\n", defaultString(roleLayout, "split"))
+	fmt.Fprintf(os.Stdout, "[github] Review-rules mode: %s\n", reviewRulesMode)
+	fmt.Fprintf(os.Stdout, "[github] Work-on policy: experimental=%t feedback_source=%s repo_native=%s human_gate=%s\n", policy.Experimental, policy.FeedbackSource, policy.RepoNativeStrictness, policy.HumanGate)
+	if profile != nil {
+		fmt.Fprintf(os.Stdout, "[github] Repo profile fingerprint: %s\n", profile.Fingerprint)
+		if profilePath != "" {
+			fmt.Fprintf(os.Stdout, "[github] Repo profile path: %s\n", profilePath)
+		}
+		if profile.CommitStyle != nil {
+			fmt.Fprintf(os.Stdout, "[github] Repo commit style: %s (confidence %.2f)\n", profile.CommitStyle.Kind, profile.CommitStyle.Confidence)
+		}
+		if profile.PullRequestTemplate != nil {
+			fmt.Fprintf(os.Stdout, "[github] Repo PR template: %s\n", profile.PullRequestTemplate.Path)
+		}
+	}
+	fmt.Fprintf(
+		os.Stdout,
+		"[github] Verification plan: lint=%d compile=%d unit=%d integration=%d benchmark=%d\n",
+		len(verificationPlan.Lint),
+		len(verificationPlan.Compile),
+		len(verificationPlan.Unit),
+		len(verificationPlan.Integration),
+		len(verificationPlan.Benchmarks),
+	)
+	for _, warning := range verificationPlan.Warnings {
+		fmt.Fprintf(os.Stdout, "[github] Verification warning: %s\n", warning)
+	}
+	if settings.HotPathAPIProfile != nil {
+		fmt.Fprintf(os.Stdout, "[github] Hot-path API files: %s\n", joinOrNone(settings.HotPathAPIProfile.HotPathAPIFiles))
+		fmt.Fprintf(os.Stdout, "[github] Hot-path API tokens: %s\n", joinOrNone(settings.HotPathAPIProfile.APIIdentifierTokens))
+	} else {
+		fmt.Fprintf(os.Stdout, "[github] Hot-path API files: (none detected)\n")
+		fmt.Fprintf(os.Stdout, "[github] Hot-path API tokens: (none detected)\n")
+	}
+	fmt.Fprintln(os.Stdout, "[github] Suggested pipeline:")
+	for _, line := range buildGithubConsiderationInstructionLines(considerations, roleLayout) {
+		fmt.Fprintln(os.Stdout, line)
+	}
+	fmt.Fprintf(os.Stdout, "[github] Next: nana implement %s\n", githubCanonicalTargetURL(target))
+	return nil
+}
+
+func githubManagedPaths(repoSlug string) githubManagedRepoPaths {
+	repoRoot := githubWorkRepoRoot(repoSlug)
+	sourcePath := filepath.Join(repoRoot, "source")
+	return githubManagedRepoPaths{
+		RepoRoot:                 repoRoot,
+		SourcePath:               sourcePath,
+		RepoMetaPath:             filepath.Join(repoRoot, "repo.json"),
+		RepoSettingsPath:         filepath.Join(repoRoot, "settings.json"),
+		RepoVerificationPlanPath: filepath.Join(repoRoot, "verification-plan.json"),
+		RepoProfilePath:          filepath.Join(repoRoot, "repo-profile.json"),
+		StartStatePath:           filepath.Join(repoRoot, "start-state.json"),
+		ReviewRulesPath:          filepath.Join(sourcePath, ".nana", "repo-review-rules.json"),
+		PlannedRunsDir:           filepath.Join(repoRoot, "planned-runs"),
+		ReviewsRoot:              filepath.Join(repoRoot, "reviews"),
+	}
+}
+
+func githubFetchTargetContext(target parsedGithubTarget, apiBaseURL string, token string) (githubTargetContext, error) {
+	var repository githubRepositoryPayload
+	if err := githubAPIGetJSON(apiBaseURL, token, fmt.Sprintf("/repos/%s", target.repoSlug), &repository); err != nil {
+		return githubTargetContext{}, err
+	}
+	var issue githubIssuePayload
+	if err := githubAPIGetJSON(apiBaseURL, token, fmt.Sprintf("/repos/%s/issues/%d", target.repoSlug, target.number), &issue); err != nil {
+		return githubTargetContext{}, err
+	}
+	if target.kind == "issue" && issue.PullRequest != nil {
+		return githubTargetContext{}, fmt.Errorf("Target %s#%d is a pull request. Use its pull request URL instead.", target.repoSlug, target.number)
+	}
+	return githubTargetContext{Repository: repository, Issue: issue}, nil
+}
+
+func ensureGithubManagedRepoMetadata(paths githubManagedRepoPaths, target githubTargetContext, now time.Time) (*githubManagedRepoMetadata, error) {
+	var existing githubManagedRepoMetadata
+	if err := readGithubJSON(paths.RepoMetaPath, &existing); err == nil {
+		if !strings.EqualFold(strings.TrimSpace(existing.RepoSlug), strings.TrimSpace(target.Repository.FullName)) {
+			return nil, fmt.Errorf("Managed repo path collision at %s: expected %s, found %s.", paths.RepoRoot, target.Repository.FullName, existing.RepoSlug)
+		}
+	}
+	parts := strings.SplitN(target.Repository.FullName, "/", 2)
+	repoOwner := ""
+	if len(parts) > 0 {
+		repoOwner = parts[0]
+	}
+	metadata := &githubManagedRepoMetadata{
+		Version:       1,
+		RepoName:      target.Repository.Name,
+		RepoSlug:      target.Repository.FullName,
+		RepoOwner:     repoOwner,
+		CloneURL:      target.Repository.CloneURL,
+		DefaultBranch: target.Repository.DefaultBranch,
+		HTMLURL:       target.Repository.HTMLURL,
+		RepoRoot:      paths.RepoRoot,
+		SourcePath:    paths.SourcePath,
+		UpdatedAt:     now.Format(time.RFC3339),
+	}
+	if err := writeGithubJSON(paths.RepoMetaPath, metadata); err != nil {
+		return nil, err
+	}
+	return metadata, nil
+}
+
+func ensureGithubSourceClone(paths githubManagedRepoPaths, repoMeta *githubManagedRepoMetadata) error {
+	if _, err := os.Stat(paths.SourcePath); os.IsNotExist(err) {
+		if err := githubRunGit("", "clone", repoMeta.CloneURL, paths.SourcePath); err != nil {
+			return err
+		}
+	} else {
+		currentOrigin, err := githubGitOutput(paths.SourcePath, "remote", "get-url", "origin")
+		if err != nil || strings.TrimSpace(currentOrigin) != strings.TrimSpace(repoMeta.CloneURL) {
+			if err := githubRunGit(paths.SourcePath, "remote", "set-url", "origin", repoMeta.CloneURL); err != nil {
+				return err
+			}
+		}
+	}
+	return githubRunGit(paths.SourcePath, "fetch", "--prune", "origin")
+}
+
+func githubRunGit(cwd string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	cmd.Env = githubGitEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %s failed: %v\n%s", strings.Join(args, " "), err, output)
+	}
+	return nil
+}
+
+func githubGitOutput(cwd string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = cwd
+	cmd.Env = githubGitEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git %s failed: %v\n%s", strings.Join(args, " "), err, output)
+	}
+	return string(output), nil
+}
+
+func githubGitEnv() []string {
+	env := append([]string{}, os.Environ()...)
+	ensure := func(key string, value string) {
+		for _, existing := range env {
+			if strings.HasPrefix(existing, key+"=") {
+				return
+			}
+		}
+		env = append(env, key+"="+value)
+	}
+	ensure("GIT_AUTHOR_NAME", "Nana")
+	ensure("GIT_AUTHOR_EMAIL", "nana@example.invalid")
+	ensure("GIT_COMMITTER_NAME", "Nana")
+	ensure("GIT_COMMITTER_EMAIL", "nana@example.invalid")
+	return env
+}
+
+func readMakefileTargets(path string) (map[string]bool, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	targets := map[string]bool{}
+	re := regexp.MustCompile(`(?m)^([A-Za-z0-9_.-]+):`)
+	for _, match := range re.FindAllStringSubmatch(string(content), -1) {
+		target := strings.TrimSpace(match[1])
+		if target != "" && !strings.HasPrefix(target, ".") {
+			targets[target] = true
+		}
+	}
+	return targets, nil
+}
+
+func inferGithubInitialRepoConsiderations(repoCheckoutPath string, repoSlug string, verificationPlan githubVerificationPlan) githubConsiderationInference {
+	return inferGithubInitialRepoConsiderationsFromFiles(trackedRepoFiles(repoCheckoutPath), repoSlug, verificationPlan)
+}
+
+func inferGithubInitialRepoConsiderationsFromFiles(files []string, repoSlug string, verificationPlan githubVerificationPlan) githubConsiderationInference {
+	lowerPaths := make([]string, 0, len(files))
+	for _, path := range files {
+		lowerPaths = append(lowerPaths, strings.ToLower(path))
+	}
+	considerations := map[string]bool{}
+	if len(verificationPlan.Unit) > 0 || len(verificationPlan.Integration) > 0 || hasPathMatch(lowerPaths, "test", "__tests__", "spec", "integration") {
+		considerations["qa"] = true
+	}
+	if len(verificationPlan.Lint) > 0 || hasSuffixMatch(lowerPaths, "biome.json", ".eslintrc", ".editorconfig", "ruff.toml") {
+		considerations["style"] = true
+	}
+	if hasSuffixMatch(lowerPaths, "package.json", "pom.xml", "cargo.toml", "go.mod", "pyproject.toml", "requirements.txt") {
+		considerations["dependency"] = true
+	}
+	if hasPathMatch(lowerPaths, "openapi", "swagger", "graphql", "proto", "/api/", "sdk", "client") || strings.Contains(strings.ToLower(repoSlug), "api") {
+		considerations["api"] = true
+	}
+	if hasPathMatch(lowerPaths, "benchmark", "perf", "performance", "latency") {
+		considerations["perf"] = true
+	}
+	if hasPathMatch(lowerPaths, "security", "auth", "policy", "secret", "permission") {
+		considerations["security"] = true
+	}
+	if hasPathMatch(lowerPaths, "architecture", "adr", "module", "schema") {
+		considerations["arch"] = true
+	}
+	if len(considerations) == 0 {
+		considerations["qa"] = true
+	}
+	out := make([]string, 0, len(considerations))
+	for item := range considerations {
+		out = append(out, item)
+	}
+	slices.Sort(out)
+	return githubConsiderationInference{Considerations: out}
+}
+
+func trackedRepoFiles(repoCheckoutPath string) []string {
+	output, err := githubGitOutput(repoCheckoutPath, "ls-files")
+	if err == nil {
+		parts := []string{}
+		for _, line := range strings.Split(output, "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				parts = append(parts, line)
+			}
+		}
+		return parts
+	}
+	files := []string{}
+	_ = filepath.Walk(repoCheckoutPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(repoCheckoutPath, path)
+		if relErr == nil {
+			files = append(files, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	return files
+}
+
+func hasPathMatch(paths []string, needles ...string) bool {
+	for _, path := range paths {
+		for _, needle := range needles {
+			if strings.Contains(path, strings.ToLower(needle)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasSuffixMatch(paths []string, suffixes ...string) bool {
+	for _, path := range paths {
+		for _, suffix := range suffixes {
+			if strings.HasSuffix(path, strings.ToLower(suffix)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func inferGithubHotPathProfile(repoCheckoutPath string, now time.Time) *githubHotPathProfile {
+	return inferGithubHotPathProfileFromFiles(trackedRepoFiles(repoCheckoutPath), now)
+}
+
+func inferGithubHotPathProfileFromFiles(files []string, now time.Time) *githubHotPathProfile {
+	apiSurfaceFiles := []string{}
+	hotPathFiles := []string{}
+	tokens := []string{}
+	for _, path := range files {
+		lower := strings.ToLower(path)
+		if strings.Contains(lower, "openapi") || strings.Contains(lower, "swagger") || strings.Contains(lower, "graphql") || strings.Contains(lower, "proto") || strings.Contains(lower, "/api/") {
+			apiSurfaceFiles = append(apiSurfaceFiles, path)
+			base := filepath.Base(path)
+			base = strings.TrimSuffix(base, filepath.Ext(base))
+			for _, token := range githubHotPathTokenSplitPattern.Split(base, -1) {
+				token = strings.TrimSpace(token)
+				if len(token) >= 3 {
+					tokens = append(tokens, token)
+				}
+			}
+			if strings.Contains(lower, "perf") || strings.Contains(lower, "benchmark") {
+				hotPathFiles = append(hotPathFiles, path)
+			}
+		}
+	}
+	apiSurfaceFiles = uniqueStrings(apiSurfaceFiles)
+	hotPathFiles = uniqueStrings(hotPathFiles)
+	tokens = uniqueStrings(tokens)
+	slices.Sort(apiSurfaceFiles)
+	slices.Sort(hotPathFiles)
+	slices.Sort(tokens)
+	evidence := []string{}
+	if len(apiSurfaceFiles) > 0 {
+		evidence = append(evidence, fmt.Sprintf("api surface files detected: %s", strings.Join(apiSurfaceFiles, ", ")))
+	}
+	if len(hotPathFiles) > 0 {
+		evidence = append(evidence, fmt.Sprintf("hot-path api files detected: %s", strings.Join(hotPathFiles, ", ")))
+	}
+	if len(tokens) > 0 {
+		evidence = append(evidence, fmt.Sprintf("api identifier tokens extracted: %s", strings.Join(tokens, ", ")))
+	}
+	return &githubHotPathProfile{
+		Version:             1,
+		AnalyzedAt:          now.Format(time.RFC3339),
+		APISurfaceFiles:     apiSurfaceFiles,
+		HotPathAPIFiles:     hotPathFiles,
+		APIIdentifierTokens: tokens,
+		Evidence:            evidence,
+	}
+}
+
+func refreshGithubVerificationArtifacts(runID string, useLast bool) error {
+	manifestPath, repoRoot, err := resolveGithubRunManifestPath(runID, useLast)
+	if err != nil {
+		return err
+	}
+	manifest, err := readGithubWorkManifest(manifestPath)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(manifest.SandboxPath) == "" || strings.TrimSpace(manifest.SandboxRepoPath) == "" {
+		return fmt.Errorf("run %s is missing sandbox paths required for verify-refresh", manifest.RunID)
+	}
+	plan := detectGithubVerificationPlan(manifest.SandboxRepoPath)
+	if err := writeGithubJSON(filepath.Join(repoRoot, "verification-plan.json"), plan); err != nil {
+		return err
+	}
+	scriptsDir, err := writeGithubVerificationScripts(manifest.SandboxPath, manifest.SandboxRepoPath, plan, manifest.RunID)
+	if err != nil {
+		return err
+	}
+	beforePlan := ""
+	if manifest.VerificationPlan != nil {
+		beforePlan = manifest.VerificationPlan.PlanFingerprint
+	}
+	manifest.VerificationPlan = &plan
+	manifest.VerificationScriptsDir = scriptsDir
+	if err := writeGithubJSON(manifestPath, manifest); err != nil {
+		return err
+	}
+	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+		return err
+	}
+	status := "already current"
+	if beforePlan != plan.PlanFingerprint || beforePlan == "" {
+		status = "refreshed"
+	}
+	fmt.Fprintf(os.Stdout, "[github] Verification artifacts for run %s %s.\n", manifest.RunID, status)
+	if len(plan.SourceFiles) > 0 {
+		parts := make([]string, 0, len(plan.SourceFiles))
+		for _, sourceFile := range plan.SourceFiles {
+			parts = append(parts, fmt.Sprintf("%s:%s", sourceFile.Path, sourceFile.Checksum))
+		}
+		fmt.Fprintf(os.Stdout, "[github] Verification source files: %s\n", strings.Join(parts, ", "))
+	}
+	if scriptsDir != "" {
+		fmt.Fprintf(os.Stdout, "[github] Verification scripts directory: %s\n", scriptsDir)
+	}
+	return nil
+}
+
+func writeGithubVerificationScripts(sandboxPath string, repoCheckoutPath string, plan githubVerificationPlan, runID string) (string, error) {
+	return writeVerificationScripts("work", sandboxPath, repoCheckoutPath, plan, []string{"nana", "work", "verify-refresh", "--run-id", runID})
+}
+
+func detectGithubVerificationPlan(repoCheckoutPath string) githubVerificationPlan {
+	var source string
+	var lint, compile, unit, integration, benchmarks, warnings []string
+	var sourceFiles []githubVerificationSourceFile
+	addSourceFile := func(path string, kind string) {
+		checksum, err := checksumFile(path)
+		if err != nil {
+			return
+		}
+		rel, err := filepath.Rel(repoCheckoutPath, path)
+		if err != nil {
+			rel = path
+		}
+		sourceFiles = append(sourceFiles, githubVerificationSourceFile{
+			Path:     filepath.ToSlash(rel),
+			Checksum: checksum,
+			Kind:     kind,
+		})
+	}
+	makefilePath := filepath.Join(repoCheckoutPath, "Makefile")
+	if targets, err := readMakefileTargets(makefilePath); err == nil {
+		source = "makefile"
+		if targets["lint"] {
+			lint = append(lint, "make lint")
+		}
+		if targets["build"] {
+			compile = append(compile, "make build")
+		}
+		if targets["compile"] {
+			compile = append(compile, "make compile")
+		}
+		if targets["test-unit"] {
+			unit = append(unit, "make test-unit")
+		} else if targets["test"] {
+			unit = append(unit, "make test")
+			if targets["test-integration"] {
+				warnings = append(warnings, "Repo exposes both `test` and `test-integration`, but no dedicated `test-unit`. Split unit and integration so Nana can run them separately.")
+			}
+		}
+		if targets["test-integration"] {
+			integration = append(integration, "make test-integration")
+		}
+		explicitBenchmarkEntrypoint := false
+		switch {
+		case targets["test-benchmark"]:
+			benchmarks = append(benchmarks, "make test-benchmark")
+			explicitBenchmarkEntrypoint = true
+		case targets["benchmark"]:
+			benchmarks = append(benchmarks, "make benchmark")
+			explicitBenchmarkEntrypoint = true
+		case targets["test-benchmark-jmh"]:
+			benchmarks = append(benchmarks, "make test-benchmark-jmh")
+		}
+		if !explicitBenchmarkEntrypoint && (targets["test-benchmark-e2e"] || targets["test-benchmark-jmh"] || targets["test-benchmark-jmh-quick"]) {
+			warnings = append(warnings, "Repo exposes benchmark targets but no single benchmark entrypoint. Add a dedicated benchmark target so Nana can keep benchmarks separate from unit and integration tests.")
+		}
+		if len(lint)+len(compile)+len(unit)+len(integration)+len(benchmarks) > 0 {
+			addSourceFile(makefilePath, "makefile")
+		}
+	}
+	if source == "" {
+		if path := filepath.Join(repoCheckoutPath, "pom.xml"); githubFileExists(path) {
+			source = "heuristic"
+			compile = []string{"mvn -q -DskipTests compile", "mvn -q test-compile"}
+			unit = []string{"mvn -q test"}
+			addSourceFile(path, "heuristic")
+		} else if path := filepath.Join(repoCheckoutPath, "package.json"); githubFileExists(path) {
+			source = "heuristic"
+			lint = []string{"npm run lint --if-present"}
+			compile = []string{"npm run build --if-present"}
+			unit = []string{"npm test -- --runInBand"}
+			integration = []string{"npm run test:integration --if-present"}
+			addSourceFile(path, "heuristic")
+		} else if path := filepath.Join(repoCheckoutPath, "Cargo.toml"); githubFileExists(path) {
+			source = "heuristic"
+			lint = []string{"cargo fmt --check", "cargo clippy --all-targets -- -D warnings"}
+			compile = []string{"cargo check"}
+			unit = []string{"cargo test --lib"}
+			addSourceFile(path, "heuristic")
+		} else if path := filepath.Join(repoCheckoutPath, "go.mod"); githubFileExists(path) {
+			source = "heuristic"
+			lint = []string{`test -z "$(gofmt -l .)"`, "go vet ./..."}
+			compile = []string{"go test -run '^$' ./..."}
+			unit = []string{"go test ./..."}
+			addSourceFile(path, "heuristic")
+		}
+	}
+	if source == "" {
+		source = "heuristic"
+	}
+	fingerprintInput := strings.Join(append(append(append(append(append(append([]string{source}, lint...), compile...), unit...), integration...), benchmarks...), warnings...), "\n")
+	for _, item := range sourceFiles {
+		fingerprintInput += "\n" + item.Path + "\n" + item.Checksum + "\n" + item.Kind
+	}
+	sum := sha256.Sum256([]byte(fingerprintInput))
+	return githubVerificationPlan{
+		Source:          source,
+		Lint:            lint,
+		Compile:         compile,
+		Unit:            unit,
+		Integration:     integration,
+		Benchmarks:      benchmarks,
+		Warnings:        warnings,
+		PlanFingerprint: hex.EncodeToString(sum[:]),
+		SourceFiles:     sourceFiles,
+	}
+}
+
+func checksumFile(path string) (string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func githubFileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}

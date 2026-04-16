@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Start UI Assistant Workspace - nana Docs</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header>
+      <nav class="container nav" aria-label="Primary">
+        <a class="brand" href="./index.html">nana</a>
+        <a href="./index.html">Home</a>
+        <a href="./getting-started.html">Getting Started</a>
+        <a class="active" href="./start-ui.html">Start UI</a>
+        <a href="./agents.html">Agents</a>
+        <a href="./skills.html">Skills</a>
+        <a href="./integrations.html">Integrations</a>
+      </nav>
+    </header>
+
+    <main class="container">
+      <h1>Nana Assistant Workspace</h1>
+      <p class="muted">Guide for the loopback REST API and browser workspace launched by <code>nana start</code>.</p>
+
+      <section aria-labelledby="quick-start">
+        <h2 id="quick-start">Quick start</h2>
+        <p>
+          <code>nana start</code> starts the repo automation loop and, unless <code>--no-ui</code> is supplied, also starts a
+          local REST API and assistant workspace bound to <code>127.0.0.1</code>. The process prints the resolved URLs when the UI is ready:
+        </p>
+        <pre><code>[start-ui] API: http://127.0.0.1:17653
+[start-ui] Web: http://127.0.0.1:17654</code></pre>
+        <p>Open the printed Web URL in your browser. Keep the terminal process running while you operate the console.</p>
+        <pre><code>nana repo onboard owner/repo
+nana repo config owner/repo --repo-mode fork --issue-pick label --pr-forward approve
+nana start</code></pre>
+      </section>
+
+      <section aria-labelledby="what-you-can-do">
+        <h2 id="what-you-can-do">What you can do in the workspace</h2>
+        <div class="card-grid">
+          <article class="card">
+            <h3>Home and work queues</h3>
+            <p>See active runs, pending work items, approvals, queue pressure, and repo automation state in one surface.</p>
+          </article>
+          <article class="card">
+            <h3>Issues and investigations</h3>
+            <p>Inspect tracked issues, review triage rationale, launch work for tracked issues, and start or inspect investigation runs.</p>
+          </article>
+          <article class="card">
+            <h3>Feedback and approvals</h3>
+            <p>Review drafted PR feedback and replies, submit ready drafts, and inspect the human-gate queue for publication or launch decisions.</p>
+          </article>
+          <article class="card">
+            <h3>Repo operations</h3>
+            <p>Keep the existing repo-scoped config, controls, scouts, planned work, and logs available without leaving the workspace.</p>
+          </article>
+        </div>
+      </section>
+
+      <section aria-labelledby="operator-flow">
+        <h2 id="operator-flow">End-to-end operator flow</h2>
+        <ol>
+          <li>Onboard and configure each target repo with <code>nana repo onboard</code>, <code>nana repo config</code>, or <code>nana repo explain</code>.</li>
+          <li>Run bare <code>nana start</code> for the normal long-running loop, or <code>nana start --cycles &lt;n&gt;</code> for a bounded run.</li>
+          <li>Open the printed Web URL and use Home, Issues, Work, Feedback, Investigations, and Approvals to find blocked or queued work.</li>
+          <li>Open a repo page when you need repo-local Scouts, Config, Controls, or queue posture.</li>
+          <li>Use run detail and logs when verification, publication, or review feedback needs investigation.</li>
+          <li>Stop the loop from the terminal with <kbd>Ctrl</kbd>+<kbd>C</kbd> when you are done operating automation.</li>
+        </ol>
+      </section>
+
+      <section aria-labelledby="api-reference">
+        <h2 id="api-reference">Loopback API reference</h2>
+        <p>
+          The Web URL calls the API URL printed by the same <code>nana start</code> process. Endpoints return JSON and are intended
+          for local automation and workspace UX; keep them on loopback and do not expose the ports outside your machine.
+        </p>
+        <table>
+          <thead><tr><th>Endpoint</th><th>Use</th></tr></thead>
+          <tbody>
+            <tr><td><code>GET /api/v1/overview</code></td><td>Global totals, repo summaries, recent runs, work items, and HUD payload.</td></tr>
+            <tr><td><code>GET /api/v1/attention</code></td><td>Ranked attention queue plus the single best next item and recommended command.</td></tr>
+            <tr><td><code>GET /api/v1/issues</code></td><td>Flattened tracked-issue queue with triage and publication state.</td></tr>
+            <tr><td><code>GET /api/v1/investigations</code></td><td>Investigation runs discovered across the workspace and managed repo checkouts.</td></tr>
+            <tr><td><code>POST /api/v1/investigations</code></td><td>Start a new investigation for the current workspace or a managed repo checkout.</td></tr>
+            <tr><td><code>GET /api/v1/reviews</code></td><td>Review-request drafts and PR feedback queue.</td></tr>
+            <tr><td><code>GET /api/v1/replies</code></td><td>Reply drafts for GitHub review or issue threads.</td></tr>
+            <tr><td><code>POST /api/v1/feedback/sync</code></td><td>Refresh the feedback queue from GitHub notifications.</td></tr>
+            <tr><td><code>GET /api/v1/approvals</code></td><td>Human-gate queue across blocked runs, ready drafts, and planned launches.</td></tr>
+            <tr><td><code>GET /api/v1/repos</code></td><td>List start-aware repo summaries.</td></tr>
+            <tr><td><code>GET /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/start-state</code></td><td>Inspect one repo's start state and automation settings.</td></tr>
+            <tr><td><code>PATCH /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/settings</code></td><td>Update repo-mode, issue-pick, PR-forwarding, publish settings, scout policies, and scout schedules.</td></tr>
+            <tr><td><code>PATCH /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/issues/&lt;number&gt;</code></td><td>Schedule, defer, reprioritize, or clear scheduling for a mirrored issue.</td></tr>
+            <tr><td><code>POST /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/issues/&lt;number&gt;/investigate</code></td><td>Start an investigation from a tracked issue.</td></tr>
+            <tr><td><code>POST /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/issues/&lt;number&gt;/launch-work</code></td><td>Launch work for a tracked issue through the planned-work path.</td></tr>
+            <tr><td><code>GET /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/scout-items</code></td><td>List local scout proposals and their available actions.</td></tr>
+            <tr><td><code>POST /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/planned-items</code></td><td>Create planned work for a repo.</td></tr>
+            <tr><td><code>GET /api/v1/work/runs</code></td><td>List recent work runs.</td></tr>
+            <tr><td><code>GET /api/v1/work/runs/&lt;run-id&gt;</code></td><td>Inspect run manifest/status detail for local and GitHub-backed work.</td></tr>
+            <tr><td><code>POST /api/v1/work/runs/&lt;run-id&gt;/sync</code></td><td>Run the safe GitHub feedback-sync flow for a GitHub-backed run.</td></tr>
+            <tr><td><code>GET /api/v1/work/runs/&lt;run-id&gt;/logs</code></td><td>List log files for a run.</td></tr>
+            <tr><td><code>GET /api/v1/work-items</code></td><td>List queued, draft, hidden, or actionable work items.</td></tr>
+            <tr><td><code>GET /api/v1/events</code></td><td>Server-sent events stream for live overview refreshes.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section aria-labelledby="ports-and-safety">
+        <h2 id="ports-and-safety">Ports and safety controls</h2>
+        <ul>
+          <li>Default ports are API <code>17653</code> and Web <code>17654</code>; if a requested port is busy, Nana tries nearby ports and prints the resolved URLs.</li>
+          <li>Use <code>--ui-api-port &lt;port&gt;</code> or <code>--ui-web-port &lt;port&gt;</code> when you need predictable local ports.</li>
+          <li>Use <code>--no-ui</code> for headless automation runs or environments where opening a local browser workspace is not desired.</li>
+          <li>The latest UI runtime metadata is written under <code>~/.nana/start/ui/runtime.json</code> for local inspection.</li>
+        </ul>
+      </section>
+    </main>
+
+    <footer>
+      <div class="container">
+        <span class="muted">Related: <a href="./work.md">work and start automation reference</a> · <a href="./qa/assistant-workspace-manual-checklist.md">assistant workspace manual checklist</a>.</span>
+      </div>
+    </footer>
+  </body>
+</html>

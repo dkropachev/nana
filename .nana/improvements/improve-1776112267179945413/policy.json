@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "mode": "auto",
+  "issue_destination": "local",
+  "labels": [
+    "improvement",
+    "improvement-scout",
+    "local-scout"
+  ],
+  "max_issues": 5
+}
