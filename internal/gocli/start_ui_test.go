@@ -1830,6 +1830,98 @@ func TestStartUIAPIScoutItemsAndActions(t *testing.T) {
 	}
 }
 
+func TestStartUIAPIScoutItemsBatchAction(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	stateDir := filepath.Join(cwd, ".nana", "state")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	repo := createLocalWorkRepoAt(t, sourcePath)
+	if repo != sourcePath {
+		t.Fatalf("unexpected repo path: %s", repo)
+	}
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{
+		Version:        6,
+		RepoMode:       "fork",
+		IssuePickMode:  "auto",
+		PRForwardMode:  "approve",
+		ForkIssuesMode: "auto",
+		ImplementMode:  "auto",
+		PublishTarget:  "fork",
+	}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	writeScoutPickupFixture(t, repo, improvementScoutRole, "Improve help text", "Make help clearer")
+	writeScoutPickupFixture(t, repo, enhancementScoutRole, "Add benchmark target", "Expose benchmarks")
+	if err := writeGithubJSON(filepath.Join(repo, ".nana", "improvements", "improve-test", "policy.json"), improvementPolicy{
+		Version:          1,
+		IssueDestination: improvementDestinationLocal,
+		Labels:           []string{"improvement"},
+		MaxIssues:        5,
+	}); err != nil {
+		t.Fatalf("write improvement policy: %v", err)
+	}
+	if err := writeGithubJSON(filepath.Join(repo, ".nana", "enhancements", "enhance-test", "policy.json"), improvementPolicy{
+		Version:          1,
+		IssueDestination: improvementDestinationLocal,
+		Labels:           []string{"enhancement"},
+		MaxIssues:        5,
+	}); err != nil {
+		t.Fatalf("write enhancement policy: %v", err)
+	}
+
+	server := httptest.NewServer((&startUIAPI{cwd: cwd, allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
+	defer server.Close()
+
+	loadResponse, err := http.Get(server.URL + "/api/v1/repos/" + repoSlug + "/scout-items")
+	if err != nil {
+		t.Fatalf("GET scout items: %v", err)
+	}
+	defer loadResponse.Body.Close()
+	var loadPayload startUIScoutItemsResponse
+	if err := json.NewDecoder(loadResponse.Body).Decode(&loadPayload); err != nil {
+		t.Fatalf("decode scout items: %v", err)
+	}
+	if len(loadPayload.Items) != 2 {
+		t.Fatalf("expected two scout items, got %+v", loadPayload.Items)
+	}
+
+	body := strings.NewReader(fmt.Sprintf(`{"action":"queue-planned","item_ids":["%s","%s"]}`, loadPayload.Items[0].ID, loadPayload.Items[1].ID))
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/repos/"+repoSlug+"/scout-items/batch", body)
+	if err != nil {
+		t.Fatalf("new batch request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST batch queue: %v", err)
+	}
+	defer response.Body.Close()
+	var payload startUIScoutItemsResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode batch payload: %v", err)
+	}
+	if payload.Action != "queue-planned" || payload.SuccessCount != 2 || payload.FailureCount != 0 {
+		t.Fatalf("unexpected batch action summary: %+v", payload)
+	}
+	if len(payload.Results) != 2 || payload.Results[0].Status != "ok" || payload.Results[1].Status != "ok" {
+		t.Fatalf("unexpected batch results: %+v", payload.Results)
+	}
+	if len(payload.Items) != 2 || payload.Items[0].Status != "planned" || payload.Items[1].Status != "planned" {
+		t.Fatalf("expected both scout items to be planned, got %+v", payload.Items)
+	}
+	if payload.Repo.State == nil || len(payload.Repo.State.PlannedItems) != 2 {
+		t.Fatalf("expected planned items in repo state, got %+v", payload.Repo.State)
+	}
+}
+
 func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	server := httptest.NewServer(startUIWebHandler("http://127.0.0.1:17653"))
 	defer server.Close()
