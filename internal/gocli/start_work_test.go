@@ -418,6 +418,46 @@ func TestStartWorkPlannedItemDueRequiresExplicitSchedule(t *testing.T) {
 	}
 }
 
+func TestStartRepoCoordinatorKeepsManualLaunchingPlannedItemsQueued(t *testing.T) {
+	repoSlug := "acme/widget"
+	coordinator := &startRepoCoordinator{
+		repoSlug: repoSlug,
+		cycleID:  "cycle-1",
+		state: &startWorkState{
+			Version:      startWorkStateVersion,
+			SourceRepo:   repoSlug,
+			UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+			Issues:       map[string]startWorkIssueState{},
+			ServiceTasks: map[string]startWorkServiceTask{},
+			PlannedItems: map[string]startWorkPlannedItem{
+				"planned-1": {
+					ID:        "planned-1",
+					RepoSlug:  repoSlug,
+					Title:     "Manual launch only",
+					Priority:  2,
+					State:     startPlannedItemLaunching,
+					CreatedAt: time.Now().UTC().Format(time.RFC3339),
+					UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+				},
+			},
+		},
+	}
+	if err := coordinator.syncServiceTasks(); err != nil {
+		t.Fatalf("syncServiceTasks: %v", err)
+	}
+	task, ok := coordinator.state.ServiceTasks[startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1")]
+	if !ok {
+		t.Fatalf("expected manual launch to persist a planned-launch task")
+	}
+	if task.Status != startWorkServiceTaskQueued || task.PlannedItemID != "planned-1" {
+		t.Fatalf("unexpected planned-launch task: %+v", task)
+	}
+	queue := coordinator.buildServiceQueue()
+	if len(queue) != 1 || queue[0].Key != startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1") {
+		t.Fatalf("expected queued planned-launch task, got %+v", queue)
+	}
+}
+
 func TestStartRepoCoordinatorPersistsStateWhenNoTasksAreQueued(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

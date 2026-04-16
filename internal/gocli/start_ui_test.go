@@ -297,12 +297,6 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 		t.Fatalf("unexpected planned item payload: %+v", createPayload.PlannedItem)
 	}
 
-	oldLaunch := startLaunchPlannedItem
-	startLaunchPlannedItem = func(cwd string, repoSlug string, workOptions startWorkOptions, item startWorkPlannedItem) (startPlannedLaunchResult, error) {
-		return startPlannedLaunchResult{Status: "created_issue", Result: "created GitHub issue #77", IssueNumber: 77, IssueURL: "https://github.com/acme/widget/issues/77"}, nil
-	}
-	defer func() { startLaunchPlannedItem = oldLaunch }()
-
 	launchRequest, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/planned-items/"+createPayload.PlannedItem.ID+"/launch-now", nil)
 	if err != nil {
 		t.Fatalf("new launch request: %v", err)
@@ -317,10 +311,19 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 		Launch      startPlannedLaunchResult `json:"launch"`
 	}
 	if err := json.NewDecoder(launchResponse.Body).Decode(&launchPayload); err != nil {
-		t.Fatalf("decode launch payload: %v", err)
+		body, _ := io.ReadAll(launchResponse.Body)
+		t.Fatalf("decode launch payload: %v (status=%d body=%q)", err, launchResponse.StatusCode, body)
 	}
-	if launchPayload.PlannedItem.State != startPlannedItemLaunched || launchPayload.Launch.IssueNumber != 77 {
+	if launchPayload.PlannedItem.State != startPlannedItemLaunching || launchPayload.Launch.Status != "queued" {
 		t.Fatalf("unexpected launch payload: %+v", launchPayload)
+	}
+	updatedState, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("read updated state: %v", err)
+	}
+	task := updatedState.ServiceTasks[startServiceTaskKey(startTaskKindPlannedLaunch, createPayload.PlannedItem.ID)]
+	if task.Status != startWorkServiceTaskQueued || task.PlannedItemID != createPayload.PlannedItem.ID {
+		t.Fatalf("expected queued planned-launch task, got %+v", task)
 	}
 }
 
@@ -2103,15 +2106,8 @@ func TestStartUIPlannedItemLaunchFailureInvalidatesOverviewCache(t *testing.T) {
 	if err := writeStartWorkState(state); err != nil {
 		t.Fatalf("write start state: %v", err)
 	}
-
 	api := &startUIAPI{cwd: cwd}
 	startUITestPrimeOverviewCache(t, api)
-
-	oldLaunch := startLaunchPlannedItem
-	startLaunchPlannedItem = func(cwd string, repoSlug string, workOptions startWorkOptions, item startWorkPlannedItem) (startPlannedLaunchResult, error) {
-		return startPlannedLaunchResult{}, fmt.Errorf("launcher failed")
-	}
-	defer func() { startLaunchPlannedItem = oldLaunch }()
 
 	server := httptest.NewServer(api.routes())
 	defer server.Close()
@@ -2120,16 +2116,20 @@ func TestStartUIPlannedItemLaunchFailureInvalidatesOverviewCache(t *testing.T) {
 		t.Fatalf("POST launch-now: %v", err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected launch failure status 400, got %d", response.StatusCode)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected launch queue status 200, got %d", response.StatusCode)
 	}
 	updated, err := readStartWorkState(repoSlug)
 	if err != nil {
 		t.Fatalf("read updated state: %v", err)
 	}
 	item := updated.PlannedItems["planned-fail"]
-	if item.State != startPlannedItemFailed || !strings.Contains(item.LastError, "launcher failed") {
-		t.Fatalf("expected failed planned item side effect, got %+v", item)
+	if item.State != startPlannedItemLaunching || item.LastError != "" {
+		t.Fatalf("expected failed item to requeue for bounded launch, got %+v", item)
+	}
+	task := updated.ServiceTasks[startServiceTaskKey(startTaskKindPlannedLaunch, "planned-fail")]
+	if task.Status != startWorkServiceTaskQueued || task.PlannedItemID != "planned-fail" {
+		t.Fatalf("expected queued planned-launch task, got %+v", task)
 	}
 	if startUITestOverviewCacheValid(api) {
 		t.Fatalf("expected failed planned-item launch side effect to invalidate overview cache")

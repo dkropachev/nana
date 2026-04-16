@@ -402,7 +402,15 @@ func (c *startRepoCoordinator) syncServiceTasks() error {
 		}
 		if task.Kind == startTaskKindPlannedLaunch {
 			item, ok := c.state.PlannedItems[task.PlannedItemID]
-			if !ok || !startWorkPlannedItemDue(item, nowTime) {
+			if !ok {
+				delete(c.state.ServiceTasks, key)
+				mutated = true
+				continue
+			}
+			if strings.TrimSpace(item.State) == startPlannedItemLaunching {
+				continue
+			}
+			if !startWorkPlannedItemDue(item, nowTime) {
 				delete(c.state.ServiceTasks, key)
 				mutated = true
 			}
@@ -477,7 +485,7 @@ func (c *startRepoCoordinator) syncServiceTasks() error {
 	slices.Sort(plannedIDs)
 	for _, itemID := range plannedIDs {
 		item := c.state.PlannedItems[itemID]
-		if !startWorkPlannedItemDue(item, nowTime) {
+		if strings.TrimSpace(item.State) != startPlannedItemLaunching && !startWorkPlannedItemDue(item, nowTime) {
 			continue
 		}
 		if c.upsertServiceTask(startWorkServiceTask{

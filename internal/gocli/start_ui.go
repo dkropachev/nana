@@ -4275,69 +4275,51 @@ func findStartUIPlannedItem(itemID string) (string, *startWorkState, startWorkPl
 	return "", nil, startWorkPlannedItem{}, fmt.Errorf("planned item %s was not found", itemID)
 }
 
+func queueStartUIPlannedItemLaunchUnlocked(state *startWorkState, item startWorkPlannedItem, now string) {
+	if state.ServiceTasks == nil {
+		state.ServiceTasks = map[string]startWorkServiceTask{}
+	}
+	taskID := startServiceTaskKey(startTaskKindPlannedLaunch, item.ID)
+	state.ServiceTasks[taskID] = startWorkServiceTask{
+		ID:            taskID,
+		Kind:          startTaskKindPlannedLaunch,
+		Queue:         startTaskQueueService,
+		Status:        startWorkServiceTaskQueued,
+		PlannedItemID: item.ID,
+		Fingerprint:   startWorkPlannedItemFingerprint(item),
+		UpdatedAt:     now,
+	}
+}
+
 func launchStartUIPlannedItemNow(repoSlug string, state *startWorkState, item startWorkPlannedItem) (*startWorkState, startWorkPlannedItem, startPlannedLaunchResult, error) {
 	startWorkStateFileMu.Lock()
+	defer startWorkStateFileMu.Unlock()
 	freshState, err := readStartWorkStateUnlocked(repoSlug)
 	if err != nil {
-		startWorkStateFileMu.Unlock()
 		return nil, startWorkPlannedItem{}, startPlannedLaunchResult{}, err
 	}
 	freshItem := freshState.PlannedItems[item.ID]
 	if strings.TrimSpace(freshItem.State) != startPlannedItemQueued && strings.TrimSpace(freshItem.State) != startPlannedItemFailed {
-		startWorkStateFileMu.Unlock()
 		return nil, startWorkPlannedItem{}, startPlannedLaunchResult{}, fmt.Errorf("planned item %s is not launchable from state %s", item.ID, freshItem.State)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	freshItem.State = startPlannedItemLaunching
 	freshItem.LastError = ""
+	freshItem.LaunchRunID = ""
+	freshItem.LaunchIssueURL = ""
+	freshItem.LaunchIssueNumber = 0
+	freshItem.LaunchResult = ""
 	freshItem.UpdatedAt = now
 	freshState.PlannedItems[item.ID] = freshItem
 	freshState.UpdatedAt = now
+	queueStartUIPlannedItemLaunchUnlocked(freshState, freshItem, now)
 	if err := writeStartWorkStateUnlocked(*freshState); err != nil {
-		startWorkStateFileMu.Unlock()
 		return nil, startWorkPlannedItem{}, startPlannedLaunchResult{}, err
 	}
-	startWorkStateFileMu.Unlock()
-
-	settings, _ := readGithubRepoSettings(githubRepoSettingsPath(repoSlug))
-	workOptions := startWorkOptions{
-		RepoSlug:       repoSlug,
-		PublishTarget:  repoModeToPublishTarget(resolvedGithubRepoMode(settings)),
-		RepoMode:       resolvedGithubRepoMode(settings),
-		IssuePickMode:  resolvedGithubIssuePickMode(settings),
-		PRForwardMode:  resolvedGithubPRForwardMode(settings),
-		ForkIssuesMode: defaultString(normalizeGithubAutomationMode(settings.ForkIssuesMode), issuePickModeToAutomationMode(resolvedGithubIssuePickMode(settings))),
-		ImplementMode:  defaultString(normalizeGithubAutomationMode(settings.ImplementMode), issuePickModeToAutomationMode(resolvedGithubIssuePickMode(settings))),
-		Parallel:       startWorkDefaultParallel,
-		MaxOpenPR:      startWorkDefaultOpenPRCap,
-	}
-	launch, launchErr := startLaunchPlannedItem(githubManagedPaths(repoSlug).SourcePath, repoSlug, workOptions, freshItem)
-
-	startWorkStateFileMu.Lock()
-	defer startWorkStateFileMu.Unlock()
-	updatedState, err := readStartWorkStateUnlocked(repoSlug)
-	if err != nil {
-		return nil, startWorkPlannedItem{}, startPlannedLaunchResult{}, err
-	}
-	updatedItem := updatedState.PlannedItems[item.ID]
-	if launchErr != nil {
-		updatedItem.State = startPlannedItemFailed
-		updatedItem.LastError = launchErr.Error()
-	} else {
-		updatedItem.State = startPlannedItemLaunched
-		updatedItem.LaunchRunID = launch.RunID
-		updatedItem.LaunchIssueNumber = launch.IssueNumber
-		updatedItem.LaunchIssueURL = launch.IssueURL
-		updatedItem.LaunchResult = defaultString(launch.Result, launch.Status)
-		updatedItem.LastError = ""
-	}
-	updatedItem.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	updatedState.PlannedItems[item.ID] = updatedItem
-	updatedState.UpdatedAt = updatedItem.UpdatedAt
-	if err := writeStartWorkStateUnlocked(*updatedState); err != nil {
-		return nil, startWorkPlannedItem{}, startPlannedLaunchResult{}, err
-	}
-	return updatedState, updatedItem, launch, launchErr
+	return freshState, freshItem, startPlannedLaunchResult{
+		Status: "queued",
+		Result: "planned item queued for bounded scheduler launch",
+	}, nil
 }
 
 func ensureStartUIStateUnlocked(repoSlug string) (*startWorkState, error) {
