@@ -2179,6 +2179,93 @@ func TestListStartUIScoutItemsReconcilesRunningScoutJobFromManifest(t *testing.T
 	}
 }
 
+func TestListStartUIScoutItemsDoesNotDowngradeRunningScoutJobFromPickupStateWithoutRunID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	repo := createLocalWorkRepoAt(t, sourcePath)
+	writeScoutPickupFixture(t, repo, improvementScoutRole, "Improve help text", "Make help clearer")
+	if err := writeGithubJSON(filepath.Join(repo, ".nana", "improvements", "improve-test", "policy.json"), improvementPolicy{
+		Version:          1,
+		IssueDestination: improvementDestinationLocal,
+		Labels:           []string{"improvement"},
+	}); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	proposal := scoutFinding{
+		Title:             "Improve help text",
+		Area:              "UX",
+		Summary:           "Make help clearer",
+		Rationale:         "Users need this.",
+		Evidence:          "README.md",
+		Impact:            "Better workflow.",
+		SuggestedNextStep: "Make the smallest change.",
+		Files:             []string{"README.md"},
+	}
+	proposalID := localScoutProposalID(improvementScoutRole, proposal)
+	now := time.Now().UTC().Format(time.RFC3339)
+	pickupPath, err := localScoutPickupStatePath(repo)
+	if err != nil {
+		t.Fatalf("pickup state path: %v", err)
+	}
+	if err := writeLocalScoutPickupState(pickupPath, localScoutPickupState{
+		Version: 1,
+		Items: map[string]localScoutPickupItem{
+			proposalID: {
+				Status:        "running",
+				Title:         proposal.Title,
+				Artifact:      filepath.ToSlash(filepath.Join(".nana", "improvements", "improve-test")),
+				PlannedItemID: "planned-1",
+				UpdatedAt:     now,
+				ProposalID:    proposalID,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("write pickup state: %v", err)
+	}
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  now,
+		ScoutJobs: map[string]startWorkScoutJob{
+			proposalID: {
+				ID:                  proposalID,
+				Role:                improvementScoutRole,
+				Title:               proposal.Title,
+				Summary:             proposal.Summary,
+				ArtifactPath:        filepath.ToSlash(filepath.Join(".nana", "improvements", "improve-test")),
+				ProposalPath:        filepath.ToSlash(filepath.Join(".nana", "improvements", "improve-test", "proposals.json")),
+				Destination:         improvementDestinationLocal,
+				TaskBody:            "Implement local scout proposal: Improve help text",
+				Status:              startScoutJobRunning,
+				RunID:               "lw-existing",
+				UpdatedAt:           now,
+				CreatedAt:           now,
+				LegacyPlannedItemID: "planned-1",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	items, err := listStartUIScoutItems(repoSlug)
+	if err != nil {
+		t.Fatalf("list scout items: %v", err)
+	}
+	if len(items) != 1 || items[0].Status != startScoutJobRunning || items[0].RunID != "lw-existing" {
+		t.Fatalf("expected running scout item to retain bound run id, got %+v", items)
+	}
+	workState, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("read start state: %v", err)
+	}
+	if workState.ScoutJobs[proposalID].Status != startScoutJobRunning || workState.ScoutJobs[proposalID].RunID != "lw-existing" {
+		t.Fatalf("expected running scout job to remain running with existing run id, got %+v", workState.ScoutJobs[proposalID])
+	}
+}
+
 func TestReadStartWorkStateMigratesScoutDerivedPlannedItemsToScoutJobs(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

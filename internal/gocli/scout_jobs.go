@@ -470,7 +470,10 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 		job.Status = mappedStatus
 	case startScoutJobRunning:
 		if strings.TrimSpace(record.RunID) == "" {
-			if !hasExisting || !startWorkScoutJobIsResolved(existing.Status) {
+			if hasExisting && strings.TrimSpace(existing.RunID) != "" && strings.TrimSpace(existing.Status) == startScoutJobRunning {
+				job.Status = existing.Status
+				job.RunID = existing.RunID
+			} else if !hasExisting || !startWorkScoutJobIsResolved(existing.Status) {
 				job.Status = startScoutJobQueued
 				job.RunID = ""
 			}
