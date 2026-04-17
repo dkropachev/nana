@@ -24,7 +24,7 @@ Use:
 `
 
 const (
-	startWorkStateVersion         = 3
+	startWorkStateVersion         = 4
 	startWorkDefaultParallel      = 3
 	startWorkDefaultOpenPRCap     = 10
 	startWorkStatusQueued         = "queued"
@@ -47,6 +47,11 @@ const (
 	startPlannedItemLaunching     = "launching"
 	startPlannedItemLaunched      = "launched"
 	startPlannedItemFailed        = "failed"
+	startScoutJobQueued           = "queued"
+	startScoutJobRunning          = "running"
+	startScoutJobCompleted        = "completed"
+	startScoutJobFailed           = "failed"
+	startScoutJobDismissed        = "dismissed"
 )
 
 type startWorkOptions struct {
@@ -78,6 +83,7 @@ type startWorkState struct {
 	Promotions     map[string]startWorkPromotion     `json:"promotions,omitempty"`
 	PromotionSkips map[string]startWorkPromotionSkip `json:"promotion_skips,omitempty"`
 	PlannedItems   map[string]startWorkPlannedItem   `json:"planned_items,omitempty"`
+	ScoutJobs      map[string]startWorkScoutJob      `json:"scout_jobs,omitempty"`
 }
 
 type startWorkIssueState struct {
@@ -196,6 +202,48 @@ type startWorkPlannedItem struct {
 	UpdatedAt         string `json:"updated_at"`
 }
 
+type startWorkScoutJob struct {
+	ID                  string   `json:"id"`
+	Role                string   `json:"role"`
+	Title               string   `json:"title"`
+	Area                string   `json:"area,omitempty"`
+	Summary             string   `json:"summary"`
+	Rationale           string   `json:"rationale,omitempty"`
+	Evidence            string   `json:"evidence,omitempty"`
+	Impact              string   `json:"impact,omitempty"`
+	SuggestedNextStep   string   `json:"suggested_next_step,omitempty"`
+	Confidence          string   `json:"confidence,omitempty"`
+	Files               []string `json:"files,omitempty"`
+	Labels              []string `json:"labels,omitempty"`
+	Page                string   `json:"page,omitempty"`
+	Route               string   `json:"route,omitempty"`
+	Severity            string   `json:"severity,omitempty"`
+	TargetKind          string   `json:"target_kind,omitempty"`
+	Screenshots         []string `json:"screenshots,omitempty"`
+	ArtifactPath        string   `json:"artifact_path"`
+	ProposalPath        string   `json:"proposal_path"`
+	PolicyPath          string   `json:"policy_path,omitempty"`
+	PreflightPath       string   `json:"preflight_path,omitempty"`
+	IssueDraftPath      string   `json:"issue_draft_path,omitempty"`
+	RawOutputPath       string   `json:"raw_output_path,omitempty"`
+	GeneratedAt         string   `json:"generated_at,omitempty"`
+	AuditMode           string   `json:"audit_mode,omitempty"`
+	SurfaceKind         string   `json:"surface_kind,omitempty"`
+	SurfaceTarget       string   `json:"surface_target,omitempty"`
+	BrowserReady        bool     `json:"browser_ready,omitempty"`
+	PreflightReason     string   `json:"preflight_reason,omitempty"`
+	Destination         string   `json:"destination"`
+	ForkRepo            string   `json:"fork_repo,omitempty"`
+	TaskBody            string   `json:"task_body"`
+	Status              string   `json:"status"`
+	RunID               string   `json:"run_id,omitempty"`
+	Attempts            int      `json:"attempts,omitempty"`
+	LastError           string   `json:"last_error,omitempty"`
+	UpdatedAt           string   `json:"updated_at"`
+	CreatedAt           string   `json:"created_at"`
+	LegacyPlannedItemID string   `json:"legacy_planned_item_id,omitempty"`
+}
+
 type startWorkReasonCount struct {
 	Reason string `json:"reason"`
 	Count  int    `json:"count"`
@@ -276,6 +324,14 @@ func writeStartWorkStatePreservingPlannedItems(state startWorkState) error {
 			for itemID, item := range current.PlannedItems {
 				if _, ok := state.PlannedItems[itemID]; !ok {
 					state.PlannedItems[itemID] = item
+				}
+			}
+			if state.ScoutJobs == nil {
+				state.ScoutJobs = map[string]startWorkScoutJob{}
+			}
+			for jobID, job := range current.ScoutJobs {
+				if _, ok := state.ScoutJobs[jobID]; !ok {
+					state.ScoutJobs[jobID] = job
 				}
 			}
 		}
@@ -1383,6 +1439,11 @@ func startWorkImplementationInProgress(state *startWorkState) int {
 			count++
 		}
 	}
+	for _, job := range state.ScoutJobs {
+		if job.Status == startScoutJobRunning {
+			count++
+		}
+	}
 	return count
 }
 
@@ -1576,6 +1637,9 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 	if state.PlannedItems == nil {
 		state.PlannedItems = map[string]startWorkPlannedItem{}
 	}
+	if state.ScoutJobs == nil {
+		state.ScoutJobs = map[string]startWorkScoutJob{}
+	}
 	if state.Version < startWorkStateVersion {
 		state.Version = startWorkStateVersion
 	}
@@ -1616,6 +1680,15 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 			item.State = startPlannedItemQueued
 		}
 		state.PlannedItems[key] = item
+	}
+	for key, job := range state.ScoutJobs {
+		job.ID = defaultString(strings.TrimSpace(job.ID), key)
+		job.Status = defaultString(strings.TrimSpace(job.Status), startScoutJobQueued)
+		job.Destination = defaultString(strings.TrimSpace(job.Destination), improvementDestinationLocal)
+		if strings.TrimSpace(job.TaskBody) == "" {
+			job.TaskBody = strings.TrimSpace(job.Title)
+		}
+		state.ScoutJobs[key] = job
 	}
 	return &state, nil
 }

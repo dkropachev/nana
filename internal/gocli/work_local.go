@@ -389,50 +389,55 @@ type localWorkFindingHistoryEvent struct {
 }
 
 func runLocalWorkCommand(cwd string, args []string) error {
+	_, err := runLocalWorkCommandWithRunID(cwd, args)
+	return err
+}
+
+func runLocalWorkCommandWithRunID(cwd string, args []string) (string, error) {
 	if len(args) == 0 || isHelpToken(args[0]) {
 		fmt.Fprint(os.Stdout, LocalWorkHelp)
-		return nil
+		return "", nil
 	}
 
 	switch args[0] {
 	case "start":
 		options, err := parseLocalWorkStartArgs(args[1:])
 		if err != nil {
-			return err
+			return "", err
 		}
-		return startLocalWork(cwd, options)
+		return startLocalWorkWithRunID(cwd, options)
 	case "resume":
 		options, err := parseLocalWorkResumeArgs(args[1:])
 		if err != nil {
-			return err
+			return "", err
 		}
-		return resumeLocalWork(cwd, options)
+		return "", resumeLocalWork(cwd, options)
 	case "status":
 		options, err := parseLocalWorkStatusArgs(args[1:])
 		if err != nil {
-			return err
+			return "", err
 		}
-		return localWorkStatus(cwd, options)
+		return "", localWorkStatus(cwd, options)
 	case "logs":
 		options, err := parseLocalWorkLogsArgs(args[1:])
 		if err != nil {
-			return err
+			return "", err
 		}
-		return localWorkLogs(cwd, options)
+		return "", localWorkLogs(cwd, options)
 	case "retrospective":
 		selection, err := parseLocalWorkRunSelection(args[1:], true)
 		if err != nil {
-			return err
+			return "", err
 		}
-		return localWorkRetrospective(cwd, selection)
+		return "", localWorkRetrospective(cwd, selection)
 	case "verify-refresh":
 		selection, err := parseLocalWorkRunSelection(args[1:], false)
 		if err != nil {
-			return err
+			return "", err
 		}
-		return refreshLocalWorkVerificationArtifacts(cwd, selection)
+		return "", refreshLocalWorkVerificationArtifacts(cwd, selection)
 	default:
-		return fmt.Errorf("Unknown work subcommand: %s\n\n%s", args[0], LocalWorkHelp)
+		return "", fmt.Errorf("Unknown work subcommand: %s\n\n%s", args[0], LocalWorkHelp)
 	}
 }
 
@@ -1405,27 +1410,32 @@ func requireLocalWorkFlagValue(args []string, index int, flag string) (string, e
 }
 
 func startLocalWork(cwd string, options localWorkStartOptions) error {
+	_, err := startLocalWorkWithRunID(cwd, options)
+	return err
+}
+
+func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string, error) {
 	repoRoot, err := resolveLocalWorkRepoRoot(cwd, options.RepoPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := ensureLocalWorkRepoClean(repoRoot); err != nil {
-		return err
+		return "", err
 	}
 
 	baselineSHAOutput, err := githubGitOutput(repoRoot, "rev-parse", "HEAD")
 	if err != nil {
-		return err
+		return "", err
 	}
 	sourceBranchOutput, err := githubGitOutput(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
-		return err
+		return "", err
 	}
 	baselineSHA := strings.TrimSpace(baselineSHAOutput)
 	sourceBranch := strings.TrimSpace(sourceBranchOutput)
 	inputContent, inputMode, err := readLocalWorkInput(cwd, options, sourceBranch)
 	if err != nil {
-		return err
+		return "", err
 	}
 	repoID := localWorkRepoID(repoRoot)
 	repoName := filepath.Base(repoRoot)
@@ -1435,23 +1445,23 @@ func startLocalWork(cwd string, options localWorkStartOptions) error {
 	repoDir := localWorkRepoDirByID(repoID)
 	runDir := filepath.Join(repoDir, "runs", runID)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return err
+		return "", err
 	}
 	inputPath := filepath.Join(runDir, "input-plan.md")
 	if err := os.WriteFile(inputPath, []byte(strings.TrimSpace(inputContent)+"\n"), 0o644); err != nil {
-		return err
+		return "", err
 	}
 
 	sandboxPath := filepath.Join(localWorkSandboxesDir(), repoID, runID)
 	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
 	if err := cloneGithubSourceToSandbox(repoRoot, sandboxRepoPath); err != nil {
-		return err
+		return "", err
 	}
 
 	verificationPlan := detectGithubVerificationPlan(sandboxRepoPath)
 	verificationScriptsDir, err := writeVerificationScripts(localWorkRuntimeName, sandboxPath, sandboxRepoPath, verificationPlan, []string{"nana", "work", "verify-refresh", "--run-id", runID})
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	now := ISOTimeNow()
@@ -1481,7 +1491,7 @@ func startLocalWork(cwd string, options localWorkStartOptions) error {
 		MaxIterations:          options.MaxIterations,
 	}
 	if err := writeLocalWorkManifest(manifest); err != nil {
-		return err
+		return "", err
 	}
 
 	fmt.Fprintf(os.Stdout, "[local] Starting run %s for %s\n", runID, repoRoot)
@@ -1494,7 +1504,7 @@ func startLocalWork(cwd string, options localWorkStartOptions) error {
 		fmt.Fprintf(os.Stdout, "[local] Verification warning: %s\n", warning)
 	}
 
-	return executeLocalWorkLoop(runID, options.CodexArgs)
+	return runID, executeLocalWorkLoop(runID, options.CodexArgs)
 }
 
 func resumeLocalWork(cwd string, options localWorkResumeOptions) error {

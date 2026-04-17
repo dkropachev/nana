@@ -563,6 +563,7 @@ type startUIApprovalQueueItem struct {
 	RunID          string `json:"run_id,omitempty"`
 	ItemID         string `json:"item_id,omitempty"`
 	PlannedItemID  string `json:"planned_item_id,omitempty"`
+	ScoutJobID     string `json:"scout_job_id,omitempty"`
 	UpdatedAt      string `json:"updated_at,omitempty"`
 	AttentionState string `json:"attention_state,omitempty"`
 }
@@ -2280,7 +2281,29 @@ func loadStartUIApprovals() ([]startUIApprovalQueueItem, error) {
 		if repo.State == nil {
 			continue
 		}
+		for _, job := range repo.State.ScoutJobs {
+			if job.Status != startScoutJobFailed {
+				continue
+			}
+			out = append(out, startUIApprovalQueueItem{
+				ID:             "scout-job:" + job.ID,
+				Kind:           "scout_job",
+				RepoSlug:       repo.RepoSlug,
+				Subject:        job.Title,
+				Status:         job.Status,
+				Reason:         defaultString(strings.TrimSpace(job.LastError), "scout job failed"),
+				NextAction:     "Retry this scout job to requeue it, or dismiss it.",
+				ActionKind:     "retry_scout_job",
+				RunID:          job.RunID,
+				ScoutJobID:     job.ID,
+				UpdatedAt:      job.UpdatedAt,
+				AttentionState: "failed",
+			})
+		}
 		for _, item := range repo.State.PlannedItems {
+			if startWorkPlannedItemLooksScoutDerived(item) {
+				continue
+			}
 			if item.State != startPlannedItemQueued && item.State != startPlannedItemFailed {
 				continue
 			}
@@ -2647,6 +2670,11 @@ func loadStartUIRepoSummary(repoSlug string, includeState bool) (startUIRepoSumm
 	state, err := readStartWorkState(repoSlug)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return startUIRepoSummary{}, err
+	}
+	if repoPath := strings.TrimSpace(githubManagedPaths(repoSlug).SourcePath); repoPath != "" {
+		if _, syncedState, syncErr := syncStartWorkScoutJobs(repoPath, repoSlug); syncErr == nil && syncedState != nil {
+			state = syncedState
+		}
 	}
 	summary := startUIRepoSummary{
 		RepoSlug:          repoSlug,
@@ -3294,12 +3322,9 @@ func listStartUIScoutItems(repoSlug string) ([]startUIScoutItem, error) {
 		}
 		return nil, err
 	}
-	if _, err := reconcileLocalScoutPickupPlannedItems(repoPath, repoSlug); err != nil {
+	_, workState, err := syncStartWorkScoutJobs(repoPath, repoSlug)
+	if err != nil {
 		return nil, err
-	}
-	pickupState := localScoutPickupState{Version: 1, Items: map[string]localScoutPickupItem{}}
-	if state, _, err := readLocalScoutPickupState(repoPath); err == nil {
-		pickupState = state
 	}
 	items := []startUIScoutItem{}
 	for _, role := range supportedScoutRoleOrder {
@@ -3354,50 +3379,31 @@ func listStartUIScoutItems(repoSlug string) ([]startUIScoutItem, error) {
 					continue
 				}
 				itemID := localScoutProposalID(role, proposal)
-				status := "pending"
-				if policy.IssueDestination != improvementDestinationLocal {
-					status = "external"
+				discovered := localScoutDiscoveredItem{
+					ID:              itemID,
+					Role:            role,
+					Title:           title,
+					Artifact:        relArtifactDir,
+					Proposal:        proposal,
+					ProposalPath:    relProposalPath,
+					PolicyPath:      relPolicyPath,
+					PreflightPath:   relPreflightPath,
+					IssueDraftPath:  relIssueDraftPath,
+					RawOutputPath:   relRawOutputPath,
+					GeneratedAt:     strings.TrimSpace(report.GeneratedAt),
+					AuditMode:       strings.TrimSpace(preflight.Mode),
+					SurfaceKind:     strings.TrimSpace(preflight.SurfaceKind),
+					SurfaceTarget:   strings.TrimSpace(preflight.SurfaceTarget),
+					BrowserReady:    preflight.BrowserReady,
+					PreflightReason: strings.TrimSpace(preflight.Reason),
+					Destination:     startUIScoutDestinationLabel(policy.IssueDestination),
+					ForkRepo:        strings.TrimSpace(policy.ForkRepo),
 				}
-				scoutItem := startUIScoutItem{
-					ID:                itemID,
-					Role:              role,
-					Title:             title,
-					Area:              defaultString(strings.TrimSpace(proposal.Area), scoutIssueHeading(role)),
-					Summary:           summary,
-					Rationale:         strings.TrimSpace(proposal.Rationale),
-					Evidence:          strings.TrimSpace(proposal.Evidence),
-					Impact:            strings.TrimSpace(proposal.Impact),
-					SuggestedNextStep: strings.TrimSpace(proposal.SuggestedNextStep),
-					Confidence:        strings.TrimSpace(proposal.Confidence),
-					Files:             append([]string{}, proposal.Files...),
-					Labels:            append([]string{}, proposal.Labels...),
-					Page:              strings.TrimSpace(proposal.Page),
-					Route:             strings.TrimSpace(proposal.Route),
-					Severity:          strings.TrimSpace(proposal.Severity),
-					TargetKind:        strings.TrimSpace(proposal.TargetKind),
-					Screenshots:       append([]string{}, proposal.Screenshots...),
-					ArtifactPath:      relArtifactDir,
-					ProposalPath:      relProposalPath,
-					PolicyPath:        relPolicyPath,
-					PreflightPath:     relPreflightPath,
-					IssueDraftPath:    relIssueDraftPath,
-					RawOutputPath:     relRawOutputPath,
-					GeneratedAt:       strings.TrimSpace(report.GeneratedAt),
-					AuditMode:         strings.TrimSpace(preflight.Mode),
-					SurfaceKind:       strings.TrimSpace(preflight.SurfaceKind),
-					SurfaceTarget:     strings.TrimSpace(preflight.SurfaceTarget),
-					BrowserReady:      preflight.BrowserReady,
-					PreflightReason:   strings.TrimSpace(preflight.Reason),
-					Destination:       startUIScoutDestinationLabel(policy.IssueDestination),
-					ForkRepo:          strings.TrimSpace(policy.ForkRepo),
-					Status:            status,
-				}
-				if record, ok := pickupState.Items[itemID]; ok {
-					scoutItem.Status = defaultString(strings.TrimSpace(record.Status), scoutItem.Status)
-					scoutItem.RunID = strings.TrimSpace(record.RunID)
-					scoutItem.PlannedItemID = strings.TrimSpace(record.PlannedItemID)
-					scoutItem.Error = strings.TrimSpace(record.Error)
-					scoutItem.UpdatedAt = strings.TrimSpace(record.UpdatedAt)
+				scoutItem := startUIScoutItemFromDiscovered(discovered)
+				if workState != nil && scoutItem.Destination == improvementDestinationLocal {
+					if job, ok := workState.ScoutJobs[itemID]; ok {
+						scoutItem = startWorkScoutJobFromItem(job)
+					}
 				}
 				scoutItem.AvailableActions = startUIScoutAvailableActions(scoutItem)
 				items = append(items, scoutItem)
@@ -3434,10 +3440,6 @@ func mutateStartUIScoutItem(repoSlug string, itemID string, action string) (star
 	if repoPath == "" {
 		return startUIScoutItemsResponse{}, fmt.Errorf("repo %s does not have a managed source checkout", repoSlug)
 	}
-	state, statePath, err := readLocalScoutPickupState(repoPath)
-	if err != nil {
-		return startUIScoutItemsResponse{}, err
-	}
 	items, err := listStartUIScoutItems(repoSlug)
 	if err != nil {
 		return startUIScoutItemsResponse{}, err
@@ -3451,6 +3453,27 @@ func mutateStartUIScoutItem(repoSlug string, itemID string, action string) (star
 	}
 	if selected == nil {
 		return startUIScoutItemsResponse{}, fmt.Errorf("scout item %s was not found", itemID)
+	}
+	if selected.Destination == improvementDestinationLocal {
+		localAction := action
+		if action == "queue-planned" {
+			if selected.Status == startScoutJobFailed || selected.Status == startScoutJobDismissed {
+				localAction = "retry"
+			} else {
+				return loadStartUIScoutItems(repoSlug)
+			}
+		}
+		switch action {
+		case "dismiss", "retry", "reset", "queue-planned":
+			if _, _, err := mutateStartWorkScoutJob(repoSlug, itemID, localAction); err != nil {
+				return startUIScoutItemsResponse{}, err
+			}
+			return loadStartUIScoutItems(repoSlug)
+		}
+	}
+	state, statePath, err := readLocalScoutPickupState(repoPath)
+	if err != nil {
+		return startUIScoutItemsResponse{}, err
 	}
 	switch action {
 	case "dismiss":
@@ -4421,28 +4444,40 @@ func startUIScoutDestinationLabel(destination string) string {
 
 func startUIScoutStatusRank(status string) int {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "running", "in_progress":
+	case startScoutJobRunning:
 		return 0
-	case "pending":
+	case startScoutJobQueued:
 		return 1
-	case "failed":
+	case startScoutJobFailed:
 		return 2
-	case "planned":
+	case startScoutJobDismissed:
 		return 3
-	case "dismissed":
+	case startScoutJobCompleted:
 		return 4
-	case "completed":
-		return 5
 	case "external":
-		return 6
+		return 5
 	default:
-		return 7
+		return 6
 	}
 }
 
 func startUIScoutAvailableActions(item startUIScoutItem) []string {
 	actions := []string{}
 	status := strings.ToLower(strings.TrimSpace(item.Status))
+	if strings.TrimSpace(item.RunID) != "" {
+		actions = append(actions, "open-run")
+	}
+	if item.Destination == improvementDestinationLocal {
+		switch status {
+		case startScoutJobQueued:
+			actions = append(actions, "dismiss")
+		case startScoutJobFailed:
+			actions = append(actions, "retry", "dismiss")
+		case startScoutJobDismissed:
+			actions = append(actions, "retry")
+		}
+		return actions
+	}
 	if (status == "pending" || status == "failed" || status == "dismissed") && item.Destination == "local" {
 		actions = append(actions, "queue-planned")
 	}

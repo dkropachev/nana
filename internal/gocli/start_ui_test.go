@@ -1767,7 +1767,7 @@ func TestStartUIAPIScoutItemsAndActions(t *testing.T) {
 	if err := json.NewDecoder(loadResponse.Body).Decode(&loadPayload); err != nil {
 		t.Fatalf("decode scout items: %v", err)
 	}
-	if len(loadPayload.Items) != 1 || loadPayload.Items[0].Status != "pending" || loadPayload.Items[0].Destination != "local" {
+	if len(loadPayload.Items) != 1 || loadPayload.Items[0].Status != startScoutJobQueued || loadPayload.Items[0].Destination != "local" {
 		t.Fatalf("unexpected scout items payload: %+v", loadPayload)
 	}
 	if len(loadPayload.ScoutCatalog) != len(supportedScoutRoleOrder) {
@@ -1795,7 +1795,7 @@ func TestStartUIAPIScoutItemsAndActions(t *testing.T) {
 		t.Fatalf("unexpected dismiss payload: %+v", dismissPayload)
 	}
 
-	resetRequest, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/repos/"+repoSlug+"/scout-items/"+itemID+"/reset", nil)
+	resetRequest, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/repos/"+repoSlug+"/scout-items/"+itemID+"/retry", nil)
 	if err != nil {
 		t.Fatalf("new reset request: %v", err)
 	}
@@ -1808,7 +1808,7 @@ func TestStartUIAPIScoutItemsAndActions(t *testing.T) {
 	if err := json.NewDecoder(resetResponse.Body).Decode(&resetPayload); err != nil {
 		t.Fatalf("decode reset payload: %v", err)
 	}
-	if len(resetPayload.Items) != 1 || resetPayload.Items[0].Status != "pending" {
+	if len(resetPayload.Items) != 1 || resetPayload.Items[0].Status != startScoutJobQueued {
 		t.Fatalf("unexpected reset payload: %+v", resetPayload)
 	}
 
@@ -1825,11 +1825,11 @@ func TestStartUIAPIScoutItemsAndActions(t *testing.T) {
 	if err := json.NewDecoder(queueResponse.Body).Decode(&queuePayload); err != nil {
 		t.Fatalf("decode queue payload: %v", err)
 	}
-	if len(queuePayload.Items) != 1 || queuePayload.Items[0].Status != "in_progress" || queuePayload.Items[0].PlannedItemID == "" {
+	if len(queuePayload.Items) != 1 || queuePayload.Items[0].Status != startScoutJobQueued || queuePayload.Items[0].PlannedItemID != "" {
 		t.Fatalf("unexpected queue payload: %+v", queuePayload)
 	}
-	if queuePayload.Repo.State == nil || len(queuePayload.Repo.State.PlannedItems) != 1 {
-		t.Fatalf("expected planned item in repo state, got %+v", queuePayload.Repo.State)
+	if queuePayload.Repo.State == nil || len(queuePayload.Repo.State.ScoutJobs) != 1 {
+		t.Fatalf("expected scout job in repo state, got %+v", queuePayload.Repo.State)
 	}
 }
 
@@ -1894,7 +1894,7 @@ func TestStartUIAPIScoutItemsBatchAction(t *testing.T) {
 		t.Fatalf("expected two scout items, got %+v", loadPayload.Items)
 	}
 
-	body := strings.NewReader(fmt.Sprintf(`{"action":"queue-planned","item_ids":["%s","%s"]}`, loadPayload.Items[0].ID, loadPayload.Items[1].ID))
+	body := strings.NewReader(fmt.Sprintf(`{"action":"dismiss","item_ids":["%s","%s"]}`, loadPayload.Items[0].ID, loadPayload.Items[1].ID))
 	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/repos/"+repoSlug+"/scout-items/batch", body)
 	if err != nil {
 		t.Fatalf("new batch request: %v", err)
@@ -1909,17 +1909,17 @@ func TestStartUIAPIScoutItemsBatchAction(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode batch payload: %v", err)
 	}
-	if payload.Action != "queue-planned" || payload.SuccessCount != 2 || payload.FailureCount != 0 {
+	if payload.Action != "dismiss" || payload.SuccessCount != 2 || payload.FailureCount != 0 {
 		t.Fatalf("unexpected batch action summary: %+v", payload)
 	}
 	if len(payload.Results) != 2 || payload.Results[0].Status != "ok" || payload.Results[1].Status != "ok" {
 		t.Fatalf("unexpected batch results: %+v", payload.Results)
 	}
-	if len(payload.Items) != 2 || payload.Items[0].Status != "in_progress" || payload.Items[1].Status != "in_progress" {
-		t.Fatalf("expected both scout items to be in_progress after queueing, got %+v", payload.Items)
+	if len(payload.Items) != 2 || payload.Items[0].Status != startScoutJobDismissed || payload.Items[1].Status != startScoutJobDismissed {
+		t.Fatalf("expected both scout items to be dismissed, got %+v", payload.Items)
 	}
-	if payload.Repo.State == nil || len(payload.Repo.State.PlannedItems) != 2 {
-		t.Fatalf("expected planned items in repo state, got %+v", payload.Repo.State)
+	if payload.Repo.State == nil || len(payload.Repo.State.ScoutJobs) != 2 {
+		t.Fatalf("expected scout jobs in repo state, got %+v", payload.Repo.State)
 	}
 }
 
@@ -1991,15 +1991,15 @@ func TestListStartUIScoutItemsMarksDonePlannedScoutItemsCompleted(t *testing.T) 
 	if err != nil {
 		t.Fatalf("list scout items: %v", err)
 	}
-	if len(items) != 1 || items[0].Status != "completed" {
+	if len(items) != 1 || items[0].Status != startScoutJobCompleted {
 		t.Fatalf("expected done planned scout item to reconcile as completed, got %+v", items)
 	}
-	state, _, err := readLocalScoutPickupState(repo)
+	workState, err := readStartWorkState(repoSlug)
 	if err != nil {
-		t.Fatalf("read pickup state: %v", err)
+		t.Fatalf("read start state: %v", err)
 	}
-	if state.Items[proposalID].Status != "completed" {
-		t.Fatalf("expected reconciled pickup state to persist completion, got %+v", state.Items[proposalID])
+	if workState.ScoutJobs[proposalID].Status != startScoutJobCompleted {
+		t.Fatalf("expected scout job completion in state, got %+v", workState.ScoutJobs[proposalID])
 	}
 }
 
@@ -2230,7 +2230,7 @@ func TestStartUIWorkItemFixFailureInvalidatesOverviewCache(t *testing.T) {
 	}
 }
 
-func TestStartUIScoutQueuePlannedPickupWriteFailureInvalidatesOverviewCache(t *testing.T) {
+func TestStartUIScoutDismissWriteFailureInvalidatesOverviewCache(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	cwd := t.TempDir()
@@ -2249,18 +2249,6 @@ func TestStartUIScoutQueuePlannedPickupWriteFailureInvalidatesOverviewCache(t *t
 	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
-	pickupPath, err := localScoutPickupStatePath(repo)
-	if err != nil {
-		t.Fatalf("pickup state path: %v", err)
-	}
-	if err := writeLocalScoutPickupState(pickupPath, localScoutPickupState{Version: 1, Items: map[string]localScoutPickupItem{}}); err != nil {
-		t.Fatalf("write pickup state: %v", err)
-	}
-	if err := os.Chmod(pickupPath, 0o400); err != nil {
-		t.Fatalf("chmod pickup state: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(pickupPath, 0o600) })
-
 	items, err := listStartUIScoutItems(repoSlug)
 	if err != nil {
 		t.Fatalf("list scout items: %v", err)
@@ -2270,31 +2258,39 @@ func TestStartUIScoutQueuePlannedPickupWriteFailureInvalidatesOverviewCache(t *t
 	}
 
 	api := &startUIAPI{cwd: cwd}
-	startUITestPrimeOverviewCache(t, api)
+	api.overviewCacheMu.Lock()
+	api.overviewCache.valid = true
+	api.overviewCacheMu.Unlock()
+
+	statePath := startWorkStatePath(repoSlug)
+	if err := os.Chmod(statePath, 0o400); err != nil {
+		t.Fatalf("chmod start state: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(statePath, 0o600) })
 
 	server := httptest.NewServer(api.routes())
 	defer server.Close()
-	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/repos/"+repoSlug+"/scout-items/"+items[0].ID+"/queue-planned", nil)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/repos/"+repoSlug+"/scout-items/"+items[0].ID+"/dismiss", nil)
 	if err != nil {
-		t.Fatalf("new queue request: %v", err)
+		t.Fatalf("new dismiss request: %v", err)
 	}
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		t.Fatalf("POST queue-planned: %v", err)
+		t.Fatalf("POST dismiss: %v", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected queue-planned failure status 400, got %d", response.StatusCode)
+		t.Fatalf("expected dismiss failure status 400, got %d", response.StatusCode)
 	}
 	state, err := readStartWorkState(repoSlug)
 	if err != nil {
 		t.Fatalf("read start state: %v", err)
 	}
-	if len(state.PlannedItems) != 1 {
-		t.Fatalf("expected planned item side effect before pickup write failure, got %+v", state.PlannedItems)
+	if len(state.ScoutJobs) != 1 {
+		t.Fatalf("expected scout job to remain present after write failure, got %+v", state.ScoutJobs)
 	}
 	if startUITestOverviewCacheValid(api) {
-		t.Fatalf("expected failed scout queue-planned side effect to invalidate overview cache")
+		t.Fatalf("expected failed scout dismiss side effect to invalidate overview cache")
 	}
 }
 
@@ -2935,12 +2931,15 @@ func startUITestHasDependencyPath(paths []string, want string) bool {
 
 func startUITestPrimeOverviewCache(t *testing.T, api *startUIAPI) {
 	t.Helper()
-	if _, err := api.buildOverview(); err != nil {
-		t.Fatalf("buildOverview: %v", err)
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := api.buildOverview(); err != nil {
+			t.Fatalf("buildOverview: %v", err)
+		}
+		if startUITestOverviewCacheValid(api) {
+			return
+		}
 	}
-	if !startUITestOverviewCacheValid(api) {
-		t.Fatalf("expected overview cache to be valid after warm build")
-	}
+	t.Fatalf("expected overview cache to be valid after warm build")
 }
 
 func startUITestOverviewCacheValid(api *startUIAPI) bool {

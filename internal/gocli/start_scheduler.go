@@ -17,6 +17,7 @@ const (
 	startTaskKindScout         = "scout"
 	startTaskKindTriage        = "triage"
 	startTaskKindIssue         = "implementation"
+	startTaskKindScoutJob      = "scout-job"
 	startTaskKindReconcile     = "reconcile"
 	startTaskKindPlannedLaunch = "planned-launch"
 )
@@ -27,6 +28,8 @@ type startRepoTask struct {
 	Kind          string
 	IssueKey      string
 	Issue         startWorkIssueState
+	ScoutJobID    string
+	ScoutJob      startWorkScoutJob
 	PlannedItemID string
 	PlannedItem   startWorkPlannedItem
 	ScoutRole     string
@@ -115,6 +118,10 @@ var startRunIssueSync = func(options startWorkOptions) error {
 
 var startRunPlannedItemLaunch = func(cwd string, repoSlug string, workOptions startWorkOptions, item startWorkPlannedItem) (startPlannedLaunchResult, error) {
 	return startLaunchScheduledPlannedItem(cwd, repoSlug, workOptions, item)
+}
+
+var startRunScoutJobLaunch = func(repoSlug string, job startWorkScoutJob, codexArgs []string) (startWorkLaunchResult, error) {
+	return runStartWorkScoutJob(repoSlug, job, codexArgs)
 }
 
 func runStartRepoCyclesSharedWorkers(cwd string, repos []string, options startOptions) error {
@@ -324,6 +331,11 @@ func (c *startRepoCoordinator) refreshRepoState() error {
 	c.workOptions = updatedOptions
 	c.state = state
 	c.openPRs = openPRs
+	if repoPath := strings.TrimSpace(githubManagedPaths(c.repoSlug).SourcePath); repoPath != "" {
+		if _, syncErr := syncStartWorkScoutJobsIntoState(repoPath, c.state); syncErr != nil {
+			return syncErr
+		}
+	}
 	c.scoutRoles, err = startRepoDueScoutRoles(c.repoSlug, time.Now().UTC())
 	if err != nil {
 		return err
@@ -432,6 +444,14 @@ func (c *startRepoCoordinator) syncServiceTasks() error {
 				mutated = true
 				continue
 			}
+			if startWorkPlannedItemLooksScoutDerived(item) {
+				if strings.TrimSpace(item.State) == startPlannedItemLaunching {
+					continue
+				}
+				delete(c.state.ServiceTasks, key)
+				mutated = true
+				continue
+			}
 			if strings.TrimSpace(item.State) == startPlannedItemLaunching {
 				continue
 			}
@@ -510,6 +530,9 @@ func (c *startRepoCoordinator) syncServiceTasks() error {
 	slices.Sort(plannedIDs)
 	for _, itemID := range plannedIDs {
 		item := c.state.PlannedItems[itemID]
+		if startWorkPlannedItemLooksScoutDerived(item) {
+			continue
+		}
 		if strings.TrimSpace(item.State) != startPlannedItemLaunching && !startWorkPlannedItemDue(item, nowTime) {
 			continue
 		}
@@ -618,9 +641,6 @@ func (c *startRepoCoordinator) buildServiceQueue() []startRepoTask {
 
 func (c *startRepoCoordinator) buildImplementationQueue() ([]startRepoTask, string) {
 	issues, skippedReason := startWorkBuildImplementationQueue(c.state, c.workOptions, c.openPRs)
-	if len(issues) == 0 {
-		return nil, skippedReason
-	}
 	tasks := make([]startRepoTask, 0, len(issues))
 	for _, issue := range issues {
 		issueKey := fmt.Sprintf("%d", issue.SourceNumber)
@@ -636,10 +656,52 @@ func (c *startRepoCoordinator) buildImplementationQueue() ([]startRepoTask, stri
 			Issue:    issue,
 		})
 	}
+	scoutTasks := c.buildScoutJobQueue()
+	tasks = append(tasks, scoutTasks...)
 	if len(tasks) == 0 {
 		return nil, skippedReason
 	}
 	return tasks, ""
+}
+
+func (c *startRepoCoordinator) buildScoutJobQueue() []startRepoTask {
+	if c.state == nil || c.state.ScoutJobs == nil {
+		return nil
+	}
+	jobIDs := make([]string, 0, len(c.state.ScoutJobs))
+	for jobID, job := range c.state.ScoutJobs {
+		if job.Status != startScoutJobQueued || job.Destination != improvementDestinationLocal {
+			continue
+		}
+		taskKey := startServiceTaskKey(startTaskKindScoutJob, jobID)
+		if c.running[taskKey].Key != "" {
+			continue
+		}
+		jobIDs = append(jobIDs, jobID)
+	}
+	slices.SortFunc(jobIDs, func(leftID, rightID string) int {
+		left := c.state.ScoutJobs[leftID]
+		right := c.state.ScoutJobs[rightID]
+		if left.UpdatedAt != right.UpdatedAt {
+			return strings.Compare(left.UpdatedAt, right.UpdatedAt)
+		}
+		if left.ArtifactPath != right.ArtifactPath {
+			return strings.Compare(left.ArtifactPath, right.ArtifactPath)
+		}
+		return strings.Compare(left.Title, right.Title)
+	})
+	tasks := make([]startRepoTask, 0, len(jobIDs))
+	for _, jobID := range jobIDs {
+		job := c.state.ScoutJobs[jobID]
+		tasks = append(tasks, startRepoTask{
+			Key:        startServiceTaskKey(startTaskKindScoutJob, jobID),
+			Queue:      startTaskQueueImplementation,
+			Kind:       startTaskKindScoutJob,
+			ScoutJobID: jobID,
+			ScoutJob:   job,
+		})
+	}
+	return tasks
 }
 
 func (c *startRepoCoordinator) availableWorkerSlots() int {
@@ -719,6 +781,14 @@ func (c *startRepoCoordinator) markTaskStarted(task startRepoTask) error {
 			c.state.Issues[task.IssueKey] = issue
 			c.startedIssueNumbers = append(c.startedIssueNumbers, issue.SourceNumber)
 			c.implStartedCount++
+		case startTaskKindScoutJob:
+			job := c.state.ScoutJobs[task.ScoutJobID]
+			job.Status = startScoutJobRunning
+			job.LastError = ""
+			job.UpdatedAt = now
+			job.Attempts++
+			c.state.ScoutJobs[task.ScoutJobID] = job
+			c.implStartedCount++
 		case startTaskKindPlannedLaunch:
 			item := c.state.PlannedItems[task.PlannedItemID]
 			item.State = startPlannedItemLaunching
@@ -790,6 +860,9 @@ func (c *startRepoCoordinator) executeTask(task startRepoTask) startRepoTaskResu
 		}
 		launch, err := startWorkRunGithubWork(issueURL, c.workOptions.PublishTarget, c.workOptions.CodexArgs)
 		return startRepoTaskResult{Task: task, Launch: &launch, Err: err}
+	case startTaskKindScoutJob:
+		launch, err := startRunScoutJobLaunch(c.repoSlug, task.ScoutJob, c.workOptions.CodexArgs)
+		return startRepoTaskResult{Task: task, Launch: &launch, Err: err}
 	case startTaskKindPlannedLaunch:
 		launch, err := startRunPlannedItemLaunch(c.cwd, c.repoSlug, c.workOptions, task.PlannedItem)
 		return startRepoTaskResult{Task: task, PlannedLaunch: &launch, Err: err}
@@ -834,6 +907,25 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 				return fmt.Errorf("%s %s: %w", c.repoSlug, result.Task.Key, result.Err)
 			}
 			return nil
+		case startTaskKindScoutJob:
+			job := c.state.ScoutJobs[result.Task.ScoutJobID]
+			if result.Launch != nil && strings.TrimSpace(result.Launch.RunID) != "" {
+				job.RunID = strings.TrimSpace(result.Launch.RunID)
+			}
+			if result.Err != nil {
+				job.Status = startScoutJobFailed
+				job.LastError = result.Err.Error()
+				job.UpdatedAt = now
+				c.state.ScoutJobs[result.Task.ScoutJobID] = job
+				if err := writeStartWorkStateUnlocked(*c.state); err != nil {
+					return err
+				}
+				return fmt.Errorf("%s %s: %w", c.repoSlug, result.Task.Key, result.Err)
+			}
+			job.Status = startScoutJobCompleted
+			job.LastError = ""
+			job.UpdatedAt = now
+			c.state.ScoutJobs[result.Task.ScoutJobID] = job
 		case startTaskKindIssueSync:
 			serviceTask := c.state.ServiceTasks[result.Task.Key]
 			if result.Err != nil {
@@ -979,6 +1071,7 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 		case startTaskKindPlannedLaunch:
 			serviceTask := c.state.ServiceTasks[result.Task.Key]
 			item := c.state.PlannedItems[result.Task.PlannedItemID]
+			scoutJobID, scoutJob, scoutJobOK := findScoutJobByLegacyPlannedItemID(c.state, result.Task.PlannedItemID)
 			if result.Err != nil {
 				serviceTask.Status = startWorkServiceTaskFailed
 				serviceTask.LastError = result.Err.Error()
@@ -989,6 +1082,12 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 				item.LastError = result.Err.Error()
 				item.UpdatedAt = now
 				c.state.PlannedItems[result.Task.PlannedItemID] = item
+				if scoutJobOK {
+					scoutJob.Status = startScoutJobFailed
+					scoutJob.LastError = result.Err.Error()
+					scoutJob.UpdatedAt = now
+					c.state.ScoutJobs[scoutJobID] = scoutJob
+				}
 				if err := writeStartWorkStateUnlocked(*c.state); err != nil {
 					return err
 				}
@@ -1008,6 +1107,15 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 			item.LastError = ""
 			item.UpdatedAt = now
 			c.state.PlannedItems[result.Task.PlannedItemID] = item
+			if scoutJobOK {
+				scoutJob.Status = startScoutJobCompleted
+				scoutJob.LastError = ""
+				scoutJob.UpdatedAt = now
+				if strings.TrimSpace(result.PlannedLaunch.RunID) != "" {
+					scoutJob.RunID = strings.TrimSpace(result.PlannedLaunch.RunID)
+				}
+				c.state.ScoutJobs[scoutJobID] = scoutJob
+			}
 			c.refreshState = true
 		default:
 			return fmt.Errorf("unknown start task kind %s", result.Task.Kind)

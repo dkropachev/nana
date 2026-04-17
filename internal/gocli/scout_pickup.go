@@ -25,11 +25,24 @@ type localScoutPickupItem struct {
 }
 
 type localScoutDiscoveredItem struct {
-	ID       string
-	Role     string
-	Title    string
-	Artifact string
-	Proposal scoutFinding
+	ID              string
+	Role            string
+	Title           string
+	Artifact        string
+	Proposal        scoutFinding
+	ProposalPath    string
+	PolicyPath      string
+	PreflightPath   string
+	IssueDraftPath  string
+	RawOutputPath   string
+	GeneratedAt     string
+	AuditMode       string
+	SurfaceKind     string
+	SurfaceTarget   string
+	BrowserReady    bool
+	PreflightReason string
+	Destination     string
+	ForkRepo        string
 }
 
 func reconcileLocalScoutPickupPlannedItems(repoPath string, repoSlug string) (bool, error) {
@@ -101,6 +114,27 @@ var startRunLocalScoutWork = func(repoPath string, task string, codexArgs []stri
 }
 
 func runLocalScoutDiscoveredItems(repoPath string, codexArgs []string) (bool, error) {
+	if repoSlug := findManagedRepoSlugForSourcePath(repoPath); repoSlug != "" {
+		updated, state, err := syncStartWorkScoutJobs(repoPath, repoSlug)
+		if err != nil {
+			return false, err
+		}
+		if state == nil {
+			return false, nil
+		}
+		queued := 0
+		for _, job := range state.ScoutJobs {
+			if job.Destination == improvementDestinationLocal && job.Status == startScoutJobQueued {
+				queued++
+			}
+		}
+		fmt.Fprintf(os.Stdout, "[start] Local scout jobs: queued=%d.\n", queued)
+		return updated || queued > 0, nil
+	}
+	return runLocalScoutDiscoveredItemsLegacy(repoPath, codexArgs)
+}
+
+func runLocalScoutDiscoveredItemsLegacy(repoPath string, codexArgs []string) (bool, error) {
 	items, err := listLocalScoutDiscoveredItems(repoPath)
 	if err != nil {
 		return false, err
@@ -177,17 +211,62 @@ func listLocalScoutDiscoveredItems(repoPath string) ([]localScoutDiscoveredItem,
 			}
 			artifactDir := filepath.Dir(path)
 			relArtifact, _ := filepath.Rel(repoPath, artifactDir)
+			relArtifact = filepath.ToSlash(relArtifact)
+			policyPath := filepath.Join(artifactDir, "policy.json")
+			policy := scoutPolicy{Version: 1, IssueDestination: improvementDestinationLocal}
+			_ = readGithubJSON(policyPath, &policy)
+			policy.IssueDestination = normalizeScoutDestination(policy.IssueDestination)
+			relPolicyPath := ""
+			if _, err := os.Stat(policyPath); err == nil {
+				relPolicyPath, _ = filepath.Rel(repoPath, policyPath)
+				relPolicyPath = filepath.ToSlash(relPolicyPath)
+			}
+			relProposalPath, _ := filepath.Rel(repoPath, path)
+			relProposalPath = filepath.ToSlash(relProposalPath)
+			preflightPath := filepath.Join(artifactDir, "preflight.json")
+			issueDraftPath := filepath.Join(artifactDir, "issue-drafts.md")
+			rawOutputPath := filepath.Join(artifactDir, "raw-output.txt")
+			var preflight uiScoutPreflight
+			relPreflightPath := ""
+			relIssueDraftPath := ""
+			relRawOutputPath := ""
+			if _, err := os.Stat(preflightPath); err == nil {
+				relPreflightPath, _ = filepath.Rel(repoPath, preflightPath)
+				relPreflightPath = filepath.ToSlash(relPreflightPath)
+				_ = readGithubJSON(preflightPath, &preflight)
+			}
+			if _, err := os.Stat(issueDraftPath); err == nil {
+				relIssueDraftPath, _ = filepath.Rel(repoPath, issueDraftPath)
+				relIssueDraftPath = filepath.ToSlash(relIssueDraftPath)
+			}
+			if _, err := os.Stat(rawOutputPath); err == nil {
+				relRawOutputPath, _ = filepath.Rel(repoPath, rawOutputPath)
+				relRawOutputPath = filepath.ToSlash(relRawOutputPath)
+			}
 			for _, proposal := range report.Proposals {
 				title := strings.TrimSpace(proposal.Title)
 				if title == "" || strings.TrimSpace(proposal.Summary) == "" {
 					continue
 				}
 				items = append(items, localScoutDiscoveredItem{
-					ID:       localScoutProposalID(role, proposal),
-					Role:     role,
-					Title:    title,
-					Artifact: filepath.ToSlash(relArtifact),
-					Proposal: proposal,
+					ID:              localScoutProposalID(role, proposal),
+					Role:            role,
+					Title:           title,
+					Artifact:        relArtifact,
+					Proposal:        proposal,
+					ProposalPath:    relProposalPath,
+					PolicyPath:      relPolicyPath,
+					PreflightPath:   relPreflightPath,
+					IssueDraftPath:  relIssueDraftPath,
+					RawOutputPath:   relRawOutputPath,
+					GeneratedAt:     strings.TrimSpace(report.GeneratedAt),
+					AuditMode:       strings.TrimSpace(preflight.Mode),
+					SurfaceKind:     strings.TrimSpace(preflight.SurfaceKind),
+					SurfaceTarget:   strings.TrimSpace(preflight.SurfaceTarget),
+					BrowserReady:    preflight.BrowserReady,
+					PreflightReason: strings.TrimSpace(preflight.Reason),
+					Destination:     startUIScoutDestinationLabel(policy.IssueDestination),
+					ForkRepo:        strings.TrimSpace(policy.ForkRepo),
 				})
 			}
 		}

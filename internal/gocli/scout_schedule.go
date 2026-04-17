@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -170,44 +169,8 @@ func scoutOutstandingCount(repoPath string, repoSlug string, role string, policy
 		}
 		return countOpenScoutIssues(apiBaseURL, token, targetRepo, role)
 	default:
-		return countOutstandingLocalScoutItems(repoPath, role)
+		return countOutstandingLocalScoutItems(repoPath, repoSlug, role)
 	}
-}
-
-func countOutstandingLocalScoutItems(repoPath string, role string) (int, error) {
-	items, err := listLocalScoutDiscoveredItems(repoPath)
-	if err != nil {
-		return 0, err
-	}
-	pickupState := localScoutPickupState{Version: 1, Items: map[string]localScoutPickupItem{}}
-	if statePath, statePathErr := localScoutPickupStatePath(repoPath); statePathErr == nil {
-		if err := readGithubJSON(statePath, &pickupState); err != nil && !os.IsNotExist(err) {
-			return 0, err
-		}
-		if pickupState.Items == nil {
-			pickupState.Items = map[string]localScoutPickupItem{}
-		}
-	}
-	byID := map[string]localScoutDiscoveredItem{}
-	for _, item := range items {
-		if item.Role != role {
-			continue
-		}
-		byID[item.ID] = item
-	}
-	ids := make([]string, 0, len(byID))
-	for itemID := range byID {
-		ids = append(ids, itemID)
-	}
-	sort.Strings(ids)
-	outstanding := 0
-	for _, itemID := range ids {
-		record, ok := pickupState.Items[itemID]
-		if !ok || !localScoutPickupStatusIsResolved(record.Status) {
-			outstanding++
-		}
-	}
-	return outstanding, nil
 }
 
 func localScoutPickupStatusIsResolved(status string) bool {

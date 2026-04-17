@@ -2931,6 +2931,9 @@
           if (row.kind === "planned_item") {
             return `<button class="tx-btn tx-btn-primary tx-btn-sm grid-action-button" type="button" data-approval-launch-planned="${escapeHTML(row.planned_item_id)}">Approve</button>`;
           }
+          if (row.kind === "scout_job") {
+            return `<button class="tx-btn tx-btn-primary tx-btn-sm grid-action-button" type="button" data-approval-retry-scout="${escapeHTML(row.scout_job_id)}">Retry</button>`;
+          }
           if (row.kind === "work_run") {
             const actions = [];
             if (row.external_url && row.action_kind === "review_on_github") {
@@ -3003,6 +3006,9 @@
     }
     if (item.action_kind === "approve_planned_item" && item.planned_item_id) {
       return `<button class="tx-btn tx-btn-primary" type="button" data-approval-launch-planned="${escapeHTML(item.planned_item_id)}">Approve Launch</button>`;
+    }
+    if (item.action_kind === "retry_scout_job" && item.scout_job_id) {
+      return `<button class="tx-btn tx-btn-primary" type="button" data-approval-retry-scout="${escapeHTML(item.scout_job_id)}">Retry Scout Job</button>`;
     }
     if (item.action_kind === "review_on_github" && item.external_url) {
       return `
@@ -3519,10 +3525,12 @@
 
   function scoutActionLabel(action) {
     switch (action) {
-      case "queue-planned":
-        return "Queue";
+      case "retry":
+        return "Retry";
       case "dismiss":
         return "Dismiss";
+      case "open-run":
+        return "Open Run";
       case "reset":
         return "Reset";
       default:
@@ -3546,9 +3554,9 @@
       status: scoutStatusLabel(item.status),
       status_key: defaultString(item.status, "pending"),
       updated_at: formatDateTime(item.updated_at || item.generated_at),
-      can_queue_planned: (item.available_actions || []).includes("queue-planned"),
+      can_retry: (item.available_actions || []).includes("retry"),
       can_dismiss: (item.available_actions || []).includes("dismiss"),
-      can_reset: (item.available_actions || []).includes("reset"),
+      can_open_run: (item.available_actions || []).includes("open-run"),
     }));
   }
 
@@ -3647,9 +3655,8 @@
     const selectedCount = selectedIDs.length;
     const totalCount = allScoutItemIDs().length;
     const allSelected = totalCount > 0 && selectedCount === totalCount;
-    const queueableCount = scoutActionableSelection("queue-planned").length;
+    const retryableCount = scoutActionableSelection("retry").length;
     const dismissibleCount = scoutActionableSelection("dismiss").length;
-    const resettableCount = scoutActionableSelection("reset").length;
     ensureBodyStructure(`repo:${repo.repo_slug}:scouts`, `
       <section class="surface scout-surface">
         <div class="surface-head">
@@ -3662,9 +3669,8 @@
         <div class="scout-bulk-bar">
           <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-select-all="true" ${state.scoutItems.items.length ? "" : "disabled"}>Select All</button>
           <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-clear-selection="true" ${selectedCount ? "" : "disabled"}>Clear</button>
-          <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-bulk-action="queue-planned" ${queueableCount ? "" : "disabled"}>Queue Selected (${escapeHTML(String(queueableCount))})</button>
+          <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-bulk-action="retry" ${retryableCount ? "" : "disabled"}>Retry Selected (${escapeHTML(String(retryableCount))})</button>
           <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-bulk-action="dismiss" ${dismissibleCount ? "" : "disabled"}>Dismiss Selected (${escapeHTML(String(dismissibleCount))})</button>
-          <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-bulk-action="reset" ${resettableCount ? "" : "disabled"}>Reset Selected (${escapeHTML(String(resettableCount))})</button>
           <p class="scout-bulk-copy">${escapeHTML(allSelected ? `All ${selectedCount} selected` : `${selectedCount} selected`)}</p>
         </div>
         <div id="repo-scout-grid"></div>
@@ -3697,14 +3703,14 @@
         action: true,
         render(row) {
           const actions = [];
-          if (row.can_queue_planned) {
-            actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-scout-action="queue-planned" data-scout-id="${escapeHTML(row.id)}">Queue</button>`);
+          if (row.can_retry) {
+            actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-scout-action="retry" data-scout-id="${escapeHTML(row.id)}">Retry</button>`);
           }
           if (row.can_dismiss) {
             actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-scout-action="dismiss" data-scout-id="${escapeHTML(row.id)}">Dismiss</button>`);
           }
-          if (row.can_reset) {
-            actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-scout-action="reset" data-scout-id="${escapeHTML(row.id)}">Reset</button>`);
+          if (row.can_open_run) {
+            actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-scout-action="open-run" data-scout-id="${escapeHTML(row.id)}">Open Run</button>`);
           }
           return actions.length ? `<div class="scout-actions">${actions.join("")}</div>` : '<span class="data-value-text">No actions</span>';
         },
@@ -5222,6 +5228,13 @@
         const itemID = scoutActionButton.getAttribute("data-scout-id") || "";
         const action = scoutActionButton.getAttribute("data-scout-action") || "";
         if (repo && itemID && action) {
+          if (action === "open-run") {
+            const item = (state.scoutItems.items || []).find((entry) => entry.id === itemID);
+            if (item && item.run_id) {
+              openLogDrawer(item.run_id);
+            }
+            return;
+          }
           mutateScoutItem(repo.repo_slug, itemID, action);
         }
         return;
@@ -5290,6 +5303,27 @@
               toast("success", "Launch requested", payload.launch.result || "Planned item launched.");
             }).catch((error) => {
               toast("danger", "Launch failed", error.message);
+            });
+          },
+        });
+        return;
+      }
+
+      const approvalRetryScoutButton = event.target.closest("[data-approval-retry-scout]");
+      if (approvalRetryScoutButton) {
+        const scoutJobID = approvalRetryScoutButton.getAttribute("data-approval-retry-scout") || "";
+        const selected = selectedApprovalItem();
+        if (!selected || !selected.repo_slug || !scoutJobID) return;
+        requestConfirmation({
+          title: "Retry scout job?",
+          message: "This requeues the failed scout-derived job for execution.",
+          confirmLabel: "Retry Job",
+          onConfirm() {
+            mutateScoutItem(selected.repo_slug, scoutJobID, "retry").then(() => {
+              loadApprovals({ silent: true });
+              toast("success", "Scout job requeued", selected.subject || scoutJobID);
+            }).catch((error) => {
+              toast("danger", "Retry failed", error.message);
             });
           },
         });
