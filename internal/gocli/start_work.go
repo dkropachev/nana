@@ -1579,13 +1579,6 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 	if state.Version < startWorkStateVersion {
 		state.Version = startWorkStateVersion
 	}
-	for key, task := range state.ServiceTasks {
-		if task.Status == startWorkServiceTaskRunning {
-			task.Status = startWorkServiceTaskQueued
-			task.StartedAt = ""
-			state.ServiceTasks[key] = task
-		}
-	}
 	for key, issue := range state.Issues {
 		if issue.Priority < 0 || issue.Priority > 5 {
 			issue.Priority = 5

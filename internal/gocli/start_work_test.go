@@ -458,6 +458,51 @@ func TestStartRepoCoordinatorKeepsManualLaunchingPlannedItemsQueued(t *testing.T
 	}
 }
 
+func TestStartRepoCoordinatorMarkTaskStartedMarksPlannedLaunchRunning(t *testing.T) {
+	coordinator := &startRepoCoordinator{
+		repoSlug: "acme/widget",
+		state: &startWorkState{
+			Version:    startWorkStateVersion,
+			SourceRepo: "acme/widget",
+			UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+			Issues:     map[string]startWorkIssueState{},
+			ServiceTasks: map[string]startWorkServiceTask{
+				startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1"): {
+					ID:            startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1"),
+					Kind:          startTaskKindPlannedLaunch,
+					Queue:         startTaskQueueService,
+					Status:        startWorkServiceTaskQueued,
+					PlannedItemID: "planned-1",
+				},
+			},
+			PlannedItems: map[string]startWorkPlannedItem{
+				"planned-1": {
+					ID:        "planned-1",
+					RepoSlug:  "acme/widget",
+					Title:     "Manual launch only",
+					Priority:  2,
+					State:     startPlannedItemLaunching,
+					CreatedAt: time.Now().UTC().Format(time.RFC3339),
+					UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+				},
+			},
+		},
+	}
+	task := startRepoTask{
+		Key:           startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1"),
+		Kind:          startTaskKindPlannedLaunch,
+		Queue:         startTaskQueueService,
+		PlannedItemID: "planned-1",
+	}
+	if err := coordinator.markTaskStarted(task); err != nil {
+		t.Fatalf("markTaskStarted: %v", err)
+	}
+	serviceTask := coordinator.state.ServiceTasks[task.Key]
+	if serviceTask.Status != startWorkServiceTaskRunning || serviceTask.Attempts != 1 {
+		t.Fatalf("expected planned-launch task to be marked running, got %+v", serviceTask)
+	}
+}
+
 func TestStartRepoCoordinatorPersistsStateWhenNoTasksAreQueued(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -481,7 +526,7 @@ func TestStartRepoCoordinatorPersistsStateWhenNoTasksAreQueued(t *testing.T) {
 	}
 }
 
-func TestReadStartWorkStateRequeuesRunningServiceTasks(t *testing.T) {
+func TestReadStartWorkStatePreservesRunningServiceTasks(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	state := startWorkState{
@@ -505,8 +550,8 @@ func TestReadStartWorkStateRequeuesRunningServiceTasks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
-	if loaded.ServiceTasks["triage:1"].Status != startWorkServiceTaskQueued {
-		t.Fatalf("expected running service task to requeue, got %+v", loaded.ServiceTasks["triage:1"])
+	if loaded.ServiceTasks["triage:1"].Status != startWorkServiceTaskRunning {
+		t.Fatalf("expected running service task to remain running on read, got %+v", loaded.ServiceTasks["triage:1"])
 	}
 }
 

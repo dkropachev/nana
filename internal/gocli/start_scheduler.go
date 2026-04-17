@@ -700,6 +700,15 @@ func (c *startRepoCoordinator) markTaskStarted(task startRepoTask) error {
 			item.LastError = ""
 			item.UpdatedAt = now
 			c.state.PlannedItems[task.PlannedItemID] = item
+			serviceTask := c.state.ServiceTasks[task.Key]
+			serviceTask.Status = startWorkServiceTaskRunning
+			serviceTask.Attempts++
+			serviceTask.StartedAt = now
+			serviceTask.UpdatedAt = now
+			serviceTask.LastError = ""
+			serviceTask.WaitCycle = ""
+			c.state.ServiceTasks[task.Key] = serviceTask
+			c.serviceStartedCount++
 		default:
 			serviceTask := c.state.ServiceTasks[task.Key]
 			serviceTask.Status = startWorkServiceTaskRunning
