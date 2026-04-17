@@ -2680,11 +2680,6 @@ func loadStartUIRepoSummary(repoSlug string, includeState bool) (startUIRepoSumm
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return startUIRepoSummary{}, err
 	}
-	if repoPath := strings.TrimSpace(githubManagedPaths(repoSlug).SourcePath); repoPath != "" {
-		if _, syncedState, syncErr := syncStartWorkScoutJobs(repoPath, repoSlug); syncErr == nil && syncedState != nil {
-			state = syncedState
-		}
-	}
 	summary := startUIRepoSummary{
 		RepoSlug:          repoSlug,
 		SettingsPath:      githubRepoSettingsPath(repoSlug),
