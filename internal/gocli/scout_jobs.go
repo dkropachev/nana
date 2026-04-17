@@ -425,6 +425,7 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 		job.CreatedAt = defaultString(strings.TrimSpace(existing.CreatedAt), job.CreatedAt)
 		job.LegacyPlannedItemID = defaultString(strings.TrimSpace(existing.LegacyPlannedItemID), job.LegacyPlannedItemID)
 	}
+	preserveExistingRun := hasExisting && strings.TrimSpace(existing.Status) == startScoutJobRunning && strings.TrimSpace(existing.RunID) != ""
 	if plannedOK {
 		job.LegacyPlannedItemID = planned.ID
 		switch strings.TrimSpace(planned.State) {
@@ -462,6 +463,13 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 		if !hasExisting {
 			job.Status = startScoutJobQueued
 		}
+		return
+	}
+	if preserveExistingRun && strings.TrimSpace(record.RunID) == "" {
+		job.Status = existing.Status
+		job.RunID = existing.RunID
+		job.LastError = existing.LastError
+		job.UpdatedAt = defaultString(strings.TrimSpace(existing.UpdatedAt), job.UpdatedAt)
 		return
 	}
 	mappedStatus := localScoutPickupStatusToScoutJobStatus(record.Status)
