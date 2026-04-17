@@ -1693,14 +1693,6 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 		}
 		state.ScoutJobs[key] = job
 	}
-	if updated, err := normalizeStartWorkStateScoutJobs(&state); err != nil {
-		return nil, err
-	} else if updated && strings.TrimSpace(state.SourceRepo) != "" {
-		state.UpdatedAt = defaultString(strings.TrimSpace(state.UpdatedAt), ISOTimeNow())
-		if err := writeGithubJSON(startWorkStatePath(state.SourceRepo), state); err != nil && !os.IsPermission(err) {
-			return nil, err
-		}
-	}
 	return &state, nil
 }
 

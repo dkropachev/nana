@@ -2346,7 +2346,7 @@ func TestListStartUIScoutItemsDoesNotDowngradeRunningScoutJobFromPickupStateWith
 	}
 }
 
-func TestReadStartWorkStateMigratesScoutDerivedPlannedItemsToScoutJobs(t *testing.T) {
+func TestSyncStartWorkScoutJobsMigratesScoutDerivedPlannedItemsToScoutJobs(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -2422,22 +2422,26 @@ func TestReadStartWorkStateMigratesScoutDerivedPlannedItemsToScoutJobs(t *testin
 		t.Fatalf("write start state: %v", err)
 	}
 
-	state, err := readStartWorkState(repoSlug)
+	_, _, err = syncStartWorkScoutJobs(repo, repoSlug)
 	if err != nil {
-		t.Fatalf("read start state: %v", err)
+		t.Fatalf("syncStartWorkScoutJobs: %v", err)
 	}
-	if state.Version != startWorkStateVersion {
-		t.Fatalf("expected migrated state version %d, got %d", startWorkStateVersion, state.Version)
+	migratedState, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("read start state after sync: %v", err)
 	}
-	if _, ok := state.PlannedItems["planned-scout"]; ok {
-		t.Fatalf("expected scout-derived planned item to be removed, got %+v", state.PlannedItems)
+	if migratedState.Version != startWorkStateVersion {
+		t.Fatalf("expected migrated state version %d, got %d", startWorkStateVersion, migratedState.Version)
 	}
-	if _, ok := state.PlannedItems["planned-manual"]; !ok {
-		t.Fatalf("expected manual planned item to remain, got %+v", state.PlannedItems)
+	if _, ok := migratedState.PlannedItems["planned-scout"]; ok {
+		t.Fatalf("expected scout-derived planned item to be removed, got %+v", migratedState.PlannedItems)
 	}
-	job, ok := state.ScoutJobs[proposalID]
+	if _, ok := migratedState.PlannedItems["planned-manual"]; !ok {
+		t.Fatalf("expected manual planned item to remain, got %+v", migratedState.PlannedItems)
+	}
+	job, ok := migratedState.ScoutJobs[proposalID]
 	if !ok {
-		t.Fatalf("expected migrated scout job %s, got %+v", proposalID, state.ScoutJobs)
+		t.Fatalf("expected migrated scout job %s, got %+v", proposalID, migratedState.ScoutJobs)
 	}
 	if job.Status != startScoutJobRunning || job.RunID != "lw-migrated" {
 		t.Fatalf("expected migrated scout job to preserve running state and run id, got %+v", job)

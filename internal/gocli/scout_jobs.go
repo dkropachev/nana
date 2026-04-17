@@ -12,6 +12,14 @@ import (
 func ensureStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 	state, err := readStartWorkStateUnlocked(repoSlug)
 	if err == nil {
+		if updated, syncErr := normalizeStartWorkStateScoutJobs(state); syncErr != nil {
+			return nil, syncErr
+		} else if updated {
+			state.UpdatedAt = defaultString(strings.TrimSpace(state.UpdatedAt), ISOTimeNow())
+			if writeErr := writeGithubJSON(startWorkStatePath(state.SourceRepo), *state); writeErr != nil {
+				return nil, writeErr
+			}
+		}
 		return state, nil
 	}
 	if !os.IsNotExist(err) {
