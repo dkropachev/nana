@@ -434,6 +434,7 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 		job.LegacyPlannedItemID = defaultString(strings.TrimSpace(existing.LegacyPlannedItemID), job.LegacyPlannedItemID)
 	}
 	preserveExistingRun := hasExisting && strings.TrimSpace(existing.Status) == startScoutJobRunning && strings.TrimSpace(existing.RunID) != ""
+	preserveExistingFailure := hasExisting && strings.TrimSpace(existing.Status) == startScoutJobFailed
 	if plannedOK {
 		job.LegacyPlannedItemID = planned.ID
 		switch strings.TrimSpace(planned.State) {
@@ -470,7 +471,19 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 	if !recordOK {
 		if !hasExisting {
 			job.Status = startScoutJobQueued
+		} else if preserveExistingFailure {
+			job.Status = existing.Status
+			job.RunID = existing.RunID
+			job.LastError = existing.LastError
+			job.UpdatedAt = defaultString(strings.TrimSpace(existing.UpdatedAt), job.UpdatedAt)
 		}
+		return
+	}
+	if preserveExistingFailure {
+		job.Status = existing.Status
+		job.RunID = existing.RunID
+		job.LastError = existing.LastError
+		job.UpdatedAt = defaultString(strings.TrimSpace(existing.UpdatedAt), job.UpdatedAt)
 		return
 	}
 	if preserveExistingRun && strings.TrimSpace(record.RunID) == "" {
