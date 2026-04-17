@@ -100,7 +100,6 @@ func executeGithubLane(runID string, useLast bool, laneAlias string, task string
 	finalPrompt := instructions + "\n\nTask:\n" + prompt
 	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(codexArgs)
 	finalPrompt = prefixCodexFastPrompt(finalPrompt, fastMode)
-	transport := promptTransportForSize(finalPrompt, structuredPromptStdinThreshold)
 	if err := writeGithubJSON(statePath, state); err != nil {
 		return err
 	}
@@ -121,25 +120,13 @@ func executeGithubLane(runID string, useLast bool, laneAlias string, task string
 		FreshArgsPrefix:  []string{"exec", "-C", manifest.SandboxRepoPath},
 		CommonArgs:       normalizedCodexArgs,
 		Prompt:           finalPrompt,
-		PromptTransport:  transport,
+		PromptTransport:  codexPromptTransportArg,
 		CheckpointPath:   checkpointPath,
 		StepKey:          fmt.Sprintf("github-lane-%s", lane.Alias),
 		ResumeStrategy:   codexResumeConversation,
 		Env: append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, manifest.APIBaseURL),
 			"NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath,
 		),
-		OnPause: func(info codexRateLimitPauseInfo) {
-			state.Status = "paused"
-			state.LastError = codexPauseInfoMessage(info)
-			state.UpdatedAt = ISOTimeNow()
-			_ = writeGithubJSON(statePath, state)
-		},
-		OnResume: func(info codexRateLimitPauseInfo) {
-			state.Status = "running"
-			state.LastError = ""
-			state.UpdatedAt = ISOTimeNow()
-			_ = writeGithubJSON(statePath, state)
-		},
 	})
 	combined := strings.TrimSpace(strings.Join([]string{strings.TrimSpace(result.Stdout), strings.TrimSpace(result.Stderr)}, "\n\n"))
 	if err := os.WriteFile(resultPath, []byte(combined), 0o644); err != nil {
@@ -156,15 +143,10 @@ func executeGithubLane(runID string, useLast bool, laneAlias string, task string
 	state.SessionID = strings.TrimSpace(result.SessionID)
 	state.ResumeEligible = result.ResumeEligible
 	if runErr != nil {
-		if pauseErr, ok := isCodexRateLimitPauseError(runErr); ok {
-			state.Status = "paused"
-			state.LastError = codexPauseInfoMessage(pauseErr.Info)
-		} else {
-			state.Status = "failed"
-			state.LastError = strings.TrimSpace(result.Stderr)
-			if state.LastError == "" {
-				state.LastError = runErr.Error()
-			}
+		state.Status = "failed"
+		state.LastError = strings.TrimSpace(result.Stderr)
+		if state.LastError == "" {
+			state.LastError = runErr.Error()
 		}
 	}
 	state.CompletedAt = time.Now().UTC().Format(time.RFC3339)

@@ -257,10 +257,6 @@ type githubWorkStatusSnapshot struct {
 	PublicationState     string                   `json:"publication_state,omitempty"`
 	PublicationDetail    string                   `json:"publication_detail,omitempty"`
 	PublicationError     string                   `json:"publication_error,omitempty"`
-	ExecutionStatus      string                   `json:"execution_status,omitempty"`
-	PauseReason          string                   `json:"pause_reason,omitempty"`
-	PauseUntil           string                   `json:"pause_until,omitempty"`
-	LastError            string                   `json:"last_error,omitempty"`
 	LeaderSessionID      string                   `json:"leader_session_id,omitempty"`
 	LeaderResumeEligible bool                     `json:"leader_resume_eligible,omitempty"`
 	Lanes                []githubLaneRuntimeState `json:"lanes,omitempty"`
@@ -298,19 +294,6 @@ func githubWorkStatus(selection localWorkRunSelection, jsonOutput bool) error {
 	}
 	if strings.TrimSpace(snapshot.PublicationError) != "" {
 		fmt.Fprintf(os.Stdout, "[work] Publication error: %s\n", snapshot.PublicationError)
-	}
-	if strings.TrimSpace(snapshot.ExecutionStatus) != "" {
-		fmt.Fprintf(os.Stdout, "[work] Execution status: %s\n", snapshot.ExecutionStatus)
-	}
-	if strings.TrimSpace(snapshot.PauseUntil) != "" {
-		fmt.Fprintf(os.Stdout, "[work] Pause until: %s", snapshot.PauseUntil)
-		if strings.TrimSpace(snapshot.PauseReason) != "" {
-			fmt.Fprintf(os.Stdout, " reason=%s", snapshot.PauseReason)
-		}
-		fmt.Fprintln(os.Stdout)
-	}
-	if strings.TrimSpace(snapshot.LastError) != "" {
-		fmt.Fprintf(os.Stdout, "[work] Last error: %s\n", snapshot.LastError)
 	}
 	if strings.TrimSpace(snapshot.LeaderSessionID) != "" {
 		fmt.Fprintf(os.Stdout, "[work] Leader session: %s", snapshot.LeaderSessionID)
@@ -415,10 +398,6 @@ func buildGithubWorkStatusSnapshot(manifest githubWorkManifest, runDir string) (
 		PublicationState:     manifest.PublicationState,
 		PublicationDetail:    manifest.PublicationDetail,
 		PublicationError:     manifest.PublicationError,
-		ExecutionStatus:      manifest.ExecutionStatus,
-		PauseReason:          manifest.PauseReason,
-		PauseUntil:           manifest.PauseUntil,
-		LastError:            manifest.LastError,
 		LeaderSessionID:      strings.TrimSpace(leaderCheckpoint.SessionID),
 		LeaderResumeEligible: leaderCheckpoint.ResumeEligible,
 		Lanes:                lanes,
@@ -499,7 +478,6 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 	finalPrompt := instructions + "\n\nTask:\n" + prompt
 	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(options.CodexArgs)
 	finalPrompt = prefixCodexFastPrompt(finalPrompt, fastMode)
-	transport := promptTransportForSize(finalPrompt, structuredPromptStdinThreshold)
 	result, runErr := runManagedCodexPrompt(codexManagedPromptOptions{
 		CommandDir:       manifest.SandboxPath,
 		InstructionsRoot: manifest.SandboxPath,
@@ -507,31 +485,11 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 		FreshArgsPrefix:  []string{"exec", "-C", manifest.SandboxRepoPath},
 		CommonArgs:       normalizedCodexArgs,
 		Prompt:           finalPrompt,
-		PromptTransport:  transport,
+		PromptTransport:  codexPromptTransportArg,
 		CheckpointPath:   filepath.Join(runDir, "leader-checkpoint.json"),
 		StepKey:          "github-leader",
 		ResumeStrategy:   codexResumeConversation,
 		Env:              append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, manifest.APIBaseURL), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
-		OnPause: func(info codexRateLimitPauseInfo) {
-			manifest.ExecutionStatus = "paused"
-			manifest.PauseReason = strings.TrimSpace(info.Reason)
-			manifest.PauseUntil = strings.TrimSpace(info.RetryAfter)
-			manifest.PausedAt = ISOTimeNow()
-			manifest.LastError = codexPauseInfoMessage(info)
-			manifest.UpdatedAt = manifest.PausedAt
-			_ = writeGithubJSON(filepath.Join(runDir, "manifest.json"), manifest)
-			_ = indexGithubWorkRunManifest(filepath.Join(runDir, "manifest.json"), manifest)
-		},
-		OnResume: func(info codexRateLimitPauseInfo) {
-			manifest.ExecutionStatus = "running"
-			manifest.PauseReason = ""
-			manifest.PauseUntil = ""
-			manifest.PausedAt = ""
-			manifest.LastError = ""
-			manifest.UpdatedAt = ISOTimeNow()
-			_ = writeGithubJSON(filepath.Join(runDir, "manifest.json"), manifest)
-			_ = indexGithubWorkRunManifest(filepath.Join(runDir, "manifest.json"), manifest)
-		},
 	})
 
 	manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)

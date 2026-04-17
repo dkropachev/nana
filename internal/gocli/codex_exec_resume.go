@@ -32,9 +32,6 @@ type codexStepCheckpoint struct {
 	Version           int    `json:"version"`
 	StepKey           string `json:"step_key,omitempty"`
 	Status            string `json:"status,omitempty"`
-	PauseReason       string `json:"pause_reason,omitempty"`
-	PauseUntil        string `json:"pause_until,omitempty"`
-	PausedAt          string `json:"paused_at,omitempty"`
 	SessionID         string `json:"session_id,omitempty"`
 	PromptFingerprint string `json:"prompt_fingerprint,omitempty"`
 	ResumeStrategy    string `json:"resume_strategy,omitempty"`
@@ -59,9 +56,6 @@ type codexManagedPromptOptions struct {
 	StepKey            string
 	ResumeStrategy     codexResumeStrategy
 	Env                []string
-	RateLimitPolicy    codexRateLimitPolicy
-	OnPause            func(codexRateLimitPauseInfo)
-	OnResume           func(codexRateLimitPauseInfo)
 }
 
 type codexManagedPromptResult struct {
@@ -86,70 +80,22 @@ func runManagedCodexPrompt(options codexManagedPromptOptions) (codexManagedPromp
 	if strings.TrimSpace(options.ContinuationPrompt) == "" {
 		options.ContinuationPrompt = buildCodexContinuationPrompt(options.StepKey)
 	}
-	options.RateLimitPolicy = codexRateLimitPolicyDefault(options.RateLimitPolicy)
 
 	promptFingerprint := sha256Hex(strings.TrimSpace(options.Prompt))
-	authManager, err := prepareManagedAuthManager(options.CommandDir, options.CodexHome)
-	if err != nil {
-		return codexManagedPromptResult{}, err
+	ephemeral := hasCodexEphemeralArg(options.CommonArgs)
+	checkpoint, _ := readCodexStepCheckpoint(options.CheckpointPath)
+	shouldResume := !ephemeral && checkpoint.ResumeEligible && strings.TrimSpace(checkpoint.SessionID) != "" && codexCheckpointMatchesPrompt(checkpoint, promptFingerprint, options.ResumeStrategy)
+
+	if shouldResume {
+		result, err := executeManagedCodexPrompt(options, checkpoint.SessionID, options.ContinuationPrompt, true)
+		if err != nil && codexResumeSessionMissing(strings.Join([]string{result.Stdout, result.Stderr, err.Error()}, "\n")) {
+			result, err = executeManagedCodexPrompt(options, "", options.Prompt, false)
+		}
+		return finalizeManagedCodexPrompt(options, promptFingerprint, result, err)
 	}
-	authSwitched := false
 
-	for {
-		ephemeral := hasCodexEphemeralArg(options.CommonArgs)
-		checkpoint, _ := readCodexStepCheckpoint(options.CheckpointPath)
-		shouldResume := !ephemeral && checkpoint.ResumeEligible && strings.TrimSpace(checkpoint.SessionID) != "" && codexCheckpointMatchesPrompt(checkpoint, promptFingerprint, options.ResumeStrategy)
-
-		result := codexManagedPromptResult{}
-		runErr := error(nil)
-		if shouldResume {
-			result, runErr = executeManagedCodexPrompt(options, checkpoint.SessionID, options.ContinuationPrompt, true)
-			if runErr != nil && (codexResumeSessionMissing(strings.Join([]string{result.Stdout, result.Stderr, runErr.Error()}, "\n")) || (authSwitched && codexResumeNeedsFreshLaunch(strings.Join([]string{result.Stdout, result.Stderr, runErr.Error()}, "\n")))) {
-				result, runErr = executeManagedCodexPrompt(options, "", options.Prompt, false)
-			}
-		} else {
-			result, runErr = executeManagedCodexPrompt(options, "", options.Prompt, false)
-		}
-		authSwitched = false
-
-		if runErr == nil || !codexOutputLooksRateLimited(strings.Join([]string{result.Stdout, result.Stderr, runErr.Error()}, "\n")) || authManager == nil {
-			return finalizeManagedCodexPrompt(options, promptFingerprint, result, runErr)
-		}
-
-		decision, decisionErr := authManager.handleExecutionRateLimit(codexRateLimitReason(result.Stdout, result.Stderr, runErr))
-		if decisionErr != nil {
-			return finalizeManagedCodexPrompt(options, promptFingerprint, result, fmt.Errorf("%w (and failed to resolve managed account rate limit: %v)", runErr, decisionErr))
-		}
-		pauseInfo := codexRateLimitPauseInfo{
-			Reason:     defaultString(strings.TrimSpace(decision.Reason), codexRateLimitReason(result.Stdout, result.Stderr, runErr)),
-			RetryAfter: strings.TrimSpace(decision.RetryAfter),
-			SwitchedTo: strings.TrimSpace(decision.SwitchedTo),
-		}
-		if strings.TrimSpace(decision.SwitchedTo) != "" {
-			authSwitched = true
-			continue
-		}
-		if err := writePausedCodexCheckpoint(options, promptFingerprint, result, pauseInfo); err != nil {
-			return result, err
-		}
-		if options.RateLimitPolicy == codexRateLimitPolicyReturnPause {
-			return result, &codexRateLimitPauseError{Info: pauseInfo}
-		}
-		if options.OnPause != nil {
-			options.OnPause(pauseInfo)
-		}
-		waitUntil, ok := codexPauseRetryAt(pauseInfo)
-		if !ok {
-			waitUntil = time.Now().UTC().Add(time.Minute)
-		}
-		wait := time.Until(waitUntil)
-		if wait > 0 {
-			time.Sleep(wait)
-		}
-		if options.OnResume != nil {
-			options.OnResume(pauseInfo)
-		}
-	}
+	result, err := executeManagedCodexPrompt(options, "", options.Prompt, false)
+	return finalizeManagedCodexPrompt(options, promptFingerprint, result, err)
 }
 
 func executeManagedCodexPrompt(options codexManagedPromptOptions, sessionID string, prompt string, resumed bool) (codexManagedPromptResult, error) {
@@ -162,6 +108,9 @@ func executeManagedCodexPrompt(options codexManagedPromptOptions, sessionID stri
 	}
 	args = append(args, options.CommonArgs...)
 
+	promptArgs, stdinReader := buildCodexPromptInput(prompt, options.PromptTransport)
+	args = append(args, promptArgs...)
+
 	nanaSessionID := fmt.Sprintf("%s-%d", sanitizePathToken(options.StepKey), time.Now().UnixNano())
 	if strings.TrimSpace(options.CodexHome) != "" {
 		sessionInstructionsPath, err := writeSessionModelInstructions(options.InstructionsRoot, nanaSessionID, options.CodexHome)
@@ -171,9 +120,6 @@ func executeManagedCodexPrompt(options codexManagedPromptOptions, sessionID stri
 		defer removeSessionInstructionsFile(options.InstructionsRoot, nanaSessionID)
 		args = injectModelInstructionsArgs(args, sessionInstructionsPath)
 	}
-
-	promptArgs, stdinReader := buildCodexPromptInput(prompt, options.PromptTransport)
-	args = append(args, promptArgs...)
 
 	cmd := exec.Command("codex", args...)
 	cmd.Dir = options.CommandDir
@@ -232,33 +178,6 @@ func finalizeManagedCodexPrompt(options codexManagedPromptOptions, promptFingerp
 		return result, writeErr
 	}
 	return result, runErr
-}
-
-func writePausedCodexCheckpoint(options codexManagedPromptOptions, promptFingerprint string, result codexManagedPromptResult, pauseInfo codexRateLimitPauseInfo) error {
-	if strings.TrimSpace(options.CheckpointPath) == "" {
-		return nil
-	}
-	now := ISOTimeNow()
-	checkpoint := codexStepCheckpoint{
-		Version:           1,
-		StepKey:           options.StepKey,
-		Status:            "paused",
-		PauseReason:       strings.TrimSpace(pauseInfo.Reason),
-		PauseUntil:        strings.TrimSpace(pauseInfo.RetryAfter),
-		PausedAt:          now,
-		SessionID:         strings.TrimSpace(result.SessionID),
-		PromptFingerprint: promptFingerprint,
-		ResumeStrategy:    string(options.ResumeStrategy),
-		ResumeEligible:    result.ResumeEligible,
-		LastLaunchMode:    "fresh",
-		StartedAt:         now,
-		UpdatedAt:         now,
-		LastError:         codexPauseInfoMessage(pauseInfo),
-	}
-	if result.Resumed {
-		checkpoint.LastLaunchMode = "resume"
-	}
-	return writeCodexStepCheckpoint(options.CheckpointPath, checkpoint)
 }
 
 func buildCodexPromptInput(prompt string, transport codexPromptTransport) ([]string, io.Reader) {

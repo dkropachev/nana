@@ -9,14 +9,11 @@ import (
 )
 
 type scoutExecutionRuntime struct {
-	RepoPath        string
-	ArtifactDir     string
-	CodexHome       string
-	StateDir        string
-	Cleanup         func()
-	RateLimitPolicy codexRateLimitPolicy
-	OnPause         func(codexRateLimitPauseInfo)
-	OnResume        func(codexRateLimitPauseInfo)
+	RepoPath    string
+	ArtifactDir string
+	CodexHome   string
+	StateDir    string
+	Cleanup     func()
 }
 
 func prepareScoutExecutionRuntime(repoPath string, artifactDir string, role string) (scoutExecutionRuntime, error) {

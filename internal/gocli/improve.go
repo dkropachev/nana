@@ -132,17 +132,16 @@ Rules:
 - Keep reason concise and concrete.`
 
 type ImproveOptions struct {
-	Target          string
-	RepoPath        string
-	Focus           []string
-	FromFile        string
-	ResumeRunID     string
-	ResumeLast      bool
-	DryRun          bool
-	LocalOnly       bool
-	SessionLimit    int
-	CodexArgs       []string
-	RateLimitPolicy codexRateLimitPolicy
+	Target       string
+	RepoPath     string
+	Focus        []string
+	FromFile     string
+	ResumeRunID  string
+	ResumeLast   bool
+	DryRun       bool
+	LocalOnly    bool
+	SessionLimit int
+	CodexArgs    []string
 }
 
 type uiScoutPreflight struct {
@@ -172,8 +171,6 @@ type scoutRunManifest struct {
 	UpdatedAt    string   `json:"updated_at"`
 	CompletedAt  string   `json:"completed_at,omitempty"`
 	LastError    string   `json:"last_error,omitempty"`
-	PauseReason  string   `json:"pause_reason,omitempty"`
-	PauseUntil   string   `json:"pause_until,omitempty"`
 }
 
 func Improve(cwd string, args []string) error {
@@ -521,23 +518,13 @@ func runScout(cwd string, options ImproveOptions, role string) (err error) {
 	policy.Labels = normalizeScoutLabels(policy.Labels, role)
 	defer func() {
 		manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		if pauseErr, ok := isCodexRateLimitPauseError(err); ok {
-			manifest.Status = "paused"
-			manifest.LastError = codexPauseInfoMessage(pauseErr.Info)
-			manifest.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
-			manifest.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
-			manifest.CompletedAt = ""
-		} else if err != nil {
+		if err != nil {
 			manifest.Status = "failed"
 			manifest.LastError = err.Error()
-			manifest.PauseReason = ""
-			manifest.PauseUntil = ""
 			manifest.CompletedAt = manifest.UpdatedAt
 		} else {
 			manifest.Status = "completed"
 			manifest.LastError = ""
-			manifest.PauseReason = ""
-			manifest.PauseUntil = ""
 			manifest.CompletedAt = manifest.UpdatedAt
 		}
 		if writeErr := writeScoutRunManifest(artifactDir, manifest); writeErr != nil && err == nil {
@@ -1334,9 +1321,6 @@ func runScoutPrompt(runtime scoutExecutionRuntime, task string, codexArgs []stri
 		StepKey:          alias,
 		ResumeStrategy:   codexResumeSamePrompt,
 		Env:              append(buildCodexEnv(NotifyTempContract{}, runtime.CodexHome), "NANA_PROJECT_AGENTS_ROOT="+runtime.RepoPath),
-		RateLimitPolicy:  codexRateLimitPolicyDefault(runtime.RateLimitPolicy),
-		OnPause:          runtime.OnPause,
-		OnResume:         runtime.OnResume,
 	})
 	if err != nil {
 		if strings.TrimSpace(result.Stderr) != "" {

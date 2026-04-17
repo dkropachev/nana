@@ -3542,48 +3542,11 @@ func runLocalWorkCodexPrompt(manifest localWorkManifest, codexArgs []string, pro
 		StepKey:          codexHomeAlias,
 		ResumeStrategy:   codexResumeSamePrompt,
 		Env:              append(buildCodexEnv(NotifyTempContract{}, scopedCodexHome), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
-		RateLimitPolicy:  codexRateLimitPolicyDefault(codexRateLimitPolicy(manifest.RateLimitPolicy)),
-		OnPause: func(info codexRateLimitPauseInfo) {
-			updateLocalWorkPausedManifest(manifest.RunID, info, true)
-		},
-		OnResume: func(info codexRateLimitPauseInfo) {
-			updateLocalWorkPausedManifest(manifest.RunID, info, false)
-		},
 	})
-	execResult := localWorkExecutionResult{
+	return localWorkExecutionResult{
 		Stdout: result.Stdout,
 		Stderr: result.Stderr,
-	}
-	if persistErr := persistLocalWorkTokenUsage(manifest.RunID); persistErr != nil && !os.IsNotExist(persistErr) {
-		if err != nil {
-			return execResult, fmt.Errorf("%w (also failed to persist token usage: %v)", err, persistErr)
-		}
-		return execResult, persistErr
-	}
-	return execResult, err
-}
-
-func updateLocalWorkPausedManifest(runID string, info codexRateLimitPauseInfo, paused bool) {
-	manifest, err := readLocalWorkManifestByRunID(runID)
-	if err != nil {
-		return
-	}
-	now := ISOTimeNow()
-	if paused {
-		manifest.Status = "paused"
-		manifest.PauseReason = strings.TrimSpace(info.Reason)
-		manifest.PauseUntil = strings.TrimSpace(info.RetryAfter)
-		manifest.PausedAt = now
-		manifest.LastError = codexPauseInfoMessage(info)
-	} else {
-		manifest.Status = "running"
-		manifest.PauseReason = ""
-		manifest.PauseUntil = ""
-		manifest.PausedAt = ""
-		manifest.LastError = ""
-	}
-	manifest.UpdatedAt = now
-	_ = writeLocalWorkManifest(manifest)
+	}, err
 }
 
 func normalizeLocalWorkCodexArgs(args []string) []string {

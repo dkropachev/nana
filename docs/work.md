@@ -82,8 +82,8 @@ Validation behavior:
 - if a validator group still fails after retries, the run fails and stays resumable
 - `resume` will reuse completed grouping/validator work and rerun only incomplete or failed validator groups for current-format runs
 - when a Codex-backed step fails after the session transcript exists, `resume` reuses that Codex session for the failed step instead of restarting it cold
-- if final source commit is blocked because the source checkout is dirty or no longer at the run baseline, the run remains blocked until `resolve` refreshes the source checkout and retries final apply
-- if source apply succeeds but commit creation or push fails, the source checkout remains blocked until `resolve` retries the pending commit/push path
+- if final source commit is blocked because the source checkout is dirty or no longer at the run baseline, the run remains blocked and `resume` retries the final commit after the checkout is restored
+- if source apply succeeds but commit creation fails, the source checkout is left with staged changes and the run stays blocked for manual recovery
 
 Final commit recovery:
 
