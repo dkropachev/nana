@@ -331,6 +331,26 @@ func (c *startRepoCoordinator) refreshRepoState() error {
 	c.workOptions = updatedOptions
 	c.state = state
 	c.openPRs = openPRs
+	if persisted, persistErr := readStartWorkState(c.repoSlug); persistErr == nil {
+		if c.state.PlannedItems == nil {
+			c.state.PlannedItems = map[string]startWorkPlannedItem{}
+		}
+		for itemID, item := range persisted.PlannedItems {
+			if _, ok := c.state.PlannedItems[itemID]; !ok {
+				c.state.PlannedItems[itemID] = item
+			}
+		}
+		if c.state.ScoutJobs == nil {
+			c.state.ScoutJobs = map[string]startWorkScoutJob{}
+		}
+		for jobID, job := range persisted.ScoutJobs {
+			if _, ok := c.state.ScoutJobs[jobID]; !ok {
+				c.state.ScoutJobs[jobID] = job
+			}
+		}
+	} else if !os.IsNotExist(persistErr) {
+		return persistErr
+	}
 	if repoPath := strings.TrimSpace(githubManagedPaths(c.repoSlug).SourcePath); repoPath != "" {
 		if _, syncErr := syncStartWorkScoutJobsIntoState(repoPath, c.state); syncErr != nil {
 			return syncErr

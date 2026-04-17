@@ -905,6 +905,70 @@ func TestStartRepoCoordinatorApplyTaskResultPreservesExternallyAddedPlannedItems
 	}
 }
 
+func TestStartRepoCoordinatorRefreshRepoStatePreservesPersistedScoutJobs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	if err := os.MkdirAll(sourcePath, 0o755); err != nil {
+		t.Fatalf("mkdir source path: %v", err)
+	}
+	persisted := startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+		ScoutJobs: map[string]startWorkScoutJob{
+			"scout-1": {
+				ID:          "scout-1",
+				Role:        improvementScoutRole,
+				Title:       "Improve help text",
+				Summary:     "Make help clearer",
+				Destination: improvementDestinationLocal,
+				TaskBody:    "Implement local scout proposal: Improve help text",
+				Status:      startScoutJobRunning,
+				RunID:       "lw-scout-1",
+				CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+				UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
+			},
+		},
+	}
+	if err := writeStartWorkState(persisted); err != nil {
+		t.Fatalf("write persisted state: %v", err)
+	}
+
+	oldSync := startSyncRepoState
+	defer func() { startSyncRepoState = oldSync }()
+	startSyncRepoState = func(options startWorkOptions) (startWorkOptions, *startWorkState, int, bool, error) {
+		return options, &startWorkState{
+			Version:      startWorkStateVersion,
+			SourceRepo:   repoSlug,
+			UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+			Issues:       map[string]startWorkIssueState{},
+			ServiceTasks: map[string]startWorkServiceTask{},
+			PlannedItems: map[string]startWorkPlannedItem{},
+			ScoutJobs:    map[string]startWorkScoutJob{},
+		}, 0, false, nil
+	}
+
+	coordinator := &startRepoCoordinator{
+		repoSlug:      repoSlug,
+		cycleID:       "cycle-1",
+		workOptions:   startWorkOptions{RepoSlug: repoSlug, Parallel: 1},
+		globalOptions: startOptions{Parallel: 1},
+	}
+	if err := coordinator.refreshRepoState(); err != nil {
+		t.Fatalf("refreshRepoState: %v", err)
+	}
+	job, ok := coordinator.state.ScoutJobs["scout-1"]
+	if !ok {
+		t.Fatalf("expected persisted scout job to survive refresh, got %+v", coordinator.state.ScoutJobs)
+	}
+	if job.Status != startScoutJobRunning || job.RunID != "lw-scout-1" {
+		t.Fatalf("expected preserved scout job state, got %+v", job)
+	}
+}
+
 func TestPrepareStartRepoCycleCleansStaleLocalRuns(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
