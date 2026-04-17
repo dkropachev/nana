@@ -283,8 +283,14 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 		job.LegacyPlannedItemID = planned.ID
 		switch strings.TrimSpace(planned.State) {
 		case startPlannedItemLaunching:
-			job.Status = startScoutJobRunning
-			job.LastError = ""
+			if strings.TrimSpace(planned.LaunchRunID) != "" {
+				job.Status = startScoutJobRunning
+				job.LastError = ""
+			} else if !hasExisting || !startWorkScoutJobIsResolved(existing.Status) {
+				job.Status = startScoutJobQueued
+				job.LastError = ""
+				job.RunID = ""
+			}
 		case startPlannedItemQueued:
 			if !hasExisting || !startWorkScoutJobIsResolved(existing.Status) {
 				job.Status = startScoutJobQueued
@@ -317,7 +323,12 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 	case startScoutJobCompleted, startScoutJobDismissed, startScoutJobFailed:
 		job.Status = mappedStatus
 	case startScoutJobRunning:
-		if !hasExisting || existing.Status == "" || existing.Status == startScoutJobQueued || existing.Status == startScoutJobRunning {
+		if strings.TrimSpace(record.RunID) == "" {
+			if !hasExisting || !startWorkScoutJobIsResolved(existing.Status) {
+				job.Status = startScoutJobQueued
+				job.RunID = ""
+			}
+		} else if !hasExisting || existing.Status == "" || existing.Status == startScoutJobQueued || existing.Status == startScoutJobRunning {
 			job.Status = startScoutJobRunning
 		}
 	default:
@@ -334,6 +345,32 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 		job.LastError = ""
 	}
 	job.UpdatedAt = defaultString(strings.TrimSpace(record.UpdatedAt), job.UpdatedAt)
+}
+
+func reconcileStartWorkScoutJobRunState(job *startWorkScoutJob) {
+	if job == nil || strings.TrimSpace(job.RunID) == "" || strings.TrimSpace(job.Status) != startScoutJobRunning {
+		return
+	}
+	manifest, err := readLocalWorkManifestByRunID(job.RunID)
+	if err != nil {
+		return
+	}
+	switch strings.TrimSpace(manifest.Status) {
+	case "running":
+		job.LastError = ""
+	case "completed":
+		job.Status = startScoutJobCompleted
+		job.LastError = ""
+	case "failed", "blocked":
+		job.Status = startScoutJobFailed
+		job.LastError = defaultString(strings.TrimSpace(manifest.LastError), fmt.Sprintf("local work run %s ended with status %s", job.RunID, manifest.Status))
+	default:
+		if strings.TrimSpace(manifest.CompletedAt) != "" {
+			job.Status = startScoutJobFailed
+			job.LastError = defaultString(strings.TrimSpace(manifest.LastError), fmt.Sprintf("local work run %s ended with status %s", job.RunID, manifest.Status))
+		}
+	}
+	job.UpdatedAt = defaultString(strings.TrimSpace(manifest.CompletedAt), defaultString(strings.TrimSpace(manifest.UpdatedAt), job.UpdatedAt))
 }
 
 func syncStartWorkScoutJobsIntoState(repoPath string, state *startWorkState) (bool, error) {
@@ -365,6 +402,7 @@ func syncStartWorkScoutJobsIntoState(repoPath string, state *startWorkState) (bo
 		record, recordOK := pickupState.Items[item.ID]
 		planned, plannedOK := findLegacyScoutPlannedItem(state, existing, record, recordOK, item)
 		deriveScoutJobLegacyState(&job, existing, hasExisting, record, recordOK, planned, plannedOK)
+		reconcileStartWorkScoutJobRunState(&job)
 		if !hasExisting || !reflect.DeepEqual(existing, job) {
 			state.ScoutJobs[item.ID] = job
 			updated = true

@@ -2003,6 +2003,172 @@ func TestListStartUIScoutItemsMarksDonePlannedScoutItemsCompleted(t *testing.T) 
 	}
 }
 
+func TestListStartUIScoutItemsRequeuesLegacyLaunchingScoutWithoutRunID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	repo := createLocalWorkRepoAt(t, sourcePath)
+	writeScoutPickupFixture(t, repo, improvementScoutRole, "Improve help text", "Make help clearer")
+	if err := writeGithubJSON(filepath.Join(repo, ".nana", "improvements", "improve-test", "policy.json"), improvementPolicy{
+		Version:          1,
+		IssueDestination: improvementDestinationLocal,
+		Labels:           []string{"improvement"},
+	}); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	proposalID := localScoutProposalID(improvementScoutRole, scoutFinding{
+		Title:             "Improve help text",
+		Area:              "UX",
+		Summary:           "Make help clearer",
+		Rationale:         "Users need this.",
+		Evidence:          "README.md",
+		Impact:            "Better workflow.",
+		SuggestedNextStep: "Make the smallest change.",
+		Files:             []string{"README.md"},
+	})
+	artifactPath := filepath.ToSlash(filepath.Join(".nana", "improvements", "improve-test"))
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  now,
+		PlannedItems: map[string]startWorkPlannedItem{
+			"planned-1": {
+				ID:          "planned-1",
+				RepoSlug:    repoSlug,
+				Title:       "Implement scout proposal: Improve help text",
+				Description: "Source artifact: " + artifactPath + "\nScout role: " + improvementScoutRole,
+				LaunchKind:  "local_work",
+				Priority:    3,
+				State:       startPlannedItemLaunching,
+				UpdatedAt:   now,
+				CreatedAt:   now,
+			},
+		},
+		ScoutJobs: map[string]startWorkScoutJob{
+			proposalID: {
+				ID:                  proposalID,
+				Role:                improvementScoutRole,
+				Title:               "Improve help text",
+				Summary:             "Make help clearer",
+				ArtifactPath:        artifactPath,
+				ProposalPath:        filepath.ToSlash(filepath.Join(artifactPath, "proposals.json")),
+				Destination:         improvementDestinationLocal,
+				TaskBody:            "Implement scout proposal: Improve help text",
+				Status:              startScoutJobRunning,
+				UpdatedAt:           now,
+				CreatedAt:           now,
+				LegacyPlannedItemID: "planned-1",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	items, err := listStartUIScoutItems(repoSlug)
+	if err != nil {
+		t.Fatalf("list scout items: %v", err)
+	}
+	if len(items) != 1 || items[0].Status != startScoutJobQueued {
+		t.Fatalf("expected legacy launching scout item without run id to requeue, got %+v", items)
+	}
+	workState, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("read start state: %v", err)
+	}
+	if workState.ScoutJobs[proposalID].Status != startScoutJobQueued || workState.ScoutJobs[proposalID].RunID != "" {
+		t.Fatalf("expected scout job to be requeued without a run id, got %+v", workState.ScoutJobs[proposalID])
+	}
+}
+
+func TestListStartUIScoutItemsReconcilesRunningScoutJobFromManifest(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	repo := createLocalWorkRepoAt(t, sourcePath)
+	writeScoutPickupFixture(t, repo, improvementScoutRole, "Improve help text", "Make help clearer")
+	if err := writeGithubJSON(filepath.Join(repo, ".nana", "improvements", "improve-test", "policy.json"), improvementPolicy{
+		Version:          1,
+		IssueDestination: improvementDestinationLocal,
+		Labels:           []string{"improvement"},
+	}); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	proposalID := localScoutProposalID(improvementScoutRole, scoutFinding{
+		Title:             "Improve help text",
+		Area:              "UX",
+		Summary:           "Make help clearer",
+		Rationale:         "Users need this.",
+		Evidence:          "README.md",
+		Impact:            "Better workflow.",
+		SuggestedNextStep: "Make the smallest change.",
+		Files:             []string{"README.md"},
+	})
+	runID := "lw-scout-completed"
+	now := time.Now().UTC().Format(time.RFC3339)
+	manifest := localWorkManifest{
+		Version:      1,
+		RunID:        runID,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		CompletedAt:  now,
+		Status:       "completed",
+		CurrentPhase: "final-apply",
+		RepoRoot:     repo,
+		RepoName:     filepath.Base(repo),
+		RepoID:       localWorkRepoID(repo),
+		SourceBranch: "main",
+		BaselineSHA:  strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:  filepath.Join(home, "sandboxes", runID),
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write local work manifest: %v", err)
+	}
+	artifactPath := filepath.ToSlash(filepath.Join(".nana", "improvements", "improve-test"))
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  now,
+		ScoutJobs: map[string]startWorkScoutJob{
+			proposalID: {
+				ID:           proposalID,
+				Role:         improvementScoutRole,
+				Title:        "Improve help text",
+				Summary:      "Make help clearer",
+				ArtifactPath: artifactPath,
+				ProposalPath: filepath.ToSlash(filepath.Join(artifactPath, "proposals.json")),
+				Destination:  improvementDestinationLocal,
+				TaskBody:     "Implement scout proposal: Improve help text",
+				Status:       startScoutJobRunning,
+				RunID:        runID,
+				UpdatedAt:    now,
+				CreatedAt:    now,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	items, err := listStartUIScoutItems(repoSlug)
+	if err != nil {
+		t.Fatalf("list scout items: %v", err)
+	}
+	if len(items) != 1 || items[0].Status != startScoutJobCompleted || items[0].RunID != runID {
+		t.Fatalf("expected running scout item to reconcile from manifest, got %+v", items)
+	}
+	workState, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("read start state: %v", err)
+	}
+	if workState.ScoutJobs[proposalID].Status != startScoutJobCompleted || workState.ScoutJobs[proposalID].RunID != runID {
+		t.Fatalf("expected reconciled scout job completion in state, got %+v", workState.ScoutJobs[proposalID])
+	}
+}
+
 func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	server := httptest.NewServer(startUIWebHandler("http://127.0.0.1:17653"))
 	defer server.Close()
