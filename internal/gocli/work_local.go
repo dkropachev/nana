@@ -24,7 +24,7 @@ import (
 const LocalWorkHelp = `nana work - Local implementation runtime for git-backed repos
 
 Usage:
-  nana work start [--repo <path>] [--task <text> | --plan-file <path>] [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [-- codex-args...]
+  nana work start [--detach] [--repo <path>] [--task <text> | --plan-file <path>] [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [-- codex-args...]
   nana work resume [--run-id <id> | --last | --global-last] [--repo <path>] [-- codex-args...]
   nana work status [--run-id <id> | --last | --global-last] [--repo <path>] [--json]
   nana work logs [--run-id <id> | --last | --global-last] [--repo <path>] [--tail <n>] [--json]
@@ -67,6 +67,8 @@ var localWorkReadRetryDelay = 200 * time.Millisecond
 var localWorkRetrySleep = time.Sleep
 var localWorkOpenReadStore = openLocalWorkReadDB
 var localWorkProcessSnapshot = captureLocalWorkProcessSnapshot
+var localWorkStartDetachedRunner = launchLocalWorkDetachedRunner
+var localWorkExecuteLoop = executeLocalWorkLoop
 
 var localWorkFinalReviewGateRoles = []string{
 	"quality-reviewer",
@@ -76,6 +78,7 @@ var localWorkFinalReviewGateRoles = []string{
 }
 
 type localWorkStartOptions struct {
+	Detach                bool
 	RepoPath              string
 	Task                  string
 	PlanFile              string
@@ -1170,6 +1173,8 @@ func parseLocalWorkStartArgs(args []string) (localWorkStartOptions, error) {
 	for index := 0; index < len(parseArgs); index++ {
 		token := parseArgs[index]
 		switch {
+		case token == "--detach":
+			options.Detach = true
 		case token == "--repo":
 			value, err := requireLocalWorkFlagValue(parseArgs, index, "--repo")
 			if err != nil {
@@ -1504,7 +1509,58 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 		fmt.Fprintf(os.Stdout, "[local] Verification warning: %s\n", warning)
 	}
 
-	return runID, executeLocalWorkLoop(runID, options.CodexArgs)
+	if options.Detach {
+		logPath := filepath.Join(runDir, "runtime.log")
+		if err := localWorkStartDetachedRunner(repoRoot, runID, options.CodexArgs, logPath); err != nil {
+			failedAt := ISOTimeNow()
+			manifest.Status = "failed"
+			manifest.LastError = "detached local work runner failed to start: " + err.Error()
+			manifest.UpdatedAt = failedAt
+			manifest.CompletedAt = failedAt
+			setLocalWorkProgress(&manifest, nil, "failed", "launch-detached", 0)
+			if writeErr := writeLocalWorkManifest(manifest); writeErr != nil {
+				return runID, fmt.Errorf("%w (additionally failed to persist detached launch failure: %v)", err, writeErr)
+			}
+			return runID, err
+		}
+		fmt.Fprintf(os.Stdout, "[local] Detached run %s; runtime log: %s\n", runID, logPath)
+		return runID, nil
+	}
+
+	return runID, localWorkExecuteLoop(runID, options.CodexArgs)
+}
+
+func launchLocalWorkDetachedRunner(repoRoot string, runID string, codexArgs []string, logPath string) error {
+	executablePath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	args := []string{"work", "resume", "--run-id", runID, "--repo", repoRoot}
+	if len(codexArgs) > 0 {
+		args = append(args, "--")
+		args = append(args, codexArgs...)
+	}
+	cmd := exec.Command(executablePath, args...)
+	cmd.Dir = repoRoot
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Env = append([]string{}, os.Environ()...)
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		return err
+	}
+	go func() {
+		defer logFile.Close()
+		_ = cmd.Wait()
+	}()
+	return nil
 }
 
 func resumeLocalWork(cwd string, options localWorkResumeOptions) error {
@@ -1525,7 +1581,7 @@ func resumeLocalWork(cwd string, options localWorkResumeOptions) error {
 		return fmt.Errorf("work run %s has already exhausted max iterations (%d)", manifest.RunID, manifest.MaxIterations)
 	}
 	fmt.Fprintf(os.Stdout, "[local] Resuming run %s for %s\n", manifest.RunID, manifest.RepoRoot)
-	return executeLocalWorkLoop(manifest.RunID, options.CodexArgs)
+	return localWorkExecuteLoop(manifest.RunID, options.CodexArgs)
 }
 
 func retryBlockedLocalWorkFinalApply(manifest localWorkManifest) error {

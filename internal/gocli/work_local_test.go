@@ -542,6 +542,79 @@ func TestParseLocalWorkStartArgsAllowsBranchTaskInference(t *testing.T) {
 	}
 }
 
+func TestParseLocalWorkStartArgsSupportsDetach(t *testing.T) {
+	options, err := parseLocalWorkStartArgs([]string{"--detach", "--repo", ".", "--task", "ship it"})
+	if err != nil {
+		t.Fatalf("parseLocalWorkStartArgs: %v", err)
+	}
+	if !options.Detach {
+		t.Fatalf("expected detach option to be set, got %#v", options)
+	}
+}
+
+func TestStartLocalWorkWithRunIDDetachSpawnsBackgroundRunner(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoRoot := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+
+	oldDetachedRunner := localWorkStartDetachedRunner
+	oldExecuteLoop := localWorkExecuteLoop
+	detachedCalls := 0
+	executeCalls := 0
+	detachedLogPath := ""
+	localWorkStartDetachedRunner = func(repoPath string, runID string, codexArgs []string, logPath string) error {
+		detachedCalls++
+		detachedLogPath = logPath
+		if repoPath != repoRoot {
+			t.Fatalf("unexpected detached repo path: %s", repoPath)
+		}
+		if strings.TrimSpace(runID) == "" {
+			t.Fatalf("expected detached runner run id")
+		}
+		if len(codexArgs) != 0 {
+			t.Fatalf("unexpected detached codex args: %#v", codexArgs)
+		}
+		return nil
+	}
+	localWorkExecuteLoop = func(runID string, codexArgs []string) error {
+		executeCalls++
+		return nil
+	}
+	defer func() {
+		localWorkStartDetachedRunner = oldDetachedRunner
+		localWorkExecuteLoop = oldExecuteLoop
+	}()
+
+	runID, err := startLocalWorkWithRunID(repoRoot, localWorkStartOptions{
+		Detach:                true,
+		RepoPath:              repoRoot,
+		Task:                  "Implement detached local work launch",
+		MaxIterations:         1,
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+	})
+	if err != nil {
+		t.Fatalf("startLocalWorkWithRunID(detach): %v", err)
+	}
+	if detachedCalls != 1 {
+		t.Fatalf("expected one detached runner launch, got %d", detachedCalls)
+	}
+	if executeCalls != 0 {
+		t.Fatalf("expected execute loop to be skipped for detach, got %d calls", executeCalls)
+	}
+	if !strings.HasSuffix(detachedLogPath, filepath.Join("runs", runID, "runtime.log")) {
+		t.Fatalf("unexpected detached log path: %s", detachedLogPath)
+	}
+	manifest, err := readLocalWorkManifestByRunID(runID)
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID(%s): %v", runID, err)
+	}
+	if manifest.Status != "running" || manifest.CurrentPhase != "bootstrap" {
+		t.Fatalf("expected detached manifest to remain running/bootstrap, got %+v", manifest)
+	}
+}
+
 func TestInferLocalWorkTaskFromBranch(t *testing.T) {
 	task, err := inferLocalWorkTaskFromBranch("feature/add-branch-task-inference")
 	if err != nil {

@@ -238,6 +238,152 @@ func localScoutPickupStatusToScoutJobStatus(status string) string {
 	}
 }
 
+func findLocalScoutPickupItemByPlannedItemID(pickupState localScoutPickupState, plannedItemID string) (localScoutPickupItem, bool) {
+	plannedItemID = strings.TrimSpace(plannedItemID)
+	if plannedItemID == "" {
+		return localScoutPickupItem{}, false
+	}
+	for _, record := range pickupState.Items {
+		if strings.TrimSpace(record.PlannedItemID) == plannedItemID {
+			return record, true
+		}
+	}
+	return localScoutPickupItem{}, false
+}
+
+func findScoutJobByPickupPlannedItemID(state *startWorkState, pickupState localScoutPickupState, plannedItemID string) (string, startWorkScoutJob, bool) {
+	record, ok := findLocalScoutPickupItemByPlannedItemID(pickupState, plannedItemID)
+	if !ok {
+		return "", startWorkScoutJob{}, false
+	}
+	proposalID := strings.TrimSpace(record.ProposalID)
+	if proposalID == "" || state == nil {
+		return "", startWorkScoutJob{}, false
+	}
+	job, ok := state.ScoutJobs[proposalID]
+	if !ok {
+		return "", startWorkScoutJob{}, false
+	}
+	return proposalID, job, true
+}
+
+func parseLegacyScoutPlannedItemDescription(description string) (string, string, scoutFinding) {
+	lines := strings.Split(strings.TrimSpace(description), "\n")
+	section := ""
+	sections := map[string]string{}
+	appendSection := func(name string, line string) {
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(line) == "" {
+			return
+		}
+		if existing := strings.TrimSpace(sections[name]); existing != "" {
+			sections[name] = existing + "\n" + strings.TrimSpace(line)
+			return
+		}
+		sections[name] = strings.TrimSpace(line)
+	}
+	artifactPath := ""
+	role := ""
+	finding := scoutFinding{}
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		switch {
+		case line == "":
+			continue
+		case strings.HasPrefix(line, "Source artifact:"):
+			artifactPath = strings.TrimSpace(strings.TrimPrefix(line, "Source artifact:"))
+			section = ""
+		case strings.HasPrefix(line, "Scout role:"):
+			role = strings.TrimSpace(strings.TrimPrefix(line, "Scout role:"))
+			section = ""
+		case strings.HasPrefix(line, "Area:"):
+			finding.Area = strings.TrimSpace(strings.TrimPrefix(line, "Area:"))
+			section = ""
+		case line == "Summary:":
+			section = "summary"
+		case line == "Rationale:":
+			section = "rationale"
+		case line == "Evidence:":
+			section = "evidence"
+		case line == "Impact:":
+			section = "impact"
+		case line == "Files:":
+			section = "files"
+		case line == "Suggested next step:":
+			section = "suggested_next_step"
+		default:
+			appendSection(section, line)
+		}
+	}
+	finding.Summary = strings.TrimSpace(sections["summary"])
+	finding.Rationale = strings.TrimSpace(sections["rationale"])
+	finding.Evidence = strings.TrimSpace(sections["evidence"])
+	finding.Impact = strings.TrimSpace(sections["impact"])
+	finding.SuggestedNextStep = strings.TrimSpace(sections["suggested_next_step"])
+	if files := strings.TrimSpace(sections["files"]); files != "" {
+		parts := strings.Split(files, ",")
+		for _, part := range parts {
+			if value := strings.TrimSpace(part); value != "" {
+				finding.Files = append(finding.Files, value)
+			}
+		}
+	}
+	return artifactPath, role, finding
+}
+
+func startWorkScoutJobFromLegacyPlannedItem(item startWorkPlannedItem, proposalID string) startWorkScoutJob {
+	title := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(item.Title), "Implement scout proposal: "))
+	artifactPath, role, finding := parseLegacyScoutPlannedItemDescription(item.Description)
+	finding.Title = title
+	role = defaultString(role, improvementScoutRole)
+	proposalID = defaultString(strings.TrimSpace(proposalID), localScoutProposalID(role, finding))
+	discovered := localScoutDiscoveredItem{
+		ID:          proposalID,
+		Role:        role,
+		Title:       title,
+		Artifact:    artifactPath,
+		Proposal:    finding,
+		Destination: improvementDestinationLocal,
+	}
+	createdAt := defaultString(strings.TrimSpace(item.CreatedAt), defaultString(strings.TrimSpace(item.UpdatedAt), ISOTimeNow()))
+	job := startWorkScoutJobFromDiscovered(discovered, createdAt)
+	job.LegacyPlannedItemID = item.ID
+	job.UpdatedAt = defaultString(strings.TrimSpace(item.UpdatedAt), createdAt)
+	switch strings.TrimSpace(item.State) {
+	case startPlannedItemLaunching:
+		if strings.TrimSpace(item.LaunchRunID) != "" {
+			job.Status = startScoutJobRunning
+			job.RunID = strings.TrimSpace(item.LaunchRunID)
+		}
+	case startPlannedItemLaunched, "done":
+		job.Status = startScoutJobCompleted
+		job.RunID = strings.TrimSpace(item.LaunchRunID)
+	case startPlannedItemFailed:
+		job.Status = startScoutJobFailed
+		job.RunID = strings.TrimSpace(item.LaunchRunID)
+		job.LastError = strings.TrimSpace(item.LastError)
+	default:
+		job.Status = startScoutJobQueued
+	}
+	return job
+}
+
+func logStartWorkScoutJobTransition(repoSlug string, previous startWorkScoutJob, next startWorkScoutJob, hadPrevious bool) {
+	if !hadPrevious {
+		return
+	}
+	if strings.TrimSpace(previous.Status) == strings.TrimSpace(next.Status) &&
+		strings.TrimSpace(previous.RunID) == strings.TrimSpace(next.RunID) &&
+		strings.TrimSpace(previous.LastError) == strings.TrimSpace(next.LastError) {
+		return
+	}
+	switch strings.TrimSpace(next.Status) {
+	case startScoutJobCompleted:
+		fmt.Fprintf(os.Stdout, "[start] %s: scout job %s run %s completed.\n", repoSlug, next.ID, defaultString(strings.TrimSpace(next.RunID), "-"))
+	case startScoutJobFailed:
+		fmt.Fprintf(os.Stdout, "[start] %s: scout job %s run %s failed: %s.\n", repoSlug, next.ID, defaultString(strings.TrimSpace(next.RunID), "-"), defaultString(strings.TrimSpace(next.LastError), "-"))
+	}
+}
+
 func findLegacyScoutPlannedItem(state *startWorkState, existing startWorkScoutJob, record localScoutPickupItem, recordOK bool, item localScoutDiscoveredItem) (startWorkPlannedItem, bool) {
 	if state == nil {
 		return startWorkPlannedItem{}, false
@@ -374,16 +520,26 @@ func reconcileStartWorkScoutJobRunState(job *startWorkScoutJob) {
 }
 
 func syncStartWorkScoutJobsIntoState(repoPath string, state *startWorkState) (bool, error) {
-	if strings.TrimSpace(repoPath) == "" || state == nil || strings.TrimSpace(state.SourceRepo) == "" {
+	if state == nil || strings.TrimSpace(state.SourceRepo) == "" {
 		return false, nil
 	}
-	discoveredItems, err := listLocalScoutDiscoveredItems(repoPath)
-	if err != nil {
-		return false, err
+	discoveredItems := []localScoutDiscoveredItem{}
+	repoPathAvailable := false
+	if strings.TrimSpace(repoPath) != "" {
+		if info, statErr := os.Stat(repoPath); statErr == nil && info.IsDir() {
+			repoPathAvailable = true
+			items, err := listLocalScoutDiscoveredItems(repoPath)
+			if err != nil {
+				return false, err
+			}
+			discoveredItems = items
+		}
 	}
 	pickupState := localScoutPickupState{Version: 1, Items: map[string]localScoutPickupItem{}}
-	if stateValue, _, readErr := readLocalScoutPickupState(repoPath); readErr == nil {
-		pickupState = stateValue
+	if repoPathAvailable {
+		if stateValue, _, readErr := readLocalScoutPickupState(repoPath); readErr == nil {
+			pickupState = stateValue
+		}
 	}
 	if pickupState.Items == nil {
 		pickupState.Items = map[string]localScoutPickupItem{}
@@ -404,9 +560,74 @@ func syncStartWorkScoutJobsIntoState(repoPath string, state *startWorkState) (bo
 		deriveScoutJobLegacyState(&job, existing, hasExisting, record, recordOK, planned, plannedOK)
 		reconcileStartWorkScoutJobRunState(&job)
 		if !hasExisting || !reflect.DeepEqual(existing, job) {
+			logStartWorkScoutJobTransition(state.SourceRepo, existing, job, hasExisting)
 			state.ScoutJobs[item.ID] = job
 			updated = true
 		}
+	}
+	legacyPlannedItemIDs := []string{}
+	for plannedItemID, planned := range state.PlannedItems {
+		if !startWorkPlannedItemLooksScoutDerived(planned) {
+			continue
+		}
+		legacyPlannedItemIDs = append(legacyPlannedItemIDs, plannedItemID)
+		jobID, existing, hasExisting := findScoutJobByLegacyPlannedItemID(state, plannedItemID)
+		if !hasExisting {
+			jobID, existing, hasExisting = findScoutJobByPickupPlannedItemID(state, pickupState, plannedItemID)
+		}
+		record, recordOK := findLocalScoutPickupItemByPlannedItemID(pickupState, plannedItemID)
+		proposalID := strings.TrimSpace(jobID)
+		if proposalID == "" && recordOK {
+			proposalID = strings.TrimSpace(record.ProposalID)
+		}
+		if !hasExisting {
+			existing = startWorkScoutJobFromLegacyPlannedItem(planned, proposalID)
+			hasExisting = false
+		}
+		job := existing
+		if strings.TrimSpace(job.ID) == "" {
+			job = startWorkScoutJobFromLegacyPlannedItem(planned, proposalID)
+		}
+		if strings.TrimSpace(job.LegacyPlannedItemID) == "" {
+			job.LegacyPlannedItemID = planned.ID
+		}
+		if recordOK && strings.TrimSpace(record.RunID) != "" {
+			job.RunID = strings.TrimSpace(record.RunID)
+		}
+		switch strings.TrimSpace(planned.State) {
+		case startPlannedItemLaunching:
+			if strings.TrimSpace(job.RunID) != "" {
+				job.Status = startScoutJobRunning
+				job.LastError = ""
+			} else if !startWorkScoutJobIsResolved(job.Status) {
+				job.Status = startScoutJobQueued
+				job.LastError = ""
+			}
+		case startPlannedItemLaunched, "done":
+			job.Status = startScoutJobCompleted
+			job.LastError = ""
+		case startPlannedItemFailed:
+			job.Status = startScoutJobFailed
+			job.LastError = defaultString(strings.TrimSpace(planned.LastError), strings.TrimSpace(job.LastError))
+		default:
+			if !startWorkScoutJobIsResolved(job.Status) {
+				job.Status = startScoutJobQueued
+				job.LastError = ""
+			}
+		}
+		if strings.TrimSpace(planned.LaunchRunID) != "" {
+			job.RunID = strings.TrimSpace(planned.LaunchRunID)
+		}
+		reconcileStartWorkScoutJobRunState(&job)
+		if !hasExisting || !reflect.DeepEqual(existing, job) {
+			logStartWorkScoutJobTransition(state.SourceRepo, existing, job, hasExisting)
+			state.ScoutJobs[job.ID] = job
+			updated = true
+		}
+	}
+	for _, plannedItemID := range legacyPlannedItemIDs {
+		delete(state.PlannedItems, plannedItemID)
+		updated = true
 	}
 	return updated, nil
 }
@@ -435,6 +656,14 @@ func syncStartWorkScoutJobs(repoPath string, repoSlug string) (bool, *startWorkS
 		return false, nil, err
 	}
 	return true, state, nil
+}
+
+func normalizeStartWorkStateScoutJobs(state *startWorkState) (bool, error) {
+	if state == nil || strings.TrimSpace(state.SourceRepo) == "" {
+		return false, nil
+	}
+	repoPath := strings.TrimSpace(githubManagedPaths(state.SourceRepo).SourcePath)
+	return syncStartWorkScoutJobsIntoState(repoPath, state)
 }
 
 func countOutstandingLocalScoutItems(repoPath string, repoSlug string, role string) (int, error) {
@@ -548,7 +777,7 @@ func runStartWorkScoutJob(repoSlug string, job startWorkScoutJob, codexArgs []st
 	if err != nil {
 		return startWorkLaunchResult{}, err
 	}
-	args := []string{"start", "--repo", repoPath, "--task", job.TaskBody}
+	args := []string{"start", "--detach", "--repo", repoPath, "--task", job.TaskBody}
 	if len(codexArgs) > 0 {
 		args = append(args, "--")
 		args = append(args, codexArgs...)
@@ -558,7 +787,7 @@ func runStartWorkScoutJob(repoSlug string, job startWorkScoutJob, codexArgs []st
 		return startWorkLaunchResult{RunID: runID}, err
 	}
 	if strings.TrimSpace(runID) == "" {
-		return startWorkLaunchResult{}, fmt.Errorf("scout job %s completed without a run id", job.ID)
+		return startWorkLaunchResult{}, fmt.Errorf("scout job %s started without a run id", job.ID)
 	}
 	return startWorkLaunchResult{RunID: runID}, nil
 }

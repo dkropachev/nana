@@ -503,6 +503,98 @@ func TestStartRepoCoordinatorMarkTaskStartedMarksPlannedLaunchRunning(t *testing
 	}
 }
 
+func TestStartRepoCoordinatorMarkTaskStartedMarksScoutJobRunning(t *testing.T) {
+	coordinator := &startRepoCoordinator{
+		repoSlug: "acme/widget",
+		state: &startWorkState{
+			Version:      startWorkStateVersion,
+			SourceRepo:   "acme/widget",
+			UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+			Issues:       map[string]startWorkIssueState{},
+			ServiceTasks: map[string]startWorkServiceTask{},
+			ScoutJobs: map[string]startWorkScoutJob{
+				"scout-1": {
+					ID:          "scout-1",
+					Role:        improvementScoutRole,
+					Title:       "Improve help text",
+					Summary:     "Make help clearer",
+					Destination: improvementDestinationLocal,
+					TaskBody:    "Implement local scout proposal: Improve help text",
+					Status:      startScoutJobQueued,
+					CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+					UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
+				},
+			},
+		},
+	}
+	task := startRepoTask{
+		Key:        startServiceTaskKey(startTaskKindScoutJob, "scout-1"),
+		Kind:       startTaskKindScoutJob,
+		Queue:      startTaskQueueImplementation,
+		ScoutJobID: "scout-1",
+	}
+	if err := coordinator.markTaskStarted(task); err != nil {
+		t.Fatalf("markTaskStarted: %v", err)
+	}
+	job := coordinator.state.ScoutJobs["scout-1"]
+	if job.Status != startScoutJobRunning || job.Attempts != 1 {
+		t.Fatalf("expected scout job to be marked running, got %+v", job)
+	}
+}
+
+func TestStartRepoCoordinatorApplyTaskResultKeepsScoutJobRunningAfterLaunch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	coordinator := &startRepoCoordinator{
+		repoSlug: "acme/widget",
+		state: &startWorkState{
+			Version:      startWorkStateVersion,
+			SourceRepo:   "acme/widget",
+			UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+			Issues:       map[string]startWorkIssueState{},
+			ServiceTasks: map[string]startWorkServiceTask{},
+			ScoutJobs: map[string]startWorkScoutJob{
+				"scout-1": {
+					ID:          "scout-1",
+					Role:        improvementScoutRole,
+					Title:       "Improve help text",
+					Summary:     "Make help clearer",
+					Destination: improvementDestinationLocal,
+					TaskBody:    "Implement local scout proposal: Improve help text",
+					Status:      startScoutJobRunning,
+					CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+					UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
+				},
+			},
+		},
+	}
+	if err := writeStartWorkState(*coordinator.state); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	if err := coordinator.applyTaskResult(startRepoTaskResult{
+		Task: startRepoTask{
+			Key:        startServiceTaskKey(startTaskKindScoutJob, "scout-1"),
+			Kind:       startTaskKindScoutJob,
+			Queue:      startTaskQueueImplementation,
+			ScoutJobID: "scout-1",
+		},
+		Launch: &startWorkLaunchResult{RunID: "lw-scout-1"},
+	}); err != nil {
+		t.Fatalf("applyTaskResult: %v", err)
+	}
+
+	state, err := readStartWorkState("acme/widget")
+	if err != nil {
+		t.Fatalf("read start state: %v", err)
+	}
+	job := state.ScoutJobs["scout-1"]
+	if job.Status != startScoutJobRunning || job.RunID != "lw-scout-1" {
+		t.Fatalf("expected scout job to stay running with run id, got %+v", job)
+	}
+}
+
 func TestStartRepoCoordinatorPersistsStateWhenNoTasksAreQueued(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -1366,13 +1366,24 @@
     return pendingWorkItems().filter((item) => item.repo_slug === repoSlug);
   }
 
+  function repoScoutQueueCount(repo) {
+    return (repo.scout_job_counts.queued || 0) +
+      (repo.scout_job_counts.running || 0) +
+      (repo.scout_job_counts.failed || 0);
+  }
+
+  function repoManualPlannedQueueCount(repo) {
+    return (repo.planned_item_counts.queued || 0) +
+      (repo.planned_item_counts.launching || 0);
+  }
+
   function outstandingRepoCount(repo) {
     return (repo.issue_counts.queued || 0) +
       (repo.issue_counts.blocked || 0) +
       (repo.service_task_counts.queued || 0) +
       (repo.service_task_counts.running || 0) +
-      (repo.planned_item_counts.queued || 0) +
-      (repo.planned_item_counts.launching || 0) +
+      repoScoutQueueCount(repo) +
+      repoManualPlannedQueueCount(repo) +
       pendingRunsForRepo(repo.repo_slug).length +
       pendingWorkItemsForRepo(repo.repo_slug).length;
   }
@@ -1806,7 +1817,8 @@
       queued_issues: repo.issue_counts.queued || 0,
       blocked_issues: repo.issue_counts.blocked || 0,
       service_queue: (repo.service_task_counts.queued || 0) + (repo.service_task_counts.running || 0),
-      planned_queue: (repo.planned_item_counts.queued || 0) + (repo.planned_item_counts.launching || 0),
+      scout_queue: repoScoutQueueCount(repo),
+      planned_queue: repoManualPlannedQueueCount(repo),
       pending_runs: pendingRunsForRepo(repo.repo_slug).length,
     }));
   }
@@ -2122,8 +2134,8 @@
               <strong>${(repo.service_task_counts.queued || 0) + (repo.service_task_counts.running || 0)}</strong>
             </div>
             <div class="repo-card-metric">
-              <span>Planned</span>
-              <strong>${(repo.planned_item_counts.queued || 0) + (repo.planned_item_counts.launching || 0)}</strong>
+              <span>Scouts</span>
+              <strong>${repoScoutQueueCount(repo)}</strong>
             </div>
           </div>
           <button class="tx-btn tx-btn-secondary repo-card-button" type="button" data-open-repo="${escapeHTML(repo.repo_slug)}">Open Repo</button>
@@ -2206,6 +2218,7 @@
     const metricCards = [
       { label: "Repos", value: state.overview.totals.repos, note: "Onboarded and visible in the console." },
       { label: "Queued Issues", value: state.overview.totals.issues_queued, note: "Tracked issues waiting for work." },
+      { label: "Scout Queue", value: (state.overview.totals.scout_queued || 0) + (state.overview.totals.scout_running || 0) + (state.overview.totals.scout_failed || 0), note: "Local scout jobs waiting, active, or failed." },
       { label: "Pending Jobs", value: runs.length, note: "Work runs still in flight or blocked." },
       { label: "Approvals", value: state.overview.totals.approval_items || 0, note: "Human-gate work waiting for review or launch." },
       { label: "Service Queue", value: state.overview.totals.service_queued + state.overview.totals.service_running, note: "Scouts, triage, sync, and reconcile tasks." },
@@ -3277,7 +3290,7 @@
         <div class="surface-head">
           <div>
             <h3>Queue Snapshot</h3>
-            <p>Current issue, service, and planned-work pressure.</p>
+            <p>Current issue, service, scout-job, and planned-work pressure.</p>
           </div>
           <button class="tx-btn tx-btn-secondary" type="button" data-repo-drop="${escapeHTML(repo.repo_slug)}">Drop Repo</button>
         </div>
@@ -3290,7 +3303,8 @@
       { label: "Queued Issues", value: repo.issue_counts.queued || 0, note: "Issues waiting to be picked up." },
       { label: "Blocked Issues", value: repo.issue_counts.blocked || 0, note: "Issues blocked on policy, timing, or feedback." },
       { label: "Service Queue", value: (repo.service_task_counts.queued || 0) + (repo.service_task_counts.running || 0), note: "Service tasks still executing or waiting." },
-      { label: "Planned Queue", value: (repo.planned_item_counts.queued || 0) + (repo.planned_item_counts.launching || 0), note: "Planned launches not fully cleared yet." },
+      { label: "Scout Queue", value: repoScoutQueueCount(repo), note: "Local scout jobs waiting, active, or failed." },
+      { label: "Planned Queue", value: repoManualPlannedQueueCount(repo), note: "Manual planned launches that still need action." },
       { label: "Pending Jobs", value: repoRuns.length, note: "Work runs currently mapped to this repo." },
       { label: "Work Items", value: repoWorkItems.length, note: "Inbound items linked to this repo." },
     ]);
@@ -4225,6 +4239,7 @@
   function refreshCounts(repo, updatedState) {
     repo.issue_counts = {};
     repo.service_task_counts = {};
+    repo.scout_job_counts = {};
     repo.planned_item_counts = {};
     Object.values(updatedState.issues || {}).forEach((issue) => {
       const key = issue.status || "";
@@ -4233,6 +4248,10 @@
     Object.values(updatedState.service_tasks || {}).forEach((task) => {
       const key = task.status || "";
       repo.service_task_counts[key] = (repo.service_task_counts[key] || 0) + 1;
+    });
+    Object.values(updatedState.scout_jobs || {}).forEach((job) => {
+      const key = job.status || "";
+      repo.scout_job_counts[key] = (repo.scout_job_counts[key] || 0) + 1;
     });
     Object.values(updatedState.planned_items || {}).forEach((item) => {
       const key = item.state || "";

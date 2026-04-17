@@ -79,6 +79,10 @@ type startUITotals struct {
 	IssuesInProgress int `json:"issues_in_progress"`
 	ServiceQueued    int `json:"service_queued"`
 	ServiceRunning   int `json:"service_running"`
+	ScoutQueued      int `json:"scout_queued"`
+	ScoutRunning     int `json:"scout_running"`
+	ScoutFailed      int `json:"scout_failed"`
+	ScoutCompleted   int `json:"scout_completed"`
 	PlannedQueued    int `json:"planned_queued"`
 	PlannedLaunching int `json:"planned_launching"`
 	BlockedIssues    int `json:"blocked_issues"`
@@ -109,6 +113,7 @@ type startUIRepoSummary struct {
 	Scouts             startUIRepoScouts                 `json:"scouts"`
 	IssueCounts        map[string]int                    `json:"issue_counts"`
 	ServiceTaskCounts  map[string]int                    `json:"service_task_counts"`
+	ScoutJobCounts     map[string]int                    `json:"scout_job_counts"`
 	PlannedItemCounts  map[string]int                    `json:"planned_item_counts"`
 	LastRun            *startWorkLastRun                 `json:"last_run,omitempty"`
 	DefaultBranch      string                            `json:"default_branch,omitempty"`
@@ -1510,6 +1515,10 @@ func (h *startUIAPI) buildOverviewUncached() (startUIOverview, error) {
 		totals.BlockedIssues += repo.IssueCounts[startWorkStatusBlocked]
 		totals.ServiceQueued += repo.ServiceTaskCounts[startWorkServiceTaskQueued]
 		totals.ServiceRunning += repo.ServiceTaskCounts[startWorkServiceTaskRunning]
+		totals.ScoutQueued += repo.ScoutJobCounts[startScoutJobQueued]
+		totals.ScoutRunning += repo.ScoutJobCounts[startScoutJobRunning]
+		totals.ScoutFailed += repo.ScoutJobCounts[startScoutJobFailed]
+		totals.ScoutCompleted += repo.ScoutJobCounts[startScoutJobCompleted]
 		totals.PlannedQueued += repo.PlannedItemCounts[startPlannedItemQueued]
 		totals.PlannedLaunching += repo.PlannedItemCounts[startPlannedItemLaunching]
 	}
@@ -2686,6 +2695,7 @@ func loadStartUIRepoSummary(repoSlug string, includeState bool) (startUIRepoSumm
 		Scouts:            startUIDefaultRepoScouts(strings.TrimSpace(githubManagedPaths(repoSlug).SourcePath)),
 		IssueCounts:       map[string]int{},
 		ServiceTaskCounts: map[string]int{},
+		ScoutJobCounts:    map[string]int{},
 		PlannedItemCounts: map[string]int{},
 	}
 	applyStartUIRepoSettings(&summary, settings)
@@ -2704,6 +2714,9 @@ func loadStartUIRepoSummary(repoSlug string, includeState bool) (startUIRepoSumm
 	}
 	for _, task := range state.ServiceTasks {
 		summary.ServiceTaskCounts[task.Status]++
+	}
+	for _, job := range state.ScoutJobs {
+		summary.ScoutJobCounts[job.Status]++
 	}
 	for _, item := range state.PlannedItems {
 		summary.PlannedItemCounts[item.State]++
@@ -3455,20 +3468,14 @@ func mutateStartUIScoutItem(repoSlug string, itemID string, action string) (star
 		return startUIScoutItemsResponse{}, fmt.Errorf("scout item %s was not found", itemID)
 	}
 	if selected.Destination == improvementDestinationLocal {
-		localAction := action
-		if action == "queue-planned" {
-			if selected.Status == startScoutJobFailed || selected.Status == startScoutJobDismissed {
-				localAction = "retry"
-			} else {
-				return loadStartUIScoutItems(repoSlug)
-			}
-		}
 		switch action {
-		case "dismiss", "retry", "reset", "queue-planned":
-			if _, _, err := mutateStartWorkScoutJob(repoSlug, itemID, localAction); err != nil {
+		case "dismiss", "retry", "reset":
+			if _, _, err := mutateStartWorkScoutJob(repoSlug, itemID, action); err != nil {
 				return startUIScoutItemsResponse{}, err
 			}
 			return loadStartUIScoutItems(repoSlug)
+		case "queue-planned":
+			return startUIScoutItemsResponse{}, fmt.Errorf("local scout jobs no longer support queue-planned; use retry or dismiss")
 		}
 	}
 	state, statePath, err := readLocalScoutPickupState(repoPath)
@@ -4477,9 +4484,6 @@ func startUIScoutAvailableActions(item startUIScoutItem) []string {
 			actions = append(actions, "retry")
 		}
 		return actions
-	}
-	if (status == "pending" || status == "failed" || status == "dismissed") && item.Destination == "local" {
-		actions = append(actions, "queue-planned")
 	}
 	if status == "pending" || status == "external" || status == "failed" {
 		actions = append(actions, "dismiss")

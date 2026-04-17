@@ -917,15 +917,17 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 				job.LastError = result.Err.Error()
 				job.UpdatedAt = now
 				c.state.ScoutJobs[result.Task.ScoutJobID] = job
+				fmt.Fprintf(os.Stdout, "[start] %s: scout job %s failed to launch: %s.\n", c.repoSlug, result.Task.ScoutJobID, result.Err.Error())
 				if err := writeStartWorkStateUnlocked(*c.state); err != nil {
 					return err
 				}
 				return fmt.Errorf("%s %s: %w", c.repoSlug, result.Task.Key, result.Err)
 			}
-			job.Status = startScoutJobCompleted
+			job.Status = startScoutJobRunning
 			job.LastError = ""
 			job.UpdatedAt = now
 			c.state.ScoutJobs[result.Task.ScoutJobID] = job
+			fmt.Fprintf(os.Stdout, "[start] %s: scout job %s launched local work run %s.\n", c.repoSlug, result.Task.ScoutJobID, defaultString(strings.TrimSpace(job.RunID), "-"))
 		case startTaskKindIssueSync:
 			serviceTask := c.state.ServiceTasks[result.Task.Key]
 			if result.Err != nil {

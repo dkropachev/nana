@@ -107,6 +107,20 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 			},
 		},
+		ScoutJobs: map[string]startWorkScoutJob{
+			"scout-1": {
+				ID:          "scout-1",
+				Role:        improvementScoutRole,
+				Title:       "Improve onboarding copy",
+				Summary:     "Tighten wording in the repo overview cards.",
+				Destination: improvementDestinationLocal,
+				TaskBody:    "Implement local scout proposal: Improve onboarding copy",
+				Status:      startScoutJobFailed,
+				CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+				UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
+				LastError:   "review failed",
+			},
+		},
 	}); err != nil {
 		t.Fatalf("write start state: %v", err)
 	}
@@ -145,6 +159,9 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 	}
 	if len(overview.Repos) != 1 || overview.Totals.ActiveWorkRuns != 1 || overview.HUD.Team == nil || overview.HUD.Team.AgentCount != 2 {
 		t.Fatalf("unexpected overview payload: %+v", overview)
+	}
+	if overview.Totals.ScoutFailed != 1 || overview.Repos[0].ScoutJobCounts[startScoutJobFailed] != 1 {
+		t.Fatalf("expected scout job counts in overview payload, got totals=%+v repo=%+v", overview.Totals, overview.Repos[0].ScoutJobCounts)
 	}
 	if len(overview.ScoutCatalog) != len(supportedScoutRoleOrder) {
 		t.Fatalf("expected scout catalog in overview, got %+v", overview.ScoutCatalog)
@@ -1821,15 +1838,8 @@ func TestStartUIAPIScoutItemsAndActions(t *testing.T) {
 		t.Fatalf("POST queue-planned: %v", err)
 	}
 	defer queueResponse.Body.Close()
-	var queuePayload startUIScoutItemsResponse
-	if err := json.NewDecoder(queueResponse.Body).Decode(&queuePayload); err != nil {
-		t.Fatalf("decode queue payload: %v", err)
-	}
-	if len(queuePayload.Items) != 1 || queuePayload.Items[0].Status != startScoutJobQueued || queuePayload.Items[0].PlannedItemID != "" {
-		t.Fatalf("unexpected queue payload: %+v", queuePayload)
-	}
-	if queuePayload.Repo.State == nil || len(queuePayload.Repo.State.ScoutJobs) != 1 {
-		t.Fatalf("expected scout job in repo state, got %+v", queuePayload.Repo.State)
+	if queueResponse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected queue-planned to be rejected for local scout jobs, got %d", queueResponse.StatusCode)
 	}
 }
 
@@ -2166,6 +2176,111 @@ func TestListStartUIScoutItemsReconcilesRunningScoutJobFromManifest(t *testing.T
 	}
 	if workState.ScoutJobs[proposalID].Status != startScoutJobCompleted || workState.ScoutJobs[proposalID].RunID != runID {
 		t.Fatalf("expected reconciled scout job completion in state, got %+v", workState.ScoutJobs[proposalID])
+	}
+}
+
+func TestReadStartWorkStateMigratesScoutDerivedPlannedItemsToScoutJobs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	repo := createLocalWorkRepoAt(t, sourcePath)
+	writeScoutPickupFixture(t, repo, improvementScoutRole, "Improve help text", "Make help clearer")
+	if err := writeGithubJSON(filepath.Join(repo, ".nana", "improvements", "improve-test", "policy.json"), improvementPolicy{
+		Version:          1,
+		IssueDestination: improvementDestinationLocal,
+		Labels:           []string{"improvement"},
+	}); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	proposal := scoutFinding{
+		Title:             "Improve help text",
+		Area:              "UX",
+		Summary:           "Make help clearer",
+		Rationale:         "Users need this.",
+		Evidence:          "README.md",
+		Impact:            "Better workflow.",
+		SuggestedNextStep: "Make the smallest change.",
+		Files:             []string{"README.md"},
+	}
+	proposalID := localScoutProposalID(improvementScoutRole, proposal)
+	now := time.Now().UTC().Format(time.RFC3339)
+	pickupPath, err := localScoutPickupStatePath(repo)
+	if err != nil {
+		t.Fatalf("pickup state path: %v", err)
+	}
+	if err := writeLocalScoutPickupState(pickupPath, localScoutPickupState{
+		Version: 1,
+		Items: map[string]localScoutPickupItem{
+			proposalID: {
+				Status:        "running",
+				Title:         proposal.Title,
+				Artifact:      filepath.ToSlash(filepath.Join(".nana", "improvements", "improve-test")),
+				RunID:         "lw-migrated",
+				PlannedItemID: "planned-scout",
+				UpdatedAt:     now,
+				ProposalID:    proposalID,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("write pickup state: %v", err)
+	}
+	if err := writeStartWorkState(startWorkState{
+		Version:    4,
+		SourceRepo: repoSlug,
+		UpdatedAt:  now,
+		PlannedItems: map[string]startWorkPlannedItem{
+			"planned-scout": {
+				ID:          "planned-scout",
+				RepoSlug:    repoSlug,
+				Title:       startUIScoutPlannedItemTitle(startUIScoutItem{Title: proposal.Title}),
+				Description: startUIScoutPlannedItemDescription(startUIScoutItem{Role: improvementScoutRole, Title: proposal.Title, Area: proposal.Area, Summary: proposal.Summary, Rationale: proposal.Rationale, Evidence: proposal.Evidence, Impact: proposal.Impact, SuggestedNextStep: proposal.SuggestedNextStep, Files: proposal.Files, ArtifactPath: filepath.ToSlash(filepath.Join(".nana", "improvements", "improve-test"))}),
+				LaunchKind:  "local_work",
+				State:       startPlannedItemLaunching,
+				CreatedAt:   now,
+				UpdatedAt:   now,
+			},
+			"planned-manual": {
+				ID:         "planned-manual",
+				RepoSlug:   repoSlug,
+				Title:      "Warm the staging environment",
+				LaunchKind: "local_work",
+				State:      startPlannedItemQueued,
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	state, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("read start state: %v", err)
+	}
+	if state.Version != startWorkStateVersion {
+		t.Fatalf("expected migrated state version %d, got %d", startWorkStateVersion, state.Version)
+	}
+	if _, ok := state.PlannedItems["planned-scout"]; ok {
+		t.Fatalf("expected scout-derived planned item to be removed, got %+v", state.PlannedItems)
+	}
+	if _, ok := state.PlannedItems["planned-manual"]; !ok {
+		t.Fatalf("expected manual planned item to remain, got %+v", state.PlannedItems)
+	}
+	job, ok := state.ScoutJobs[proposalID]
+	if !ok {
+		t.Fatalf("expected migrated scout job %s, got %+v", proposalID, state.ScoutJobs)
+	}
+	if job.Status != startScoutJobRunning || job.RunID != "lw-migrated" {
+		t.Fatalf("expected migrated scout job to preserve running state and run id, got %+v", job)
+	}
+	persisted, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("re-read start state: %v", err)
+	}
+	if _, ok := persisted.PlannedItems["planned-scout"]; ok {
+		t.Fatalf("expected migrated state file to stay clean of scout-derived planned items, got %+v", persisted.PlannedItems)
 	}
 }
 
