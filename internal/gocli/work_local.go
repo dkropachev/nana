@@ -75,6 +75,13 @@ var localWorkStartDetachedRunner = launchLocalWorkDetachedRunner
 var localWorkExecuteLoop = executeLocalWorkLoop
 var localWorkTokenUsagePersistMu sync.Mutex
 
+var localWorkFinalReviewGateRoles = []string{
+	"quality-reviewer",
+	"security-reviewer",
+	"performance-reviewer",
+	"qa-tester",
+}
+
 type localWorkStartOptions struct {
 	Detach                bool
 	RepoPath              string
@@ -3543,10 +3550,17 @@ func runLocalWorkCodexPrompt(manifest localWorkManifest, codexArgs []string, pro
 		ResumeStrategy:   codexResumeSamePrompt,
 		Env:              append(buildCodexEnv(NotifyTempContract{}, scopedCodexHome), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
 	})
-	return localWorkExecutionResult{
+	execResult := localWorkExecutionResult{
 		Stdout: result.Stdout,
 		Stderr: result.Stderr,
-	}, err
+	}
+	if persistErr := persistLocalWorkTokenUsage(manifest.RunID); persistErr != nil && !os.IsNotExist(persistErr) {
+		if err != nil {
+			return execResult, fmt.Errorf("%w (also failed to persist token usage: %v)", err, persistErr)
+		}
+		return execResult, persistErr
+	}
+	return execResult, err
 }
 
 func normalizeLocalWorkCodexArgs(args []string) []string {
