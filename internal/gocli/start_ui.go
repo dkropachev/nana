@@ -26,7 +26,7 @@ import (
 const (
 	startUIDefaultAPIPort   = 17653
 	startUIDefaultWebPort   = 17654
-	startUIBindHost         = "127.0.0.1"
+	startUIBindHost         = "0.0.0.0"
 	startUIOverviewRunLimit = 10
 )
 
@@ -735,7 +735,7 @@ func (h *startUIAPI) routes() http.Handler {
 	mux.HandleFunc("/api/v1/hud", h.handleHUD)
 	mux.HandleFunc("/api/v1/events", h.handleEvents)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h.applyCORS(w)
+		h.applyCORS(w, r)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -744,8 +744,15 @@ func (h *startUIAPI) routes() http.Handler {
 	})
 }
 
-func (h *startUIAPI) applyCORS(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", h.allowedWebOrigin)
+func (h *startUIAPI) applyCORS(w http.ResponseWriter, r *http.Request) {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		origin = h.allowedWebOrigin
+	}
+	if origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Vary", "Origin")
+	}
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 }

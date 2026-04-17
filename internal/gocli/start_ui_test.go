@@ -2513,6 +2513,24 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	}
 }
 
+func TestStartUIWebHandlerRewritesWildcardAPIBaseToRequestHost(t *testing.T) {
+	handler := startUIWebHandler("http://0.0.0.0:17653")
+	request := httptest.NewRequest(http.MethodGet, "http://example.invalid/", nil)
+	request.Host = "192.168.0.102:28654"
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+	response := recorder.Result()
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(string(body), `window.NANA_API_BASE = "http://192.168.0.102:17653"`) {
+		t.Fatalf("expected wildcard API base to resolve to request host, got %s", string(body))
+	}
+}
+
 func TestHashStartUIEventPayloadIgnoresGeneratedAt(t *testing.T) {
 	left := map[string]any{
 		"generated_at": "2026-04-13T17:00:00Z",

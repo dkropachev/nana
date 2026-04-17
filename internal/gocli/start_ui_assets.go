@@ -4,6 +4,7 @@ import (
 	"embed"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -20,8 +21,9 @@ func startUIWebHandler(apiURL string) http.Handler {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			resolvedAPIURL := resolveStartUIAPIURLForRequest(apiURL, r.Host)
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(strings.ReplaceAll(string(content), "__API_BASE__", apiURL)))
+			_, _ = w.Write([]byte(strings.ReplaceAll(string(content), "__API_BASE__", resolvedAPIURL)))
 		case r.URL.Path == "/app.css":
 			http.ServeFileFS(w, r, subtree, "app.css")
 		case r.URL.Path == "/app.js":
@@ -39,4 +41,26 @@ func startUIWebHandler(apiURL string) http.Handler {
 			http.NotFound(w, r)
 		}
 	})
+}
+
+func resolveStartUIAPIURLForRequest(apiURL string, requestHost string) string {
+	parsed, err := url.Parse(strings.TrimSpace(apiURL))
+	if err != nil {
+		return apiURL
+	}
+	apiHost := parsed.Hostname()
+	if apiHost != "" && apiHost != "0.0.0.0" && apiHost != "::" && apiHost != "[::]" {
+		return apiURL
+	}
+	hostOnly := strings.TrimSpace(requestHost)
+	if hostOnly == "" {
+		return apiURL
+	}
+	if parsedPort := strings.TrimSpace(parsed.Port()); parsedPort != "" {
+		if requestURL, requestErr := url.Parse("http://" + hostOnly); requestErr == nil {
+			parsed.Host = requestURL.Hostname() + ":" + parsedPort
+			return parsed.String()
+		}
+	}
+	return apiURL
 }

@@ -540,7 +540,7 @@ func TestStartLaunchesUIByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v\n%s", err, output)
 	}
-	if !strings.Contains(output, "[start-ui] API: http://127.0.0.1:") || !strings.Contains(output, "[start-ui] Web: http://127.0.0.1:") {
+	if !strings.Contains(output, "[start-ui] API: http://0.0.0.0:") || !strings.Contains(output, "[start-ui] Web: http://0.0.0.0:") {
 		t.Fatalf("expected UI URLs in output, got %q", output)
 	}
 	var runtime startUIRuntimeState
