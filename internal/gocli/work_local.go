@@ -60,6 +60,7 @@ const (
 	localWorkPathGroupingPolicy    = "path"
 	localWorkSingletonPolicy       = "singleton"
 	localWorkReadRetryAttempts     = 4
+	localWorkWriteRetryAttempts    = 4
 	localWorkStaleRunThreshold     = 5 * time.Minute
 )
 
@@ -673,6 +674,26 @@ func withLocalWorkReadStore[T any](readFn func(*localWorkDBStore) (T, error)) (T
 		localWorkRetrySleep(localWorkReadRetryDelay)
 	}
 	return zero, fmt.Errorf("local work DB read retry exhausted")
+}
+
+func withLocalWorkWriteRetry(writeFn func() error) error {
+	attempts := localWorkWriteRetryAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := writeFn(); err != nil {
+			lastErr = err
+			if !isLocalWorkDBLockError(err) || attempt == attempts {
+				return err
+			}
+			localWorkRetrySleep(localWorkReadRetryDelay)
+			continue
+		}
+		return nil
+	}
+	return lastErr
 }
 
 func ensureSQLiteColumn(db *sql.DB, table string, column string, alter string) error {
@@ -4180,11 +4201,6 @@ func writeLocalWorkActiveState(runDir string, manifest *localWorkManifest, state
 	if manifest == nil {
 		return nil
 	}
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return err
-	}
-	defer store.Close()
 	if state != nil {
 		if state.Iteration == 0 {
 			state.Iteration = manifest.CurrentIteration
@@ -4193,7 +4209,14 @@ func writeLocalWorkActiveState(runDir string, manifest *localWorkManifest, state
 			manifest.CurrentIteration = state.Iteration
 		}
 	}
-	return store.writeActiveState(*manifest, state)
+	return withLocalWorkWriteRetry(func() error {
+		store, err := openLocalWorkDB()
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		return store.writeActiveState(*manifest, state)
+	})
 }
 
 func latestCompletedLocalWorkIteration(manifest localWorkManifest) int {
@@ -4602,12 +4625,14 @@ func localWorkRepoID(repoRoot string) string {
 }
 
 func writeLocalWorkManifest(manifest localWorkManifest) error {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	return store.writeManifest(manifest)
+	return withLocalWorkWriteRetry(func() error {
+		store, err := openLocalWorkDB()
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		return store.writeManifest(manifest)
+	})
 }
 
 func detectLocalWorkStall(iterations []localWorkIterationSummary) string {
