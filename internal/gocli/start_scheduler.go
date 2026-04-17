@@ -257,6 +257,9 @@ func (c *startRepoCoordinator) run() error {
 	results := make(chan startRepoTaskResult, max(c.workOptions.Parallel, 1))
 	errs := []string{}
 	for {
+		if err := c.reconcileStaleLocalRuns(); err != nil {
+			return err
+		}
 		if c.refreshState {
 			if err := c.refreshRepoState(); err != nil {
 				return err
@@ -329,6 +332,28 @@ func (c *startRepoCoordinator) refreshRepoState() error {
 		return err
 	}
 	c.refreshState = false
+	return nil
+}
+
+func (c *startRepoCoordinator) reconcileStaleLocalRuns() error {
+	cleaned, manifests, err := cleanupStaleLocalWorkRunsForRepoDetailed(githubManagedPaths(c.repoSlug).SourcePath)
+	if err != nil {
+		return err
+	}
+	for _, manifest := range manifests {
+		fmt.Fprintf(
+			os.Stdout,
+			"[start] %s: stale local work run %s marked failed unexpectedly (phase=%s updated_at=%s reason=%s).\n",
+			c.repoSlug,
+			manifest.RunID,
+			defaultString(strings.TrimSpace(manifest.CurrentPhase), "-"),
+			defaultString(strings.TrimSpace(manifest.UpdatedAt), "-"),
+			defaultString(strings.TrimSpace(manifest.LastError), "-"),
+		)
+	}
+	if cleaned > 0 {
+		c.refreshState = true
+	}
 	return nil
 }
 
@@ -1063,11 +1088,42 @@ func (c *startRepoCoordinator) persistLastRun() error {
 	})
 }
 
+func (c *startRepoCoordinator) capacitySnapshot() (active int, limit int, runnableService int, runnableImplementation int, blockedService int) {
+	limit = c.workOptions.Parallel
+	if limit <= 0 {
+		limit = 1
+	}
+	if c.state == nil {
+		return 0, limit, 0, 0, 0
+	}
+	serviceQueue := c.buildServiceQueue()
+	implementationQueue, _ := c.buildImplementationQueue()
+	queuedServiceTotal := 0
+	for _, task := range c.state.ServiceTasks {
+		if task.Queue == startTaskQueueService && task.Status == startWorkServiceTaskQueued {
+			queuedServiceTotal++
+		}
+	}
+	active = limit - c.availableWorkerSlots()
+	if active < 0 {
+		active = 0
+	}
+	runnableService = len(serviceQueue)
+	runnableImplementation = len(implementationQueue)
+	blockedService = queuedServiceTotal - runnableService
+	if blockedService < 0 {
+		blockedService = 0
+	}
+	return active, limit, runnableService, runnableImplementation, blockedService
+}
+
 func (c *startRepoCoordinator) completeRun() error {
 	if err := c.persistLastRun(); err != nil {
 		return err
 	}
+	active, limit, runnableService, runnableImplementation, blockedService := c.capacitySnapshot()
 	fmt.Fprintf(os.Stdout, "[start] %s: service started=%d implementation started=%d.\n", c.repoSlug, c.serviceStartedCount, c.implStartedCount)
+	fmt.Fprintf(os.Stdout, "[start] %s: worker utilization=%d/%d runnable service=%d runnable implementation=%d blocked service=%d.\n", c.repoSlug, active, limit, runnableService, runnableImplementation, blockedService)
 	return nil
 }
 

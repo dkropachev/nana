@@ -856,6 +856,115 @@ func TestPrepareStartRepoCycleCleansStaleLocalRuns(t *testing.T) {
 	}
 }
 
+func TestStartRepoCoordinatorCapacitySnapshotCountsRunnableAndBlockedServiceTasks(t *testing.T) {
+	coordinator := &startRepoCoordinator{
+		repoSlug: "acme/widget",
+		workOptions: startWorkOptions{
+			Parallel: 10,
+		},
+		state: &startWorkState{
+			SourceRepo: "acme/widget",
+			Issues:     map[string]startWorkIssueState{},
+			ServiceTasks: map[string]startWorkServiceTask{
+				"planned-launch:1": {
+					ID:            "planned-launch:1",
+					Kind:          startTaskKindPlannedLaunch,
+					Queue:         startTaskQueueService,
+					Status:        startWorkServiceTaskRunning,
+					PlannedItemID: "1",
+				},
+				"issue-sync:1": {
+					ID:             "issue-sync:1",
+					Kind:           startTaskKindIssueSync,
+					Queue:          startTaskQueueService,
+					Status:         startWorkServiceTaskQueued,
+					DependencyKeys: []string{"scout:ui-scout"},
+				},
+				"scout:ui-scout": {
+					ID:        "scout:ui-scout",
+					Kind:      startTaskKindScout,
+					Queue:     startTaskQueueService,
+					Status:    startWorkServiceTaskFailed,
+					ScoutRole: uiScoutRole,
+				},
+			},
+			PlannedItems: map[string]startWorkPlannedItem{},
+		},
+		running: map[string]startRepoTask{},
+	}
+	active, limit, runnableService, runnableImplementation, blockedService := coordinator.capacitySnapshot()
+	if active != 1 || limit != 10 || runnableService != 0 || runnableImplementation != 0 || blockedService != 1 {
+		t.Fatalf("unexpected capacity snapshot: active=%d limit=%d runnableService=%d runnableImplementation=%d blockedService=%d", active, limit, runnableService, runnableImplementation, blockedService)
+	}
+}
+
+func TestStartRepoCoordinatorLogsUnexpectedlyDeadStaleRunDuringCycle(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+
+	manifest := localWorkManifest{
+		Version:      1,
+		RunID:        "lw-dead-during-cycle",
+		CreatedAt:    time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339),
+		UpdatedAt:    time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339),
+		Status:       "running",
+		CurrentPhase: "review",
+		RepoRoot:     sourcePath,
+		RepoName:     filepath.Base(sourcePath),
+		RepoID:       localWorkRepoID(sourcePath),
+		SourceBranch: "main",
+		BaselineSHA:  strings.TrimSpace(runLocalWorkTestGitOutput(t, sourcePath, "rev-parse", "HEAD")),
+		SandboxPath:  filepath.Join(home, "sandboxes", "lw-dead-during-cycle"),
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) { return "", nil }
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	oldSync := startSyncRepoState
+	startSyncRepoState = func(options startWorkOptions) (startWorkOptions, *startWorkState, int, bool, error) {
+		return options, &startWorkState{
+			Version:       startWorkStateVersion,
+			SourceRepo:    repoSlug,
+			DefaultBranch: "main",
+			UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+			Issues:        map[string]startWorkIssueState{},
+			ServiceTasks:  map[string]startWorkServiceTask{},
+			PlannedItems:  map[string]startWorkPlannedItem{},
+		}, 0, false, nil
+	}
+	defer func() { startSyncRepoState = oldSync }()
+
+	output, err := captureStdout(t, func() error {
+		return runStartRepoSchedulerCycle(".", repoSlug, startWorkOptions{RepoSlug: repoSlug, Parallel: 1}, startOptions{Parallel: 1})
+	})
+	if err != nil {
+		t.Fatalf("runStartRepoSchedulerCycle: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "stale local work run lw-dead-during-cycle marked failed unexpectedly") {
+		t.Fatalf("expected stale-run log in output, got %q", output)
+	}
+
+	updated, err := readLocalWorkManifestByRunID("lw-dead-during-cycle")
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
+	}
+	if updated.Status != "failed" {
+		t.Fatalf("expected stale run to be failed, got %+v", updated)
+	}
+}
+
 func TestRunStartWorkIssueReconcileRefreshesPublishedPRCIState(t *testing.T) {
 	serverState := struct {
 		headSHA string

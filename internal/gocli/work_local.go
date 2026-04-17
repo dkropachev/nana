@@ -897,43 +897,49 @@ func localWorkManifestHasLiveProcess(manifest localWorkManifest, snapshot string
 }
 
 func cleanupStaleLocalWorkRunsForRepo(repoRoot string) (int, error) {
+	cleaned, _, err := cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot)
+	return cleaned, err
+}
+
+func cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot string) (int, []localWorkManifest, error) {
 	repoRoot = strings.TrimSpace(repoRoot)
 	if repoRoot == "" {
-		return 0, nil
+		return 0, nil, nil
 	}
 	snapshot, err := localWorkProcessSnapshot()
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	store, err := openLocalWorkDB()
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer store.Close()
 	rows, err := store.db.Query(`SELECT manifest_json FROM runs WHERE repo_root = ? AND status = ?`, repoRoot, "running")
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer rows.Close()
 	manifests := []localWorkManifest{}
 	for rows.Next() {
 		var raw string
 		if err := rows.Scan(&raw); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 		var manifest localWorkManifest
 		if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 		normalizeLocalWorkManifest(&manifest)
 		manifests = append(manifests, manifest)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	now := ISOTimeNow()
 	nowTime := time.Now().UTC()
 	cleaned := 0
+	cleanedManifests := []localWorkManifest{}
 	for _, manifest := range manifests {
 		lastHeartbeat := localWorkManifestLastHeartbeat(manifest)
 		if !lastHeartbeat.IsZero() && nowTime.Sub(lastHeartbeat) < localWorkStaleRunThreshold {
@@ -949,11 +955,12 @@ func cleanupStaleLocalWorkRunsForRepo(repoRoot string) (int, error) {
 		}
 		manifest.LastError = "stale running run cleaned up at start: no active process found"
 		if err := store.writeManifest(manifest); err != nil {
-			return cleaned, err
+			return cleaned, cleanedManifests, err
 		}
 		cleaned++
+		cleanedManifests = append(cleanedManifests, manifest)
 	}
-	return cleaned, nil
+	return cleaned, cleanedManifests, nil
 }
 
 func localWorkRunIndexEntry(manifest localWorkManifest) workRunIndexEntry {
