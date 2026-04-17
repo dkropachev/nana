@@ -181,6 +181,11 @@ type preparedStartRepoCycle struct {
 
 func prepareStartRepoCycle(repoSlug string, options startOptions) (*preparedStartRepoCycle, error) {
 	settings, _ := readGithubRepoSettings(githubRepoSettingsPath(repoSlug))
+	if cleaned, err := cleanupStaleLocalWorkRunsForRepo(githubManagedPaths(repoSlug).SourcePath); err != nil {
+		fmt.Fprintf(os.Stdout, "[start] %s: stale local work cleanup skipped: %v\n", repoSlug, err)
+	} else if cleaned > 0 {
+		fmt.Fprintf(os.Stdout, "[start] %s: cleaned stale local work runs=%d\n", repoSlug, cleaned)
+	}
 	forkMode := "manual"
 	implementMode := "manual"
 	repoMode := resolvedGithubRepoMode(settings)

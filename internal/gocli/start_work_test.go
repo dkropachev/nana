@@ -813,6 +813,49 @@ func TestStartRepoCoordinatorApplyTaskResultPreservesExternallyAddedPlannedItems
 	}
 }
 
+func TestPrepareStartRepoCycleCleansStaleLocalRuns(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+
+	manifest := localWorkManifest{
+		Version:      1,
+		RunID:        "lw-start-clean",
+		CreatedAt:    "2026-04-17T00:00:00Z",
+		UpdatedAt:    "2026-04-17T00:00:00Z",
+		Status:       "running",
+		CurrentPhase: "implement",
+		RepoRoot:     sourcePath,
+		RepoName:     filepath.Base(sourcePath),
+		RepoID:       localWorkRepoID(sourcePath),
+		SourceBranch: "main",
+		BaselineSHA:  strings.TrimSpace(runLocalWorkTestGitOutput(t, sourcePath, "rev-parse", "HEAD")),
+		SandboxPath:  filepath.Join(home, "sandboxes", "lw-start-clean"),
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) { return "", nil }
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	if _, err := prepareStartRepoCycle(repoSlug, startOptions{}); err != nil {
+		t.Fatalf("prepareStartRepoCycle: %v", err)
+	}
+
+	updated, err := readLocalWorkManifestByRunID("lw-start-clean")
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
+	}
+	if updated.Status != "failed" || !strings.Contains(updated.LastError, "stale running run cleaned up at start") {
+		t.Fatalf("expected stale run cleanup during start prep, got %+v", updated)
+	}
+}
+
 func TestRunStartWorkIssueReconcileRefreshesPublishedPRCIState(t *testing.T) {
 	serverState := struct {
 		headSHA string

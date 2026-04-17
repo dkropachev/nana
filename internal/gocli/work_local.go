@@ -60,11 +60,13 @@ const (
 	localWorkPathGroupingPolicy    = "path"
 	localWorkSingletonPolicy       = "singleton"
 	localWorkReadRetryAttempts     = 4
+	localWorkStaleRunThreshold     = 5 * time.Minute
 )
 
 var localWorkReadRetryDelay = 200 * time.Millisecond
 var localWorkRetrySleep = time.Sleep
 var localWorkOpenReadStore = openLocalWorkReadDB
+var localWorkProcessSnapshot = captureLocalWorkProcessSnapshot
 
 var localWorkFinalReviewGateRoles = []string{
 	"quality-reviewer",
@@ -845,6 +847,113 @@ func (s *localWorkDBStore) readManifest(runID string) (localWorkManifest, error)
 	}
 	normalizeLocalWorkManifest(&manifest)
 	return manifest, nil
+}
+
+func captureLocalWorkProcessSnapshot() (string, error) {
+	output, err := exec.Command("ps", "-eo", "pid,args").CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
+}
+
+func localWorkManifestLastHeartbeat(manifest localWorkManifest) time.Time {
+	for _, candidate := range []string{
+		strings.TrimSpace(manifest.UpdatedAt),
+		strings.TrimSpace(manifest.CreatedAt),
+	} {
+		if candidate == "" {
+			continue
+		}
+		if parsed, err := time.Parse(time.RFC3339Nano, candidate); err == nil {
+			return parsed
+		}
+		if parsed, err := time.Parse(time.RFC3339, candidate); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
+func localWorkManifestHasLiveProcess(manifest localWorkManifest, snapshot string) bool {
+	for _, line := range strings.Split(snapshot, "\n") {
+		if line == "" {
+			continue
+		}
+		if !strings.Contains(line, "codex exec -C ") && !strings.Contains(line, "/codex/codex exec -C ") {
+			continue
+		}
+		for _, candidate := range []string{
+			strings.TrimSpace(manifest.RunID),
+			strings.TrimSpace(manifest.SandboxPath),
+			strings.TrimSpace(manifest.SandboxRepoPath),
+		} {
+			if candidate != "" && strings.Contains(line, candidate) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func cleanupStaleLocalWorkRunsForRepo(repoRoot string) (int, error) {
+	repoRoot = strings.TrimSpace(repoRoot)
+	if repoRoot == "" {
+		return 0, nil
+	}
+	snapshot, err := localWorkProcessSnapshot()
+	if err != nil {
+		return 0, err
+	}
+	store, err := openLocalWorkDB()
+	if err != nil {
+		return 0, err
+	}
+	defer store.Close()
+	rows, err := store.db.Query(`SELECT manifest_json FROM runs WHERE repo_root = ? AND status = ?`, repoRoot, "running")
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	manifests := []localWorkManifest{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return 0, err
+		}
+		var manifest localWorkManifest
+		if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
+			return 0, err
+		}
+		normalizeLocalWorkManifest(&manifest)
+		manifests = append(manifests, manifest)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	now := ISOTimeNow()
+	nowTime := time.Now().UTC()
+	cleaned := 0
+	for _, manifest := range manifests {
+		lastHeartbeat := localWorkManifestLastHeartbeat(manifest)
+		if !lastHeartbeat.IsZero() && nowTime.Sub(lastHeartbeat) < localWorkStaleRunThreshold {
+			continue
+		}
+		if localWorkManifestHasLiveProcess(manifest, snapshot) {
+			continue
+		}
+		manifest.Status = "failed"
+		manifest.UpdatedAt = now
+		if strings.TrimSpace(manifest.CompletedAt) == "" {
+			manifest.CompletedAt = now
+		}
+		manifest.LastError = "stale running run cleaned up at start: no active process found"
+		if err := store.writeManifest(manifest); err != nil {
+			return cleaned, err
+		}
+		cleaned++
+	}
+	return cleaned, nil
 }
 
 func localWorkRunIndexEntry(manifest localWorkManifest) workRunIndexEntry {

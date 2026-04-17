@@ -148,6 +148,150 @@ func TestReadWorkRunIndexRetriesWhenDatabaseIsLocked(t *testing.T) {
 	}
 }
 
+func TestCleanupStaleLocalWorkRunsForRepoMarksOrphanedRunsFailed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoRoot := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	oldUpdatedAt := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+
+	manifest := localWorkManifest{
+		Version:      1,
+		RunID:        "lw-stale",
+		CreatedAt:    oldUpdatedAt,
+		UpdatedAt:    oldUpdatedAt,
+		Status:       "running",
+		CurrentPhase: "implement",
+		RepoRoot:     repoRoot,
+		RepoName:     filepath.Base(repoRoot),
+		RepoID:       localWorkRepoID(repoRoot),
+		SourceBranch: "main",
+		BaselineSHA:  strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
+		SandboxPath:  filepath.Join(home, "sandboxes", "lw-stale"),
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) { return "", nil }
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	cleaned, err := cleanupStaleLocalWorkRunsForRepo(repoRoot)
+	if err != nil {
+		t.Fatalf("cleanupStaleLocalWorkRunsForRepo: %v", err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("expected one cleaned run, got %d", cleaned)
+	}
+
+	updated, err := readLocalWorkManifestByRunID("lw-stale")
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
+	}
+	if updated.Status != "failed" {
+		t.Fatalf("expected failed status, got %+v", updated)
+	}
+	if updated.CompletedAt == "" || !strings.Contains(updated.LastError, "stale running run cleaned up at start") {
+		t.Fatalf("expected stale cleanup markers, got %+v", updated)
+	}
+}
+
+func TestCleanupStaleLocalWorkRunsForRepoPreservesLiveRuns(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoRoot := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	oldUpdatedAt := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+
+	manifest := localWorkManifest{
+		Version:         1,
+		RunID:           "lw-live",
+		CreatedAt:       oldUpdatedAt,
+		UpdatedAt:       oldUpdatedAt,
+		Status:          "running",
+		CurrentPhase:    "implement",
+		RepoRoot:        repoRoot,
+		RepoName:        filepath.Base(repoRoot),
+		RepoID:          localWorkRepoID(repoRoot),
+		SourceBranch:    "main",
+		BaselineSHA:     strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
+		SandboxPath:     filepath.Join(home, "sandboxes", "lw-live"),
+		SandboxRepoPath: filepath.Join(home, "sandboxes", "lw-live", "repo"),
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) {
+		return "123 codex exec -C " + manifest.SandboxRepoPath + " " + manifest.RunID, nil
+	}
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	cleaned, err := cleanupStaleLocalWorkRunsForRepo(repoRoot)
+	if err != nil {
+		t.Fatalf("cleanupStaleLocalWorkRunsForRepo: %v", err)
+	}
+	if cleaned != 0 {
+		t.Fatalf("expected no cleaned runs, got %d", cleaned)
+	}
+
+	updated, err := readLocalWorkManifestByRunID("lw-live")
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
+	}
+	if updated.Status != "running" {
+		t.Fatalf("expected running status, got %+v", updated)
+	}
+}
+
+func TestCleanupStaleLocalWorkRunsIgnoresNonWorkerProcessMentions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoRoot := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	oldUpdatedAt := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+
+	manifest := localWorkManifest{
+		Version:         1,
+		RunID:           "lw-shell-hit",
+		CreatedAt:       oldUpdatedAt,
+		UpdatedAt:       oldUpdatedAt,
+		Status:          "running",
+		CurrentPhase:    "review",
+		RepoRoot:        repoRoot,
+		RepoName:        filepath.Base(repoRoot),
+		RepoID:          localWorkRepoID(repoRoot),
+		SourceBranch:    "main",
+		BaselineSHA:     strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
+		SandboxPath:     filepath.Join(home, "sandboxes", "lw-shell-hit"),
+		SandboxRepoPath: filepath.Join(home, "sandboxes", "lw-shell-hit", "repo"),
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) {
+		return "999 bash -c grep " + manifest.RunID + " " + manifest.SandboxPath + " " + manifest.SandboxRepoPath, nil
+	}
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	cleaned, err := cleanupStaleLocalWorkRunsForRepo(repoRoot)
+	if err != nil {
+		t.Fatalf("cleanupStaleLocalWorkRunsForRepo: %v", err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("expected stale run to be cleaned despite shell mention, got %d", cleaned)
+	}
+
+	updated, err := readLocalWorkManifestByRunID("lw-shell-hit")
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
+	}
+	if updated.Status != "failed" {
+		t.Fatalf("expected failed status, got %+v", updated)
+	}
+}
+
 func TestRepoOnboardPrintsAutoOnboardingGuidanceAndSplit(t *testing.T) {
 	repo := createLocalWorkRepoAt(t, t.TempDir())
 	if err := os.WriteFile(filepath.Join(repo, "Makefile"), []byte(strings.Join([]string{
