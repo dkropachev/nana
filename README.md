@@ -1,30 +1,25 @@
 # nana
 
 <p align="center">
-  <img src="./docs/shared/nana-character-spark-initiative.jpg" alt="nana character" width="280">
+  <img src="https://yeachan-heo.github.io/nana-website/nana-character-nobg.png" alt="nana character" width="280">
   <br>
-  <em>A personal AI assistant for developers that automates daily engineering work with minimal supervision.</em>
+  <em>Start Codex stronger, then let NANA add better prompts, workflows, and runtime help when the work grows.</em>
 </p>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Go](https://img.shields.io/badge/go-1.25%2B-00ADD8)](https://go.dev)
 [![Discord](https://img.shields.io/discord/1452487457085063218?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/PUwSMR9XNk)
 
-**Website:** https://dkropachev.github.io/nana/  
-**Docs:** [Getting Started](./docs/getting-started.html) · [Start UI](./docs/start-ui.html) · [Agents](./docs/agents.html) · [Skills](./docs/skills.html) · [Integrations](./docs/integrations.html) · [Work](./docs/work.md) · [Demo](./DEMO.md) · [OpenClaw guide](./docs/openclaw-integration.md)
+**Website:** https://yeachan-heo.github.io/nana-website/  
+**Docs:** [Getting Started](./docs/getting-started.html) · [Agents](./docs/agents.html) · [Skills](./docs/skills.html) · [Integrations](./docs/integrations.html) · [Work](./docs/work.md) · [Demo](./DEMO.md) · [OpenClaw guide](./docs/openclaw-integration.md)
 
-`nana` is a personal AI assistant for developers, built on top of [OpenAI Codex CLI](https://github.com/openai/codex).
+`nana` is a workflow layer for [OpenAI Codex CLI](https://github.com/openai/codex).
 
-Its goal is to automate recurring development work with little to no oversight, while still allowing human gates at the points that matter most. Over time, it learns the preferences of the owner or repository owner so the code, reviews, and decisions it produces align more closely with how that project is run.
-
-It is designed to help with daily engineering work such as:
-- issue investigation
-- feature implementation
-- pull request review
-- bug fixing
-- triaging
-- replying to review feedback
-- repository maintenance and ongoing development
+It keeps Codex as the execution engine and makes it easier to:
+- start a stronger Codex session by default
+- run one consistent workflow from clarification to completion
+- invoke the canonical skills with `$deep-interview` and `$ralplan`
+- keep project guidance, plans, logs, and state in `.nana/`
 
 ## Core Maintainers
 
@@ -51,81 +46,45 @@ It is designed to help with daily engineering work such as:
 
 ## Recommended default flow
 
-If you want the default NANA experience, start here:
+If you want the default NANA experience, install and verify the CLI first:
 
-<!-- NANA:INSTALL:START -->
 ```bash
 set -euo pipefail
 
-NANA_VERSION=0.11.12
+npm install -g @openai/codex
+
 case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) nana_target="x86_64-unknown-linux-musl" ;;
-  Linux-aarch64|Linux-arm64) nana_target="aarch64-unknown-linux-musl" ;;
-  Darwin-x86_64) nana_target="x86_64-apple-darwin" ;;
-  Darwin-arm64) nana_target="aarch64-apple-darwin" ;;
-  *) echo "Unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+  Linux-x86_64) NANA_TARGET="x86_64-unknown-linux-gnu" ;;
+  Linux-aarch64 | Linux-arm64) NANA_TARGET="aarch64-unknown-linux-gnu" ;;
+  Darwin-x86_64) NANA_TARGET="x86_64-apple-darwin" ;;
+  Darwin-arm64) NANA_TARGET="aarch64-apple-darwin" ;;
+  *)
+    echo "Download the matching native asset from https://github.com/Yeachan-Heo/nana/releases/latest" >&2
+    exit 1
+    ;;
 esac
 
-nana_archive="nana-${nana_target}.tar.gz"
-nana_base="https://github.com/dkropachev/nana/releases/download/v${NANA_VERSION}"
-curl -fsSL -o native-release-manifest.json "${nana_base}/native-release-manifest.json"
-if ! grep -q "\"archive\": \"${nana_archive}\"" native-release-manifest.json; then
-  echo "Release manifest does not list ${nana_archive}" >&2
-  exit 1
-fi
-expected_sha256="$(
-  awk -v archive="${nana_archive}" '
-    index($0, "\"archive\": \"" archive "\"") { found=1 }
-    found && index($0, "\"sha256\":") {
-      sha=$0
-      sub(/^.*"sha256": "/, "", sha)
-      sub(/".*$/, "", sha)
-      print sha
-      exit
-    }
-  ' native-release-manifest.json
-)"
-if [ -z "$expected_sha256" ]; then
-  echo "Release manifest is missing sha256 for ${nana_archive}" >&2
-  exit 1
-fi
-curl -fsSL -o "${nana_archive}" "${nana_base}/${nana_archive}"
-if command -v sha256sum >/dev/null 2>&1; then
-  actual_sha256="$(sha256sum "${nana_archive}" | awk '{print $1}')"
-elif command -v shasum >/dev/null 2>&1; then
-  actual_sha256="$(shasum -a 256 "${nana_archive}" | awk '{print $1}')"
-else
-  echo "No SHA-256 checksum tool found (expected sha256sum or shasum)" >&2
-  exit 1
-fi
-if [ "$actual_sha256" != "$expected_sha256" ]; then
-  echo "Checksum mismatch for ${nana_archive}" >&2
-  exit 1
-fi
-tar -xzf "${nana_archive}" nana
-chmod +x nana
-sudo mv nana /usr/local/bin/nana
-```
-<!-- NANA:INSTALL:END -->
+curl -fsSL -o nana.tar.gz "https://github.com/Yeachan-Heo/nana/releases/latest/download/nana-${NANA_TARGET}.tar.gz"
+tar -xzf nana.tar.gz
+sudo mkdir -p /usr/local/bin
+sudo install -m 0755 nana nana-runtime nana-explore-harness nana-sparkshell /usr/local/bin/
+rm -f nana nana-runtime nana-explore-harness nana-sparkshell nana.tar.gz
 
-Then install Codex CLI, set up NANA, and run the health check:
-
-```bash
-npm install -g @openai/codex
 nana setup
 nana doctor
 ```
 
-Then start the first session:
+Start your first NANA session from a project:
 
 ```bash
 nana
 ```
 
+Need bypass mode? Use `nana --madmax` only in trusted environments because it bypasses approvals and sandboxing.
+
 Then work normally inside Codex:
 
 ```text
-nana next
 $deep-interview "clarify the authentication change"
 $ralplan "approve the auth plan and review tradeoffs"
 nana investigate "why is CI failing?"
@@ -134,7 +93,7 @@ nana work start https://github.com/acme/widget/issues/42
 ```
 
 That is the main path.
-Launch NANA with the plain `nana` command first, clarify when needed, approve the plan, then move into direct implementation, GitHub review, or `work`.
+Start NANA strongly, clarify first when needed, approve the plan, then move into direct implementation, GitHub review, or `work`.
 
 ## What NANA is for
 
@@ -156,17 +115,25 @@ If you want plain Codex with no extra workflow layer, you probably do not need N
 
 ### A good first session
 
-Launch NANA the canonical way:
+Launch NANA the recommended way:
 
 ```bash
 nana
 ```
 
-After the first launch, use `--fast` only when you specifically want NANA to start Codex by issuing the Codex `/fast` slash command first:
+Use a one-off reasoning override when you want it:
+
+```bash
+nana --high
+```
+
+To have NANA start Codex by issuing the Codex `/fast` slash command first, use:
 
 ```bash
 nana --fast
 ```
+
+Use `nana --madmax` only in trusted environments because it bypasses approvals and sandboxing.
 
 NANA's generated Codex config defaults to extra-high reasoning. Control the user-level default used by future `nana setup` runs with:
 
@@ -200,13 +167,11 @@ Most users should think of NANA as **better task routing + better workflow + bet
 
 ## Start here if you are new
 
-1. Run the versioned install block and `npm install -g @openai/codex`
-2. Run `nana setup`
-3. Run `nana doctor`
-4. Launch with `nana`
-5. Use `$deep-interview "..."` when the request or boundaries are still unclear
-6. Use `$ralplan "..."` to approve the plan and review tradeoffs
-7. Continue with direct implementation, `nana review`, or `nana work`
+1. Run `nana setup`
+2. Launch with `nana` (or `nana --high` for a one-off reasoning override), use `nana --fast` to start by issuing Codex `/fast`, and reserve `nana --madmax` for trusted environments because it bypasses approvals and sandboxing
+3. Use `$deep-interview "..."` when the request or boundaries are still unclear
+4. Use `$ralplan "..."` to approve the plan and review tradeoffs
+5. Continue with direct implementation, `nana review`, or `nana work`
 
 ## Recommended workflow
 
@@ -218,13 +183,12 @@ Most users should think of NANA as **better task routing + better workflow + bet
 
 | Surface | Use it for |
 | --- | --- |
-| `nana next` | showing the top item that needs attention and the next command to run |
 | `$deep-interview "..."` | clarifying intent, boundaries, and non-goals |
 | `$ralplan "..."` | approving the implementation plan and tradeoffs |
 | `nana investigate "..."` | source-backed investigation with proof-linked JSON reports and validator enforcement |
 | `nana investigate onboard` | bootstrap the dedicated investigate Codex config |
 | `nana investigate doctor` | ask Codex to probe the MCPs configured in the investigate config |
-| `nana start` | run onboarded repo automation, including issue pickup, scouts, a post-scout pickup pass, and the default loopback assistant workspace; with scout flags or policy-backed local repos, run supported scout startup automation |
+| `nana start` | run onboarded repo automation, including issue pickup, scouts, and a post-scout pickup pass; with scout flags or policy-backed local repos, run supported scout startup automation |
 | `nana improve [owner/repo]` | run the improvement-scout role for UX/perf proposals and route them by repo policy |
 | `nana enhance [owner/repo]` | run the enhancement-scout role for forward-looking repo proposals with the same policy routing |
 | `nana work start --task "..."` | long-running local plan execution in a managed sandbox, ending with verified changes committed to the local branch |
@@ -346,7 +310,7 @@ Minimal policy examples:
 - malformed override files are ignored for execution but show up as diagnostics in `work` runtime artifacts and retrospectives
 
 Repo profile:
-- managed GitHub repos persist a derived repo profile at `~/.nana/work/repos/<owner>/<repo>/repo-profile.json`
+- managed GitHub repos persist a derived repo profile at `~/.nana/repos/<owner>/<repo>/repo-profile.json`
 - the profile records detected verification shape, commit-style heuristics, PR template presence, workflow files, CODEOWNERS presence, review-rule summary, and warnings for ambiguous signals
 - low-confidence repo-native signals fall back to generic commit/PR behavior rather than blocking execution
 - `nana work explain --last` shows the effective policy, repo profile, GitHub control-plane reviewers, review-request state, merge state, and next action for the active run
@@ -389,22 +353,21 @@ nana repo scout enable --role both --mode auto --issue-destination local
 
 Use `--github` to write shareable `.github/nana-*-policy.json` files instead of `.nana/*-policy.json`.
 
-`.nana/...` takes precedence. Improvement labels are normalized to include `improvement` and `improvement-scout` while excluding `enhancement`. Enhancement labels include `enhancement` and `enhancement-scout`. Scouts return and publish every grounded proposal or finding they produce.
+`.nana/...` takes precedence. Improvement labels are normalized to include `improvement` and `improvement-scout` while excluding `enhancement`. Enhancement labels include `enhancement` and `enhancement-scout`. Scout policy defaults to 5 proposals per run and allows `max_issues` up to 50.
 
 For GitHub targets, `issue_destination: "repo"` publishes to the target repo and `issue_destination: "fork"` publishes to `fork_repo`. For local repos, `nana start` treats `mode: "auto"` in every supported scout policy as permission to switch to the repo's default branch, commit generated scout artifacts there, and run `nana work start --task ...` for one pending local discovered item per cycle. Auto mode requires a clean worktree and a resolvable local default branch.
 
 ## Start Automation
 
-Use `nana repo defaults set --repo-mode disabled|local|fork|repo --issue-pick manual|label|auto --pr-forward approve|auto` to set defaults for future manual GitHub repo onboarding. Use `nana repo onboard <owner/repo> ...` or `nana repo config <owner/repo> ...` to opt a specific GitHub repo into global automation. Then run one command:
+Use `nana repo defaults set --repo-mode local|fork|repo --issue-pick manual|label|auto --pr-forward approve|auto` to set defaults for future manual GitHub repo onboarding. Use `nana repo onboard <owner/repo> ...` or `nana repo config <owner/repo> ...` to opt a specific GitHub repo into global automation. Then run one command:
 
 ```bash
 nana start
 ```
 
-Automatically onboarded repos use system defaults, meaning `repo-mode=local`, `issue-pick=manual`, and `pr-forward=approve` unless later configured. `repo-mode=disabled` keeps a repo onboarded for observation only and blocks any work launch until the mode changes. `nana start` scans all onboarded GitHub repos under `~/.nana/work/repos`, skips repos where `repo-mode` is `disabled` or `local`, or where `issue-pick` is `manual`, triages mirrored issues locally before implementation pickup, keeps separate per-repo service and implementation queues, and runs up to three repos at a time by default while each repo may use up to three workers. Manual `P0` labels always sort first; Nana only auto-triages `P1` through `P5`. The ten-open-PR cap still applies per repo to PR-producing implementation work. Service tasks such as scout runs, issue-sync, triage, and implementation reconciliation are persisted in start state, retried conservatively on transient failures, and requeued safely after restart so stale `in_progress` issues can be reconciled instead of occupying capacity forever. When the managed source checkout declares scout policies, scout runs enter the repo service queue, feed an issue-sync pass, and newly-created proposal issues are mirrored, triaged, and become eligible for implementation in the same cycle. Bare `nana start` repeats forever with a one-minute target cadence between cycle starts; use `--once` for one pass, `--cycles <n>` for a bounded run, or `--interval <duration>` to change that target cadence. Published PR reconcile now refreshes live CI state, treats repos with no CI as green, and surfaces GitHub CI API failures as explicit blocked publication errors instead of passive waiting.
+Automatically onboarded repos use system defaults, meaning `repo-mode=local`, `issue-pick=manual`, and `pr-forward=approve` unless later configured. `nana start` scans all onboarded GitHub repos under `~/.nana/work/repos`, skips repos where `repo-mode` is `local` or `issue-pick` is `manual`, triages mirrored issues locally before implementation pickup, keeps separate per-repo service and implementation queues, and runs up to three repos at a time by default while each repo may use up to three workers. Manual `P0` labels always sort first; Nana only auto-triages `P1` through `P5`. The ten-open-PR cap still applies per repo to PR-producing implementation work. Service tasks such as scout runs, issue-sync, triage, and implementation reconciliation are persisted in start state, retried conservatively on transient failures, and requeued safely after restart so stale `in_progress` issues can be reconciled instead of occupying capacity forever. When the managed source checkout declares scout policies, scout runs enter the repo service queue, feed an issue-sync pass, and newly-created proposal issues are mirrored, triaged, and become eligible for implementation in the same cycle. Bare `nana start` repeats forever with a one-minute target cadence between cycle starts; use `--once` for one pass, `--cycles <n>` for a bounded run, or `--interval <duration>` to change that target cadence. Published PR reconcile now refreshes live CI state, treats repos with no CI as green, and surfaces GitHub CI API failures as explicit blocked publication errors instead of passive waiting.
 
 Mode behavior:
-- `repo-mode disabled`: keep the repo onboarded for observation only and never launch work
 - `repo-mode local`: keep work on a local branch and do not open a PR
 - `repo-mode fork`: push work to your fork
 - `repo-mode repo`: push work to the target repo
@@ -492,7 +455,6 @@ If this happens, try:
 ## Documentation
 
 - [Getting Started](./docs/getting-started.html)
-- [Start UI assistant workspace guide](./docs/start-ui.html)
 - [Demo guide](./DEMO.md)
 - [Agent catalog](./docs/agents.html)
 - [Skills reference](./docs/skills.html)
@@ -528,7 +490,7 @@ If this happens, try:
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=dkropachev/nana&type=date&legend=top-left)](https://www.star-history.com/#dkropachev/nana&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/svg?repos=Yeachan-Heo/nana&type=date&legend=top-left)](https://www.star-history.com/#Yeachan-Heo/nana&type=date&legend=top-left)
 
 ## License
 

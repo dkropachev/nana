@@ -12,7 +12,6 @@
         <a class="brand" href="./index.html">nana</a>
         <a class="active" href="./index.html">Home</a>
         <a href="./getting-started.html">Getting Started</a>
-        <a href="./start-ui.html">Start UI</a>
         <a href="./agents.html">Agents</a>
         <a href="./skills.html">Skills</a>
         <a href="./integrations.html">Integrations</a>
@@ -21,88 +20,77 @@
 
     <main class="container">
       <section class="hero">
-        <span class="badge">GitHub Pages</span>
+        <span class="badge">GitHub Pages · Go-native 0.11.x</span>
         <h1>nana</h1>
-        <p>Multi-agent orchestration for OpenAI Codex CLI.</p>
-        <!-- NANA:INSTALL:START -->
-<pre><code>set -euo pipefail
+        <p>Go-native multi-agent orchestration for OpenAI Codex CLI.</p>
+        <pre><code>set -euo pipefail
 
-NANA_VERSION=0.11.12
-case &#34;$(uname -s)-$(uname -m)&#34; in
-  Linux-x86_64) nana_target=&#34;x86_64-unknown-linux-musl&#34; ;;
-  Linux-aarch64|Linux-arm64) nana_target=&#34;aarch64-unknown-linux-musl&#34; ;;
-  Darwin-x86_64) nana_target=&#34;x86_64-apple-darwin&#34; ;;
-  Darwin-arm64) nana_target=&#34;aarch64-apple-darwin&#34; ;;
-  *) echo &#34;Unsupported platform: $(uname -s)-$(uname -m)&#34; &gt;&amp;2; exit 1 ;;
+npm install -g @openai/codex
+
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64) NANA_TARGET="x86_64-unknown-linux-gnu" ;;
+  Linux-aarch64 | Linux-arm64) NANA_TARGET="aarch64-unknown-linux-gnu" ;;
+  Darwin-x86_64) NANA_TARGET="x86_64-apple-darwin" ;;
+  Darwin-arm64) NANA_TARGET="aarch64-apple-darwin" ;;
+  *)
+    echo "Download the matching native asset from https://github.com/Yeachan-Heo/nana/releases/latest" &gt;&amp;2
+    exit 1
+    ;;
 esac
 
-nana_archive=&#34;nana-${nana_target}.tar.gz&#34;
-nana_base=&#34;https://github.com/dkropachev/nana/releases/download/v${NANA_VERSION}&#34;
-curl -fsSL -o native-release-manifest.json &#34;${nana_base}/native-release-manifest.json&#34;
-if ! grep -q &#34;\&#34;archive\&#34;: \&#34;${nana_archive}\&#34;&#34; native-release-manifest.json; then
-  echo &#34;Release manifest does not list ${nana_archive}&#34; &gt;&amp;2
-  exit 1
-fi
-expected_sha256=&#34;$(
-  awk -v archive=&#34;${nana_archive}&#34; &#39;
-    index($0, &#34;\&#34;archive\&#34;: \&#34;&#34; archive &#34;\&#34;&#34;) { found=1 }
-    found &amp;&amp; index($0, &#34;\&#34;sha256\&#34;:&#34;) {
-      sha=$0
-      sub(/^.*&#34;sha256&#34;: &#34;/, &#34;&#34;, sha)
-      sub(/&#34;.*$/, &#34;&#34;, sha)
-      print sha
-      exit
-    }
-  &#39; native-release-manifest.json
-)&#34;
-if [ -z &#34;$expected_sha256&#34; ]; then
-  echo &#34;Release manifest is missing sha256 for ${nana_archive}&#34; &gt;&amp;2
-  exit 1
-fi
-curl -fsSL -o &#34;${nana_archive}&#34; &#34;${nana_base}/${nana_archive}&#34;
-if command -v sha256sum &gt;/dev/null 2&gt;&amp;1; then
-  actual_sha256=&#34;$(sha256sum &#34;${nana_archive}&#34; | awk &#39;{print $1}&#39;)&#34;
-elif command -v shasum &gt;/dev/null 2&gt;&amp;1; then
-  actual_sha256=&#34;$(shasum -a 256 &#34;${nana_archive}&#34; | awk &#39;{print $1}&#39;)&#34;
-else
-  echo &#34;No SHA-256 checksum tool found (expected sha256sum or shasum)&#34; &gt;&amp;2
-  exit 1
-fi
-if [ &#34;$actual_sha256&#34; != &#34;$expected_sha256&#34; ]; then
-  echo &#34;Checksum mismatch for ${nana_archive}&#34; &gt;&amp;2
-  exit 1
-fi
-tar -xzf &#34;${nana_archive}&#34; nana
-chmod +x nana
-sudo mv nana /usr/local/bin/nana</code></pre>
-<p class="muted">Installs nana v0.11.12 and checks the matching release manifest: <code>https://github.com/dkropachev/nana/releases/download/v0.11.12/native-release-manifest.json</code>.</p>
-<!-- NANA:INSTALL:END -->
+curl -fsSL -o nana.tar.gz "https://github.com/Yeachan-Heo/nana/releases/latest/download/nana-${NANA_TARGET}.tar.gz"
+tar -xzf nana.tar.gz
+sudo mkdir -p /usr/local/bin
+sudo install -m 0755 nana nana-runtime nana-explore-harness nana-sparkshell /usr/local/bin/
+rm -f nana nana-runtime nana-explore-harness nana-sparkshell nana.tar.gz
+
+nana setup</code></pre>
       </section>
 
-      <!-- NANA:RELEASE:START -->
-<section aria-labelledby="whats-new-01112">
-        <h2 id="whats-new-01112">What's New in 0.11.12</h2>
-        <p class="muted">Generated from <code>VERSION</code> and the release notes for the native manifest published at <code>https://github.com/dkropachev/nana/releases/download/v0.11.12/native-release-manifest.json</code>.</p>
+      <section aria-labelledby="whats-new-011">
+        <h2 id="whats-new-011">What's New in 0.11.x</h2>
+        <p class="muted">
+          The current docs target the Go-native 0.11.x command surface: native binaries,
+          <code>nana explore</code>, <code>nana sparkshell</code>, and the
+          <code>$deep-interview</code> → <code>$ralplan</code> workflow.
+        </p>
         <div class="grid">
           <article class="card">
-            <h3>Windows terminal flicker reductions</h3>
-            <p><code>windowsHide</code> coverage now spans the remaining child-process launch paths, and filesystem-based git info reads avoid the extra Windows console flash path.</p>
+            <h3>Go-only installation</h3>
+            <p>
+              Install NANA from native release binaries and use the current Go-owned CLI/runtime
+              surface for setup, review, and work automation.
+            </p>
           </article>
           <article class="card">
-            <h3>Team/runtime seam cleanup</h3>
-            <p>team cwd metadata now resolves canonically from <code>manifest.v2</code>, and dispatch/mailbox transitions no longer straddle the remaining dual-write seam gaps.</p>
+            <h3>Current launch defaults</h3>
+            <p>
+              Use <code>nana</code> with the configured defaults, add
+              <code>nana --high</code> for a one-off reasoning override, reserve
+              <code>nana --madmax</code> for trusted environments only because it
+              bypasses approvals and sandboxing, or use <code>nana --fast</code>
+              when you want NANA to issue Codex <code>/fast</code> before the rest
+              of your prompt.
+            </p>
           </article>
           <article class="card">
-            <h3>Auto-nudge / tmux session hygiene</h3>
-            <p>stale-turn auto-nudges stay disarmed after cooldown, readiness checks tolerate prompt scroll-off, and nudges stay limited to NANA-managed tmux sessions.</p>
+            <h3>Native explore + sparkshell</h3>
+            <p>
+              <code>nana explore</code> is the read-only repo lookup surface, while
+              <code>nana sparkshell</code> gives compact summaries for noisy commands and
+              explicit <code>--tmux-pane</code> inspection.
+            </p>
           </article>
           <article class="card">
-            <h3>Cross-platform Node test runner</h3>
-            <p>Node test execution can now enumerate compiled test files without depending on POSIX <code>find</code>, making the release/CI test path portable across platforms.</p>
+            <h3>Workflow-first execution</h3>
+            <p>
+              Clarify with <code>$deep-interview</code>, approve the path with
+              <code>$ralplan</code>, then continue with direct implementation,
+              <code>nana review</code>, or <code>nana work</code>.
+            </p>
           </article>
         </div>
       </section>
-<!-- NANA:RELEASE:END -->
 
       <h2>Core Features</h2>
       <div class="grid">
@@ -114,11 +102,16 @@ sudo mv nana /usr/local/bin/nana</code></pre>
 
       <h2>Quick Start</h2>
       <ol>
-        <li>Run the versioned install block above.</li>
         <li><code>npm install -g @openai/codex</code></li>
+        <li>Set <code>NANA_TARGET</code> using the platform detection snippet above, or choose the matching release asset manually.</li>
+        <li><code>curl -fsSL -o nana.tar.gz "https://github.com/Yeachan-Heo/nana/releases/latest/download/nana-${NANA_TARGET}.tar.gz"</code></li>
+        <li><code>tar -xzf nana.tar.gz</code></li>
+        <li><code>sudo mkdir -p /usr/local/bin</code></li>
+        <li><code>sudo install -m 0755 nana nana-runtime nana-explore-harness nana-sparkshell /usr/local/bin/</code></li>
+        <li><code>rm -f nana nana-runtime nana-explore-harness nana-sparkshell nana.tar.gz</code></li>
         <li><code>nana setup</code></li>
         <li><code>nana doctor</code></li>
-        <li><code>nana</code></li>
+        <li><code>nana</code>, <code>nana --high</code>, <code>nana --fast</code>, or <code>nana --madmax</code> in trusted environments only because it bypasses approvals and sandboxing</li>
       </ol>
 
       <h2>Integration Guides</h2>
@@ -152,7 +145,7 @@ sudo mv nana /usr/local/bin/nana</code></pre>
 
     <footer>
       <div class="container">
-        <span class="muted">GitHub: <a href="https://github.com/dkropachev/nana">dkropachev/nana</a></span>
+        <span class="muted">GitHub: <a href="https://github.com/Yeachan-Heo/nana">Yeachan-Heo/nana</a></span>
       </div>
     </footer>
   </body>
