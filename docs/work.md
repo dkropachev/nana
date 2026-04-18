@@ -1,5 +1,7 @@
 # Work
 
+Related docs: [CLI command reference](./command-reference.html) · [Getting Started](./getting-started.html)
+
 `nana work` is the unified implementation runtime for both local repo work and GitHub-backed issue/PR work.
 
 ## Commands
@@ -13,11 +15,9 @@ nana work retrospective [--run-id <id> | --last | --global-last] [--repo <path>]
 nana work verify-refresh [--run-id <id> | --last | --global-last] [--repo <path>]
 nana work sync [--run-id <id> | --last] [--reviewer <login|@me>] [--resume-last] [-- codex-args...]
 nana work lane-exec --run-id <id>|--last --lane <alias> [--task <text>] [-- codex-args...]
-nana start [--repo <owner/repo>] [--parallel <n>] [--per-repo-workers <n>] [--max-open-prs <n>] [--once|--cycles <n>|--forever] [--interval <duration>] [--no-ui] [--ui-api-port <port>] [--ui-web-port <port>] [-- codex-args...]
 nana start [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [--once|--cycles <n>|--forever] [--interval <duration>] [-- codex-args...]
 nana improve [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [-- codex-args...]
 nana enhance [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [-- codex-args...]
-nana ui-scout [owner/repo|github-url] [--repo <path>] [--focus <ui,ux,a11y,perf>] [--from-file <findings.json>] [--dry-run] [--local-only] [--session-limit <1-6>] [-- codex-args...]
 ```
 
 Selection rules:
@@ -26,9 +26,7 @@ Selection rules:
 - local mode uses `--task`, `--plan-file`, or an inferred task from the current branch
 - GitHub mode is selected when `start` receives a GitHub issue/PR URL
 - `sync` and `lane-exec` are GitHub-only run controls
-- top-level `nana start` has two modes and prints a one-line `[start] Mode: ...` banner before work begins
-- `nana start` automation mode mirrors issues, starts eligible work, runs scouts, and refreshes issue pickup for onboarded GitHub repos
-- `nana start` scout mode runs supported scout roles for policy-backed local repos or explicit scout targets
+- top-level `nana start` runs supported scout roles for local scout startup, and for onboarded GitHub repos it also mirrors issues, starts eligible work, runs scouts, and refreshes issue pickup after scouts finish
 - `improve` and `enhance` are proposal-only direct scout role commands
 
 ## Storage
@@ -103,31 +101,26 @@ Repo overrides still live in the source checkout:
 
 ## Improvement Runs
 
-`nana improve` inspects the selected repo for UX and performance improvement proposals. `nana enhance` uses the same flow for grounded enhancements that help the repo move forward. `nana ui-scout` is the direct operator-facing command for page-by-page UI audit findings, and the same role also runs through managed scout policy plus `nana start`. Top-level `nana start` enters scout mode when scout-specific flags are provided, a positional scout target is provided, a path-like `--repo` value is provided, or a bare local repo declares scout policies. `nana start` prints `[start] Mode: scout (policy-backed scout startup).` before scout execution begins. Bare scout-mode `nana start` loops indefinitely until interrupted; use `--once` or `--cycles <n>` for bounded runs.
+`nana improve` inspects the selected repo for UX and performance improvement proposals. `nana enhance` uses the same flow for grounded enhancements that help the repo move forward. Top-level `nana start` runs scout startup automation when scout-specific flags are provided or local scout policies are present. Bare `nana start` loops indefinitely until interrupted; use `--once` or `--cycles <n>` for bounded runs.
 
 Local repo behavior:
 
-- scout artifacts are saved under `.nana/improvements/<run-id>/`, `.nana/enhancements/<run-id>/`, or `.nana/ui-findings/<run-id>/`
+- proposals are saved under `.nana/improvements/<run-id>/` or `.nana/enhancements/<run-id>/`
 - auto-mode local start picks up one pending discovered item for local implementation per cycle
 - no GitHub APIs are called
 
 GitHub target behavior:
 
 - the repo is inspected from NANA's managed source checkout
-- scout startup runs `improvement-scout`, `enhancement-scout`, and `ui-scout` only when their matching policies exist
+- scout startup runs `improvement-scout` only when an improvement policy exists and `enhancement-scout` only when an enhancement policy exists
 - `.github/nana-improvement-policy.json` and `.nana/improvement-policy.json` are read for `improvement-scout`
 - `.github/nana-enhancement-policy.json` and `.nana/enhancement-policy.json` are read for `enhancement-scout`
-- `.github/nana-ui-policy.json` and `.nana/ui-policy.json` are read for `ui-scout`
 - `.nana/...` takes precedence over `.github/...`
 - `issue_destination` controls publication: `local`, `repo`/`target`, or `fork`
-- `schedule` controls reruns: `always`, `daily`, `weekly`, or `when_resolved`
-- when `schedule` is omitted, scouts default to `when_resolved` and rerun only after their previously reported local or GitHub issues are completed or dropped
 - scout issue labels include the role label
-- scouts return and publish every grounded proposal or finding they produce
-- `ui-scout` also accepts `session_limit` to cap parallel page-audit sessions
-- direct `nana ui-scout` runs perform a short preflight first and persist `preflight.json` beside the findings artifact
+- scout policy defaults to 5 proposals per run and allows `max_issues` up to 50
 - local `mode: "auto"` in every supported scout policy makes `nana start` switch to the repo's default branch, commit generated scout artifacts there, and run `nana work start --task ...` for one pending local discovered item per cycle; this requires a clean worktree and a resolvable local default branch
-- `nana repo scout enable` creates or updates these policy files; by default it writes `.nana` policies for improvement and enhancement, and `--role ui` or `--role all` adds `ui-scout`
+- `nana repo scout enable` creates or updates these policy files; by default it writes `.nana` policies for both scouts with local auto mode
 
 Policy examples:
 
@@ -136,16 +129,12 @@ Policy examples:
 ```
 
 ```json
-{"version":1,"mode":"auto","schedule":"weekly","issue_destination":"repo","labels":["ui"],"session_limit":4}
-```
-
-```json
 {"version":1,"issue_destination":"fork","fork_repo":"my-user/widget","labels":["improvement"]}
 ```
 
 ## Start Automation
 
-`nana start` automation mode is the global automation command for onboarded GitHub repos when run without scout-specific flags or positional scout targets. It prints `[start] Mode: automation (onboarded repo automation).` before automation execution begins. By default it also launches a loopback REST API and assistant workspace on `127.0.0.1` (default API port `17653`, default Web port `17654`) and prints the resolved `[start-ui]` URLs. Use `--no-ui` for headless runs, or `--ui-api-port` / `--ui-web-port` to request specific local ports. See the [Start UI guide](./start-ui.html) for the end-to-end flow. Configure each repo first:
+`nana start` is also the global automation command for onboarded GitHub repos when run without scout-specific flags or positional scout targets. Configure each repo first:
 
 ```bash
 nana repo defaults set --repo-mode fork --issue-pick label --pr-forward approve
@@ -154,9 +143,9 @@ nana repo config owner/repo --repo-mode repo --issue-pick auto --pr-forward auto
 nana repo explain owner/repo
 ```
 
-`repo-mode` controls how Nana works with the repository: `disabled` keeps it onboarded for observation only and blocks work launch, `local` keeps changes on a local branch and is the default, `fork` pushes implementation work to your fork, and `repo` pushes implementation work to the target repo. For repos with development enabled, `issue-pick` controls automatic issue selection with `manual`, `label`, or `auto`; label mode picks issues with the single opt-in label `nana`, and also picks Nana-generated scout proposal issues labeled `improvement-scout`, `enhancement-scout`, or `ui-scout`. `pr-forward` controls what happens after a PR exists: `approve` waits for approval, while `auto` goes forward automatically. In `fork` mode, going forward creates the matching PR on the target repo. In `repo` mode, going forward means merging the PR.
+`repo-mode` controls how Nana works with the repository: `local` keeps changes on a local branch and is the default, `fork` pushes implementation work to your fork, and `repo` pushes implementation work to the target repo. For `fork` and `repo`, `issue-pick` controls automatic issue selection with `manual`, `label`, or `auto`; label mode picks issues with the single opt-in label `nana`, and also picks Nana-generated scout proposal issues labeled `improvement-scout` or `enhancement-scout`. `pr-forward` controls what happens after a PR exists: `approve` waits for approval, while `auto` goes forward automatically. In `fork` mode, going forward creates the matching PR on the target repo. In `repo` mode, going forward means merging the PR.
 
-A `nana start` automation run scans `~/.nana/work/repos`, skips repos where `repo-mode` is `disabled` or `local`, or where `issue-pick` is `manual`, mirrors eligible issues, triages them locally before implementation pickup, and schedules work through one shared worker queue across all selected repos. `--parallel` now limits total workers across that shared queue, `--per-repo-workers` is accepted as a deprecated alias for `--parallel`, and the ten-open-PR cap remains per repo for PR-producing implementation work. Nana only auto-triages `P1` through `P5`; manual `P0` labels always sort first and stay user-controlled. Service tasks such as scout runs, issue-sync, triage, planned launches, and implementation reconciliation are persisted in start state, carry explicit dependencies, retry conservatively on transient failures, and previously running service tasks are requeued on restart. Scout runs are scheduled through the repo service queue, feed an issue-sync pass, and scout-created proposal issues can be mirrored, triaged, and become eligible for implementation in the same cycle. Bare `nana start` repeats forever with a one-minute target cadence between cycle starts; use `--once` for one pass, `--cycles <n>` for a bounded run, or `--interval <duration>` to change that target cadence. Reconcile refreshes published-PR CI state live, treats repos with no CI as green, defers true pending publication until the next outer cycle, and surfaces GitHub CI API failures as explicit blocked publication errors. State is persisted under `~/.nana/work/repos/<owner>/<repo>/start-state.json`. The default assistant workspace caches its overview snapshot and refreshes it only after API mutations or detected start-state/work-database/HUD dependency changes, avoiding a full filesystem and SQLite rebuild on every live-events tick.
+A `nana start` automation run scans `~/.nana/work/repos`, skips repos where `repo-mode` is `local` or `issue-pick` is `manual`, mirrors eligible issues, triages them locally before implementation pickup, and schedules work through separate per-repo service and implementation queues. `--parallel` now limits active repos, `--per-repo-workers` limits workers inside each repo, and the ten-open-PR cap remains per repo for PR-producing implementation work. Nana only auto-triages `P1` through `P5`; manual `P0` labels always sort first and stay user-controlled. Service tasks such as scout runs, issue-sync, triage, and implementation reconciliation are persisted in start state, carry explicit dependencies, retry conservatively on transient failures, and previously running service tasks are requeued on restart. Scout runs are scheduled through the repo service queue, feed an issue-sync pass, and scout-created proposal issues can be mirrored, triaged, and become eligible for implementation in the same cycle. Bare `nana start` repeats forever with a one-minute target cadence between cycle starts; use `--once` for one pass, `--cycles <n>` for a bounded run, or `--interval <duration>` to change that target cadence. Reconcile refreshes published-PR CI state live, treats repos with no CI as green, defers true pending publication until the next outer cycle, and surfaces GitHub CI API failures as explicit blocked publication errors. State is persisted under `~/.nana/start/<owner>/<repo>/state.json`.
 
 
 ## Troubleshooting

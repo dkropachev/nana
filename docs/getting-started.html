@@ -12,6 +12,8 @@
         <a class="brand" href="./index.html">nana</a>
         <a href="./index.html">Home</a>
         <a class="active" href="./getting-started.html">Getting Started</a>
+        <a href="./command-reference.html">CLI Reference</a>
+        <a href="./work.md">Work</a>
         <a href="./agents.html">Agents</a>
         <a href="./skills.html">Skills</a>
         <a href="./integrations.html">Integrations</a>
@@ -30,26 +32,11 @@
       </ul>
 
       <h2>Installation</h2>
-      <pre><code>set -euo pipefail
+      <pre><code>npm install -g @openai/codex
 
-npm install -g @openai/codex
-
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) NANA_TARGET="x86_64-unknown-linux-gnu" ;;
-  Linux-aarch64 | Linux-arm64) NANA_TARGET="aarch64-unknown-linux-gnu" ;;
-  Darwin-x86_64) NANA_TARGET="x86_64-apple-darwin" ;;
-  Darwin-arm64) NANA_TARGET="aarch64-apple-darwin" ;;
-  *)
-    echo "Download the matching native asset from https://github.com/Yeachan-Heo/nana/releases/latest" &gt;&amp;2
-    exit 1
-    ;;
-esac
-
-curl -fsSL -o nana.tar.gz "https://github.com/Yeachan-Heo/nana/releases/latest/download/nana-${NANA_TARGET}.tar.gz"
-tar -xzf nana.tar.gz
-sudo mkdir -p /usr/local/bin
-sudo install -m 0755 nana nana-runtime nana-explore-harness nana-sparkshell /usr/local/bin/
-rm -f nana nana-runtime nana-explore-harness nana-sparkshell nana.tar.gz
+curl -L -o nana &lt;release-binary-url&gt;
+chmod +x nana
+sudo mv nana /usr/local/bin/nana
 
 nana setup
 nana doctor</code></pre>

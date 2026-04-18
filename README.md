@@ -11,7 +11,7 @@
 [![Discord](https://img.shields.io/discord/1452487457085063218?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/PUwSMR9XNk)
 
 **Website:** https://yeachan-heo.github.io/nana-website/  
-**Docs:** [Getting Started](./docs/getting-started.html) · [Agents](./docs/agents.html) · [Skills](./docs/skills.html) · [Integrations](./docs/integrations.html) · [Work](./docs/work.md) · [Demo](./DEMO.md) · [OpenClaw guide](./docs/openclaw-integration.md)
+**Docs:** [Getting Started](./docs/getting-started.html) · [CLI Reference](./docs/command-reference.html) · [Work](./docs/work.md) · [Agents](./docs/agents.html) · [Skills](./docs/skills.html) · [Integrations](./docs/integrations.html) · [Demo](./DEMO.md) · [OpenClaw guide](./docs/openclaw-integration.md)
 
 `nana` is a workflow layer for [OpenAI Codex CLI](https://github.com/openai/codex).
 
@@ -46,37 +46,15 @@ It keeps Codex as the execution engine and makes it easier to:
 
 ## Recommended default flow
 
-If you want the default NANA experience, install and verify the CLI first:
+If you want the default NANA experience, start here:
 
 ```bash
-set -euo pipefail
-
 npm install -g @openai/codex
-
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) NANA_TARGET="x86_64-unknown-linux-gnu" ;;
-  Linux-aarch64 | Linux-arm64) NANA_TARGET="aarch64-unknown-linux-gnu" ;;
-  Darwin-x86_64) NANA_TARGET="x86_64-apple-darwin" ;;
-  Darwin-arm64) NANA_TARGET="aarch64-apple-darwin" ;;
-  *)
-    echo "Download the matching native asset from https://github.com/Yeachan-Heo/nana/releases/latest" >&2
-    exit 1
-    ;;
-esac
-
-curl -fsSL -o nana.tar.gz "https://github.com/Yeachan-Heo/nana/releases/latest/download/nana-${NANA_TARGET}.tar.gz"
-tar -xzf nana.tar.gz
-sudo mkdir -p /usr/local/bin
-sudo install -m 0755 nana nana-runtime nana-explore-harness nana-sparkshell /usr/local/bin/
-rm -f nana nana-runtime nana-explore-harness nana-sparkshell nana.tar.gz
-
+curl -L -o nana <release-binary-url>
+chmod +x nana
+sudo mv nana /usr/local/bin/nana
 nana setup
 nana doctor
-```
-
-Start your first NANA session from a project:
-
-```bash
 nana
 ```
 
@@ -455,6 +433,8 @@ If this happens, try:
 ## Documentation
 
 - [Getting Started](./docs/getting-started.html)
+- [CLI command reference](./docs/command-reference.html)
+- [Work automation guide](./docs/work.md)
 - [Demo guide](./DEMO.md)
 - [Agent catalog](./docs/agents.html)
 - [Skills reference](./docs/skills.html)
