@@ -1,0 +1,86 @@
+name: Benchmarks
+
+on:
+  pull_request:
+    branches: [main, dev, experimental/dev]
+  schedule:
+    # Nightly regression signal for runtime/CLI benchmark hot paths.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmarks-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-benchmarks:
+    name: Go Benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run Go benchmarks with benchmem
+        id: bench
+        shell: bash
+        # Pull request benchmark regressions are advisory; scheduled and manual
+        # runs should fail so nightly regression signals stay visible.
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        run: |
+          mkdir -p benchmark-results
+
+          set +e
+          make benchmark 2>&1 | tee benchmark-results/go-benchmem.txt
+          status=${PIPESTATUS[0]}
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+
+          if [ "${status}" -ne 0 ]; then
+            echo "::warning::make benchmark exited with status ${status}; summary and artifact steps will still run."
+          fi
+
+          exit "${status}"
+
+      - name: Publish benchmark summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## Go benchmark results'
+            echo ''
+            echo '- Command: `make benchmark`'
+            echo '- Benchmark flags: `go test -run=^$$ -bench=. -benchmem ./...`'
+            echo '- Exit status: `${{ steps.bench.outputs.status }}`'
+            echo '- Full benchmem output is attached as the `go-benchmem` artifact.'
+            echo ''
+
+            if [ -f benchmark-results/go-benchmem.txt ]; then
+              echo '<details><summary>benchmem output preview</summary>'
+              echo ''
+              echo '```text'
+              sed -n '1,200p' benchmark-results/go-benchmem.txt
+              if [ "$(wc -l < benchmark-results/go-benchmem.txt)" -gt 200 ]; then
+                echo '... output truncated in summary; see the uploaded artifact for the complete output.'
+              fi
+              echo '```'
+              echo '</details>'
+            else
+              echo '_No benchmark output file was produced._'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmem artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-benchmem
+          path: benchmark-results/go-benchmem.txt
+          if-no-files-found: warn
+          retention-days: 14
