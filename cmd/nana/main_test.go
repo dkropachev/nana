@@ -146,13 +146,9 @@ func TestBinaryNestedGithubHelpRoutesLocally(t *testing.T) {
 		{args: []string{"review-rules", "--help"}, expected: "nana review-rules - Persistent repo rules mined from PR review history"},
 		{args: []string{"repo", "--help"}, expected: "nana repo - Repository onboarding and verification-plan inspection"},
 		{args: []string{"start", "--help"}, expected: "nana start - Run repo automation or scout startup"},
-		{args: []string{"next", "--help"}, expected: "nana next - Show the highest-priority item that needs operator attention"},
-		{args: []string{"ui-scout", "--help"}, expected: "nana ui-scout - Audit UI pages and flows with issue-style findings"},
 		{args: []string{"work", "--help"}, expected: "nana work - Unified local and GitHub-backed implementation runtime"},
-		{args: []string{"usage", "--help"}, expected: "nana usage - Report token spend across NANA-managed sessions"},
 		{args: []string{"config", "--help"}, expected: "Usage:\n  nana config show"},
 		{args: []string{"hud", "--help"}, expected: "Usage:\n  nana hud"},
-		{args: []string{"sparkshell", "--help"}, expected: "NANA_SPARKSHELL_SUMMARY_TIMEOUT_MS"},
 		{args: []string{"work-on", "--help"}, expected: "has been replaced by `nana work`"},
 		{args: []string{"work-local", "--help"}, expected: "has been replaced by `nana work`"},
 	}
@@ -184,7 +180,6 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 	expectedSnippets := []string{
 		"Start and session:",
 		"Recommended in-session workflow:",
-		"nana next",
 		`$deep-interview "..."`,
 		`$ralplan "..."`,
 		"Investigate and review:",
@@ -203,60 +198,22 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 		"nana start",
 		"nana improve [owner/repo]",
 		"nana enhance [owner/repo]",
-		"nana ui-scout [owner/repo]",
 		"nana repo onboard [--json]",
-		"nana repo drop <owner/repo>",
 		"nana repo explain <owner/repo>",
 		"nana repo scout ...",
 		"Local tools and support:",
-		"nana next",
 		"nana config",
-		"nana usage",
 		"nana account <subcommand>",
 		"nana reflect | nana explore",
-		"nana sparkshell",
-		"above NANA_SPARKSHELL_LINES",
 		"nana hud",
 		"More help:",
 		"nana help work",
 		"nana help investigate",
 		"nana help repo",
-		"nana help usage",
-		"nana help sparkshell",
 	}
 	for _, snippet := range expectedSnippets {
 		if !strings.Contains(help, snippet) {
 			t.Fatalf("expected top-level help to contain %q, got %q", snippet, output)
-		}
-	}
-}
-
-func TestBinaryHelpTopicRoutesToSparkshellHelp(t *testing.T) {
-	binaryPath := buildNanaBinary(t)
-	cwd := t.TempDir()
-
-	cmd := runCommand(t, binaryPath, "help", "sparkshell")
-	cmd.Dir = cwd
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("binary help sparkshell failed: %v\n%s", err, output)
-	}
-
-	help := string(output)
-	expectedSnippets := []string{
-		"Usage: nana sparkshell <command> [args...]",
-		"raw-vs-summary behavior",
-		"stdout+stderr is emitted raw when visible output is <= NANA_SPARKSHELL_LINES (default 12)",
-		"Output above that threshold is summarized with codex exec using low reasoning",
-		"NANA_SPARKSHELL_SUMMARY_TIMEOUT_MS",
-		"NANA_SPARKSHELL_MODEL",
-		"NANA_SPARKSHELL_FALLBACK_MODEL",
-		"NANA_SPARKSHELL_SUMMARY_MAX_LINES",
-		"NANA_SPARKSHELL_SUMMARY_MAX_BYTES",
-	}
-	for _, snippet := range expectedSnippets {
-		if !strings.Contains(help, snippet) {
-			t.Fatalf("expected sparkshell help to contain %q, got %q", snippet, output)
 		}
 	}
 }
@@ -582,8 +539,8 @@ func TestBinaryLocalWorkStartCommitsVerifiedSandboxResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("local work start failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "committed and pushed source branch") {
-		t.Fatalf("expected committed-and-pushed completion output, got %q", output)
+	if !strings.Contains(string(output), "committed to source branch") {
+		t.Fatalf("expected committed completion output, got %q", output)
 	}
 	subject := runGit(sourceRepo, "log", "-1", "--pretty=%s")
 	if !strings.HasPrefix(subject, "nana work: apply lw-") {
@@ -600,12 +557,8 @@ func TestBinaryLocalWorkStartCommitsVerifiedSandboxResult(t *testing.T) {
 		t.Fatalf("expected no source repo work runtime artifacts, err=%v", err)
 	}
 	originAfter := runGit(originBare, "rev-parse", "refs/heads/main")
-	if originAfter == originBefore {
-		t.Fatalf("local work should push the tracked target branch, before=%s after=%s", originBefore, originAfter)
-	}
-	sourceHead := runGit(sourceRepo, "rev-parse", "HEAD")
-	if originAfter != sourceHead {
-		t.Fatalf("expected pushed remote HEAD to match local source HEAD, origin=%s source=%s", originAfter, sourceHead)
+	if originAfter != originBefore {
+		t.Fatalf("local work should not push to remote, before=%s after=%s", originBefore, originAfter)
 	}
 }
 

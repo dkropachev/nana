@@ -1,7 +1,5 @@
 # Work
 
-Related docs: [CLI command reference](./command-reference.html) · [Getting Started](./getting-started.html)
-
 `nana work` is the unified implementation runtime for both local repo work and GitHub-backed issue/PR work.
 
 ## Commands
@@ -15,7 +13,8 @@ nana work retrospective [--run-id <id> | --last | --global-last] [--repo <path>]
 nana work verify-refresh [--run-id <id> | --last | --global-last] [--repo <path>]
 nana work sync [--run-id <id> | --last] [--reviewer <login|@me>] [--resume-last] [-- codex-args...]
 nana work lane-exec --run-id <id>|--last --lane <alias> [--task <text>] [-- codex-args...]
-nana start [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [--once|--cycles <n>|--forever] [--interval <duration>] [-- codex-args...]
+nana start [--repo <owner/repo>] [--parallel <n>] [--per-repo-workers <n>] [--max-open-prs <n>] [--once|--cycles <n>|--forever] [--interval <duration>] [--no-ui] [--ui-api-port <port>] [--ui-web-port <port>] [-- codex-args...]
+nana start [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [--once|--cycles <n>|--forever] [--interval <duration>] [--no-ui] [--ui-api-port <port>] [--ui-web-port <port>] [-- codex-args...]
 nana improve [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [-- codex-args...]
 nana enhance [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [-- codex-args...]
 ```
@@ -26,7 +25,9 @@ Selection rules:
 - local mode uses `--task`, `--plan-file`, or an inferred task from the current branch
 - GitHub mode is selected when `start` receives a GitHub issue/PR URL
 - `sync` and `lane-exec` are GitHub-only run controls
-- top-level `nana start` runs supported scout roles for local scout startup, and for onboarded GitHub repos it also mirrors issues, starts eligible work, runs scouts, and refreshes issue pickup after scouts finish
+- top-level `nana start` has two runtime modes and prints the selected mode before work begins: `automation` for onboarded GitHub repo automation, and `scout` for scout startup
+- `nana start --repo <owner/repo>` and automation flags such as `--parallel`, `--per-repo-workers`, and `--max-open-prs` select automation mode
+- scout targets, repo-path `--repo` values, `--focus`, `--from-file`, `--dry-run`, `--local-only`, or a bare local repo with scout policies select scout mode
 - `improve` and `enhance` are proposal-only direct scout role commands
 
 ## Storage
@@ -101,7 +102,7 @@ Repo overrides still live in the source checkout:
 
 ## Improvement Runs
 
-`nana improve` inspects the selected repo for UX and performance improvement proposals. `nana enhance` uses the same flow for grounded enhancements that help the repo move forward. Top-level `nana start` runs scout startup automation when scout-specific flags are provided or local scout policies are present. Bare `nana start` loops indefinitely until interrupted; use `--once` or `--cycles <n>` for bounded runs.
+`nana improve` inspects the selected repo for UX and performance improvement proposals. `nana enhance` uses the same flow for grounded enhancements that help the repo move forward. Top-level `nana start` runs scout startup automation in scout mode when scout-specific flags are provided or local scout policies are present, and prints `[start] Mode: scout (startup scout automation).` before execution begins. Bare `nana start` loops indefinitely until interrupted; use `--once` or `--cycles <n>` for bounded runs.
 
 Local repo behavior:
 
@@ -134,7 +135,7 @@ Policy examples:
 
 ## Start Automation
 
-`nana start` is also the global automation command for onboarded GitHub repos when run without scout-specific flags or positional scout targets. Configure each repo first:
+`nana start` is also the global automation command for onboarded GitHub repos when run without scout-specific flags or positional scout targets, and prints `[start] Mode: automation (onboarded repo automation).` before execution begins. Configure each repo first:
 
 ```bash
 nana repo defaults set --repo-mode fork --issue-pick label --pr-forward approve
