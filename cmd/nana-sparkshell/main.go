@@ -187,9 +187,32 @@ func run(args []string, stdout io.Writer, stderr io.Writer) (int, error) {
 
 func usageText() string {
 	return fmt.Sprintf(
-		"usage: nana-sparkshell <command> [args...]\n   or: nana-sparkshell --tmux-pane <pane-id> [--tail-lines <%d-%d>]\n\nDirect command mode executes argv without shell metacharacter parsing.\nTmux pane mode captures a larger pane tail and applies the same raw-vs-summary behavior.\n",
+		`usage: nana-sparkshell <command> [args...]
+   or: nana-sparkshell --tmux-pane <pane-id> [--tail-lines <%d-%d>]
+
+Direct command mode executes argv without shell metacharacter parsing.
+Tmux pane mode captures a larger pane tail and applies the same raw-vs-summary behavior.
+
+Summary behavior:
+  stdout+stderr is emitted raw when visible output is <= NANA_SPARKSHELL_LINES (default %d).
+  Output above that threshold is summarized with codex exec using low reasoning.
+  If summarization fails or times out, raw output is emitted with a "summary unavailable" notice.
+
+Environment controls:
+  NANA_SPARKSHELL_LINES                 raw-vs-summary line threshold (default %d)
+  NANA_SPARKSHELL_SUMMARY_TIMEOUT_MS    codex summary timeout in milliseconds (default %d)
+  NANA_SPARKSHELL_MODEL                 primary summary model; then NANA_DEFAULT_SPARK_MODEL / NANA_SPARK_MODEL
+  NANA_SPARKSHELL_FALLBACK_MODEL        retry model for quota/access/capacity errors; then NANA_DEFAULT_FRONTIER_MODEL
+  NANA_SPARKSHELL_SUMMARY_MAX_LINES     max output lines included in summary prompt (default %d)
+  NANA_SPARKSHELL_SUMMARY_MAX_BYTES     max output bytes included in summary prompt (default %d)
+`,
 		minTmuxTailLines,
 		maxTmuxTailLines,
+		defaultMaxVisibleLines,
+		defaultMaxVisibleLines,
+		defaultSummaryTimeoutMS,
+		defaultSummaryMaxLines,
+		defaultSummaryMaxBytes,
 	)
 }
 

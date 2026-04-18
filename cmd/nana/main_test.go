@@ -152,6 +152,7 @@ func TestBinaryNestedGithubHelpRoutesLocally(t *testing.T) {
 		{args: []string{"usage", "--help"}, expected: "nana usage - Report token spend across NANA-managed sessions"},
 		{args: []string{"config", "--help"}, expected: "Usage:\n  nana config show"},
 		{args: []string{"hud", "--help"}, expected: "Usage:\n  nana hud"},
+		{args: []string{"sparkshell", "--help"}, expected: "NANA_SPARKSHELL_SUMMARY_TIMEOUT_MS"},
 		{args: []string{"work-on", "--help"}, expected: "has been replaced by `nana work`"},
 		{args: []string{"work-local", "--help"}, expected: "has been replaced by `nana work`"},
 	}
@@ -213,16 +214,49 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 		"nana usage",
 		"nana account <subcommand>",
 		"nana reflect | nana explore",
+		"nana sparkshell",
+		"above NANA_SPARKSHELL_LINES",
 		"nana hud",
 		"More help:",
 		"nana help work",
 		"nana help investigate",
 		"nana help repo",
 		"nana help usage",
+		"nana help sparkshell",
 	}
 	for _, snippet := range expectedSnippets {
 		if !strings.Contains(help, snippet) {
 			t.Fatalf("expected top-level help to contain %q, got %q", snippet, output)
+		}
+	}
+}
+
+func TestBinaryHelpTopicRoutesToSparkshellHelp(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cwd := t.TempDir()
+
+	cmd := runCommand(t, binaryPath, "help", "sparkshell")
+	cmd.Dir = cwd
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("binary help sparkshell failed: %v\n%s", err, output)
+	}
+
+	help := string(output)
+	expectedSnippets := []string{
+		"Usage: nana sparkshell <command> [args...]",
+		"raw-vs-summary behavior",
+		"stdout+stderr is emitted raw when visible output is <= NANA_SPARKSHELL_LINES (default 12)",
+		"Output above that threshold is summarized with codex exec using low reasoning",
+		"NANA_SPARKSHELL_SUMMARY_TIMEOUT_MS",
+		"NANA_SPARKSHELL_MODEL",
+		"NANA_SPARKSHELL_FALLBACK_MODEL",
+		"NANA_SPARKSHELL_SUMMARY_MAX_LINES",
+		"NANA_SPARKSHELL_SUMMARY_MAX_BYTES",
+	}
+	for _, snippet := range expectedSnippets {
+		if !strings.Contains(help, snippet) {
+			t.Fatalf("expected sparkshell help to contain %q, got %q", snippet, output)
 		}
 	}
 }

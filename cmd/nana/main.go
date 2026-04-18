@@ -71,7 +71,7 @@ Local tools and support:
   nana agents                  Inspect available role agents
   nana agents-init             Initialize repo agent instructions
   nana reflect | nana explore  Run read-only repo reflection/search helpers
-  nana sparkshell              Run noisy shell commands with compact summaries
+  nana sparkshell              Run shell commands; summarize output above NANA_SPARKSHELL_LINES
   nana session                 Search prior local session history
   nana hooks                   Manage NANA hook integration
   nana hud                     Show or watch the local NANA HUD
@@ -82,6 +82,7 @@ More help:
   nana help investigate
   nana help repo
   nana help usage
+  nana help sparkshell
   nana help review
   nana help review-rules
   nana help start
@@ -217,7 +218,7 @@ func main() {
 		return
 	case "sparkshell":
 		repoRoot := legacyshim.ResolveRepoRoot(os.Getenv(legacyshim.RepoRootEnv), os.Args[0])
-		if repoRoot == "" {
+		if repoRoot == "" && !isHelpRequest(args[1:]) {
 			fmt.Fprintln(os.Stderr, "nana: repo root not found for sparkshell")
 			os.Exit(1)
 		}
@@ -420,6 +421,13 @@ func mustHandleHelp(err error) {
 	if err != nil {
 		exitWithError(err)
 	}
+}
+
+func isHelpRequest(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	return args[0] == "--help" || args[0] == "-h" || args[0] == "help"
 }
 
 func mustGetwd() string {

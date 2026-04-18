@@ -75,6 +75,29 @@ func writeExecutable(t *testing.T, path string, body string) {
 	}
 }
 
+func TestUsageTextDocumentsSummaryControls(t *testing.T) {
+	usage := usageText()
+	expectedSnippets := []string{
+		"usage: nana-sparkshell <command> [args...]",
+		"raw-vs-summary behavior",
+		"stdout+stderr is emitted raw when visible output is <= NANA_SPARKSHELL_LINES (default 12)",
+		"Output above that threshold is summarized with codex exec using low reasoning",
+		"summary unavailable",
+		"NANA_SPARKSHELL_SUMMARY_TIMEOUT_MS",
+		"NANA_SPARKSHELL_MODEL",
+		"NANA_DEFAULT_SPARK_MODEL / NANA_SPARK_MODEL",
+		"NANA_SPARKSHELL_FALLBACK_MODEL",
+		"NANA_DEFAULT_FRONTIER_MODEL",
+		"NANA_SPARKSHELL_SUMMARY_MAX_LINES",
+		"NANA_SPARKSHELL_SUMMARY_MAX_BYTES",
+	}
+	for _, snippet := range expectedSnippets {
+		if !strings.Contains(usage, snippet) {
+			t.Fatalf("expected usage to contain %q, got %q", snippet, usage)
+		}
+	}
+}
+
 func TestRawModePreservesStdoutAndStderr(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell snippets use POSIX sh")
