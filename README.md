@@ -108,17 +108,18 @@ sudo mv nana /usr/local/bin/nana
 ```
 <!-- NANA:INSTALL:END -->
 
-Then install Codex CLI and set up NANA:
+Then install Codex CLI, set up NANA, and run the health check:
 
 ```bash
 npm install -g @openai/codex
 nana setup
+nana doctor
 ```
 
-Then start the first session separately:
+Then start the first session:
 
 ```bash
-nana --madmax --high
+nana
 ```
 
 Then work normally inside Codex:
@@ -133,7 +134,7 @@ nana work start https://github.com/acme/widget/issues/42
 ```
 
 That is the main path.
-Start NANA strongly, clarify first when needed, approve the plan, then move into direct implementation, GitHub review, or `work`.
+Launch NANA with the plain `nana` command first, clarify when needed, approve the plan, then move into direct implementation, GitHub review, or `work`.
 
 ## What NANA is for
 
@@ -155,13 +156,13 @@ If you want plain Codex with no extra workflow layer, you probably do not need N
 
 ### A good first session
 
-Launch NANA the recommended way:
+Launch NANA the canonical way:
 
 ```bash
-nana --madmax --high
+nana
 ```
 
-To have NANA start Codex by issuing the Codex `/fast` slash command first, use:
+After the first launch, use `--fast` only when you specifically want NANA to start Codex by issuing the Codex `/fast` slash command first:
 
 ```bash
 nana --fast
@@ -199,11 +200,13 @@ Most users should think of NANA as **better task routing + better workflow + bet
 
 ## Start here if you are new
 
-1. Run `nana setup`
-2. Launch with `nana --madmax --high` for thorough work or `nana --fast` to start by issuing Codex `/fast`
-3. Use `$deep-interview "..."` when the request or boundaries are still unclear
-4. Use `$ralplan "..."` to approve the plan and review tradeoffs
-5. Continue with direct implementation, `nana review`, or `nana work`
+1. Run the versioned install block and `npm install -g @openai/codex`
+2. Run `nana setup`
+3. Run `nana doctor`
+4. Launch with `nana`
+5. Use `$deep-interview "..."` when the request or boundaries are still unclear
+6. Use `$ralplan "..."` to approve the plan and review tradeoffs
+7. Continue with direct implementation, `nana review`, or `nana work`
 
 ## Recommended workflow
 
