@@ -1993,16 +1993,29 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 		if err := os.MkdirAll(iterationDir, 0o755); err != nil {
 			return err
 		}
+		freshIterationState := false
 		state, err := readLocalWorkRuntimeState(manifest.RunID, iteration)
 		if err != nil {
 			if !os.IsNotExist(err) {
 				return err
 			}
+			freshIterationState = true
 			state = localWorkIterationRuntimeState{
 				Version:               1,
 				Iteration:             iteration,
 				GroupingPolicy:        manifest.GroupingPolicy,
 				ValidationParallelism: manifest.ValidationParallelism,
+			}
+		}
+		if freshIterationState {
+			if _, err := refreshLocalWorkIterationBaseline(&manifest, iteration); err != nil {
+				manifest.Status = "failed"
+				manifest.LastError = err.Error()
+				manifest.UpdatedAt = ISOTimeNow()
+				if writeErr := writeLocalWorkManifest(manifest); writeErr != nil {
+					return writeErr
+				}
+				return err
 			}
 		}
 

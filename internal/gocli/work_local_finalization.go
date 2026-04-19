@@ -348,6 +348,90 @@ func syncLocalWorkTrackedBranch(repoPath string, sourceBranch string, phase stri
 	return target, nil
 }
 
+func refreshLocalWorkIterationBaseline(manifest *localWorkManifest, iteration int) (bool, error) {
+	if manifest == nil {
+		return false, nil
+	}
+	previousBaseline := strings.TrimSpace(manifest.BaselineSHA)
+	if previousBaseline == "" {
+		return false, nil
+	}
+	target, err := syncLocalWorkTrackedBranch(manifest.RepoRoot, manifest.SourceBranch, fmt.Sprintf("before iteration %d", iteration))
+	if err != nil {
+		return false, err
+	}
+	currentBaselineOutput, err := githubGitOutput(manifest.RepoRoot, "rev-parse", "HEAD")
+	if err != nil {
+		return false, err
+	}
+	currentBaseline := strings.TrimSpace(currentBaselineOutput)
+	if currentBaseline == "" || currentBaseline == previousBaseline {
+		return false, nil
+	}
+	if err := refreshLocalWorkSandboxBaseline(manifest.SandboxRepoPath, manifest.SourceBranch, currentBaseline, iteration, localWorkFinalApplyTargetLabel(target, manifest.SourceBranch)); err != nil {
+		return false, err
+	}
+	manifest.BaselineSHA = currentBaseline
+	manifest.UpdatedAt = ISOTimeNow()
+	if err := writeLocalWorkManifest(*manifest); err != nil {
+		return false, err
+	}
+	fmt.Fprintf(os.Stdout, "[local] Iteration %d: refreshed sandbox baseline from %s to %s.\n",
+		iteration,
+		shortGitRef(previousBaseline),
+		shortGitRef(currentBaseline),
+	)
+	return true, nil
+}
+
+func refreshLocalWorkSandboxBaseline(repoPath string, sourceBranch string, baselineSHA string, iteration int, targetLabel string) error {
+	statusOutput, err := githubGitOutput(repoPath, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return err
+	}
+	sandboxDirty := strings.TrimSpace(statusOutput) != ""
+	stashedChanges := false
+	stashRef := "stash@{0}"
+	if sandboxDirty {
+		if err := githubRunGit(repoPath, "reset"); err != nil {
+			return fmt.Errorf("failed to clear sandbox index before iteration %d refresh: %w", iteration, err)
+		}
+		if err := githubRunGit(repoPath, "stash", "push", "--include-untracked", "-m", fmt.Sprintf("nana work: iteration-%d-refresh", iteration)); err != nil {
+			return fmt.Errorf("failed to preserve sandbox changes before iteration %d refresh: %w", iteration, err)
+		}
+		stashedChanges = true
+	}
+	if err := githubRunGit(repoPath, "fetch", "--prune", "origin"); err != nil {
+		return fmt.Errorf("failed to refresh sandbox origin before iteration %d against %s: %w", iteration, targetLabel, err)
+	}
+	if err := checkoutLocalWorkSourceBranch(repoPath, sourceBranch); err != nil {
+		return err
+	}
+	if err := githubRunGit(repoPath, "reset", "--hard", strings.TrimSpace(baselineSHA)); err != nil {
+		return fmt.Errorf("failed to reset sandbox to refreshed baseline %s before iteration %d: %w", shortGitRef(baselineSHA), iteration, err)
+	}
+	if err := githubRunGit(repoPath, "clean", "-fd"); err != nil {
+		return fmt.Errorf("failed to clean sandbox before iteration %d refresh: %w", iteration, err)
+	}
+	if !stashedChanges {
+		return nil
+	}
+	if err := githubRunGit(repoPath, "stash", "apply", stashRef); err != nil {
+		resolvedPaths, resolveErr := resolveGitConflictedPathsByPreferringTheirs(repoPath)
+		if resolveErr != nil {
+			return fmt.Errorf("reapplying sandbox changes after refreshing to %s before iteration %d failed: %w", targetLabel, iteration, err)
+		}
+		if err := githubRunGit(repoPath, "add", "--all"); err != nil {
+			return fmt.Errorf("failed to stage sandbox paths after conflict resolution in iteration %d: %w", iteration, err)
+		}
+		fmt.Fprintf(os.Stdout, "[local] Iteration %d: auto-resolved sandbox refresh conflicts by preferring sandbox changes for: %s\n", iteration, strings.Join(resolvedPaths, ", "))
+	}
+	if err := githubRunGit(repoPath, "stash", "drop", stashRef); err != nil {
+		return fmt.Errorf("refreshed sandbox baseline for iteration %d, but failed to drop temporary stash: %w", iteration, err)
+	}
+	return nil
+}
+
 func refreshLocalWorkTrackedBranch(repoPath string, sourceBranch string, target localWorkFinalApplyTarget, phase string) error {
 	remoteRef := fmt.Sprintf("%s/%s", target.RemoteName, target.Branch)
 	currentSHA, err := githubGitOutput(repoPath, "rev-parse", "HEAD")
@@ -547,11 +631,7 @@ func readLocalWorkFinalApplyLock(lockPath string, manifest localWorkManifest) (l
 	return existing, false, nil
 }
 
-func autoResolveLocalWorkApplyConflicts(repoPath string) ([]string, error) {
-	managedRepoSlug := findManagedRepoSlugForSourcePath(repoPath)
-	if strings.TrimSpace(managedRepoSlug) == "" {
-		return nil, fmt.Errorf("automatic final-apply conflict resolution is only enabled for managed source checkouts")
-	}
+func resolveGitConflictedPathsByPreferringTheirs(repoPath string) ([]string, error) {
 	conflictedOutput, err := githubGitOutput(repoPath, "diff", "--name-only", "--diff-filter=U")
 	if err != nil {
 		return nil, err
@@ -576,6 +656,14 @@ func autoResolveLocalWorkApplyConflicts(repoPath string) ([]string, error) {
 		return nil, fmt.Errorf("automatic resolution left unresolved conflicts in: %s", strings.Join(remaining, ", "))
 	}
 	return conflictedPaths, nil
+}
+
+func autoResolveLocalWorkApplyConflicts(repoPath string) ([]string, error) {
+	managedRepoSlug := findManagedRepoSlugForSourcePath(repoPath)
+	if strings.TrimSpace(managedRepoSlug) == "" {
+		return nil, fmt.Errorf("automatic final-apply conflict resolution is only enabled for managed source checkouts")
+	}
+	return resolveGitConflictedPathsByPreferringTheirs(repoPath)
 }
 
 func applyLocalWorkManagedSandboxFallback(manifest localWorkManifest) ([]string, error) {
@@ -700,6 +788,14 @@ func localWorkFinalApplyTargetLabel(target localWorkFinalApplyTarget, fallbackBr
 	default:
 		return "the source branch"
 	}
+}
+
+func shortGitRef(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) <= 12 {
+		return trimmed
+	}
+	return trimmed[:12]
 }
 
 func localWorkSandboxHasDiff(manifest localWorkManifest) (bool, error) {

@@ -1645,6 +1645,99 @@ func TestStartLocalWorkWithRunIDRefreshesManagedSourceBeforeSandboxClone(t *test
 	}
 }
 
+func TestRefreshLocalWorkIterationBaselineReappliesDirtySandboxChanges(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	originBare := filepath.Join(home, "origin.git")
+	seedRepo := createLocalWorkRepoAt(t, filepath.Join(home, "seed"))
+	runLocalWorkTestGit(t, home, "init", "--bare", originBare)
+	runLocalWorkTestGit(t, seedRepo, "remote", "add", "origin", originBare)
+	runLocalWorkTestGit(t, seedRepo, "push", "-u", "origin", "main")
+	runLocalWorkTestGit(t, "", "--git-dir", originBare, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	sourceRepo := filepath.Join(home, "source")
+	runLocalWorkTestGit(t, home, "clone", originBare, sourceRepo)
+	baseline := strings.TrimSpace(runLocalWorkTestGitOutput(t, sourceRepo, "rev-parse", "HEAD"))
+
+	sandboxPath := filepath.Join(home, "sandbox")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := cloneGithubSourceToSandbox(sourceRepo, sandboxRepoPath); err != nil {
+		t.Fatalf("clone sandbox: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxRepoPath, "README.md"), []byte("# sandbox change\n"), 0o644); err != nil {
+		t.Fatalf("write sandbox readme: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxRepoPath, "extra.txt"), []byte("sandbox extra\n"), 0o644); err != nil {
+		t.Fatalf("write sandbox extra: %v", err)
+	}
+	if err := refreshLocalWorkSandboxIntentToAdd(sandboxRepoPath); err != nil {
+		t.Fatalf("intent-to-add extra.txt: %v", err)
+	}
+
+	advanceRepo := filepath.Join(home, "advance")
+	runLocalWorkTestGit(t, home, "clone", originBare, advanceRepo)
+	if err := os.WriteFile(filepath.Join(advanceRepo, "README.md"), []byte("# upstream change\n"), 0o644); err != nil {
+		t.Fatalf("write upstream readme: %v", err)
+	}
+	runLocalWorkTestGit(t, advanceRepo, "add", "README.md")
+	runLocalWorkTestGit(t, advanceRepo, "commit", "-m", "upstream advanced")
+	runLocalWorkTestGit(t, advanceRepo, "push", "origin", "main")
+	remoteHead := strings.TrimSpace(runLocalWorkTestGitOutput(t, advanceRepo, "rev-parse", "origin/main"))
+
+	manifest := localWorkManifest{
+		Version:         5,
+		RunID:           "lw-iteration-refresh",
+		CreatedAt:       ISOTimeNow(),
+		UpdatedAt:       ISOTimeNow(),
+		Status:          "running",
+		RepoRoot:        sourceRepo,
+		RepoName:        filepath.Base(sourceRepo),
+		RepoID:          localWorkRepoID(sourceRepo),
+		SourceBranch:    "main",
+		BaselineSHA:     baseline,
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+	}
+
+	changed, err := refreshLocalWorkIterationBaseline(&manifest, 2)
+	if err != nil {
+		t.Fatalf("refreshLocalWorkIterationBaseline: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected iteration baseline refresh to detect source change")
+	}
+	if strings.TrimSpace(manifest.BaselineSHA) != remoteHead {
+		t.Fatalf("expected manifest baseline to update, got baseline=%q remote=%q", manifest.BaselineSHA, remoteHead)
+	}
+	sourceHead := strings.TrimSpace(runLocalWorkTestGitOutput(t, sourceRepo, "rev-parse", "HEAD"))
+	if sourceHead != remoteHead {
+		t.Fatalf("expected source repo to refresh to remote head, got source=%q remote=%q", sourceHead, remoteHead)
+	}
+	readmeContent, err := os.ReadFile(filepath.Join(sandboxRepoPath, "README.md"))
+	if err != nil {
+		t.Fatalf("read sandbox README: %v", err)
+	}
+	if strings.TrimSpace(string(readmeContent)) != "# sandbox change" {
+		t.Fatalf("expected sandbox change to win after refresh conflict, got %q", string(readmeContent))
+	}
+	extraContent, err := os.ReadFile(filepath.Join(sandboxRepoPath, "extra.txt"))
+	if err != nil {
+		t.Fatalf("read sandbox extra.txt: %v", err)
+	}
+	if strings.TrimSpace(string(extraContent)) != "sandbox extra" {
+		t.Fatalf("expected sandbox extra.txt to survive refresh, got %q", string(extraContent))
+	}
+	conflicted := strings.TrimSpace(runLocalWorkTestGitOutput(t, sandboxRepoPath, "diff", "--name-only", "--diff-filter=U"))
+	if conflicted != "" {
+		t.Fatalf("expected refreshed sandbox to have no unresolved conflicts, got %q", conflicted)
+	}
+	stashList := strings.TrimSpace(runLocalWorkTestGitOutput(t, sandboxRepoPath, "stash", "list"))
+	if stashList != "" {
+		t.Fatalf("expected temporary sandbox stash to be dropped, got %q", stashList)
+	}
+}
+
 func TestApplyLocalWorkFinalDiffResetsManagedSourceWhenTrackedBranchDiverged(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
