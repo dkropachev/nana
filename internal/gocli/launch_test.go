@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestResolveCLIInvocation(t *testing.T) {
@@ -138,6 +139,9 @@ func TestBuildGithubCodexEnvSeedsTokensFromGhAuth(t *testing.T) {
 	}
 	script := strings.Join([]string{
 		"#!/bin/sh",
+		"if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then",
+		"  exit 0",
+		"fi",
 		"if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"token\" ]; then",
 		"  printf 'bridged-token\\n'",
 		"  exit 0",
@@ -332,6 +336,37 @@ func TestExecCreatesSessionInstructionsAndCleansUp(t *testing.T) {
 	}
 }
 
+func TestWriteSessionModelInstructionsDedupesRepeatedBlocks(t *testing.T) {
+	cwd := t.TempDir()
+	codexHome := filepath.Join(t.TempDir(), ".codex-home")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatalf("mkdir codex home: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "AGENTS.md"), []byte("# Shared\n\nRepeated block.\n\n# User Only\n\nKeep me.\n"), 0o644); err != nil {
+		t.Fatalf("write user AGENTS: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("# Shared\n\nRepeated block.\n\n# Project Only\n\nKeep me too.\n"), 0o644); err != nil {
+		t.Fatalf("write project AGENTS: %v", err)
+	}
+	path, err := writeSessionModelInstructions(cwd, "session-1", codexHome)
+	if err != nil {
+		t.Fatalf("writeSessionModelInstructions: %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read session instructions: %v", err)
+	}
+	text := string(content)
+	if strings.Count(text, "# Shared") != 1 {
+		t.Fatalf("expected deduped shared block once:\n%s", text)
+	}
+	for _, needle := range []string{"# User Only", "# Project Only", "<!-- NANA:RUNTIME:START -->"} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("expected session instructions to contain %q:\n%s", needle, text)
+		}
+	}
+}
+
 func TestExecHelpPassesThroughToCodex(t *testing.T) {
 	cwd := t.TempDir()
 	home := filepath.Join(cwd, "home")
@@ -478,5 +513,144 @@ func TestLaunchUsesProjectCodexHomeWhenPersistedScopeIsProject(t *testing.T) {
 	}
 	if !strings.Contains(output, "# Project Scope Home") {
 		t.Fatalf("expected project-scoped CODEX_HOME AGENTS content, got %q", output)
+	}
+}
+
+func TestRunCodexSessionSwitchesManagedAccountAfterRateLimit(t *testing.T) {
+	cwd := t.TempDir()
+	home := filepath.Join(cwd, "home")
+	codexHome := filepath.Join(home, ".codex")
+	fakeBin := filepath.Join(cwd, "bin")
+	fakeCodexPath := filepath.Join(fakeBin, "codex")
+	logPath := filepath.Join(cwd, "tokens.log")
+	failOncePath := filepath.Join(cwd, "fail-once")
+
+	responses := managedAccountTestResponses{
+		usage: map[string]managedAccountUsageReply{
+			"primary-token":   healthyUsageReply(),
+			"secondary-token": healthyUsageReply(),
+		},
+	}
+	server := newManagedAccountTestServer(t, responses)
+	withManagedAccountEndpoints(t, server)
+
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_TOKEN_LOG", logPath)
+	t.Setenv("FAKE_CODEX_FAIL_ONCE_PATH", failOncePath)
+	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
+		Preferred: "primary",
+		Accounts: map[string]managedAccountFixtureEntry{
+			"primary":   {Profile: chatgptProfileJSON("primary-token", "primary-refresh", "primary-acct")},
+			"secondary": {Profile: chatgptProfileJSON("secondary-token", "secondary-refresh", "secondary-acct")},
+		},
+		Active: "primary",
+	})
+
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`token=$(grep -o '"access_token"[[:space:]]*:[[:space:]]*"[^"]*"' "$CODEX_HOME/auth.json" | sed 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')`,
+		`printf '%s\n' "$token" >> "$FAKE_CODEX_TOKEN_LOG"`,
+		`if [ ! -f "$FAKE_CODEX_FAIL_ONCE_PATH" ]; then`,
+		`  : > "$FAKE_CODEX_FAIL_ONCE_PATH"`,
+		`  printf 'rate limited\n' >&2`,
+		`  exit 1`,
+		`fi`,
+		`printf 'ok\n'`,
+	}, "\n")
+	if err := os.WriteFile(fakeCodexPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error {
+		return runCodexSession(cwd, []string{"exec", "say hi"}, NotifyTempContract{}, codexHome)
+	})
+	if err != nil {
+		t.Fatalf("runCodexSession: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "ok") {
+		t.Fatalf("expected successful retry output, got %q", output)
+	}
+	logRaw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read token log: %v", err)
+	}
+	lines := strings.Fields(string(logRaw))
+	if len(lines) != 2 || lines[0] != "primary-token" || lines[1] != "secondary-token" {
+		t.Fatalf("expected primary then secondary token usage, got %#v", lines)
+	}
+}
+
+func TestRunCodexSessionWaitsForRetryAfterWhenNoAlternateAccountExists(t *testing.T) {
+	cwd := t.TempDir()
+	home := filepath.Join(cwd, "home")
+	codexHome := filepath.Join(home, ".codex")
+	fakeBin := filepath.Join(cwd, "bin")
+	fakeCodexPath := filepath.Join(fakeBin, "codex")
+	logPath := filepath.Join(cwd, "invocations.log")
+	failOncePath := filepath.Join(cwd, "fail-once")
+
+	responses := managedAccountTestResponses{
+		usage: map[string]managedAccountUsageReply{
+			"primary-token": {
+				statusCode: 200,
+				body:       `{"plan_type":"pro","rate_limit":{"allowed":false,"limit_reached":true,"primary_window":{"used_percent":100,"limit_window_seconds":18000,"reset_after_seconds":1,"reset_at":0},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":1,"reset_at":0}},"credits":{"has_credits":false,"unlimited":false,"overage_limit_reached":false,"balance":"0"},"spend_control":{"reached":false}}`,
+			},
+		},
+	}
+	server := newManagedAccountTestServer(t, responses)
+	withManagedAccountEndpoints(t, server)
+
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_RUN_LOG", logPath)
+	t.Setenv("FAKE_CODEX_FAIL_ONCE_PATH", failOncePath)
+	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
+		Preferred: "primary",
+		Accounts: map[string]managedAccountFixtureEntry{
+			"primary": {Profile: chatgptProfileJSON("primary-token", "primary-refresh", "primary-acct")},
+		},
+		Active: "primary",
+	})
+
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`date +%s >> "$FAKE_CODEX_RUN_LOG"`,
+		`if [ ! -f "$FAKE_CODEX_FAIL_ONCE_PATH" ]; then`,
+		`  : > "$FAKE_CODEX_FAIL_ONCE_PATH"`,
+		`  printf 'rate limited\n' >&2`,
+		`  exit 1`,
+		`fi`,
+		`printf 'ok\n'`,
+	}, "\n")
+	if err := os.WriteFile(fakeCodexPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	started := time.Now()
+	output, err := captureStdout(t, func() error {
+		return runCodexSession(cwd, []string{"exec", "say hi"}, NotifyTempContract{}, codexHome)
+	})
+	if err != nil {
+		t.Fatalf("runCodexSession: %v\n%s", err, output)
+	}
+	if time.Since(started) < 900*time.Millisecond {
+		t.Fatalf("expected cooldown wait before retry, elapsed=%s", time.Since(started))
+	}
+	logRaw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read invocation log: %v", err)
+	}
+	lines := strings.Fields(string(logRaw))
+	if len(lines) != 2 {
+		t.Fatalf("expected two invocations, got %#v", lines)
 	}
 }

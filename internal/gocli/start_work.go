@@ -178,6 +178,7 @@ type startWorkServiceTask struct {
 	LastError      string   `json:"last_error,omitempty"`
 	ResultSummary  string   `json:"result_summary,omitempty"`
 	WaitCycle      string   `json:"wait_cycle,omitempty"`
+	WaitUntil      string   `json:"wait_until,omitempty"`
 	StartedAt      string   `json:"started_at,omitempty"`
 	CompletedAt    string   `json:"completed_at,omitempty"`
 	UpdatedAt      string   `json:"updated_at,omitempty"`
@@ -192,6 +193,7 @@ type startWorkPlannedItem struct {
 	TargetURL         string `json:"target_url,omitempty"`
 	Priority          int    `json:"priority"`
 	ScheduleAt        string `json:"schedule_at,omitempty"`
+	DeferredReason    string `json:"deferred_reason,omitempty"`
 	State             string `json:"state"`
 	LaunchRunID       string `json:"launch_run_id,omitempty"`
 	LaunchIssueURL    string `json:"launch_issue_url,omitempty"`
@@ -239,6 +241,8 @@ type startWorkScoutJob struct {
 	RunID               string   `json:"run_id,omitempty"`
 	Attempts            int      `json:"attempts,omitempty"`
 	LastError           string   `json:"last_error,omitempty"`
+	PauseUntil          string   `json:"pause_until,omitempty"`
+	PauseReason         string   `json:"pause_reason,omitempty"`
 	UpdatedAt           string   `json:"updated_at"`
 	CreatedAt           string   `json:"created_at"`
 	LegacyPlannedItemID string   `json:"legacy_planned_item_id,omitempty"`
@@ -343,18 +347,18 @@ func writeStartWorkStatePreservingPlannedItems(state startWorkState) error {
 }
 
 var startWorkRunGithubWork = func(issueURL string, publishTarget string, codexArgs []string) (startWorkLaunchResult, error) {
-	args := []string{"start", issueURL}
-	if publishTarget == "local-branch" {
-		args = append(args, "--local-only")
-	} else {
-		args = append(args, "--create-pr")
+	target, err := parseGithubTargetURL(issueURL)
+	if err != nil {
+		return startWorkLaunchResult{}, err
 	}
-	if len(codexArgs) > 0 {
-		args = append(args, "--")
-		args = append(args, codexArgs...)
-	}
-	result, err := GithubWorkCommand("", args)
-	return startWorkLaunchResult{RunID: result.RunID}, err
+	run, err := startGithubWork(githubWorkStartOptions{
+		Target:           target,
+		CreatePR:         publishTarget != "local-branch",
+		CreatePRExplicit: true,
+		CodexArgs:        codexArgs,
+		RateLimitPolicy:  codexRateLimitPolicyReturnPause,
+	})
+	return startWorkLaunchResult{RunID: run.RunID}, err
 }
 
 func StartWork(cwd string, args []string) error {
@@ -1073,7 +1077,11 @@ func startWorkStatus(options startWorkOptions) error {
 }
 
 func isWaitingStartServiceTask(task startWorkServiceTask) bool {
-	return task.Status == startWorkServiceTaskQueued && (task.ResultSummary == "waiting" || strings.TrimSpace(task.WaitCycle) != "")
+	return task.Status == startWorkServiceTaskQueued &&
+		(task.ResultSummary == "waiting" ||
+			task.ResultSummary == "paused_rate_limit" ||
+			strings.TrimSpace(task.WaitCycle) != "" ||
+			strings.TrimSpace(task.WaitUntil) != "")
 }
 
 func buildStartWorkStatusSummary(state startWorkState) startWorkStatusSummary {

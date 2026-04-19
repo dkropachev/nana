@@ -1,12 +1,10 @@
 package gocli
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -15,23 +13,26 @@ import (
 )
 
 type githubLaneRuntimeState struct {
-	Version          int    `json:"version"`
-	LaneID           string `json:"lane_id"`
-	Alias            string `json:"alias"`
-	Role             string `json:"role"`
-	Activation       string `json:"activation,omitempty"`
-	Phase            string `json:"phase,omitempty"`
-	Blocking         bool   `json:"blocking,omitempty"`
-	Status           string `json:"status"`
-	Pid              int    `json:"pid,omitempty"`
-	StartedAt        string `json:"started_at,omitempty"`
-	UpdatedAt        string `json:"updated_at"`
-	CompletedAt      string `json:"completed_at,omitempty"`
-	InstructionsPath string `json:"instructions_path"`
-	ResultPath       string `json:"result_path"`
-	StdoutPath       string `json:"stdout_path"`
-	StderrPath       string `json:"stderr_path"`
-	LastError        string `json:"last_error,omitempty"`
+	Version               int    `json:"version"`
+	LaneID                string `json:"lane_id"`
+	Alias                 string `json:"alias"`
+	Role                  string `json:"role"`
+	Activation            string `json:"activation,omitempty"`
+	Phase                 string `json:"phase,omitempty"`
+	Blocking              bool   `json:"blocking,omitempty"`
+	Status                string `json:"status"`
+	Pid                   int    `json:"pid,omitempty"`
+	StartedAt             string `json:"started_at,omitempty"`
+	UpdatedAt             string `json:"updated_at"`
+	CompletedAt           string `json:"completed_at,omitempty"`
+	InstructionsPath      string `json:"instructions_path"`
+	ResultPath            string `json:"result_path"`
+	StdoutPath            string `json:"stdout_path"`
+	StderrPath            string `json:"stderr_path"`
+	SessionCheckpointPath string `json:"session_checkpoint_path,omitempty"`
+	SessionID             string `json:"session_id,omitempty"`
+	ResumeEligible        bool   `json:"resume_eligible,omitempty"`
+	LastError             string `json:"last_error,omitempty"`
 }
 
 func executeGithubLane(runID string, useLast bool, laneAlias string, task string, codexArgs []string) error {
@@ -56,6 +57,7 @@ func executeGithubLane(runID string, useLast bool, laneAlias string, task string
 	resultPath := filepath.Join(runtimeDir, fmt.Sprintf("%s-result.md", sanitizeLanePathToken(laneAlias)))
 	stdoutPath := filepath.Join(runtimeDir, fmt.Sprintf("%s-stdout.log", sanitizeLanePathToken(laneAlias)))
 	stderrPath := filepath.Join(runtimeDir, fmt.Sprintf("%s-stderr.log", sanitizeLanePathToken(laneAlias)))
+	checkpointPath := filepath.Join(runtimeDir, fmt.Sprintf("%s-checkpoint.json", sanitizeLanePathToken(laneAlias)))
 	statePath := filepath.Join(runtimeDir, fmt.Sprintf("%s.json", sanitizeLanePathToken(laneAlias)))
 	eventsPath := filepath.Join(runtimeDir, "events.jsonl")
 
@@ -74,20 +76,21 @@ func executeGithubLane(runID string, useLast bool, laneAlias string, task string
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	state := githubLaneRuntimeState{
-		Version:          1,
-		LaneID:           fmt.Sprintf("%s:%s", manifest.RunID, lane.Alias),
-		Alias:            lane.Alias,
-		Role:             lane.Role,
-		Activation:       lane.Activation,
-		Phase:            lane.Phase,
-		Blocking:         lane.Blocking,
-		Status:           "running",
-		UpdatedAt:        now,
-		StartedAt:        now,
-		InstructionsPath: instructionsPath,
-		ResultPath:       resultPath,
-		StdoutPath:       stdoutPath,
-		StderrPath:       stderrPath,
+		Version:               1,
+		LaneID:                fmt.Sprintf("%s:%s", manifest.RunID, lane.Alias),
+		Alias:                 lane.Alias,
+		Role:                  lane.Role,
+		Activation:            lane.Activation,
+		Phase:                 lane.Phase,
+		Blocking:              lane.Blocking,
+		Status:                "running",
+		UpdatedAt:             now,
+		StartedAt:             now,
+		InstructionsPath:      instructionsPath,
+		ResultPath:            resultPath,
+		StdoutPath:            stdoutPath,
+		StderrPath:            stderrPath,
+		SessionCheckpointPath: checkpointPath,
 	}
 
 	prompt := strings.TrimSpace(task)
@@ -97,30 +100,7 @@ func executeGithubLane(runID string, useLast bool, laneAlias string, task string
 	finalPrompt := instructions + "\n\nTask:\n" + prompt
 	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(codexArgs)
 	finalPrompt = prefixCodexFastPrompt(finalPrompt, fastMode)
-	args := append([]string{"exec", "-C", manifest.SandboxRepoPath}, normalizedCodexArgs...)
-	args = append(args, finalPrompt)
-
-	sessionID := fmt.Sprintf("lane-%d", time.Now().UnixNano())
-	sessionInstructionsPath, err := writeSessionModelInstructions(manifest.SandboxPath, sessionID, laneCodexHome)
-	if err != nil {
-		return err
-	}
-	defer removeSessionInstructionsFile(manifest.SandboxPath, sessionID)
-	args = injectModelInstructionsArgs(args, sessionInstructionsPath)
-
-	cmd := exec.Command("codex", args...)
-	cmd.Dir = manifest.SandboxPath
-	cmd.Env = append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, manifest.APIBaseURL),
-		"NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath,
-	)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if cmd.Process == nil {
-		state.Pid = 0
-	}
+	transport := promptTransportForSize(finalPrompt, structuredPromptStdinThreshold)
 	if err := writeGithubJSON(statePath, state); err != nil {
 		return err
 	}
@@ -134,24 +114,57 @@ func executeGithubLane(runID string, useLast bool, laneAlias string, task string
 		return err
 	}
 
-	runErr := cmd.Run()
-	combined := strings.TrimSpace(strings.Join([]string{strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String())}, "\n\n"))
+	result, runErr := runManagedCodexPrompt(codexManagedPromptOptions{
+		CommandDir:       manifest.SandboxPath,
+		InstructionsRoot: manifest.SandboxPath,
+		CodexHome:        laneCodexHome,
+		FreshArgsPrefix:  []string{"exec", "-C", manifest.SandboxRepoPath},
+		CommonArgs:       normalizedCodexArgs,
+		Prompt:           finalPrompt,
+		PromptTransport:  transport,
+		CheckpointPath:   checkpointPath,
+		StepKey:          fmt.Sprintf("github-lane-%s", lane.Alias),
+		ResumeStrategy:   codexResumeConversation,
+		Env: append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, manifest.APIBaseURL),
+			"NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath,
+		),
+		OnPause: func(info codexRateLimitPauseInfo) {
+			state.Status = "paused"
+			state.LastError = codexPauseInfoMessage(info)
+			state.UpdatedAt = ISOTimeNow()
+			_ = writeGithubJSON(statePath, state)
+		},
+		OnResume: func(info codexRateLimitPauseInfo) {
+			state.Status = "running"
+			state.LastError = ""
+			state.UpdatedAt = ISOTimeNow()
+			_ = writeGithubJSON(statePath, state)
+		},
+	})
+	combined := strings.TrimSpace(strings.Join([]string{strings.TrimSpace(result.Stdout), strings.TrimSpace(result.Stderr)}, "\n\n"))
 	if err := os.WriteFile(resultPath, []byte(combined), 0o644); err != nil {
 		return err
 	}
-	if err := os.WriteFile(stdoutPath, stdout.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(stdoutPath, []byte(result.Stdout), 0o644); err != nil {
 		return err
 	}
-	if err := os.WriteFile(stderrPath, stderr.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(stderrPath, []byte(result.Stderr), 0o644); err != nil {
 		return err
 	}
 
 	state.Status = "completed"
+	state.SessionID = strings.TrimSpace(result.SessionID)
+	state.ResumeEligible = result.ResumeEligible
 	if runErr != nil {
-		state.Status = "failed"
-		state.LastError = strings.TrimSpace(stderr.String())
-		if state.LastError == "" {
-			state.LastError = runErr.Error()
+		if pauseErr, ok := isCodexRateLimitPauseError(runErr); ok {
+			state.Status = "paused"
+			state.LastError = codexPauseInfoMessage(pauseErr.Info)
+		} else {
+			state.Status = "failed"
+			state.LastError = strings.TrimSpace(result.Stderr)
+			if state.LastError == "" {
+				state.LastError = runErr.Error()
+			}
 		}
 	}
 	state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
@@ -209,12 +222,14 @@ func buildGithubLaneExecutionInstructions(manifest githubWorkManifest, lane gith
 	if promptBody == "" && len(lane.PromptRoles) > 0 {
 		var parts []string
 		for _, role := range lane.PromptRoles {
-			content, err := readGithubPromptSurface(role)
+			content, err := readGithubEmbeddedPromptSurface(role)
 			if err == nil && strings.TrimSpace(content) != "" {
 				parts = append(parts, strings.TrimSpace(content))
 			}
 		}
-		promptBody = strings.Join(parts, "\n\n")
+		promptBody = compactPromptHeadValue(strings.Join(parts, "\n\n"), 0, githubRolePromptCharLimit)
+	} else if strings.TrimSpace(promptBody) != "" {
+		promptBody = compactPromptHeadValue(promptBody, 0, githubRolePromptCharLimit)
 	}
 	lines := []string{
 		"# NANA Work Lane",
@@ -251,7 +266,7 @@ func buildGithubLaneExecutionInstructions(manifest githubWorkManifest, lane gith
 	if strings.TrimSpace(promptBody) != "" {
 		lines = append(lines, "", strings.TrimSpace(promptBody))
 	}
-	return strings.Join(lines, "\n") + "\n", nil
+	return capPromptChars(strings.Join(lines, "\n")+"\n", githubInstructionCharLimit), nil
 }
 
 func readGithubPromptSurface(role string) (string, error) {
@@ -259,12 +274,30 @@ func readGithubPromptSurface(role string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	key := role + ".md"
-	content := prompts[key]
+	content := prompts[promptSurfaceFileName(role)]
 	if content == "" {
 		return "", fmt.Errorf("prompt not found for role %s", role)
 	}
 	return content, nil
+}
+
+func readGithubEmbeddedPromptSurface(role string) (string, error) {
+	prompts, err := gocliassets.Prompts()
+	if err != nil {
+		return "", err
+	}
+	if content := prompts[embeddedPromptSurfaceFileName(role)]; content != "" {
+		return content, nil
+	}
+	return readGithubPromptSurface(role)
+}
+
+func promptSurfaceFileName(role string) string {
+	return role + ".md"
+}
+
+func embeddedPromptSurfaceFileName(role string) string {
+	return role + "-embedded.md"
 }
 
 func ensureGithubLaneCodexHome(sandboxPath string, laneAlias string) (string, error) {

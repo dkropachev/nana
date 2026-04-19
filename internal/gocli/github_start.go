@@ -1,10 +1,8 @@
 package gocli
 
 import (
-	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -137,6 +135,7 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 		RunID:                   runID,
 		CreatedAt:               now.Format(time.RFC3339),
 		UpdatedAt:               now.Format(time.RFC3339),
+		ExecutionStatus:         "running",
 		RepoSlug:                repoMeta.RepoSlug,
 		RepoOwner:               repoMeta.RepoOwner,
 		RepoName:                repoMeta.RepoName,
@@ -206,38 +205,79 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 	if err != nil {
 		return githubWorkManifest{}, err
 	}
-	sessionID := fmt.Sprintf("start-%d", time.Now().UnixNano())
-	sessionInstructionsPath, err := writeSessionModelInstructions(sandboxPath, sessionID, laneCodexHome)
-	if err != nil {
-		return githubWorkManifest{}, err
-	}
-	defer removeSessionInstructionsFile(sandboxPath, sessionID)
 	prompt := fmt.Sprintf("Implement GitHub %s #%d for %s", options.Target.kind, options.Target.number, options.Target.repoSlug)
 	finalPrompt := buildGithubStartInstructions(manifest) + "\n\nTask:\n" + prompt
 	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(options.CodexArgs)
 	finalPrompt = prefixCodexFastPrompt(finalPrompt, fastMode)
-	execArgs := append([]string{"exec", "-C", sandboxRepoPath}, normalizedCodexArgs...)
-	execArgs = append(execArgs, finalPrompt)
-	execArgs = injectModelInstructionsArgs(execArgs, sessionInstructionsPath)
-	cmd := exec.Command("codex", execArgs...)
-	cmd.Dir = sandboxPath
-	cmd.Env = append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, apiBaseURL), "NANA_PROJECT_AGENTS_ROOT="+sandboxRepoPath)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	runErr := cmd.Run()
+	transport := promptTransportForSize(finalPrompt, structuredPromptStdinThreshold)
+	result, runErr := runManagedCodexPrompt(codexManagedPromptOptions{
+		CommandDir:       sandboxPath,
+		InstructionsRoot: sandboxPath,
+		CodexHome:        laneCodexHome,
+		FreshArgsPrefix:  []string{"exec", "-C", sandboxRepoPath},
+		CommonArgs:       normalizedCodexArgs,
+		Prompt:           finalPrompt,
+		PromptTransport:  transport,
+		CheckpointPath:   filepath.Join(runDir, "leader-checkpoint.json"),
+		StepKey:          "github-leader",
+		ResumeStrategy:   codexResumeConversation,
+		Env:              append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, apiBaseURL), "NANA_PROJECT_AGENTS_ROOT="+sandboxRepoPath),
+		RateLimitPolicy:  codexRateLimitPolicyDefault(options.RateLimitPolicy),
+		OnPause: func(info codexRateLimitPauseInfo) {
+			manifest.ExecutionStatus = "paused"
+			manifest.PauseReason = strings.TrimSpace(info.Reason)
+			manifest.PauseUntil = strings.TrimSpace(info.RetryAfter)
+			manifest.PausedAt = ISOTimeNow()
+			manifest.LastError = codexPauseInfoMessage(info)
+			manifest.UpdatedAt = manifest.PausedAt
+			_ = writeGithubJSON(manifestPath, manifest)
+			_ = indexGithubWorkRunManifest(manifestPath, manifest)
+		},
+		OnResume: func(info codexRateLimitPauseInfo) {
+			manifest.ExecutionStatus = "running"
+			manifest.PauseReason = ""
+			manifest.PauseUntil = ""
+			manifest.PausedAt = ""
+			manifest.LastError = ""
+			manifest.UpdatedAt = ISOTimeNow()
+			_ = writeGithubJSON(manifestPath, manifest)
+			_ = indexGithubWorkRunManifest(manifestPath, manifest)
+		},
+	})
+	manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if pauseErr, ok := isCodexRateLimitPauseError(runErr); ok {
+		manifest.ExecutionStatus = "paused"
+		manifest.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
+		manifest.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+		manifest.PausedAt = manifest.UpdatedAt
+		manifest.LastError = codexPauseInfoMessage(pauseErr.Info)
+	} else if runErr != nil {
+		manifest.ExecutionStatus = "failed"
+		manifest.LastError = runErr.Error()
+	} else {
+		manifest.ExecutionStatus = "completed"
+		manifest.PauseReason = ""
+		manifest.PauseUntil = ""
+		manifest.PausedAt = ""
+		manifest.LastError = ""
+	}
+	if err := writeGithubJSON(manifestPath, manifest); err != nil {
+		return githubWorkManifest{}, err
+	}
+	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+		return githubWorkManifest{}, err
+	}
 
 	fmt.Fprintf(os.Stdout, "[github] Starting run %s for %s %s #%d\n", runID, manifest.RepoSlug, manifest.TargetKind, manifest.TargetNumber)
 	fmt.Fprintf(os.Stdout, "[github] Managed repo root: %s\n", paths.RepoRoot)
 	fmt.Fprintf(os.Stdout, "[github] Managed sandbox: %s -> %s\n", sandboxID, sandboxPath)
 	fmt.Fprintf(os.Stdout, "[github] Managed repo checkout: %s\n", sandboxRepoPath)
 	fmt.Fprintf(os.Stdout, "[github] Reviewer sync user: %s\n", options.Reviewer)
-	if stdout.Len() > 0 {
-		fmt.Fprint(os.Stdout, stdout.String())
+	if strings.TrimSpace(result.Stdout) != "" {
+		fmt.Fprint(os.Stdout, result.Stdout)
 	}
-	if stderr.Len() > 0 {
-		fmt.Fprint(os.Stdout, stderr.String())
+	if strings.TrimSpace(result.Stderr) != "" {
+		fmt.Fprint(os.Stdout, result.Stderr)
 	}
 	return manifest, runErr
 }
@@ -299,5 +339,5 @@ func buildGithubStartInstructions(manifest githubWorkManifest) string {
 		lines = append(lines, "")
 	}
 	lines = append(lines, buildGithubConsiderationInstructionLines(manifest.ConsiderationsActive, manifest.RoleLayout)...)
-	return strings.Join(lines, "\n") + "\n"
+	return capPromptChars(strings.Join(lines, "\n")+"\n", githubInstructionCharLimit)
 }

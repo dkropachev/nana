@@ -1,10 +1,8 @@
 package gocli
 
 import (
-	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,6 +14,7 @@ const WorkHelp = `nana work - Unified local and GitHub-backed implementation run
 Usage:
   nana work start [<github-issue-or-pr-url>] [--repo <path>] [--task <text> | --plan-file <path>] [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [--considerations <list>] [--role-layout <split|reviewer+executor>] [--new-pr] [--create-pr | --local-only] [--reviewer <login|@me>] [-- codex-args...]
   nana work resume [--run-id <id> | --last | --global-last] [--repo <path>] [-- codex-args...]
+  nana work resolve [--run-id <id> | --last | --global-last] [--repo <path>]
   nana work status [--run-id <id> | --last | --global-last] [--repo <path>] [--json]
   nana work logs [--run-id <id> | --last | --global-last] [--repo <path>] [--tail <n>] [--json]
   nana work retrospective [--run-id <id> | --last | --global-last] [--repo <path>]
@@ -29,8 +28,8 @@ Usage:
 Behavior:
   - local mode is selected when start does not receive a GitHub issue/PR URL
   - local mode uses --task, --plan-file, or an inferred task from the current branch
- - local mode syncs the target source branch, commits verified sandbox changes after final review gates pass, and pushes to the tracked remote when one exists
- - GitHub mode is selected when start receives a GitHub issue/PR URL
+  - local mode syncs the target source branch, commits verified sandbox changes after final review gates pass, pushes to the tracked remote when one exists, and uses resolve to recover blocked final-apply states
+  - GitHub mode is selected when start receives a GitHub issue/PR URL
   - work items queue inbound GitHub, email, and Slack-style requests into a shared draft/submit workflow
   - authoritative runtime state lives under ~/.nana/work/
   - legacy work-local and work-on entrypoints have been replaced by nana work
@@ -74,6 +73,8 @@ func Work(cwd string, args []string) error {
 		return startWork(cwd, args)
 	case "resume":
 		return resumeWork(cwd, args[1:])
+	case "resolve":
+		return resolveWork(cwd, args[1:])
 	case "status":
 		return workStatus(cwd, args[1:])
 	case "logs":
@@ -116,6 +117,21 @@ func resumeWork(cwd string, args []string) error {
 		return resumeGithubWork(options)
 	}
 	return resumeLocalWork(cwd, options)
+}
+
+func resolveWork(cwd string, args []string) error {
+	options, err := parseLocalWorkResolveArgs(args)
+	if err != nil {
+		return err
+	}
+	backend, err := resolveWorkBackend(cwd, options.RunSelection)
+	if err != nil {
+		return err
+	}
+	if backend == "github" {
+		return fmt.Errorf("work resolve is only available for blocked local runs")
+	}
+	return resolveLocalWork(cwd, options)
 }
 
 func workStatus(cwd string, args []string) error {
@@ -229,20 +245,26 @@ func resolveWorkBackend(cwd string, selection localWorkRunSelection) (string, er
 }
 
 type githubWorkStatusSnapshot struct {
-	RunID             string                   `json:"run_id"`
-	RepoSlug          string                   `json:"repo_slug"`
-	TargetKind        string                   `json:"target_kind"`
-	TargetNumber      int                      `json:"target_number"`
-	TargetURL         string                   `json:"target_url"`
-	Sandbox           string                   `json:"sandbox"`
-	RepoCheckout      string                   `json:"repo_checkout"`
-	UpdatedAt         string                   `json:"updated_at"`
-	ReviewReviewer    string                   `json:"review_reviewer,omitempty"`
-	PublicationState  string                   `json:"publication_state,omitempty"`
-	PublicationDetail string                   `json:"publication_detail,omitempty"`
-	PublicationError  string                   `json:"publication_error,omitempty"`
-	Lanes             []githubLaneRuntimeState `json:"lanes,omitempty"`
-	FeedbackAvailable bool                     `json:"feedback_available,omitempty"`
+	RunID                string                   `json:"run_id"`
+	RepoSlug             string                   `json:"repo_slug"`
+	TargetKind           string                   `json:"target_kind"`
+	TargetNumber         int                      `json:"target_number"`
+	TargetURL            string                   `json:"target_url"`
+	Sandbox              string                   `json:"sandbox"`
+	RepoCheckout         string                   `json:"repo_checkout"`
+	UpdatedAt            string                   `json:"updated_at"`
+	ReviewReviewer       string                   `json:"review_reviewer,omitempty"`
+	PublicationState     string                   `json:"publication_state,omitempty"`
+	PublicationDetail    string                   `json:"publication_detail,omitempty"`
+	PublicationError     string                   `json:"publication_error,omitempty"`
+	ExecutionStatus      string                   `json:"execution_status,omitempty"`
+	PauseReason          string                   `json:"pause_reason,omitempty"`
+	PauseUntil           string                   `json:"pause_until,omitempty"`
+	LastError            string                   `json:"last_error,omitempty"`
+	LeaderSessionID      string                   `json:"leader_session_id,omitempty"`
+	LeaderResumeEligible bool                     `json:"leader_resume_eligible,omitempty"`
+	Lanes                []githubLaneRuntimeState `json:"lanes,omitempty"`
+	FeedbackAvailable    bool                     `json:"feedback_available,omitempty"`
 }
 
 func githubWorkStatus(selection localWorkRunSelection, jsonOutput bool) error {
@@ -276,6 +298,26 @@ func githubWorkStatus(selection localWorkRunSelection, jsonOutput bool) error {
 	}
 	if strings.TrimSpace(snapshot.PublicationError) != "" {
 		fmt.Fprintf(os.Stdout, "[work] Publication error: %s\n", snapshot.PublicationError)
+	}
+	if strings.TrimSpace(snapshot.ExecutionStatus) != "" {
+		fmt.Fprintf(os.Stdout, "[work] Execution status: %s\n", snapshot.ExecutionStatus)
+	}
+	if strings.TrimSpace(snapshot.PauseUntil) != "" {
+		fmt.Fprintf(os.Stdout, "[work] Pause until: %s", snapshot.PauseUntil)
+		if strings.TrimSpace(snapshot.PauseReason) != "" {
+			fmt.Fprintf(os.Stdout, " reason=%s", snapshot.PauseReason)
+		}
+		fmt.Fprintln(os.Stdout)
+	}
+	if strings.TrimSpace(snapshot.LastError) != "" {
+		fmt.Fprintf(os.Stdout, "[work] Last error: %s\n", snapshot.LastError)
+	}
+	if strings.TrimSpace(snapshot.LeaderSessionID) != "" {
+		fmt.Fprintf(os.Stdout, "[work] Leader session: %s", snapshot.LeaderSessionID)
+		if snapshot.LeaderResumeEligible {
+			fmt.Fprint(os.Stdout, " (resume available)")
+		}
+		fmt.Fprintln(os.Stdout)
 	}
 	if snapshot.FeedbackAvailable {
 		fmt.Fprintln(os.Stdout, "[work] Feedback instructions are present for this run.")
@@ -359,21 +401,28 @@ func buildGithubWorkStatusSnapshot(manifest githubWorkManifest, runDir string) (
 		return githubWorkStatusSnapshot{}, err
 	}
 	_, feedbackErr := os.Stat(filepath.Join(runDir, "feedback-instructions.md"))
+	leaderCheckpoint, _ := readCodexStepCheckpoint(filepath.Join(runDir, "leader-checkpoint.json"))
 	return githubWorkStatusSnapshot{
-		RunID:             manifest.RunID,
-		RepoSlug:          manifest.RepoSlug,
-		TargetKind:        manifest.TargetKind,
-		TargetNumber:      manifest.TargetNumber,
-		TargetURL:         manifest.TargetURL,
-		Sandbox:           manifest.SandboxPath,
-		RepoCheckout:      manifest.SandboxRepoPath,
-		UpdatedAt:         manifest.UpdatedAt,
-		ReviewReviewer:    manifest.ReviewReviewer,
-		PublicationState:  manifest.PublicationState,
-		PublicationDetail: manifest.PublicationDetail,
-		PublicationError:  manifest.PublicationError,
-		Lanes:             lanes,
-		FeedbackAvailable: feedbackErr == nil,
+		RunID:                manifest.RunID,
+		RepoSlug:             manifest.RepoSlug,
+		TargetKind:           manifest.TargetKind,
+		TargetNumber:         manifest.TargetNumber,
+		TargetURL:            manifest.TargetURL,
+		Sandbox:              manifest.SandboxPath,
+		RepoCheckout:         manifest.SandboxRepoPath,
+		UpdatedAt:            manifest.UpdatedAt,
+		ReviewReviewer:       manifest.ReviewReviewer,
+		PublicationState:     manifest.PublicationState,
+		PublicationDetail:    manifest.PublicationDetail,
+		PublicationError:     manifest.PublicationError,
+		ExecutionStatus:      manifest.ExecutionStatus,
+		PauseReason:          manifest.PauseReason,
+		PauseUntil:           manifest.PauseUntil,
+		LastError:            manifest.LastError,
+		LeaderSessionID:      strings.TrimSpace(leaderCheckpoint.SessionID),
+		LeaderResumeEligible: leaderCheckpoint.ResumeEligible,
+		Lanes:                lanes,
+		FeedbackAvailable:    feedbackErr == nil,
 	}, nil
 }
 
@@ -445,31 +494,63 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 	if err != nil {
 		return err
 	}
-	sessionID := fmt.Sprintf("resume-%d", time.Now().UnixNano())
-	sessionInstructionsPath, err := writeSessionModelInstructions(manifest.SandboxPath, sessionID, laneCodexHome)
-	if err != nil {
-		return err
-	}
-	defer removeSessionInstructionsFile(manifest.SandboxPath, sessionID)
-
 	instructions := buildGithubStartInstructions(manifest)
 	prompt := fmt.Sprintf("Resume GitHub %s #%d for %s", manifest.TargetKind, manifest.TargetNumber, manifest.RepoSlug)
 	finalPrompt := instructions + "\n\nTask:\n" + prompt
 	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(options.CodexArgs)
 	finalPrompt = prefixCodexFastPrompt(finalPrompt, fastMode)
-	execArgs := append([]string{"exec", "-C", manifest.SandboxRepoPath}, normalizedCodexArgs...)
-	execArgs = append(execArgs, finalPrompt)
-	execArgs = injectModelInstructionsArgs(execArgs, sessionInstructionsPath)
-	cmd := exec.Command("codex", execArgs...)
-	cmd.Dir = manifest.SandboxPath
-	cmd.Env = append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, manifest.APIBaseURL), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	runErr := cmd.Run()
+	transport := promptTransportForSize(finalPrompt, structuredPromptStdinThreshold)
+	result, runErr := runManagedCodexPrompt(codexManagedPromptOptions{
+		CommandDir:       manifest.SandboxPath,
+		InstructionsRoot: manifest.SandboxPath,
+		CodexHome:        laneCodexHome,
+		FreshArgsPrefix:  []string{"exec", "-C", manifest.SandboxRepoPath},
+		CommonArgs:       normalizedCodexArgs,
+		Prompt:           finalPrompt,
+		PromptTransport:  transport,
+		CheckpointPath:   filepath.Join(runDir, "leader-checkpoint.json"),
+		StepKey:          "github-leader",
+		ResumeStrategy:   codexResumeConversation,
+		Env:              append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, manifest.APIBaseURL), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
+		OnPause: func(info codexRateLimitPauseInfo) {
+			manifest.ExecutionStatus = "paused"
+			manifest.PauseReason = strings.TrimSpace(info.Reason)
+			manifest.PauseUntil = strings.TrimSpace(info.RetryAfter)
+			manifest.PausedAt = ISOTimeNow()
+			manifest.LastError = codexPauseInfoMessage(info)
+			manifest.UpdatedAt = manifest.PausedAt
+			_ = writeGithubJSON(filepath.Join(runDir, "manifest.json"), manifest)
+			_ = indexGithubWorkRunManifest(filepath.Join(runDir, "manifest.json"), manifest)
+		},
+		OnResume: func(info codexRateLimitPauseInfo) {
+			manifest.ExecutionStatus = "running"
+			manifest.PauseReason = ""
+			manifest.PauseUntil = ""
+			manifest.PausedAt = ""
+			manifest.LastError = ""
+			manifest.UpdatedAt = ISOTimeNow()
+			_ = writeGithubJSON(filepath.Join(runDir, "manifest.json"), manifest)
+			_ = indexGithubWorkRunManifest(filepath.Join(runDir, "manifest.json"), manifest)
+		},
+	})
 
 	manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if pauseErr, ok := isCodexRateLimitPauseError(runErr); ok {
+		manifest.ExecutionStatus = "paused"
+		manifest.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
+		manifest.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+		manifest.PausedAt = manifest.UpdatedAt
+		manifest.LastError = codexPauseInfoMessage(pauseErr.Info)
+	} else if runErr != nil {
+		manifest.ExecutionStatus = "failed"
+		manifest.LastError = runErr.Error()
+	} else {
+		manifest.ExecutionStatus = "completed"
+		manifest.PauseReason = ""
+		manifest.PauseUntil = ""
+		manifest.PausedAt = ""
+		manifest.LastError = ""
+	}
 	manifestPath := filepath.Join(runDir, "manifest.json")
 	if err := writeGithubJSON(manifestPath, manifest); err != nil {
 		return err
@@ -479,11 +560,11 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 	}
 
 	fmt.Fprintf(os.Stdout, "[github] Resuming run %s for %s %s #%d\n", manifest.RunID, manifest.RepoSlug, manifest.TargetKind, manifest.TargetNumber)
-	if stdout.Len() > 0 {
-		fmt.Fprint(os.Stdout, stdout.String())
+	if strings.TrimSpace(result.Stdout) != "" {
+		fmt.Fprint(os.Stdout, result.Stdout)
 	}
-	if stderr.Len() > 0 {
-		fmt.Fprint(os.Stdout, stderr.String())
+	if strings.TrimSpace(result.Stderr) != "" {
+		fmt.Fprint(os.Stdout, result.Stderr)
 	}
 	return runErr
 }

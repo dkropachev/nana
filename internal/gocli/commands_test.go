@@ -24,6 +24,32 @@ func captureStdout(t *testing.T, fn func() error) (string, error) {
 	return string(data), runErr
 }
 
+func captureOutput(t *testing.T, fn func() error) (string, string, error) {
+	t.Helper()
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	os.Stdout = stdoutW
+	os.Stderr = stderrW
+	runErr := fn()
+	_ = stdoutW.Close()
+	_ = stderrW.Close()
+	os.Stdout = oldStdout
+	os.Stderr = oldStderr
+	defer stdoutR.Close()
+	defer stderrR.Close()
+	stdoutData, _ := io.ReadAll(stdoutR)
+	stderrData, _ := io.ReadAll(stderrR)
+	return string(stdoutData), string(stderrData), runErr
+}
+
 func TestReadAndUpsertTomlString(t *testing.T) {
 	content := "model = \"gpt-5\"\n[tui]\ntheme = \"night\"\n"
 	if got := ReadTopLevelTomlString(content, "model"); got != "gpt-5" {

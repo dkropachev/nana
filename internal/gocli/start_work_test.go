@@ -831,6 +831,41 @@ func TestStartRepoCoordinatorReconcileRequeuesWhileMetadataIsPending(t *testing.
 	}
 }
 
+func TestStartRepoCoordinatorBuildServiceQueueSkipsTasksUntilWaitUntil(t *testing.T) {
+	coordinator := &startRepoCoordinator{
+		repoSlug: "acme/widget",
+		cycleID:  "cycle-1",
+		state: &startWorkState{
+			Issues: map[string]startWorkIssueState{},
+			ServiceTasks: map[string]startWorkServiceTask{
+				"triage:1": {
+					ID:        "triage:1",
+					Kind:      startTaskKindTriage,
+					Queue:     startTaskQueueService,
+					Status:    startWorkServiceTaskQueued,
+					IssueKey:  "1",
+					WaitUntil: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+				},
+			},
+		},
+		running: map[string]startRepoTask{},
+	}
+	if queue := coordinator.buildServiceQueue(); len(queue) != 0 {
+		t.Fatalf("expected future wait_until to suppress queueing, got %+v", queue)
+	}
+	coordinator.state.ServiceTasks["triage:1"] = startWorkServiceTask{
+		ID:        "triage:1",
+		Kind:      startTaskKindTriage,
+		Queue:     startTaskQueueService,
+		Status:    startWorkServiceTaskQueued,
+		IssueKey:  "1",
+		WaitUntil: time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
+	}
+	if queue := coordinator.buildServiceQueue(); len(queue) != 1 || queue[0].Key != "triage:1" {
+		t.Fatalf("expected expired wait_until to be runnable, got %+v", queue)
+	}
+}
+
 func TestStartRepoCoordinatorApplyTaskResultPreservesExternallyAddedPlannedItems(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

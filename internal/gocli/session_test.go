@@ -2,9 +2,9 @@ package gocli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 )
@@ -61,214 +61,186 @@ func TestSearchSessionHistory(t *testing.T) {
 	}
 }
 
-func TestSearchSessionHistoryPrunesStandardSessionFilenameCandidates(t *testing.T) {
-	cwd := t.TempDir()
-	codexHomeDir := filepath.Join(cwd, ".codex-home")
-	dir := filepath.Join(codexHomeDir, "sessions", "2026", "04", "18")
-	for i := 0; i < 5; i++ {
-		writeSessionRollout(t,
-			filepath.Join(dir, "rollout-2026-04-18T12-00-0"+strconv.Itoa(i)+"-other-session.jsonl"),
-			"other-session",
-			"2026-04-18T12:00:00.000Z",
-			cwd,
-			"needle appears in a different session",
-		)
-	}
-	writeSessionRollout(t,
-		filepath.Join(dir, "rollout-2026-04-18T11-59-00-target-session.jsonl"),
-		"target-session",
-		"2026-04-18T11:59:00.000Z",
-		cwd,
-		"needle appears in the target session",
-	)
-
-	report, err := SearchSessionHistory(SessionSearchOptions{
-		Query:        "needle",
-		Session:      "target-session",
-		Limit:        1,
-		CWD:          cwd,
-		CodexHomeDir: codexHomeDir,
-	})
-	if err != nil {
-		t.Fatalf("SearchSessionHistory(): %v", err)
-	}
-	if len(report.Results) != 1 || report.Results[0].SessionID != "target-session" {
-		t.Fatalf("unexpected report: %+v", report)
-	}
-	if report.SearchedFiles != 1 {
-		t.Fatalf("expected session path pruning to search one transcript, searched %d", report.SearchedFiles)
-	}
-}
-
-func TestSearchSessionHistoryFindsFallbackStandardSessionID(t *testing.T) {
-	cwd := t.TempDir()
-	codexHomeDir := filepath.Join(cwd, ".codex-home")
-	dir := filepath.Join(codexHomeDir, "sessions", "2026", "04", "18")
-	sessionID := "2026-04-18T12-00-00-target-session"
-	writeSessionRolloutWithoutMeta(t,
-		filepath.Join(dir, "rollout-"+sessionID+".jsonl"),
-		"needle appears in fallback-named target session",
-	)
-	writeSessionRolloutWithoutMeta(t,
-		filepath.Join(dir, "rollout-2026-04-18T12-00-01-other-session.jsonl"),
-		"needle appears in another fallback-named session",
-	)
-
-	report, err := SearchSessionHistory(SessionSearchOptions{
-		Query:        "needle",
-		Session:      sessionID,
-		Limit:        1,
-		CWD:          cwd,
-		CodexHomeDir: codexHomeDir,
-	})
-	if err != nil {
-		t.Fatalf("SearchSessionHistory(): %v", err)
-	}
-	if len(report.Results) != 1 {
-		t.Fatalf("expected one fallback-named result, got %+v", report)
-	}
-	if report.Results[0].SessionID != sessionID {
-		t.Fatalf("expected fallback session id %q, got %+v", sessionID, report.Results[0])
-	}
-	if report.SearchedFiles != 1 {
-		t.Fatalf("expected path pruning to keep only fallback-named target transcript, searched %d", report.SearchedFiles)
-	}
-}
-
-func TestSearchSessionHistorySinceKeepsLegacyRolloutsInOldDateDirectories(t *testing.T) {
-	cwd := t.TempDir()
-	codexHomeDir := filepath.Join(cwd, ".codex-home")
-	file := filepath.Join(codexHomeDir, "sessions", "2026", "04", "09", "rollout-legacy.jsonl")
-	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-		t.Fatalf("mkdir rollout dir: %v", err)
-	}
-	if err := os.WriteFile(file, []byte(`{"type":"event_msg","payload":{"type":"user_message","message":"needle from legacy transcript"}}`+"\n"), 0o644); err != nil {
-		t.Fatalf("write legacy rollout: %v", err)
-	}
-	mtime, err := time.Parse(time.RFC3339, "2026-04-11T12:00:00Z")
-	if err != nil {
-		t.Fatalf("parse mtime: %v", err)
-	}
-	if err := os.Chtimes(file, mtime, mtime); err != nil {
-		t.Fatalf("set legacy rollout mtime: %v", err)
-	}
-
-	report, err := SearchSessionHistory(SessionSearchOptions{
-		Query:        "needle",
-		Since:        "2026-04-10",
-		Limit:        1,
-		CWD:          cwd,
-		CodexHomeDir: codexHomeDir,
-	})
-	if err != nil {
-		t.Fatalf("SearchSessionHistory(): %v", err)
-	}
-	if len(report.Results) != 1 {
-		t.Fatalf("expected legacy rollout match, got %+v", report)
-	}
-	if report.Results[0].TranscriptPath != file {
-		t.Fatalf("expected match from %s, got %+v", file, report.Results[0])
-	}
-	if report.Results[0].SessionID != "legacy" || report.Results[0].Timestamp != "" {
-		t.Fatalf("expected fallback legacy metadata, got %+v", report.Results[0])
-	}
-}
-
-func TestWalkRolloutFilesNewestKeepsNonstandardSessionFallback(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "sessions")
-	standardMatch := filepath.Join(root, "2026", "04", "18", "rollout-2026-04-18T12-00-00-target-session.jsonl")
-	standardOther := filepath.Join(root, "2026", "04", "18", "rollout-2026-04-18T12-01-00-other-session.jsonl")
-	fallback := filepath.Join(root, "2026", "04", "18", "rollout-loose.jsonl")
-	writeSessionRollout(t, standardMatch, "target-session", "2026-04-18T12:00:00.000Z", t.TempDir(), "target")
-	writeSessionRollout(t, standardOther, "other-session", "2026-04-18T12:01:00.000Z", t.TempDir(), "other")
-	writeSessionRollout(t, fallback, "target-session", "2026-04-18T12:02:00.000Z", t.TempDir(), "fallback")
+func TestWalkRolloutFilesNewestFirstAndStops(t *testing.T) {
+	codexHomeDir := t.TempDir()
+	root := filepath.Join(codexHomeDir, "sessions")
+	oldest := writeSessionRollout(t, codexHomeDir, time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC), "session-oldest", codexHomeDir, "older needle")
+	middle := writeSessionRollout(t, codexHomeDir, time.Date(2026, 3, 9, 12, 0, 0, 0, time.UTC), "session-middle", codexHomeDir, "middle needle")
+	newest := writeSessionRollout(t, codexHomeDir, time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC), "session-newest", codexHomeDir, "newer needle")
 
 	visited := []string{}
-	err := walkRolloutFilesNewest(root, rolloutWalkOptions{SessionFilter: "target-session"}, func(path string) (bool, error) {
-		visited = append(visited, filepath.Base(path))
-		return true, nil
+	err := walkRolloutFiles(root, 0, func(path string) (bool, error) {
+		visited = append(visited, path)
+		return len(visited) == 2, nil
 	})
 	if err != nil {
-		t.Fatalf("walkRolloutFilesNewest(): %v", err)
+		t.Fatalf("walkRolloutFiles(): %v", err)
 	}
-	expected := []string{"rollout-loose.jsonl", "rollout-2026-04-18T12-00-00-target-session.jsonl"}
-	if len(visited) != len(expected) {
-		t.Fatalf("expected visited %v, got %v", expected, visited)
+	if len(visited) != 2 {
+		t.Fatalf("expected walk to stop after 2 files, visited %d: %#v", len(visited), visited)
 	}
-	for i := range expected {
-		if visited[i] != expected[i] {
-			t.Fatalf("expected visited %v, got %v", expected, visited)
+	if visited[0] != newest || visited[1] != middle {
+		t.Fatalf("unexpected visit order: got %#v, want first two %#v", visited, []string{newest, middle})
+	}
+	for _, path := range visited {
+		if path == oldest {
+			t.Fatalf("walk did not stop before oldest candidate: %#v", visited)
 		}
 	}
 }
 
-func BenchmarkSearchSessionHistoryPrunedSession(b *testing.B) {
-	cwd := b.TempDir()
-	codexHomeDir := filepath.Join(cwd, ".codex-home")
-	dir := filepath.Join(codexHomeDir, "sessions", "2026", "04", "18")
-	for i := 0; i < 1000; i++ {
-		writeSessionRollout(b,
-			filepath.Join(dir, "rollout-2026-04-18T12-00-00-other-session-"+strconv.Itoa(i)+".jsonl"),
-			"other-session-"+strconv.Itoa(i),
-			"2026-04-18T12:00:00.000Z",
-			cwd,
-			"needle appears in another session",
-		)
+func TestWalkRolloutFilesPrunesDatedDirsBeforeSince(t *testing.T) {
+	useLocalLocation(t, time.UTC)
+
+	codexHomeDir := t.TempDir()
+	root := filepath.Join(codexHomeDir, "sessions")
+	oldFile := writeSessionRollout(t, codexHomeDir, time.Date(2026, 3, 8, 23, 59, 0, 0, time.UTC), "session-old", codexHomeDir, "old needle")
+	newFile := writeSessionRollout(t, codexHomeDir, time.Date(2026, 3, 10, 0, 1, 0, 0, time.UTC), "session-new", codexHomeDir, "new needle")
+	cutoff := time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC).UnixMilli()
+
+	visited := []string{}
+	err := walkRolloutFiles(root, cutoff, func(path string) (bool, error) {
+		visited = append(visited, path)
+		return false, nil
+	})
+	if err != nil {
+		t.Fatalf("walkRolloutFiles(): %v", err)
 	}
-	writeSessionRollout(b,
-		filepath.Join(dir, "rollout-2026-04-18T11-59-00-target-session.jsonl"),
-		"target-session",
-		"2026-04-18T11:59:00.000Z",
-		cwd,
-		"needle appears in the target session",
-	)
+	if len(visited) != 1 || visited[0] != newFile {
+		t.Fatalf("unexpected visited files with since cutoff: got %#v, want only %q", visited, newFile)
+	}
+	if visited[0] == oldFile {
+		t.Fatalf("old dated directory was not pruned")
+	}
+}
+
+func TestWalkRolloutFilesDoesNotFollowSymlinkedRoot(t *testing.T) {
+	codexHomeDir := t.TempDir()
+	outsideHomeDir := t.TempDir()
+	outsideRoot := filepath.Join(outsideHomeDir, "sessions")
+	outsideFile := writeSessionRollout(t, outsideHomeDir, time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC), "session-outside", outsideHomeDir, "outside needle")
+
+	if err := os.MkdirAll(codexHomeDir, 0o755); err != nil {
+		t.Fatalf("mkdir codex home: %v", err)
+	}
+	root := filepath.Join(codexHomeDir, "sessions")
+	if err := os.Symlink(outsideRoot, root); err != nil {
+		t.Skipf("symlink sessions root: %v", err)
+	}
+
+	visited := []string{}
+	err := walkRolloutFiles(root, 0, func(path string) (bool, error) {
+		visited = append(visited, path)
+		return false, nil
+	})
+	if err != nil {
+		t.Fatalf("walkRolloutFiles(): %v", err)
+	}
+	if len(visited) != 0 {
+		t.Fatalf("symlinked sessions root escaped into %q; visited %#v", outsideFile, visited)
+	}
+}
+
+func TestSearchSessionHistoryIncludesPreviousLocalDateAfterSinceCutoff(t *testing.T) {
+	westOfUTC := time.FixedZone("UTC-04", -4*60*60)
+
+	codexHomeDir := t.TempDir()
+	cwd := filepath.Join(codexHomeDir, "repo")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatalf("mkdir cwd: %v", err)
+	}
+	writeSessionRollout(t, codexHomeDir, time.Date(2026, 3, 9, 20, 30, 0, 0, westOfUTC), "session-local-previous-day", cwd, "timezone cutoff needle")
+
+	useLocalLocation(t, time.UTC)
+	report, err := SearchSessionHistory(SessionSearchOptions{
+		Query:        "timezone cutoff needle",
+		Since:        "2026-03-10",
+		Project:      "current",
+		CWD:          cwd,
+		CodexHomeDir: codexHomeDir,
+	})
+	if err != nil {
+		t.Fatalf("SearchSessionHistory(): %v", err)
+	}
+	if len(report.Results) != 1 {
+		t.Fatalf("expected previous local-date rollout after cutoff to match, got %+v", report)
+	}
+	if report.Results[0].SessionID != "session-local-previous-day" {
+		t.Fatalf("unexpected result: %+v", report.Results[0])
+	}
+}
+
+func useLocalLocation(t *testing.T, location *time.Location) {
+	t.Helper()
+	originalLocal := time.Local
+	time.Local = location
+	t.Cleanup(func() {
+		time.Local = originalLocal
+	})
+}
+
+func BenchmarkSearchSessionHistoryManyRolloutFiles(b *testing.B) {
+	codexHomeDir := b.TempDir()
+	cwd := filepath.Join(codexHomeDir, "repo")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		b.Fatalf("mkdir cwd: %v", err)
+	}
+	base := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 1200; i++ {
+		message := fmt.Sprintf("background message %d", i)
+		if i == 0 {
+			message = "needle target in newest rollout"
+		}
+		writeSessionRollout(b, codexHomeDir, base.Add(-time.Duration(i)*time.Hour), fmt.Sprintf("session-%04d", i), cwd, message)
+	}
+
+	opts := SessionSearchOptions{
+		Query:        "needle target",
+		Limit:        1,
+		Project:      "current",
+		CWD:          cwd,
+		CodexHomeDir: codexHomeDir,
+	}
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := SearchSessionHistory(SessionSearchOptions{
-			Query:        "needle",
-			Session:      "target-session",
-			Limit:        1,
-			CWD:          cwd,
-			CodexHomeDir: codexHomeDir,
-		}); err != nil {
+		report, err := SearchSessionHistory(opts)
+		if err != nil {
 			b.Fatalf("SearchSessionHistory(): %v", err)
+		}
+		if len(report.Results) != 1 {
+			b.Fatalf("expected one result, got %+v", report)
 		}
 	}
 }
 
-func writeSessionRollout(t testing.TB, file string, id string, timestamp string, cwd string, message string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-		t.Fatalf("mkdir rollout dir: %v", err)
+func writeSessionRollout(tb testing.TB, codexHomeDir string, timestamp time.Time, sessionID string, cwd string, message string) string {
+	tb.Helper()
+	dir := filepath.Join(codexHomeDir, "sessions", timestamp.Format("2006"), timestamp.Format("01"), timestamp.Format("02"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		tb.Fatalf("mkdir rollout dir: %v", err)
 	}
+	file := filepath.Join(dir, fmt.Sprintf("rollout-%s-%s.jsonl", timestamp.Format("2006-01-02T15-04-05"), sessionID))
 	lines := []map[string]any{
-		{"type": "session_meta", "payload": map[string]any{"id": id, "timestamp": timestamp, "cwd": cwd}},
+		{"type": "session_meta", "payload": map[string]any{"id": sessionID, "timestamp": timestamp.UTC().Format(time.RFC3339), "cwd": cwd}},
 		{"type": "event_msg", "payload": map[string]any{"type": "user_message", "message": message}},
 	}
 	handle, err := os.Create(file)
 	if err != nil {
-		t.Fatalf("create file: %v", err)
+		tb.Fatalf("create rollout: %v", err)
 	}
 	for _, line := range lines {
 		encoded, _ := json.Marshal(line)
 		if _, err := handle.Write(append(encoded, '\n')); err != nil {
 			_ = handle.Close()
-			t.Fatalf("write line: %v", err)
+			tb.Fatalf("write rollout: %v", err)
 		}
 	}
 	if err := handle.Close(); err != nil {
-		t.Fatalf("close rollout: %v", err)
+		tb.Fatalf("close rollout: %v", err)
 	}
-}
-
-func writeSessionRolloutWithoutMeta(t testing.TB, file string, message string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-		t.Fatalf("mkdir rollout dir: %v", err)
+	if err := os.Chtimes(file, timestamp, timestamp); err != nil {
+		tb.Fatalf("chtime rollout: %v", err)
 	}
-	line := map[string]any{"type": "event_msg", "payload": map[string]any{"type": "user_message", "message": message}}
-	encoded, _ := json.Marshal(line)
-	if err := os.WriteFile(file, append(encoded, '\n'), 0o644); err != nil {
-		t.Fatalf("write rollout: %v", err)
-	}
+	return file
 }

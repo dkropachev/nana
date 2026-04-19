@@ -12,8 +12,7 @@
         <a class="brand" href="./index.html">nana</a>
         <a href="./index.html">Home</a>
         <a class="active" href="./getting-started.html">Getting Started</a>
-        <a href="./command-reference.html">CLI Reference</a>
-        <a href="./work.md">Work</a>
+        <a href="./start-ui.html">Start UI</a>
         <a href="./agents.html">Agents</a>
         <a href="./skills.html">Skills</a>
         <a href="./integrations.html">Integrations</a>
@@ -26,40 +25,88 @@
 
       <h2>Prerequisites</h2>
       <ul>
-        <li>OpenAI Codex CLI installed: <code>npm install -g @openai/codex</code>.</li>
-        <li>Codex authenticated before the first <code>nana</code> launch.</li>
+        <li>OpenAI Codex CLI installed and authenticated.</li>
         <li>Git (recommended) for project workflows.</li>
       </ul>
 
       <h2>Installation</h2>
-      <pre><code>npm install -g @openai/codex
+      <!-- NANA:INSTALL:START -->
+<pre><code>set -euo pipefail
 
-curl -L -o nana &lt;release-binary-url&gt;
+NANA_VERSION=0.11.12
+case &#34;$(uname -s)-$(uname -m)&#34; in
+  Linux-x86_64) nana_target=&#34;x86_64-unknown-linux-musl&#34; ;;
+  Linux-aarch64|Linux-arm64) nana_target=&#34;aarch64-unknown-linux-musl&#34; ;;
+  Darwin-x86_64) nana_target=&#34;x86_64-apple-darwin&#34; ;;
+  Darwin-arm64) nana_target=&#34;aarch64-apple-darwin&#34; ;;
+  *) echo &#34;Unsupported platform: $(uname -s)-$(uname -m)&#34; &gt;&amp;2; exit 1 ;;
+esac
+
+nana_archive=&#34;nana-${nana_target}.tar.gz&#34;
+nana_base=&#34;https://github.com/dkropachev/nana/releases/download/v${NANA_VERSION}&#34;
+curl -fsSL -o native-release-manifest.json &#34;${nana_base}/native-release-manifest.json&#34;
+if ! grep -q &#34;\&#34;archive\&#34;: \&#34;${nana_archive}\&#34;&#34; native-release-manifest.json; then
+  echo &#34;Release manifest does not list ${nana_archive}&#34; &gt;&amp;2
+  exit 1
+fi
+expected_sha256=&#34;$(
+  awk -v archive=&#34;${nana_archive}&#34; &#39;
+    index($0, &#34;\&#34;archive\&#34;: \&#34;&#34; archive &#34;\&#34;&#34;) { found=1 }
+    found &amp;&amp; index($0, &#34;\&#34;sha256\&#34;:&#34;) {
+      sha=$0
+      sub(/^.*&#34;sha256&#34;: &#34;/, &#34;&#34;, sha)
+      sub(/&#34;.*$/, &#34;&#34;, sha)
+      print sha
+      exit
+    }
+  &#39; native-release-manifest.json
+)&#34;
+if [ -z &#34;$expected_sha256&#34; ]; then
+  echo &#34;Release manifest is missing sha256 for ${nana_archive}&#34; &gt;&amp;2
+  exit 1
+fi
+curl -fsSL -o &#34;${nana_archive}&#34; &#34;${nana_base}/${nana_archive}&#34;
+if command -v sha256sum &gt;/dev/null 2&gt;&amp;1; then
+  actual_sha256=&#34;$(sha256sum &#34;${nana_archive}&#34; | awk &#39;{print $1}&#39;)&#34;
+elif command -v shasum &gt;/dev/null 2&gt;&amp;1; then
+  actual_sha256=&#34;$(shasum -a 256 &#34;${nana_archive}&#34; | awk &#39;{print $1}&#39;)&#34;
+else
+  echo &#34;No SHA-256 checksum tool found (expected sha256sum or shasum)&#34; &gt;&amp;2
+  exit 1
+fi
+if [ &#34;$actual_sha256&#34; != &#34;$expected_sha256&#34; ]; then
+  echo &#34;Checksum mismatch for ${nana_archive}&#34; &gt;&amp;2
+  exit 1
+fi
+tar -xzf &#34;${nana_archive}&#34; nana
 chmod +x nana
-sudo mv nana /usr/local/bin/nana
+sudo mv nana /usr/local/bin/nana</code></pre>
+<p class="muted">Installs nana v0.11.12 and checks the matching release manifest: <code>https://github.com/dkropachev/nana/releases/download/v0.11.12/native-release-manifest.json</code>.</p>
+<!-- NANA:INSTALL:END -->
 
+      <pre><code>npm install -g @openai/codex
 nana setup
 nana doctor</code></pre>
 
       <h2>Recommended Launch</h2>
-      <pre><code>nana                   # standard launch with configured defaults
-nana --high            # optional one-off reasoning override
-nana --madmax          # trusted environments only
-nana --fast            # issue Codex /fast before the rest of the prompt
-</code></pre>
-      <p><code>nana --madmax</code> is an explicit opt-in that bypasses approvals and sandboxing, so reserve it for trusted environments.</p>
+      <pre><code>nana --xhigh --madmax   # trusted environments
+nana                    # standard launch</code></pre>
 
       <h2>First Run Walkthrough</h2>
       <ol>
         <li>Create or enter a project directory.</li>
         <li>Run <code>nana setup</code> to install prompts, skills, AGENTS.md, and configuration.</li>
-        <li>Start with <code>nana</code>, or use <code>nana --high</code> for a one-off reasoning override.</li>
-        <li>Use <code>nana --fast</code> if you want NANA to issue Codex <code>/fast</code> first, and reserve <code>nana --madmax</code> for trusted environments because it bypasses approvals and sandboxing.</li>
+        <li>Start Codex CLI with <code>nana</code>.</li>
+        <li>Use <code>nana next</code> any time you want one clear next step instead of scanning multiple queues.</li>
         <li>Use <code>$deep-interview "clarify the auth change"</code> when intent or boundaries are still unclear.</li>
         <li>Use <code>$ralplan "approve the auth plan and review tradeoffs"</code> to lock the implementation plan.</li>
-        <li>Use <code>/skills</code> to browse the installed helpers inside Codex when you want to see the available workflow surfaces.</li>
         <li>Continue with direct implementation, <code>nana review &lt;pr-url&gt;</code>, or <code>nana work start &lt;issue-or-pr-url&gt;</code> based on what you are doing next.</li>
       </ol>
+
+      <h2>Repo Automation Console</h2>
+      <p>When you are ready to run onboarded repo automation, <code>nana start</code> launches a loopback REST API and assistant workspace by default. Open the printed <code>[start-ui] Web</code> URL to work across issues, investigations, feedback, approvals, repo config, scouts, and logs. See the <a href="./start-ui.html">Start UI guide</a> for the full walkthrough.</p>
+      <pre><code>nana repo onboard owner/repo
+nana start</code></pre>
 
       <h2>Prompt Instruction Source</h2>
       <p>NANA layers project instructions by default (extends Codex behavior, does not replace/bypass Codex core system policies):</p>
@@ -73,7 +120,6 @@ NANA_MODEL_INSTRUCTIONS_FILE=/path/to/instructions.md nana</code></pre>
         <thead><tr><th>Issue</th><th>What to check</th></tr></thead>
         <tbody>
           <tr><td><code>nana</code> command not found</td><td>Reinstall the release binary and ensure its install location is in PATH.</td></tr>
-          <tr><td><code>codex</code> command not found</td><td>Install Codex CLI with <code>npm install -g @openai/codex</code> and confirm the global bin directory is in PATH.</td></tr>
           <tr><td>Prompts not available</td><td>Confirm files exist in <code>~/.codex/prompts/</code> and re-run <code>nana setup</code>.</td></tr>
           <tr><td>Skills not loading</td><td>Verify <code>~/.codex/skills/*/SKILL.md</code> files were installed.</td></tr>
           <tr><td>Doctor reports config issues</td><td>Run <code>nana doctor</code> and apply the suggested fixes.</td></tr>

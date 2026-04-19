@@ -162,6 +162,8 @@ func startWorkScoutJobFromItem(item startWorkScoutJob) startUIScoutItem {
 		RunID:             item.RunID,
 		PlannedItemID:     item.LegacyPlannedItemID,
 		Error:             item.LastError,
+		PauseReason:       item.PauseReason,
+		PauseUntil:        item.PauseUntil,
 		UpdatedAt:         item.UpdatedAt,
 	}
 }
@@ -536,16 +538,29 @@ func reconcileStartWorkScoutJobRunState(job *startWorkScoutJob) {
 	switch strings.TrimSpace(manifest.Status) {
 	case "running":
 		job.LastError = ""
+		job.PauseUntil = ""
+		job.PauseReason = ""
+	case "paused":
+		job.Status = startScoutJobQueued
+		job.LastError = defaultString(strings.TrimSpace(manifest.LastError), "rate limited")
+		job.PauseReason = defaultString(strings.TrimSpace(manifest.PauseReason), "rate limited")
+		job.PauseUntil = strings.TrimSpace(manifest.PauseUntil)
 	case "completed":
 		job.Status = startScoutJobCompleted
 		job.LastError = ""
+		job.PauseUntil = ""
+		job.PauseReason = ""
 	case "failed", "blocked":
 		job.Status = startScoutJobFailed
 		job.LastError = defaultString(strings.TrimSpace(manifest.LastError), fmt.Sprintf("local work run %s ended with status %s", job.RunID, manifest.Status))
+		job.PauseUntil = ""
+		job.PauseReason = ""
 	default:
 		if strings.TrimSpace(manifest.CompletedAt) != "" {
 			job.Status = startScoutJobFailed
 			job.LastError = defaultString(strings.TrimSpace(manifest.LastError), fmt.Sprintf("local work run %s ended with status %s", job.RunID, manifest.Status))
+			job.PauseUntil = ""
+			job.PauseReason = ""
 		}
 	}
 	job.UpdatedAt = defaultString(strings.TrimSpace(manifest.CompletedAt), defaultString(strings.TrimSpace(manifest.UpdatedAt), job.UpdatedAt))

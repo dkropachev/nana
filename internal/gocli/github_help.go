@@ -106,7 +106,7 @@ Policy notes:
   - any_human feedback mode excludes bots, target authors, and blocked reviewers.
 
 Auth:
-  Uses GH_TOKEN / GITHUB_TOKEN when set, otherwise falls back to ` + "`gh auth token`" + `.
+  Requires GitHub CLI authentication via ` + "`gh auth login`" + ` / ` + "`gh auth status`" + `.
 `
 
 func MaybeHandleGithubHelp(command string, args []string) bool {

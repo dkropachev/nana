@@ -23,6 +23,7 @@ const (
 	workItemStatusDropped      = "dropped"
 	workItemStatusSilenced     = "silenced"
 	workItemStatusFailed       = "failed"
+	workItemStatusPaused       = "paused"
 	workItemStatusNeedsRouting = "needs_routing"
 )
 
@@ -44,6 +45,7 @@ Behavior:
   - intake reads a normalized work-item JSON payload from stdin
   - sync-github ingests GitHub review requests and thread comments into the queue
   - run generates a draft review/reply/execution result without publishing by default
+  - rate-limited runs pause instead of failing and become runnable again after retry_after
   - submit publishes the current draft through GitHub or an adapter submit profile
   - drop records a terminal disposition; high-confidence ignore drafts are silenced
   - hidden items stay in audit history and are excluded from default list/UI views
@@ -74,6 +76,8 @@ type workItem struct {
 	LatestDraft        *workItemDraft         `json:"latest_draft,omitempty"`
 	LatestArtifactRoot string                 `json:"latest_artifact_root,omitempty"`
 	LatestActionAt     string                 `json:"latest_action_at,omitempty"`
+	PauseReason        string                 `json:"pause_reason,omitempty"`
+	PauseUntil         string                 `json:"pause_until,omitempty"`
 	CreatedAt          string                 `json:"created_at"`
 	UpdatedAt          string                 `json:"updated_at"`
 }
@@ -468,12 +472,16 @@ func listWorkItemsCommand(options workItemsListCommandOptions) error {
 		if item.Hidden {
 			hiddenSuffix = " hidden"
 		}
+		pauseSuffix := ""
+		if strings.TrimSpace(item.PauseUntil) != "" {
+			pauseSuffix = " retry_after=" + strings.TrimSpace(item.PauseUntil)
+		}
 		fmt.Fprintf(os.Stdout, "[work-item] %s %s/%s status=%s%s subject=%q repo=%s target=%s updated=%s\n",
 			item.ID,
 			defaultString(item.Source, "-"),
 			defaultString(item.SourceKind, "-"),
 			defaultString(item.Status, "-"),
-			hiddenSuffix,
+			hiddenSuffix+pauseSuffix,
 			item.Subject,
 			defaultString(item.RepoSlug, "-"),
 			defaultString(item.TargetURL, "-"),
@@ -496,6 +504,13 @@ func showWorkItemCommand(itemID string, jsonOutput bool) error {
 	fmt.Fprintf(os.Stdout, "[work-item] Id: %s\n", item.ID)
 	fmt.Fprintf(os.Stdout, "[work-item] Source: %s/%s\n", defaultString(item.Source, "-"), defaultString(item.SourceKind, "-"))
 	fmt.Fprintf(os.Stdout, "[work-item] Status: %s\n", defaultString(item.Status, "-"))
+	if strings.TrimSpace(item.PauseUntil) != "" {
+		fmt.Fprintf(os.Stdout, "[work-item] Pause until: %s", item.PauseUntil)
+		if strings.TrimSpace(item.PauseReason) != "" {
+			fmt.Fprintf(os.Stdout, " reason=%s", item.PauseReason)
+		}
+		fmt.Fprintln(os.Stdout)
+	}
 	if item.Hidden {
 		fmt.Fprintf(os.Stdout, "[work-item] Hidden: true (%s)\n", defaultString(item.HiddenReason, "no reason recorded"))
 	}
@@ -718,6 +733,27 @@ func cloneWorkItemMetadata(input map[string]any) map[string]any {
 	return out
 }
 
+func clearWorkItemPauseMetadata(metadata map[string]any) map[string]any {
+	if len(metadata) == 0 {
+		return nil
+	}
+	cloned := cloneWorkItemMetadata(metadata)
+	delete(cloned, "pause_reason")
+	delete(cloned, "pause_until")
+	if len(cloned) == 0 {
+		return nil
+	}
+	return cloned
+}
+
+func workItemPauseFields(item *workItem) {
+	if item == nil {
+		return
+	}
+	item.PauseReason = strings.TrimSpace(item.PauseReason)
+	item.PauseUntil = strings.TrimSpace(item.PauseUntil)
+}
+
 func workItemsRoot() string {
 	return filepath.Join(workHomeRoot(), "items")
 }
@@ -806,7 +842,26 @@ func runWorkItemByID(cwd string, itemID string, codexArgs []string, background b
 	}
 	result, rawOutput, err := executeWorkItem(cwd, item, attemptDir, codexArgs)
 	if err != nil {
+		if pauseErr, ok := isCodexRateLimitPauseError(err); ok {
+			item.Status = workItemStatusPaused
+			item.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
+			item.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+			item.Metadata = clearWorkItemPauseMetadata(item.Metadata)
+			item.UpdatedAt = ISOTimeNow()
+			item.LatestActionAt = item.UpdatedAt
+			_ = store.updateWorkItem(item)
+			_ = store.appendWorkItemEvent(item.ID, "run_paused", "system", map[string]any{
+				"reason":      pauseErr.Info.Reason,
+				"retry_after": pauseErr.Info.RetryAfter,
+				"attempt_dir": attemptDir,
+			})
+			_ = writeWorkItemDraftArtifacts(item, attemptDir, rawOutput)
+			return workItemExecutionResult{Item: item, Draft: item.LatestDraft, Links: buildDefaultWorkItemLinks(item)}, nil
+		}
 		item.Status = workItemStatusFailed
+		item.PauseReason = ""
+		item.PauseUntil = ""
+		item.Metadata = clearWorkItemPauseMetadata(item.Metadata)
 		item.UpdatedAt = ISOTimeNow()
 		item.LatestActionAt = item.UpdatedAt
 		_ = store.updateWorkItem(item)
@@ -818,6 +873,11 @@ func runWorkItemByID(cwd string, itemID string, codexArgs []string, background b
 	item.LatestArtifactRoot = attemptDir
 	item.LatestActionAt = ISOTimeNow()
 	item.UpdatedAt = item.LatestActionAt
+	if item.Status != workItemStatusPaused {
+		item.PauseReason = ""
+		item.PauseUntil = ""
+		item.Metadata = clearWorkItemPauseMetadata(item.Metadata)
+	}
 	if item.LatestDraft != nil && item.Status == "" {
 		item.Status = workItemStatusDraftReady
 	}
@@ -882,8 +942,18 @@ func executeGenericTaskWorkItem(cwd string, item workItem, attemptDir string, co
 	taskMode := metadataString(item.Metadata, "task_mode")
 	switch {
 	case strings.TrimSpace(item.TargetURL) != "":
-		run, err := GithubWorkCommand(cwd, []string{"start", item.TargetURL})
+		target, err := parseGithubTargetURL(item.TargetURL)
 		if err != nil {
+			return workItemExecutionResult{}, "", err
+		}
+		run, err := startGithubWork(githubWorkStartOptions{
+			Target:           target,
+			CreatePR:         true,
+			CreatePRExplicit: true,
+			RateLimitPolicy:  codexRateLimitPolicyReturnPause,
+		})
+		if err != nil {
+			item.LinkedRunID = run.RunID
 			return workItemExecutionResult{}, "", err
 		}
 		item.LinkedRunID = run.RunID
@@ -902,7 +972,7 @@ func executeGenericTaskWorkItem(cwd string, item workItem, attemptDir string, co
 		if strings.TrimSpace(item.Body) != "" {
 			task += "\n\n" + strings.TrimSpace(item.Body)
 		}
-		if err := runLocalWorkCommand(cwd, []string{"start", "--repo", repoRoot, "--task", task}); err != nil {
+		if _, err := runLocalWorkCommandWithOptions(cwd, []string{"start", "--repo", repoRoot, "--task", task}, codexRateLimitPolicyReturnPause); err != nil {
 			return workItemExecutionResult{}, "", err
 		}
 		item.LatestDraft = &workItemDraft{
@@ -939,7 +1009,7 @@ func draftWorkItemReply(cwd string, item workItem, attemptDir string, codexArgs 
 		return nil, "", err
 	}
 	prompt := buildWorkItemReplyPrompt(item, existing, instruction)
-	rawOutput, err := runWorkItemCodexPrompt(repoPath, prompt, codexArgs)
+	rawOutput, err := runWorkItemCodexPrompt(repoPath, attemptDir, prompt, codexArgs)
 	if err != nil {
 		return nil, rawOutput, err
 	}
@@ -962,11 +1032,18 @@ func buildWorkItemReplyPrompt(item workItem, existing *workItemDraft, instructio
 		`Schema: {"kind":"reply|execution","body":"...","summary":"...","suggested_disposition":"submit|needs_review|ignore","confidence":0.0}`,
 		fmt.Sprintf("Item id: %s", item.ID),
 		fmt.Sprintf("Source: %s/%s", item.Source, item.SourceKind),
-		fmt.Sprintf("Repo: %s", defaultString(item.RepoSlug, "(none)")),
-		fmt.Sprintf("Target URL: %s", defaultString(item.TargetURL, "(none)")),
-		fmt.Sprintf("Subject: %s", item.Subject),
-		"Body:",
-		defaultString(item.Body, "(empty)"),
+	}
+	if repoSlug := strings.TrimSpace(item.RepoSlug); repoSlug != "" {
+		lines = append(lines, fmt.Sprintf("Repo: %s", repoSlug))
+	}
+	if targetURL := strings.TrimSpace(item.TargetURL); targetURL != "" {
+		lines = append(lines, fmt.Sprintf("Target URL: %s", targetURL))
+	}
+	if subject := compactPromptValue(item.Subject, 0, 200); subject != "" {
+		lines = append(lines, fmt.Sprintf("Subject: %s", subject))
+	}
+	if body := compactPromptValue(item.Body, 80, 6000); body != "" {
+		lines = append(lines, "Body:", body)
 	}
 	if strings.TrimSpace(item.Author) != "" {
 		lines = append(lines, fmt.Sprintf("Author: %s", item.Author))
@@ -978,14 +1055,14 @@ func buildWorkItemReplyPrompt(item workItem, existing *workItemDraft, instructio
 		lines = append(lines,
 			"",
 			"Current draft:",
-			defaultString(existing.Body, "(empty)"),
+			defaultString(compactPromptValue(existing.Body, 40, 3000), "(empty)"),
 		)
 	}
 	if strings.TrimSpace(instruction) != "" {
 		lines = append(lines,
 			"",
 			"Apply this fix instruction:",
-			instruction,
+			compactPromptValue(instruction, 40, 3000),
 		)
 	}
 	lines = append(lines,
@@ -1018,20 +1095,36 @@ func parseWorkItemDraft(raw string) (*workItemDraft, error) {
 	return &draft, nil
 }
 
-func runWorkItemCodexPrompt(repoPath string, prompt string, codexArgs []string) (string, error) {
-	args := append([]string{"exec", "-C", repoPath}, codexArgs...)
-	args = append(args, prompt)
-	cmd := exec.Command("codex", args...)
-	cmd.Dir = repoPath
-	cmd.Env = buildGithubCodexEnv(NotifyTempContract{}, "", strings.TrimSpace(os.Getenv("GITHUB_API_URL")))
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	output := strings.TrimSpace(stdout.String())
+func runWorkItemCodexPrompt(repoPath string, attemptDir string, prompt string, codexArgs []string) (string, error) {
+	codexHome, err := ensureScopedCodexHome(ResolveCodexHomeForLaunch(repoPath), filepath.Join(workItemsRoot(), "_codex-home", sanitizePathToken(filepath.Base(repoPath))))
 	if err != nil {
-		return output, fmt.Errorf("%v\n%s", err, stderr.String())
+		return "", err
+	}
+	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(codexArgs)
+	prompt = prefixCodexFastPrompt(prompt, fastMode)
+	transport := promptTransportForSize(prompt, structuredPromptStdinThreshold)
+	result, err := runManagedCodexPrompt(codexManagedPromptOptions{
+		CommandDir:       repoPath,
+		InstructionsRoot: repoPath,
+		CodexHome:        codexHome,
+		FreshArgsPrefix:  []string{"exec", "-C", repoPath},
+		CommonArgs:       normalizedCodexArgs,
+		Prompt:           prompt,
+		PromptTransport:  transport,
+		CheckpointPath:   filepath.Join(attemptDir, "reply-checkpoint.json"),
+		StepKey:          "work-item-reply",
+		ResumeStrategy:   codexResumeSamePrompt,
+		Env: append(buildGithubCodexEnv(NotifyTempContract{}, codexHome, strings.TrimSpace(os.Getenv("GITHUB_API_URL"))),
+			"NANA_PROJECT_AGENTS_ROOT="+repoPath,
+		),
+		RateLimitPolicy: codexRateLimitPolicyReturnPause,
+	})
+	output := strings.TrimSpace(result.Stdout)
+	if err != nil {
+		if _, ok := isCodexRateLimitPauseError(err); ok {
+			return output, err
+		}
+		return output, fmt.Errorf("%v\n%s", err, result.Stderr)
 	}
 	return output, nil
 }
@@ -1128,7 +1221,20 @@ func fixWorkItemByID(cwd string, options workItemFixCommandOptions) (workItem, e
 	}
 	draft, rawOutput, err := draftWorkItemReply(cwd, item, attemptDir, options.CodexArgs, item.LatestDraft, options.Instruction)
 	if err != nil {
+		if pauseErr, ok := isCodexRateLimitPauseError(err); ok {
+			item.Status = workItemStatusPaused
+			item.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
+			item.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+			item.Metadata = clearWorkItemPauseMetadata(item.Metadata)
+			item.UpdatedAt = ISOTimeNow()
+			_ = store.updateWorkItem(item)
+			_ = writeWorkItemDraftArtifacts(item, attemptDir, rawOutput)
+			return item, nil
+		}
 		item.Status = workItemStatusFailed
+		item.PauseReason = ""
+		item.PauseUntil = ""
+		item.Metadata = clearWorkItemPauseMetadata(item.Metadata)
 		item.UpdatedAt = ISOTimeNow()
 		_ = store.updateWorkItem(item)
 		_ = writeWorkItemDraftArtifacts(item, attemptDir, rawOutput)
@@ -1136,6 +1242,9 @@ func fixWorkItemByID(cwd string, options workItemFixCommandOptions) (workItem, e
 	}
 	item.LatestDraft = draft
 	item.Status = workItemStatusDraftReady
+	item.PauseReason = ""
+	item.PauseUntil = ""
+	item.Metadata = clearWorkItemPauseMetadata(item.Metadata)
 	item.Hidden = false
 	item.HiddenReason = ""
 	item.LatestArtifactRoot = attemptDir
@@ -1309,6 +1418,12 @@ func safeDraftSummary(draft *workItemDraft) string {
 	return draft.Summary
 }
 
+func workItemPausePending(item workItem, now time.Time) bool {
+	workItemPauseFields(&item)
+	retryAt, ok := parseManagedAuthTime(item.PauseUntil)
+	return ok && retryAt.After(now)
+}
+
 func (s *localWorkDBStore) listWorkItems(options workItemListOptions) ([]workItem, error) {
 	limit := options.Limit
 	if limit <= 0 {
@@ -1329,7 +1444,7 @@ func (s *localWorkDBStore) listWorkItems(options workItemListOptions) ([]workIte
 	} else if !options.IncludeHidden {
 		clauses = append(clauses, "hidden = 0")
 	}
-	query := `SELECT id, dedupe_key, source, source_kind, external_id, thread_key, repo_slug, target_url, linked_run_id, subject, body, author, received_at, status, priority, auto_run, auto_submit, hidden, hidden_reason, submit_profile_json, metadata_json, latest_draft_json, latest_artifact_root, latest_action_at, created_at, updated_at FROM work_items WHERE ` + strings.Join(clauses, " AND ") + ` ORDER BY updated_at DESC LIMIT ?`
+	query := `SELECT id, dedupe_key, source, source_kind, external_id, thread_key, repo_slug, target_url, linked_run_id, subject, body, author, received_at, status, priority, auto_run, auto_submit, hidden, hidden_reason, submit_profile_json, metadata_json, latest_draft_json, latest_artifact_root, latest_action_at, pause_reason, pause_until, created_at, updated_at FROM work_items WHERE ` + strings.Join(clauses, " AND ") + ` ORDER BY updated_at DESC LIMIT ?`
 	args = append(args, limit)
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -1352,8 +1467,8 @@ func (s *localWorkDBStore) listAutoRunnableWorkItems(repoSlug string, limit int)
 		limit = 10
 	}
 	args := []any{}
-	query := `SELECT id, dedupe_key, source, source_kind, external_id, thread_key, repo_slug, target_url, linked_run_id, subject, body, author, received_at, status, priority, auto_run, auto_submit, hidden, hidden_reason, submit_profile_json, metadata_json, latest_draft_json, latest_artifact_root, latest_action_at, created_at, updated_at FROM work_items WHERE auto_run = 1 AND hidden = 0 AND status = ?`
-	args = append(args, workItemStatusQueued)
+	query := `SELECT id, dedupe_key, source, source_kind, external_id, thread_key, repo_slug, target_url, linked_run_id, subject, body, author, received_at, status, priority, auto_run, auto_submit, hidden, hidden_reason, submit_profile_json, metadata_json, latest_draft_json, latest_artifact_root, latest_action_at, pause_reason, pause_until, created_at, updated_at FROM work_items WHERE auto_run = 1 AND hidden = 0 AND status IN (?, ?)`
+	args = append(args, workItemStatusQueued, workItemStatusPaused)
 	if strings.TrimSpace(repoSlug) != "" {
 		query += ` AND repo_slug = ?`
 		args = append(args, strings.TrimSpace(repoSlug))
@@ -1371,13 +1486,16 @@ func (s *localWorkDBStore) listAutoRunnableWorkItems(repoSlug string, limit int)
 		if err != nil {
 			return nil, err
 		}
+		if item.Status == workItemStatusPaused && workItemPausePending(item, time.Now().UTC()) {
+			continue
+		}
 		items = append(items, item)
 	}
 	return items, rows.Err()
 }
 
 func (s *localWorkDBStore) readWorkItem(itemID string) (workItem, error) {
-	row := s.db.QueryRow(`SELECT id, dedupe_key, source, source_kind, external_id, thread_key, repo_slug, target_url, linked_run_id, subject, body, author, received_at, status, priority, auto_run, auto_submit, hidden, hidden_reason, submit_profile_json, metadata_json, latest_draft_json, latest_artifact_root, latest_action_at, created_at, updated_at FROM work_items WHERE id = ?`, itemID)
+	row := s.db.QueryRow(`SELECT id, dedupe_key, source, source_kind, external_id, thread_key, repo_slug, target_url, linked_run_id, subject, body, author, received_at, status, priority, auto_run, auto_submit, hidden, hidden_reason, submit_profile_json, metadata_json, latest_draft_json, latest_artifact_root, latest_action_at, pause_reason, pause_until, created_at, updated_at FROM work_items WHERE id = ?`, itemID)
 	item, err := scanWorkItem(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1543,6 +1661,8 @@ func (s *localWorkDBStore) readWorkItemLinks(itemID string) ([]workItemLink, err
 }
 
 func writeWorkItemTx(tx *sql.Tx, item workItem) error {
+	workItemPauseFields(&item)
+	item.Metadata = clearWorkItemPauseMetadata(item.Metadata)
 	submitProfileJSON, err := marshalNullableJSON(item.SubmitProfile)
 	if err != nil {
 		return err
@@ -1556,8 +1676,8 @@ func writeWorkItemTx(tx *sql.Tx, item workItem) error {
 		return err
 	}
 	_, err = tx.Exec(
-		`INSERT INTO work_items(id, dedupe_key, source, source_kind, external_id, thread_key, repo_slug, target_url, linked_run_id, subject, body, author, received_at, status, priority, auto_run, auto_submit, hidden, hidden_reason, submit_profile_json, metadata_json, latest_draft_json, latest_artifact_root, latest_action_at, created_at, updated_at)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO work_items(id, dedupe_key, source, source_kind, external_id, thread_key, repo_slug, target_url, linked_run_id, subject, body, author, received_at, status, priority, auto_run, auto_submit, hidden, hidden_reason, submit_profile_json, metadata_json, latest_draft_json, latest_artifact_root, latest_action_at, pause_reason, pause_until, created_at, updated_at)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   dedupe_key=excluded.dedupe_key,
 		   source=excluded.source,
@@ -1582,6 +1702,8 @@ func writeWorkItemTx(tx *sql.Tx, item workItem) error {
 		   latest_draft_json=excluded.latest_draft_json,
 		   latest_artifact_root=excluded.latest_artifact_root,
 		   latest_action_at=excluded.latest_action_at,
+		   pause_reason=excluded.pause_reason,
+		   pause_until=excluded.pause_until,
 		   created_at=excluded.created_at,
 		   updated_at=excluded.updated_at`,
 		item.ID,
@@ -1608,6 +1730,8 @@ func writeWorkItemTx(tx *sql.Tx, item workItem) error {
 		draftJSON,
 		nullableString(item.LatestArtifactRoot),
 		nullableString(item.LatestActionAt),
+		nullableString(item.PauseReason),
+		nullableString(item.PauseUntil),
 		item.CreatedAt,
 		item.UpdatedAt,
 	)
@@ -1665,7 +1789,7 @@ type workItemScanner interface {
 func scanWorkItem(row workItemScanner) (workItem, error) {
 	var item workItem
 	var threadKey, repoSlug, targetURL, linkedRunID, body, author, hiddenReason sql.NullString
-	var submitProfileRaw, metadataRaw, latestDraftRaw, latestArtifactRoot, latestActionAt sql.NullString
+	var submitProfileRaw, metadataRaw, latestDraftRaw, latestArtifactRoot, latestActionAt, pauseReason, pauseUntil sql.NullString
 	var autoRun, autoSubmit, hidden int
 	if err := row.Scan(
 		&item.ID,
@@ -1692,6 +1816,8 @@ func scanWorkItem(row workItemScanner) (workItem, error) {
 		&latestDraftRaw,
 		&latestArtifactRoot,
 		&latestActionAt,
+		&pauseReason,
+		&pauseUntil,
 		&item.CreatedAt,
 		&item.UpdatedAt,
 	); err != nil {
@@ -1709,6 +1835,8 @@ func scanWorkItem(row workItemScanner) (workItem, error) {
 	item.HiddenReason = hiddenReason.String
 	item.LatestArtifactRoot = latestArtifactRoot.String
 	item.LatestActionAt = latestActionAt.String
+	item.PauseReason = pauseReason.String
+	item.PauseUntil = pauseUntil.String
 	if strings.TrimSpace(submitProfileRaw.String) != "" {
 		var profile workItemSubmitProfile
 		if err := json.Unmarshal([]byte(submitProfileRaw.String), &profile); err == nil {
@@ -1724,6 +1852,7 @@ func scanWorkItem(row workItemScanner) (workItem, error) {
 			item.LatestDraft = &draft
 		}
 	}
+	workItemPauseFields(&item)
 	return item, nil
 }
 

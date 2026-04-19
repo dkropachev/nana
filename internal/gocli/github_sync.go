@@ -1,11 +1,10 @@
 package gocli
 
 import (
-	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -129,37 +128,78 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 	if err != nil {
 		return err
 	}
-	sessionID := fmt.Sprintf("sync-%d", time.Now().UnixNano())
-	sessionInstructionsPath, err := writeSessionModelInstructions(manifest.SandboxPath, sessionID, laneCodexHome)
-	if err != nil {
-		return err
-	}
-	defer removeSessionInstructionsFile(manifest.SandboxPath, sessionID)
 
 	prompt := fmt.Sprintf("Continue GitHub %s #%d for %s after new reviewer feedback", manifest.TargetKind, manifest.TargetNumber, manifest.RepoSlug)
 	finalPrompt := buildGithubFeedbackInstructions(manifest, actors, newFeedback) + "\n\nTask:\n" + prompt
 	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(options.CodexArgs)
 	finalPrompt = prefixCodexFastPrompt(finalPrompt, fastMode)
-	execArgs := append([]string{"exec", "-C", manifest.SandboxRepoPath}, normalizedCodexArgs...)
-	execArgs = append(execArgs, finalPrompt)
-	execArgs = injectModelInstructionsArgs(execArgs, sessionInstructionsPath)
-	cmd := exec.Command("codex", execArgs...)
-	cmd.Dir = manifest.SandboxPath
-	cmd.Env = append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, apiBaseURL), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	runErr := cmd.Run()
+	transport := promptTransportForSize(finalPrompt, structuredPromptStdinThreshold)
+	result, runErr := runManagedCodexPrompt(codexManagedPromptOptions{
+		CommandDir:       manifest.SandboxPath,
+		InstructionsRoot: manifest.SandboxPath,
+		CodexHome:        laneCodexHome,
+		FreshArgsPrefix:  []string{"exec", "-C", manifest.SandboxRepoPath},
+		CommonArgs:       normalizedCodexArgs,
+		Prompt:           finalPrompt,
+		PromptTransport:  transport,
+		CheckpointPath:   filepath.Join(runDir, "leader-checkpoint.json"),
+		StepKey:          "github-leader",
+		ResumeStrategy:   codexResumeConversation,
+		Env:              append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, apiBaseURL), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
+		RateLimitPolicy:  codexRateLimitPolicyDefault(options.RateLimitPolicy),
+		OnPause: func(info codexRateLimitPauseInfo) {
+			manifest.ExecutionStatus = "paused"
+			manifest.PauseReason = strings.TrimSpace(info.Reason)
+			manifest.PauseUntil = strings.TrimSpace(info.RetryAfter)
+			manifest.PausedAt = ISOTimeNow()
+			manifest.LastError = codexPauseInfoMessage(info)
+			manifest.UpdatedAt = manifest.PausedAt
+			_ = writeGithubJSON(manifestPath, manifest)
+			_ = indexGithubWorkRunManifest(manifestPath, manifest)
+		},
+		OnResume: func(info codexRateLimitPauseInfo) {
+			manifest.ExecutionStatus = "running"
+			manifest.PauseReason = ""
+			manifest.PauseUntil = ""
+			manifest.PausedAt = ""
+			manifest.LastError = ""
+			manifest.UpdatedAt = ISOTimeNow()
+			_ = writeGithubJSON(manifestPath, manifest)
+			_ = indexGithubWorkRunManifest(manifestPath, manifest)
+		},
+	})
+	manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if pauseErr, ok := isCodexRateLimitPauseError(runErr); ok {
+		manifest.ExecutionStatus = "paused"
+		manifest.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
+		manifest.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+		manifest.PausedAt = manifest.UpdatedAt
+		manifest.LastError = codexPauseInfoMessage(pauseErr.Info)
+	} else if runErr != nil {
+		manifest.ExecutionStatus = "failed"
+		manifest.LastError = runErr.Error()
+	} else {
+		manifest.ExecutionStatus = "completed"
+		manifest.PauseReason = ""
+		manifest.PauseUntil = ""
+		manifest.PausedAt = ""
+		manifest.LastError = ""
+	}
+	if err := writeGithubJSON(manifestPath, manifest); err != nil {
+		return err
+	}
+	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+		return err
+	}
 
 	fmt.Fprintf(os.Stdout, "[github] Stored new feedback for run %s.\n", manifest.RunID)
 	fmt.Fprintf(os.Stdout, "[github] Feedback file: %s\n", feedbackInstructionsPath)
 	fmt.Fprintf(os.Stdout, "[github] Feedback actors: %s\n", formatGithubActorSet(actors))
-	if stdout.Len() > 0 {
-		fmt.Fprint(os.Stdout, stdout.String())
+	if strings.TrimSpace(result.Stdout) != "" {
+		fmt.Fprint(os.Stdout, result.Stdout)
 	}
-	if stderr.Len() > 0 {
-		fmt.Fprint(os.Stdout, stderr.String())
+	if strings.TrimSpace(result.Stderr) != "" {
+		fmt.Fprint(os.Stdout, result.Stderr)
 	}
 	return runErr
 }
@@ -299,29 +339,49 @@ func buildGithubFeedbackInstructions(manifest githubWorkManifest, reviewers []st
 	if len(lines) > 0 && lines[len(lines)-1] != "" {
 		lines = append(lines, "")
 	}
+	issueComments := append([]githubIssueCommentPayload(nil), feedback.IssueComments...)
+	slices.SortFunc(issueComments, func(left githubIssueCommentPayload, right githubIssueCommentPayload) int {
+		return right.ID - left.ID
+	})
+	reviews := append([]githubPullReviewPayload(nil), feedback.Reviews...)
+	slices.SortFunc(reviews, func(left githubPullReviewPayload, right githubPullReviewPayload) int {
+		return right.ID - left.ID
+	})
+	reviewComments := append([]githubPullReviewCommentPayload(nil), feedback.ReviewComments...)
+	slices.SortFunc(reviewComments, func(left githubPullReviewCommentPayload, right githubPullReviewCommentPayload) int {
+		return right.ID - left.ID
+	})
 	renderIssueComment := func(comment githubIssueCommentPayload) {
 		lines = append(lines,
 			fmt.Sprintf("## Issue comment %d", comment.ID),
 			"",
-			comment.Body,
+			fmt.Sprintf("Author: %s", comment.User.Login),
+			compactPromptHeadValue(comment.Body, 0, githubFeedbackBodyCharLimit),
 			fmt.Sprintf("Link: %s", comment.HTMLURL),
 			"",
 		)
 	}
-	for _, comment := range feedback.IssueComments {
+	for _, comment := range limitPromptList(issueComments, githubFeedbackIssueCommentLimit) {
 		renderIssueComment(comment)
 	}
-	for _, review := range feedback.Reviews {
+	if len(issueComments) > githubFeedbackIssueCommentLimit {
+		lines = append(lines, fmt.Sprintf("- ... %d older issue comments omitted", len(issueComments)-githubFeedbackIssueCommentLimit), "")
+	}
+	for _, review := range limitPromptList(reviews, githubFeedbackReviewLimit) {
 		lines = append(lines,
 			fmt.Sprintf("## Review %d", review.ID),
 			"",
+			fmt.Sprintf("Author: %s", review.User.Login),
 			fmt.Sprintf("State: %s", review.State),
-			strings.TrimSpace(review.Body),
+			compactPromptHeadValue(strings.TrimSpace(review.Body), 0, githubFeedbackBodyCharLimit),
 			fmt.Sprintf("Link: %s", review.HTMLURL),
 			"",
 		)
 	}
-	for _, comment := range feedback.ReviewComments {
+	if len(reviews) > githubFeedbackReviewLimit {
+		lines = append(lines, fmt.Sprintf("- ... %d older reviews omitted", len(reviews)-githubFeedbackReviewLimit), "")
+	}
+	for _, comment := range limitPromptList(reviewComments, githubFeedbackReviewCommentLimit) {
 		reference := comment.Path
 		if comment.Line > 0 {
 			reference = fmt.Sprintf("%s:%d", comment.Path, comment.Line)
@@ -331,13 +391,17 @@ func buildGithubFeedbackInstructions(manifest githubWorkManifest, reviewers []st
 		lines = append(lines,
 			fmt.Sprintf("## Review comment %d", comment.ID),
 			"",
+			fmt.Sprintf("Author: %s", comment.User.Login),
 			fmt.Sprintf("Path: %s", reference),
-			strings.TrimSpace(comment.Body),
+			compactPromptHeadValue(strings.TrimSpace(comment.Body), 0, githubFeedbackBodyCharLimit),
 			fmt.Sprintf("Link: %s", comment.HTMLURL),
 			"",
 		)
 	}
-	return strings.Join(lines, "\n") + "\n"
+	if len(reviewComments) > githubFeedbackReviewCommentLimit {
+		lines = append(lines, fmt.Sprintf("- ... %d older review comments omitted", len(reviewComments)-githubFeedbackReviewCommentLimit), "")
+	}
+	return capPromptChars(strings.Join(lines, "\n")+"\n", githubFeedbackInstructionCharLimit)
 }
 
 // githubFeedbackActorAllowed keeps wildcard feedback useful without letting authors,

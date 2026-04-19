@@ -8,7 +8,24 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestBuildWorkItemReplyPromptOmitsEmptyDefaultsAndCompactsBody(t *testing.T) {
+	prompt := buildWorkItemReplyPrompt(workItem{
+		ID:         "wi-1",
+		Source:     "email",
+		SourceKind: "task",
+		Subject:    "Reply to this thread",
+		Body:       strings.Repeat("body\n", 2000),
+	}, nil, "")
+	if strings.Contains(prompt, "Repo: (none)") || strings.Contains(prompt, "Target URL: (none)") {
+		t.Fatalf("expected empty default fields to be omitted:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "... [truncated]") {
+		t.Fatalf("expected large body to be truncated:\n%s", prompt)
+	}
+}
 
 func TestWorkItemDropSilencesAndRestoreRequeues(t *testing.T) {
 	home := t.TempDir()
@@ -213,5 +230,117 @@ func TestSubmitWorkItemViaShellUsesDraftEnv(t *testing.T) {
 	}
 	if string(content) != "Adapter reply\nReply summary\n" {
 		t.Fatalf("unexpected submit output: %q", content)
+	}
+}
+
+func TestWorkItemPauseFieldsHydrateFromMetadataAndDelayAutoRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "email",
+		SourceKind: "task",
+		ExternalID: "mail-pause-1",
+		Subject:    "Wait for retry window",
+		AutoRun:    true,
+		Metadata: map[string]any{
+			"task_mode": "reply",
+		},
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+	store, err := openLocalWorkDB()
+	if err != nil {
+		t.Fatalf("openLocalWorkDB: %v", err)
+	}
+	legacyMetadata := map[string]any{
+		"task_mode":    "reply",
+		"pause_reason": "rate limited",
+		"pause_until":  time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+	}
+	encoded, err := json.Marshal(legacyMetadata)
+	if err != nil {
+		t.Fatalf("marshal legacy metadata: %v", err)
+	}
+	if _, err := store.db.Exec(`UPDATE work_items SET status = ?, metadata_json = ?, pause_reason = NULL, pause_until = NULL WHERE id = ?`,
+		workItemStatusPaused, string(encoded), item.ID); err != nil {
+		t.Fatalf("seed legacy paused row: %v", err)
+	}
+	store.Close()
+
+	detail, err := readWorkItemDetail(item.ID)
+	if err != nil {
+		t.Fatalf("readWorkItemDetail: %v", err)
+	}
+	if detail.Item.PauseReason != "rate limited" || detail.Item.PauseUntil == "" {
+		t.Fatalf("expected hydrated pause fields, got %+v", detail.Item)
+	}
+
+	store, err = openLocalWorkDB()
+	if err != nil {
+		t.Fatalf("openLocalWorkDB (second): %v", err)
+	}
+	reloaded, err := store.readWorkItem(item.ID)
+	if err != nil {
+		t.Fatalf("readWorkItem after legacy rewrite: %v", err)
+	}
+	if reloaded.Metadata != nil {
+		if _, ok := reloaded.Metadata["pause_reason"]; ok {
+			t.Fatalf("expected legacy pause_reason metadata to be cleared, got %+v", reloaded.Metadata)
+		}
+		if _, ok := reloaded.Metadata["pause_until"]; ok {
+			t.Fatalf("expected legacy pause_until metadata to be cleared, got %+v", reloaded.Metadata)
+		}
+	}
+	runnable, err := store.listAutoRunnableWorkItems("", 10)
+	store.Close()
+	if err != nil {
+		t.Fatalf("listAutoRunnableWorkItems: %v", err)
+	}
+	if len(runnable) != 0 {
+		t.Fatalf("expected paused item with future retry to stay unrunnable, got %+v", runnable)
+	}
+}
+
+func TestWorkItemPauseFieldsPersistExplicitlyInDB(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "email",
+		SourceKind: "task",
+		ExternalID: "mail-pause-2",
+		Subject:    "Persist explicit pause fields",
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+	store, err := openLocalWorkDB()
+	if err != nil {
+		t.Fatalf("openLocalWorkDB: %v", err)
+	}
+	item.Status = workItemStatusPaused
+	item.PauseReason = "rate limited"
+	item.PauseUntil = time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	item.Metadata = nil
+	if err := store.updateWorkItem(item); err != nil {
+		t.Fatalf("updateWorkItem: %v", err)
+	}
+	reloaded, err := store.readWorkItem(item.ID)
+	store.Close()
+	if err != nil {
+		t.Fatalf("readWorkItem: %v", err)
+	}
+	if reloaded.PauseReason != "rate limited" || reloaded.PauseUntil == "" {
+		t.Fatalf("expected explicit pause fields from DB, got %+v", reloaded)
+	}
+	if reloaded.Metadata != nil {
+		if _, ok := reloaded.Metadata["pause_reason"]; ok {
+			t.Fatalf("expected new rows to avoid pause_reason metadata dual-write, got %+v", reloaded.Metadata)
+		}
+		if _, ok := reloaded.Metadata["pause_until"]; ok {
+			t.Fatalf("expected new rows to avoid pause_until metadata dual-write, got %+v", reloaded.Metadata)
+		}
 	}
 }

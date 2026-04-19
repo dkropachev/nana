@@ -9,6 +9,9 @@ All notable changes to this project are documented in this file.
 - replace `.mjs` hooks with executable hook JSON I/O handled by Go
 - move version/update/release ownership to `VERSION` plus Go-native tooling
 - tighten automation wait-path behavior: `nana start --interval` now targets time between cycle starts, published-PR reconcile refreshes live CI state, repos with no CI no longer stall, and managed-auth retries no longer sleep on deterministic local errors
+- managed task runtimes and direct interactive launch now distinguish rate limits from ordinary failures, switch to another eligible managed account when possible, and otherwise pause or wait until the next known reset time
+- queued work now stays paused instead of failing on rate limits, with retry timing visible in work status, Start UI run/work-item/investigation/scout surfaces, and work-item detail output
+- Start UI approvals now stay focused on human-actionable review/launch decisions, while paused runs remain visible in the normal run surfaces
 
 ### Removed
 - remove the TypeScript/JavaScript product tree and root npm metadata from the live repository

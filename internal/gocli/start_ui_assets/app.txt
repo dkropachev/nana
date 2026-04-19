@@ -1583,6 +1583,28 @@
     return `<span class="run-state-pill run-state-${escapeHTML(defaultString(attentionState, "active"))}">${escapeHTML(defaultString(status, "-"))}</span>`;
   }
 
+  function pauseStateSummary(pauseUntil, pauseReason) {
+    const until = String(pauseUntil || "").trim();
+    const reason = String(pauseReason || "").trim();
+    const parts = [];
+    if (until) {
+      const formatted = formatDateTime(until);
+      parts.push(formatted || until);
+    }
+    if (reason) {
+      parts.push(reason);
+    }
+    return parts.join(" · ");
+  }
+
+  function renderStatePillWithPause(attentionState, status, pauseUntil, pauseReason) {
+    const detail = pauseStateSummary(pauseUntil, pauseReason);
+    if (!detail) {
+      return renderStatePill(attentionState, status);
+    }
+    return `${renderStatePill(attentionState, status)}<span class="data-value-text">${escapeHTML(detail)}</span>`;
+  }
+
   function runRepoDisplay(run) {
     if (run && String(run.repo_slug || "").trim()) {
       return String(run.repo_slug).trim();
@@ -1830,9 +1852,14 @@
         backend: defaultString(run.backend, "-"),
         status: defaultString(run.status, "active"),
         attention_state: defaultString(run.attention_state, "active"),
+        pause_reason: defaultString(run.pause_reason, ""),
+        pause_until: defaultString(run.pause_until, ""),
         current_phase: defaultString(run.current_phase, "Awaiting phase"),
         updated_at: formatDateTime(run.updated_at),
       };
+      if (row.pause_until) {
+        row.current_phase = `Retry ${formatDateTime(row.pause_until)}`;
+      }
       if (includeRepo) {
         row.repo_slug = runRepoDisplay(run);
       }
@@ -1847,6 +1874,8 @@
         source: `${defaultString(item.source, "-")}/${defaultString(item.source_kind, "-")}`,
         status: defaultString(item.status, "-"),
         attention_state: defaultString(item.attention_state, "active"),
+        pause_reason: defaultString(item.pause_reason, ""),
+        pause_until: defaultString(item.pause_until, ""),
         subject: defaultString(item.subject, "(no subject)"),
         updated_at: formatDateTime(item.updated_at),
         draft_kind: defaultString(item.draft_kind, "-"),
@@ -1865,7 +1894,7 @@
     }
     columns.push(
       { field: "backend", label: "Backend" },
-      { field: "status", label: "Status", render: (row) => renderStatePill(row.attention_state, row.status) },
+      { field: "status", label: "Status", render: (row) => renderStatePillWithPause(row.attention_state, row.status, row.pause_until, row.pause_reason) },
       { field: "current_phase", label: "Phase" },
       { field: "updated_at", label: "Updated" },
       { field: "run_id", label: "Logs", action: true, template: '<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-log-run-id="{{run_id}}">Logs</button>' },
@@ -1881,11 +1910,17 @@
         kind: defaultString(run.backend, "-"),
         status: defaultString(run.status, "active"),
         attention_state: defaultString(run.attention_state, "active"),
+        pause_reason: defaultString(run.pause_reason, ""),
+        pause_until: defaultString(run.pause_until, ""),
         current_phase: defaultString(run.current_phase, "Awaiting phase"),
         target_url: defaultString(run.target_url, "-"),
         updated_at: formatDateTime(run.updated_at),
         can_sync: run.backend === "github",
+        can_resolve: Boolean(run.resolve_allowed),
       };
+      if (row.pause_until) {
+        row.current_phase = `Retry ${formatDateTime(row.pause_until)}`;
+      }
       if (includeRepo) {
         row.repo_slug = runRepoDisplay(run);
       }
@@ -1900,7 +1935,7 @@
     }
     columns.push(
       { field: "backend", label: "Backend" },
-      { field: "status", label: "Status", render: (row) => renderStatePill(row.attention_state, row.status) },
+      { field: "status", label: "Status", render: (row) => renderStatePillWithPause(row.attention_state, row.status, row.pause_until, row.pause_reason) },
       { field: "current_phase", label: "Phase" },
       { field: "target_url", label: "Target" },
       { field: "updated_at", label: "Updated" },
@@ -1914,6 +1949,17 @@
             return '<span class="data-value-text">N/A</span>';
           }
           return `<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-run-sync="${escapeHTML(row.run_id)}">Sync</button>`;
+        },
+      },
+      {
+        field: "run_id",
+        label: "Resolve",
+        action: true,
+        render(row) {
+          if (!row.can_resolve) {
+            return '<span class="data-value-text">N/A</span>';
+          }
+          return `<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-run-resolve="${escapeHTML(row.run_id)}">Resolve</button>`;
         },
       },
       {
@@ -2218,7 +2264,7 @@
     const metricCards = [
       { label: "Repos", value: state.overview.totals.repos, note: "Onboarded and visible in the console." },
       { label: "Queued Issues", value: state.overview.totals.issues_queued, note: "Tracked issues waiting for work." },
-      { label: "Scout Queue", value: (state.overview.totals.scout_queued || 0) + (state.overview.totals.scout_running || 0) + (state.overview.totals.scout_failed || 0), note: "Local scout jobs waiting, active, or failed." },
+      { label: "Scout Queue", value: (state.overview.totals.scout_queued || 0) + (state.overview.totals.scout_running || 0) + (state.overview.totals.scout_failed || 0), note: "Local scout jobs waiting, paused, active, or failed." },
       { label: "Pending Jobs", value: runs.length, note: "Work runs still in flight or blocked." },
       { label: "Approvals", value: state.overview.totals.approval_items || 0, note: "Human-gate work waiting for review or launch." },
       { label: "Service Queue", value: state.overview.totals.service_queued + state.overview.totals.service_running, note: "Scouts, triage, sync, and reconcile tasks." },
@@ -2244,13 +2290,13 @@
         { field: "source", label: "Source" },
         { field: "repo_slug", label: "Repo" },
         { field: "subject", label: "Subject" },
-        { field: "status", label: "Status", render: (row) => renderStatePill(row.attention_state, row.status) },
+        { field: "status", label: "Status", render: (row) => renderStatePillWithPause(row.attention_state, row.status, row.pause_until, row.pause_reason) },
         { field: "draft_kind", label: "Kind" },
         { field: "updated_at", label: "Updated" },
         { field: "id", label: "Review", action: true, template: '<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-work-item-show="{{id}}">Open</button>' },
       ], workItemRows(workItems, true), {
         maxHeight: "360px",
-        emptyMessage: "No queued work items are active.",
+        emptyMessage: "No queued or paused work items are waiting.",
       });
     }
     document.getElementById("hud-json").textContent = JSON.stringify(state.overview.hud || {}, null, 2);
@@ -2492,7 +2538,7 @@
     return (state.investigations.items || []).filter((item) => {
       return matchesRepoFilter(item, filter.repo) &&
         matchesAttentionFilter(item, filter.attention) &&
-        matchesQuery(item, ["query", "repo_slug", "overall_short_explanation", "run_id"], filter.query);
+        matchesQuery(item, ["query", "repo_slug", "overall_short_explanation", "run_id", "pause_reason", "pause_until"], filter.query);
     });
   }
 
@@ -2502,7 +2548,7 @@
       return matchesRepoFilter(item, filter.repo) &&
         matchesAttentionFilter(item, filter.attention) &&
         matchesKindFilter(item, filter.kind) &&
-        matchesQuery(item, ["repo_slug", "run_id", "target_url", "current_phase", "status", "backend"], filter.query);
+        matchesQuery(item, ["repo_slug", "run_id", "target_url", "current_phase", "status", "backend", "pause_reason", "pause_until"], filter.query);
     });
   }
 
@@ -2512,7 +2558,7 @@
     return (sourceItems || []).filter((item) => {
       return matchesRepoFilter(item, filter.repo) &&
         matchesAttentionFilter(item, filter.attention) &&
-        matchesQuery(item, ["subject", "repo_slug", "draft_summary", "draft_body", "target_url", "comment_path"], filter.query);
+        matchesQuery(item, ["subject", "repo_slug", "draft_summary", "draft_body", "target_url", "comment_path", "pause_reason", "pause_until"], filter.query);
     });
   }
 
@@ -2687,7 +2733,7 @@
         <div class="surface-head">
           <div>
             <h3>Runs</h3>
-            <p>Accepted, running, and failed investigation runs.</p>
+            <p>Accepted, running, paused, and failed investigation runs.</p>
           </div>
         </div>
         ${buildFilterToolbar("investigations", { placeholder: "Search query, repo, summary, or run id" })}
@@ -2706,7 +2752,7 @@
     `);
     renderGrid("investigations-grid", [
       { field: "repo_slug", label: "Repo", render: (row) => `<span class="data-value-text">${escapeHTML(defaultString(row.repo_slug, "Workspace"))}</span>` },
-      { field: "status", label: "Run", render: (row) => renderStatePill(row.attention_state, row.status) },
+      { field: "status", label: "Run", render: (row) => renderStatePillWithPause(row.attention_state, row.status, row.pause_until, row.pause_reason) },
       { field: "overall_status", label: "Result" },
       { field: "query", label: "Query" },
       { field: "updated_at", label: "Updated", render: (row) => `<span class="data-value-text">${escapeHTML(formatDateTime(row.updated_at))}</span>` },
@@ -2738,6 +2784,7 @@
     const summary = detail.summary;
     const report = detail.final_report;
     const validator = detail.latest_validator_result;
+    const investigationPauseSummary = pauseStateSummary(summary.pause_until, summary.pause_reason);
     const issueSections = report && Array.isArray(report.issues) && report.issues.length
       ? report.issues.map((issue) => `
         <article class="queue-item">
@@ -2794,6 +2841,7 @@
           <div class="drawer-summary-card"><span class="drawer-label">Accepted Round</span><span class="drawer-value">${escapeHTML(defaultString(summary.accepted_round, "-"))}</span></div>
           <div class="drawer-summary-card"><span class="drawer-label">Issues</span><span class="drawer-value">${escapeHTML(defaultString(summary.issue_count, 0))}</span></div>
           <div class="drawer-summary-card"><span class="drawer-label">Updated</span><span class="drawer-value">${escapeHTML(formatDateTime(summary.updated_at))}</span></div>
+          ${investigationPauseSummary ? `<div class="drawer-summary-card"><span class="drawer-label">Retry</span><span class="drawer-value">${escapeHTML(investigationPauseSummary)}</span></div>` : ""}
         </div>
       </div>
       <div class="queue-summary">
@@ -2801,6 +2849,8 @@
         <article class="queue-item"><span class="queue-label">Workspace</span><p class="queue-copy">${escapeHTML(defaultString(summary.workspace_root, "(none)"))}</p></article>
         <article class="queue-item"><span class="queue-label">Final Report</span><p class="queue-copy">${escapeHTML(defaultString(summary.final_report_path, "(none)"))}</p></article>
         <article class="queue-item"><span class="queue-label">Last Error</span><p class="queue-copy">${escapeHTML(defaultString(summary.last_error, "(none)"))}</p></article>
+        ${summary.pause_until ? `<article class="queue-item"><span class="queue-label">Pause Until</span><p class="queue-copy">${escapeHTML(formatDateTime(summary.pause_until))}</p></article>` : ""}
+        ${summary.pause_reason ? `<article class="queue-item"><span class="queue-label">Pause Reason</span><p class="queue-copy">${escapeHTML(summary.pause_reason)}</p></article>` : ""}
       </div>
       <div class="surface">
         <div class="surface-head"><div><h3>Detailed Explanation</h3><p>${escapeHTML(defaultString(summary.completed_at ? formatDateTime(summary.completed_at) : "", "Run not completed yet."))}</p></div></div>
@@ -2873,7 +2923,7 @@
     renderGrid("feedback-grid", [
       { field: "repo_slug", label: "Repo", render: (row) => `<span class="data-value-text">${escapeHTML(defaultString(row.repo_slug, "Standalone"))}</span>` },
       { field: "subject", label: "Subject" },
-      { field: "status", label: "Status", render: (row) => renderStatePill(row.attention_state, row.status) },
+      { field: "status", label: "Status", render: (row) => renderStatePillWithPause(row.attention_state, row.status, row.pause_until, row.pause_reason) },
       { field: "draft_summary", label: "Draft" },
       { field: "review_event", label: state.feedbackTab === "reviews" ? "Event" : "Context" },
       { field: "updated_at", label: "Updated", render: (row) => `<span class="data-value-text">${escapeHTML(formatDateTime(row.updated_at))}</span>` },
@@ -2952,6 +3002,9 @@
             if (row.external_url && row.action_kind === "review_on_github") {
               actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-open-external="${escapeHTML(row.external_url)}">Review</button>`);
             }
+            if (row.run_id && row.action_kind === "resolve_run") {
+              actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-run-resolve="${escapeHTML(row.run_id)}">Resolve</button>`);
+            }
             if (row.run_id && row.action_kind === "sync_run") {
               actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-run-sync="${escapeHTML(row.run_id)}">Refresh</button>`);
             }
@@ -3028,6 +3081,13 @@
         <button class="tx-btn tx-btn-primary" type="button" data-open-external="${escapeHTML(item.external_url)}">Review on GitHub</button>
         ${item.run_id ? `<button class="tx-btn tx-btn-secondary" type="button" data-run-sync="${escapeHTML(item.run_id)}">Refresh Status</button>` : ""}
         ${item.run_id ? `<button class="tx-btn tx-btn-secondary" type="button" data-run-drop="${escapeHTML(item.run_id)}">Drop Run</button>` : ""}
+      `;
+    }
+    if (item.action_kind === "resolve_run" && item.run_id) {
+      return `
+        <button class="tx-btn tx-btn-primary" type="button" data-run-resolve="${escapeHTML(item.run_id)}">Resolve Run</button>
+        <button class="tx-btn tx-btn-secondary" type="button" data-log-run-id="${escapeHTML(item.run_id)}">Open Run</button>
+        <button class="tx-btn tx-btn-secondary" type="button" data-run-drop="${escapeHTML(item.run_id)}">Drop Run</button>
       `;
     }
     if (item.action_kind === "sync_run" && item.run_id) {
@@ -3303,7 +3363,7 @@
       { label: "Queued Issues", value: repo.issue_counts.queued || 0, note: "Issues waiting to be picked up." },
       { label: "Blocked Issues", value: repo.issue_counts.blocked || 0, note: "Issues blocked on policy, timing, or feedback." },
       { label: "Service Queue", value: (repo.service_task_counts.queued || 0) + (repo.service_task_counts.running || 0), note: "Service tasks still executing or waiting." },
-      { label: "Scout Queue", value: repoScoutQueueCount(repo), note: "Local scout jobs waiting, active, or failed." },
+      { label: "Scout Queue", value: repoScoutQueueCount(repo), note: "Local scout jobs waiting, paused, active, or failed." },
       { label: "Planned Queue", value: repoManualPlannedQueueCount(repo), note: "Manual planned launches that still need action." },
       { label: "Pending Jobs", value: repoRuns.length, note: "Work runs currently mapped to this repo." },
       { label: "Work Items", value: repoWorkItems.length, note: "Inbound items linked to this repo." },
@@ -3364,7 +3424,7 @@
       renderGrid("repo-work-item-grid", [
         { field: "source", label: "Source" },
         { field: "subject", label: "Subject" },
-        { field: "status", label: "Status", render: (row) => renderStatePill(row.attention_state, row.status) },
+        { field: "status", label: "Status", render: (row) => renderStatePillWithPause(row.attention_state, row.status, row.pause_until, row.pause_reason) },
         { field: "draft_kind", label: "Kind" },
         { field: "updated_at", label: "Updated" },
         { field: "id", label: "Open", action: true, template: '<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-work-item-show="{{id}}">Open</button>' },
@@ -3566,7 +3626,9 @@
       audit_mode: defaultString(item.audit_mode, ""),
       destination: defaultString(item.destination, "local"),
       status: scoutStatusLabel(item.status),
-      status_key: defaultString(item.status, "pending"),
+      status_key: defaultString(item.status === "paused" ? "blocked" : item.status, "pending"),
+      pause_reason: defaultString(item.pause_reason, ""),
+      pause_until: defaultString(item.pause_until, ""),
       updated_at: formatDateTime(item.updated_at || item.generated_at),
       can_retry: (item.available_actions || []).includes("retry"),
       can_dismiss: (item.available_actions || []).includes("dismiss"),
@@ -3596,7 +3658,7 @@
           <h3>${escapeHTML(item.title)}</h3>
           <p>${escapeHTML(scoutRoleLabel(item.role))} · ${escapeHTML(defaultString(item.destination, "local"))} destination</p>
         </div>
-        <span class="status-pill">${escapeHTML(scoutStatusLabel(item.status))}</span>
+        ${renderStatePillWithPause(defaultString(item.status === "paused" ? "blocked" : item.status, "pending"), scoutStatusLabel(item.status), item.pause_until, item.pause_reason)}
       </div>
       <div class="config-meta">
         <span><strong>Artifact:</strong> ${escapeHTML(defaultString(item.artifact_path, "Unavailable"))}</span>
@@ -3658,6 +3720,8 @@
         <span><strong>Run ID:</strong> ${escapeHTML(defaultString(item.run_id, "(none)"))}</span>
         <span><strong>Planned Item:</strong> ${escapeHTML(defaultString(item.planned_item_id, "(none)"))}</span>
         <span><strong>Error:</strong> ${escapeHTML(defaultString(item.error, "(none)"))}</span>
+        <span><strong>Pause Until:</strong> ${escapeHTML(defaultString(item.pause_until ? formatDateTime(item.pause_until) : "", "(none)"))}</span>
+        <span><strong>Pause Reason:</strong> ${escapeHTML(defaultString(item.pause_reason, "(none)"))}</span>
       </div>
     `;
   }
@@ -3708,7 +3772,7 @@
       { field: "severity", label: "Severity" },
       { field: "audit_mode", label: "Audit" },
       { field: "destination", label: "Destination" },
-      { field: "status", label: "Status", render: (row) => renderStatePill(row.status_key, row.status) },
+      { field: "status", label: "Status", render: (row) => renderStatePillWithPause(row.status_key, row.status, row.pause_until, row.pause_reason) },
       { field: "updated_at", label: "Updated" },
       { field: "id", label: "Details", action: true, template: '<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-scout-select="{{id}}">Details</button>' },
       {
@@ -4340,6 +4404,7 @@
     const manifest = detail ? (detail.github_manifest || detail.local_manifest || null) : null;
     const status = detail && detail.github_status ? detail.github_status : null;
     const typedDetail = detail || {};
+    const runPauseSummary = pauseStateSummary(summary.pause_until, summary.pause_reason);
     const laneMarkup = status && Array.isArray(status.lanes) && status.lanes.length
       ? `<ul class="status-list">${status.lanes.map((lane) => `
           <li>
@@ -4367,6 +4432,9 @@
           <article class="queue-item"><span class="queue-label">Sandbox</span><p class="queue-copy">${escapeHTML(defaultString(manifest && manifest.sandbox_path, "(none)"))}</p></article>
           <article class="queue-item"><span class="queue-label">Repo Checkout</span><p class="queue-copy">${escapeHTML(defaultString(manifest && manifest.sandbox_repo_path, "(none)"))}</p></article>
           <article class="queue-item"><span class="queue-label">Iteration</span><p class="queue-copy">${escapeHTML(defaultString(manifest && manifest.current_iteration, "(none)"))}</p></article>
+          ${manifest && manifest.superseded_by_run_id ? `<article class="queue-item"><span class="queue-label">Superseded By</span><p class="queue-copy">${escapeHTML(manifest.superseded_by_run_id)}</p></article>` : ""}
+          ${manifest && manifest.superseded_reason ? `<article class="queue-item"><span class="queue-label">Superseded Reason</span><p class="queue-copy">${escapeHTML(manifest.superseded_reason)}</p></article>` : ""}
+          ${manifest && manifest.superseded_at ? `<article class="queue-item"><span class="queue-label">Superseded At</span><p class="queue-copy">${escapeHTML(formatDateTime(manifest.superseded_at))}</p></article>` : ""}
         </div>
       `;
 
@@ -4380,7 +4448,7 @@
         <div class="drawer-summary-grid">
           <div class="drawer-summary-card">
             <span class="drawer-label">Status</span>
-            <span class="drawer-value"><span class="run-state-pill run-state-${escapeHTML(defaultString(summary.attention_state, "active"))}">${escapeHTML(defaultString(summary.status, "active"))}</span></span>
+            <span class="drawer-value">${renderStatePillWithPause(defaultString(summary.attention_state, "active"), defaultString(summary.status, "active"), summary.pause_until, summary.pause_reason)}</span>
           </div>
           <div class="drawer-summary-card">
             <span class="drawer-label">Phase</span>
@@ -4394,6 +4462,7 @@
             <span class="drawer-label">Updated</span>
             <span class="drawer-value">${escapeHTML(formatDateTime(summary.updated_at))}</span>
           </div>
+          ${runPauseSummary ? `<div class="drawer-summary-card"><span class="drawer-label">Retry</span><span class="drawer-value">${escapeHTML(runPauseSummary)}</span></div>` : ""}
         </div>
       </div>
       <div class="surface">
@@ -4408,6 +4477,8 @@
           <article class="queue-item"><span class="queue-label">Publication</span><p class="queue-copy">${escapeHTML(defaultString(summary.publication_state, typedDetail.backend === "github" && manifest && manifest.publication_state || "(none)"))}</p></article>
           <article class="queue-item"><span class="queue-label">Repo</span><p class="queue-copy">${escapeHTML(runRepoDisplay(summary))}</p></article>
           <article class="queue-item"><span class="queue-label">Current Phase</span><p class="queue-copy">${escapeHTML(defaultString(summary.current_phase, "(none)"))}</p></article>
+          ${summary.pause_until ? `<article class="queue-item"><span class="queue-label">Pause Until</span><p class="queue-copy">${escapeHTML(formatDateTime(summary.pause_until))}</p></article>` : ""}
+          ${summary.pause_reason ? `<article class="queue-item"><span class="queue-label">Pause Reason</span><p class="queue-copy">${escapeHTML(summary.pause_reason)}</p></article>` : ""}
         </div>
         ${manifestSummaryMarkup}
       </div>
@@ -4416,6 +4487,7 @@
           <span>File</span>
           <select id="log-file-select" ${files.length ? "" : "disabled"}>${options || '<option value="">No log files</option>'}</select>
         </label>
+        ${typedDetail.resolve_allowed ? `<button class="tx-btn tx-btn-secondary" type="button" data-run-resolve="${escapeHTML(summary.run_id)}">Resolve Run</button>` : ""}
         ${typedDetail.sync_allowed ? `<button class="tx-btn tx-btn-secondary" type="button" data-run-sync="${escapeHTML(summary.run_id)}">Sync Run</button>` : ""}
         <button class="tx-btn tx-btn-secondary" type="button" data-run-drop="${escapeHTML(summary.run_id)}">Drop Run</button>
         <button class="tx-btn tx-btn-secondary" type="button" data-log-refresh="true">Refresh</button>
@@ -4622,6 +4694,7 @@
 
     const item = detail.item;
     const draft = item.latest_draft || null;
+    const workItemPauseSummary = pauseStateSummary(item.pause_until, item.pause_reason);
     const events = (detail.events || []).map((event) => {
       return `
         <li>
@@ -4642,7 +4715,7 @@
         <div class="drawer-summary-grid">
           <div class="drawer-summary-card">
             <span class="drawer-label">Status</span>
-            <span class="drawer-value"><span class="run-state-pill run-state-${escapeHTML(defaultString(currentWorkItemSummary(item.id)?.attention_state, "active"))}">${escapeHTML(defaultString(item.status, "-"))}</span></span>
+            <span class="drawer-value">${renderStatePillWithPause(defaultString(currentWorkItemSummary(item.id)?.attention_state, "active"), defaultString(item.status, "-"), item.pause_until, item.pause_reason)}</span>
           </div>
           <div class="drawer-summary-card">
             <span class="drawer-label">Target</span>
@@ -4656,6 +4729,7 @@
             <span class="drawer-label">Updated</span>
             <span class="drawer-value">${escapeHTML(formatDateTime(item.updated_at))}</span>
           </div>
+          ${workItemPauseSummary ? `<div class="drawer-summary-card"><span class="drawer-label">Retry</span><span class="drawer-value">${escapeHTML(workItemPauseSummary)}</span></div>` : ""}
         </div>
       </div>
       <div class="drawer-toolbar">
@@ -4673,6 +4747,12 @@
             <p>${escapeHTML(defaultString(item.body, "No source body captured."))}</p>
           </div>
         </div>
+        ${(item.pause_until || item.pause_reason) ? `
+          <div class="queue-summary">
+            ${item.pause_until ? `<article class="queue-item"><span class="queue-label">Pause Until</span><p class="queue-copy">${escapeHTML(formatDateTime(item.pause_until))}</p></article>` : ""}
+            ${item.pause_reason ? `<article class="queue-item"><span class="queue-label">Pause Reason</span><p class="queue-copy">${escapeHTML(item.pause_reason)}</p></article>` : ""}
+          </div>
+        ` : ""}
       </div>
       <div class="surface">
         <div class="surface-head">
@@ -5203,6 +5283,26 @@
           toast("success", "Run synced", runID);
         }).catch((error) => {
           toast("danger", "Run sync failed", error.message);
+        });
+        return;
+      }
+
+      const runResolveButton = event.target.closest("[data-run-resolve]");
+      if (runResolveButton) {
+        const runID = runResolveButton.getAttribute("data-run-resolve");
+        if (!runID) return;
+        api(`/api/v1/work/runs/${encodeURIComponent(runID)}/resolve`, {
+          method: "POST",
+        }).then((payload) => {
+          if (payload.detail && state.logSelection.runID === runID) {
+            state.logSelection.detail = payload.detail;
+            renderLogDrawer();
+          }
+          load();
+          loadApprovals({ silent: true });
+          toast("success", "Run resolved", runID);
+        }).catch((error) => {
+          toast("danger", "Run resolve failed", error.message);
         });
         return;
       }

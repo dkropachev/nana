@@ -320,23 +320,17 @@ func executeGithubReviewRequestWorkItem(item workItem, attemptDir string, codexA
 }
 
 func generateGithubPullReviewFindingsWithArgs(manifest githubPullReviewManifest, repoPath string, codexArgs []string) ([]githubPullReviewFinding, string, error) {
-	changedFilesOutput, err := githubGitOutput(repoPath, "diff", "--name-only", manifest.PRBaseSHA, manifest.PRHeadSHA)
+	context, err := buildReviewPromptContext(repoPath, []string{manifest.PRBaseSHA, manifest.PRHeadSHA}, reviewPromptContextOptions{
+		ChangedFilesLimit: reviewPromptChangedFilesLimit,
+		MaxHunksPerFile:   reviewPromptMaxHunksPerFile,
+		MaxLinesPerFile:   reviewPromptMaxLinesPerFile,
+		MaxCharsPerFile:   reviewPromptMaxCharsPerFile,
+	})
 	if err != nil {
 		return nil, "", err
 	}
-	changedFiles := []string{}
-	for _, line := range strings.Split(changedFilesOutput, "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			changedFiles = append(changedFiles, line)
-		}
-	}
-	diffOutput, err := githubGitOutput(repoPath, "diff", manifest.PRBaseSHA, manifest.PRHeadSHA)
-	if err != nil {
-		return nil, "", err
-	}
-	prompt := buildGithubPullReviewPrompt(manifest, changedFiles, diffOutput)
-	rawOutput, err := runWorkItemCodexPrompt(repoPath, prompt, codexArgs)
+	prompt := buildGithubPullReviewPrompt(manifest, context)
+	rawOutput, err := runWorkItemCodexPrompt(repoPath, filepath.Join(workItemsRoot(), "_review-attempts", sanitizePathToken(manifest.RunID)), prompt, codexArgs)
 	if err != nil {
 		return nil, rawOutput, err
 	}

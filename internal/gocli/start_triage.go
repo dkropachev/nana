@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 type startWorkTriageResult struct {
@@ -28,26 +26,28 @@ func runStartWorkIssueTriage(repoSlug string, issue startWorkIssueState, codexAr
 	if err != nil {
 		return startWorkTriageResult{}, err
 	}
-	sessionID := fmt.Sprintf("triage-%d", time.Now().UnixNano())
-	sessionInstructionsPath, err := writeSessionModelInstructions(repoPath, sessionID, scopedCodexHome)
-	if err != nil {
-		return startWorkTriageResult{}, err
-	}
-	defer removeSessionInstructionsFile(repoPath, sessionID)
 	prompt := buildStartWorkTriagePrompt(repoSlug, issue)
 	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(codexArgs)
 	prompt = prefixCodexFastPrompt(prompt, fastMode)
-	args := append([]string{"exec", "-C", repoPath}, normalizedCodexArgs...)
-	args = append(args, prompt)
-	args = injectModelInstructionsArgs(args, sessionInstructionsPath)
-	cmd := exec.Command("codex", args...)
-	cmd.Dir = repoPath
-	cmd.Env = append(buildGithubCodexEnv(NotifyTempContract{}, scopedCodexHome, strings.TrimSpace(os.Getenv("GITHUB_API_URL"))), "NANA_PROJECT_AGENTS_ROOT="+repoPath)
-	output, err := cmd.CombinedOutput()
+	transport := promptTransportForSize(prompt, structuredPromptStdinThreshold)
+	result, err := runManagedCodexPrompt(codexManagedPromptOptions{
+		CommandDir:       repoPath,
+		InstructionsRoot: repoPath,
+		CodexHome:        scopedCodexHome,
+		FreshArgsPrefix:  []string{"exec", "-C", repoPath},
+		CommonArgs:       normalizedCodexArgs,
+		Prompt:           prompt,
+		PromptTransport:  transport,
+		CheckpointPath:   filepath.Join(githubManagedPaths(repoSlug).RepoRoot, ".nana", "start", "triage-checkpoints", fmt.Sprintf("issue-%d.json", issue.SourceNumber)),
+		StepKey:          fmt.Sprintf("triage-issue-%d", issue.SourceNumber),
+		ResumeStrategy:   codexResumeSamePrompt,
+		Env:              append(buildGithubCodexEnv(NotifyTempContract{}, scopedCodexHome, strings.TrimSpace(os.Getenv("GITHUB_API_URL"))), "NANA_PROJECT_AGENTS_ROOT="+repoPath),
+		RateLimitPolicy:  codexRateLimitPolicyReturnPause,
+	})
 	if err != nil {
-		return startWorkTriageResult{}, fmt.Errorf("%w\n%s", err, strings.TrimSpace(string(output)))
+		return startWorkTriageResult{}, fmt.Errorf("%w\n%s", err, strings.TrimSpace(strings.Join([]string{result.Stdout, result.Stderr}, "\n")))
 	}
-	return parseStartWorkTriageResult(output)
+	return parseStartWorkTriageResult([]byte(result.Stdout))
 }
 
 func buildStartWorkTriagePrompt(repoSlug string, issue startWorkIssueState) string {
@@ -59,18 +59,22 @@ func buildStartWorkTriagePrompt(repoSlug string, issue startWorkIssueState) stri
 		"- Use only P1 through P5.",
 		"- Base the answer on urgency, severity, likely user impact, and implementation urgency.",
 		"- Keep rationale under 160 characters.",
-		"",
 		fmt.Sprintf("Repo: %s", repoSlug),
 		fmt.Sprintf("Issue: #%d", issue.SourceNumber),
-		fmt.Sprintf("Title: %s", issue.Title),
-		fmt.Sprintf("State: %s", issue.State),
-		fmt.Sprintf("Labels: %s", strings.Join(issue.Labels, ", ")),
-		"",
-		"Body:",
-		strings.TrimSpace(issue.SourceBody),
-		"",
-		"Respond with JSON only.",
 	}
+	if title := compactPromptValue(issue.Title, 0, 200); title != "" {
+		lines = append(lines, fmt.Sprintf("Title: %s", title))
+	}
+	if state := strings.TrimSpace(issue.State); state != "" {
+		lines = append(lines, fmt.Sprintf("State: %s", state))
+	}
+	if len(issue.Labels) > 0 {
+		lines = append(lines, fmt.Sprintf("Labels: %s", compactPromptValue(strings.Join(issue.Labels, ", "), 0, 400)))
+	}
+	if body := compactPromptValue(issue.SourceBody, 80, 6000); body != "" {
+		lines = append(lines, "Body:", body)
+	}
+	lines = append(lines, "Respond with JSON only.")
 	return strings.Join(lines, "\n")
 }
 

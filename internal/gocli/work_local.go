@@ -1,6 +1,7 @@
 package gocli
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"database/sql"
@@ -24,8 +25,9 @@ import (
 const LocalWorkHelp = `nana work - Local implementation runtime for git-backed repos
 
 Usage:
-  nana work start [--repo <path>] [--task <text> | --plan-file <path>] [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [-- codex-args...]
+  nana work start [--detach] [--repo <path>] [--task <text> | --plan-file <path>] [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [-- codex-args...]
   nana work resume [--run-id <id> | --last | --global-last] [--repo <path>] [-- codex-args...]
+  nana work resolve [--run-id <id> | --last | --global-last] [--repo <path>]
   nana work status [--run-id <id> | --last | --global-last] [--repo <path>] [--json]
   nana work logs [--run-id <id> | --last | --global-last] [--repo <path>] [--tail <n>] [--json]
   nana work retrospective [--run-id <id> | --last | --global-last] [--repo <path>]
@@ -34,8 +36,9 @@ Usage:
 Behavior:
   - runs only against a local git repo in an isolated managed sandbox
   - infers a task from the current branch when --task and --plan-file are omitted
-  - commits verified sandbox changes back to the local source branch after completion
-  - never submits, publishes, pushes to remotes, or calls GitHub APIs
+  - refreshes managed source checkouts before sandbox start, syncs the local source branch before final apply, commits verified sandbox changes after completion, and pushes to the tracked remote when one exists
+  - resolve retries blocked final-apply runs after Nana refreshes the managed source checkout or completes a pending commit/push
+  - never submits, publishes, opens PRs, or calls GitHub APIs
   - loops through implement -> verify -> self-review -> harden -> re-verify with capped hardening rounds
   - runs lint, compile/build, and unit tests every iteration; integration runs on the final pass by default
   - persists run artifacts under ~/.nana/work/
@@ -45,9 +48,9 @@ const (
 	localWorkDefaultMaxIterations  = 8
 	localWorkMaxReviewRounds       = 2
 	localWorkRuntimeName           = "work"
-	localWorkPromptCharLimit       = 120000
-	localWorkGroupingPromptLimit   = 40000
-	localWorkValidationPromptLimit = 60000
+	localWorkPromptCharLimit       = localWorkHardeningPromptCharLimit
+	localWorkGroupingPromptLimit   = localWorkGroupingPromptCharLimit
+	localWorkValidationPromptLimit = localWorkValidationPromptCharLimit
 	localWorkPromptSnippetChars    = 2000
 	localWorkPromptSnippetLines    = 25
 	localWorkValidationParallelism = 4
@@ -59,16 +62,21 @@ const (
 	localWorkDefaultGroupingPolicy = "ai"
 	localWorkPathGroupingPolicy    = "path"
 	localWorkSingletonPolicy       = "singleton"
+	localWorkReadRetryAttempts     = 4
+	localWorkWriteRetryAttempts    = 4
+	localWorkStaleRunThreshold     = 5 * time.Minute
 )
 
-var localWorkFinalReviewGateRoles = []string{
-	"quality-reviewer",
-	"security-reviewer",
-	"performance-reviewer",
-	"qa-tester",
-}
+var localWorkReadRetryDelay = 200 * time.Millisecond
+var localWorkRetrySleep = time.Sleep
+var localWorkOpenReadStore = openLocalWorkReadDB
+var localWorkProcessSnapshot = captureLocalWorkProcessSnapshot
+var localWorkStartDetachedRunner = launchLocalWorkDetachedRunner
+var localWorkExecuteLoop = executeLocalWorkLoop
+var localWorkTokenUsagePersistMu sync.Mutex
 
 type localWorkStartOptions struct {
+	Detach                bool
 	RepoPath              string
 	Task                  string
 	PlanFile              string
@@ -77,6 +85,7 @@ type localWorkStartOptions struct {
 	GroupingPolicy        string
 	ValidationParallelism int
 	CodexArgs             []string
+	RateLimitPolicy       codexRateLimitPolicy
 }
 
 type localWorkStatusOptions struct {
@@ -92,8 +101,13 @@ type localWorkRunSelection struct {
 }
 
 type localWorkResumeOptions struct {
+	RunSelection    localWorkRunSelection
+	CodexArgs       []string
+	RateLimitPolicy codexRateLimitPolicy
+}
+
+type localWorkResolveOptions struct {
 	RunSelection localWorkRunSelection
-	CodexArgs    []string
 }
 
 type localWorkLogsOptions struct {
@@ -108,6 +122,7 @@ type workRunIndexEntry struct {
 	RepoKey      string
 	RepoRoot     string
 	RepoName     string
+	RepoSlug     string
 	ManifestPath string
 	UpdatedAt    string
 	TargetKind   string
@@ -124,6 +139,7 @@ type localWorkManifest struct {
 	CurrentIteration               int                            `json:"current_iteration,omitempty"`
 	RepoRoot                       string                         `json:"repo_root"`
 	RepoName                       string                         `json:"repo_name"`
+	RepoSlug                       string                         `json:"repo_slug,omitempty"`
 	RepoID                         string                         `json:"repo_id"`
 	SourceBranch                   string                         `json:"source_branch"`
 	BaselineSHA                    string                         `json:"baseline_sha"`
@@ -139,11 +155,19 @@ type localWorkManifest struct {
 	MaxIterations                  int                            `json:"max_iterations"`
 	CurrentRound                   int                            `json:"current_round,omitempty"`
 	CurrentSubphase                string                         `json:"current_subphase,omitempty"`
+	TokenUsage                     *localWorkTokenUsageTotals     `json:"token_usage,omitempty"`
 	LastError                      string                         `json:"last_error,omitempty"`
+	PauseReason                    string                         `json:"pause_reason,omitempty"`
+	PauseUntil                     string                         `json:"pause_until,omitempty"`
+	PausedAt                       string                         `json:"paused_at,omitempty"`
+	RateLimitPolicy                string                         `json:"-"`
 	FinalApplyStatus               string                         `json:"final_apply_status,omitempty"`
 	FinalApplyCommitSHA            string                         `json:"final_apply_commit_sha,omitempty"`
 	FinalApplyError                string                         `json:"final_apply_error,omitempty"`
 	FinalAppliedAt                 string                         `json:"final_applied_at,omitempty"`
+	SupersededByRunID              string                         `json:"superseded_by_run_id,omitempty"`
+	SupersededAt                   string                         `json:"superseded_at,omitempty"`
+	SupersededReason               string                         `json:"superseded_reason,omitempty"`
 	FinalGateStatus                string                         `json:"final_gate_status,omitempty"`
 	FinalGateRoleResults           []localWorkFinalGateRoleResult `json:"final_gate_role_results,omitempty"`
 	CandidateAuditStatus           string                         `json:"candidate_audit_status,omitempty"`
@@ -152,6 +176,37 @@ type localWorkManifest struct {
 	PreexistingFindingFingerprints []string                       `json:"preexisting_finding_fingerprints,omitempty"`
 	PreexistingFindings            []localWorkRememberedFinding   `json:"preexisting_findings,omitempty"`
 	Iterations                     []localWorkIterationSummary    `json:"iterations,omitempty"`
+}
+
+type localWorkTokenUsageTotals struct {
+	InputTokens           int    `json:"input_tokens"`
+	CachedInputTokens     int    `json:"cached_input_tokens"`
+	OutputTokens          int    `json:"output_tokens"`
+	ReasoningOutputTokens int    `json:"reasoning_output_tokens"`
+	TotalTokens           int    `json:"total_tokens"`
+	SessionsAccounted     int    `json:"sessions_accounted"`
+	UpdatedAt             string `json:"updated_at,omitempty"`
+}
+
+type localWorkThreadUsageArtifact struct {
+	Version     int                       `json:"version"`
+	GeneratedAt string                    `json:"generated_at"`
+	SandboxPath string                    `json:"sandbox_path"`
+	Totals      localWorkTokenUsageTotals `json:"totals"`
+	Threads     []localWorkThreadUsageRow `json:"threads,omitempty"`
+}
+
+type localWorkThreadUsageRow struct {
+	SessionID             string `json:"session_id,omitempty"`
+	Nickname              string `json:"nickname,omitempty"`
+	Role                  string `json:"role,omitempty"`
+	InputTokens           int    `json:"input_tokens"`
+	CachedInputTokens     int    `json:"cached_input_tokens"`
+	OutputTokens          int    `json:"output_tokens"`
+	ReasoningOutputTokens int    `json:"reasoning_output_tokens"`
+	TotalTokens           int    `json:"total_tokens"`
+	StartedAt             int64  `json:"started_at"`
+	UpdatedAt             int64  `json:"updated_at"`
 }
 
 type localWorkIterationSummary struct {
@@ -380,50 +435,67 @@ type localWorkFindingHistoryEvent struct {
 }
 
 func runLocalWorkCommand(cwd string, args []string) error {
+	_, err := runLocalWorkCommandWithOptions(cwd, args, codexRateLimitPolicyWaitInProcess)
+	return err
+}
+
+func runLocalWorkCommandWithRunID(cwd string, args []string) (string, error) {
+	return runLocalWorkCommandWithOptions(cwd, args, codexRateLimitPolicyWaitInProcess)
+}
+
+func runLocalWorkCommandWithOptions(cwd string, args []string, rateLimitPolicy codexRateLimitPolicy) (string, error) {
 	if len(args) == 0 || isHelpToken(args[0]) {
 		fmt.Fprint(os.Stdout, LocalWorkHelp)
-		return nil
+		return "", nil
 	}
 
 	switch args[0] {
 	case "start":
 		options, err := parseLocalWorkStartArgs(args[1:])
 		if err != nil {
-			return err
+			return "", err
 		}
-		return startLocalWork(cwd, options)
+		options.RateLimitPolicy = rateLimitPolicy
+		return startLocalWorkWithRunID(cwd, options)
 	case "resume":
 		options, err := parseLocalWorkResumeArgs(args[1:])
 		if err != nil {
-			return err
+			return "", err
 		}
-		return resumeLocalWork(cwd, options)
+		options.RateLimitPolicy = rateLimitPolicy
+		return "", resumeLocalWork(cwd, options)
+	case "resolve":
+		options, err := parseLocalWorkResolveArgs(args[1:])
+		if err != nil {
+			return "", err
+		}
+		return "", resolveLocalWork(cwd, options)
 	case "status":
 		options, err := parseLocalWorkStatusArgs(args[1:])
 		if err != nil {
-			return err
+			return "", err
 		}
-		return localWorkStatus(cwd, options)
+		return "", localWorkStatus(cwd, options)
 	case "logs":
 		options, err := parseLocalWorkLogsArgs(args[1:])
 		if err != nil {
-			return err
+			return "", err
 		}
-		return localWorkLogs(cwd, options)
+		return "", localWorkLogs(cwd, options)
 	case "retrospective":
 		selection, err := parseLocalWorkRunSelection(args[1:], true)
 		if err != nil {
-			return err
+			return "", err
 		}
-		return localWorkRetrospective(cwd, selection)
+		return "", localWorkRetrospective(cwd, selection)
 	case "verify-refresh":
 		selection, err := parseLocalWorkRunSelection(args[1:], false)
 		if err != nil {
-			return err
+			return "", err
 		}
-		return refreshLocalWorkVerificationArtifacts(cwd, selection)
+		return "", refreshLocalWorkVerificationArtifacts(cwd, selection)
 	default:
-		return fmt.Errorf("Unknown work subcommand: %s\n\n%s", args[0], LocalWorkHelp)
+		return "", fmt.Errorf("Unknown work subcommand: %s\n\n%s", args[0], LocalWorkHelp)
 	}
 }
 
@@ -439,8 +511,37 @@ func openLocalWorkDB() (*localWorkDBStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	store := &localWorkDBStore{db: db}
 	if err := store.init(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+func openLocalWorkReadDB() (*localWorkDBStore, error) {
+	path := localWorkDBPath()
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return openLocalWorkDB()
+		}
+		return nil, err
+	}
+	readyStore, err := openLocalWorkDB()
+	if err != nil {
+		return nil, err
+	}
+	_ = readyStore.Close()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	store := &localWorkDBStore{db: db}
+	if err := store.prepareReadOnly(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -497,18 +598,157 @@ func (s *localWorkDBStore) init() error {
 			event_json TEXT NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS work_run_index (
-			run_id TEXT PRIMARY KEY,
-			backend TEXT NOT NULL,
-			repo_key TEXT,
-			repo_root TEXT,
-			repo_name TEXT,
-			manifest_path TEXT,
-			updated_at TEXT NOT NULL,
-			target_kind TEXT
-		);`,
+				run_id TEXT PRIMARY KEY,
+				backend TEXT NOT NULL,
+				repo_key TEXT,
+				repo_root TEXT,
+				repo_name TEXT,
+				repo_slug TEXT,
+				manifest_path TEXT,
+				updated_at TEXT NOT NULL,
+				target_kind TEXT
+			);`,
+		`CREATE INDEX IF NOT EXISTS idx_work_run_index_updated ON work_run_index(updated_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_work_run_index_backend_updated ON work_run_index(backend, updated_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_work_run_index_repo_updated ON work_run_index(repo_key, updated_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_run_index_updated ON work_run_index(updated_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS work_items (
+			id TEXT PRIMARY KEY,
+			dedupe_key TEXT NOT NULL UNIQUE,
+			source TEXT NOT NULL,
+			source_kind TEXT NOT NULL,
+			external_id TEXT NOT NULL,
+			thread_key TEXT,
+			repo_slug TEXT,
+			target_url TEXT,
+			linked_run_id TEXT,
+			subject TEXT NOT NULL,
+			body TEXT,
+			author TEXT,
+			received_at TEXT NOT NULL,
+			status TEXT NOT NULL,
+			priority INTEGER NOT NULL DEFAULT 3,
+			auto_run INTEGER NOT NULL DEFAULT 0,
+			auto_submit INTEGER NOT NULL DEFAULT 0,
+			hidden INTEGER NOT NULL DEFAULT 0,
+			hidden_reason TEXT,
+			submit_profile_json TEXT,
+			metadata_json TEXT,
+			latest_draft_json TEXT,
+			latest_artifact_root TEXT,
+			latest_action_at TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_work_items_status_updated ON work_items(status, updated_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_work_items_repo_updated ON work_items(repo_slug, updated_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_work_items_hidden_updated ON work_items(hidden, updated_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS work_item_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			item_id TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			event_type TEXT NOT NULL,
+			actor TEXT,
+			payload_json TEXT NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_work_item_events_item_created ON work_item_events(item_id, created_at DESC, id DESC);`,
+		`CREATE TABLE IF NOT EXISTS work_item_links (
+			item_id TEXT NOT NULL,
+			link_type TEXT NOT NULL,
+			target_id TEXT NOT NULL,
+			metadata_json TEXT NOT NULL,
+			PRIMARY KEY(item_id, link_type, target_id)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_work_item_links_target ON work_item_links(link_type, target_id);`,
+	}
+	for _, stmt := range statements {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	if err := ensureSQLiteColumn(s.db, "work_run_index", "repo_slug", `ALTER TABLE work_run_index ADD COLUMN repo_slug TEXT`); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumn(s.db, "work_items", "pause_reason", `ALTER TABLE work_items ADD COLUMN pause_reason TEXT`); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumn(s.db, "work_items", "pause_until", `ALTER TABLE work_items ADD COLUMN pause_until TEXT`); err != nil {
+		return err
+	}
+	if err := s.normalizeLegacyWorkItemPauseState(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *localWorkDBStore) normalizeLegacyWorkItemPauseState() error {
+	rows, err := s.db.Query(`SELECT id, metadata_json, pause_reason, pause_until FROM work_items`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type update struct {
+		id          string
+		pauseReason string
+		pauseUntil  string
+		metadataRaw string
+	}
+	updates := []update{}
+	for rows.Next() {
+		var id string
+		var metadataRaw sql.NullString
+		var pauseReason sql.NullString
+		var pauseUntil sql.NullString
+		if err := rows.Scan(&id, &metadataRaw, &pauseReason, &pauseUntil); err != nil {
+			return err
+		}
+		if strings.TrimSpace(pauseReason.String) != "" || strings.TrimSpace(pauseUntil.String) != "" {
+			continue
+		}
+		if strings.TrimSpace(metadataRaw.String) == "" {
+			continue
+		}
+		metadata := map[string]any{}
+		if err := json.Unmarshal([]byte(metadataRaw.String), &metadata); err != nil {
+			continue
+		}
+		legacyReason := metadataString(metadata, "pause_reason")
+		legacyUntil := metadataString(metadata, "pause_until")
+		if strings.TrimSpace(legacyReason) == "" && strings.TrimSpace(legacyUntil) == "" {
+			continue
+		}
+		metadata = clearWorkItemPauseMetadata(metadata)
+		nextMetadata, err := marshalNullableJSON(metadata)
+		if err != nil {
+			return err
+		}
+		updates = append(updates, update{
+			id:          id,
+			pauseReason: legacyReason,
+			pauseUntil:  legacyUntil,
+			metadataRaw: nextMetadata,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, update := range updates {
+		if _, err := s.db.Exec(`UPDATE work_items SET metadata_json = ?, pause_reason = ?, pause_until = ? WHERE id = ?`,
+			nullableString(update.metadataRaw),
+			nullableString(update.pauseReason),
+			nullableString(update.pauseUntil),
+			update.id,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *localWorkDBStore) prepareReadOnly() error {
+	statements := []string{
+		`PRAGMA busy_timeout=15000;`,
+		`PRAGMA query_only=ON;`,
 	}
 	for _, stmt := range statements {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -518,8 +758,108 @@ func (s *localWorkDBStore) init() error {
 	return nil
 }
 
+func isLocalWorkDBLockError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(lower, "database is locked"):
+		return true
+	case strings.Contains(lower, "database table is locked"):
+		return true
+	case strings.Contains(lower, "database schema is locked"):
+		return true
+	case strings.Contains(lower, "sqlite_busy"):
+		return true
+	default:
+		return false
+	}
+}
+
+func withLocalWorkReadStore[T any](readFn func(*localWorkDBStore) (T, error)) (T, error) {
+	var zero T
+	attempts := localWorkReadRetryAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	for attempt := 1; attempt <= attempts; attempt++ {
+		store, err := localWorkOpenReadStore()
+		if err != nil {
+			if !isLocalWorkDBLockError(err) || attempt == attempts {
+				return zero, err
+			}
+			localWorkRetrySleep(localWorkReadRetryDelay)
+			continue
+		}
+		value, readErr := readFn(store)
+		closeErr := store.Close()
+		if readErr == nil && closeErr == nil {
+			return value, nil
+		}
+		err = readErr
+		if err == nil {
+			err = closeErr
+		}
+		if !isLocalWorkDBLockError(err) || attempt == attempts {
+			return zero, err
+		}
+		localWorkRetrySleep(localWorkReadRetryDelay)
+	}
+	return zero, fmt.Errorf("local work DB read retry exhausted")
+}
+
+func withLocalWorkWriteRetry(writeFn func() error) error {
+	attempts := localWorkWriteRetryAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := writeFn(); err != nil {
+			lastErr = err
+			if !isLocalWorkDBLockError(err) || attempt == attempts {
+				return err
+			}
+			localWorkRetrySleep(localWorkReadRetryDelay)
+			continue
+		}
+		return nil
+	}
+	return lastErr
+}
+
+func ensureSQLiteColumn(db *sql.DB, table string, column string, alter string) error {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name string
+		var ctype string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(column)) {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(alter)
+	return err
+}
+
 func (s *localWorkDBStore) writeManifest(manifest localWorkManifest) error {
 	normalizeLocalWorkManifest(&manifest)
+	s.mergePersistedTokenUsage(&manifest)
+	manifest.RepoSlug = localWorkResolvedRepoSlug(manifest.RepoRoot, manifest.RepoSlug)
 	if strings.TrimSpace(manifest.RepoID) == "" {
 		manifest.RepoID = localWorkRepoID(manifest.RepoRoot)
 	}
@@ -578,6 +918,8 @@ func (s *localWorkDBStore) writeManifest(manifest localWorkManifest) error {
 
 func (s *localWorkDBStore) writeActiveState(manifest localWorkManifest, state *localWorkIterationRuntimeState) error {
 	normalizeLocalWorkManifest(&manifest)
+	s.mergePersistedTokenUsage(&manifest)
+	manifest.RepoSlug = localWorkResolvedRepoSlug(manifest.RepoRoot, manifest.RepoSlug)
 	if strings.TrimSpace(manifest.RepoID) == "" {
 		manifest.RepoID = localWorkRepoID(manifest.RepoRoot)
 	}
@@ -671,8 +1013,154 @@ func (s *localWorkDBStore) readManifest(runID string) (localWorkManifest, error)
 	return manifest, nil
 }
 
+func (s *localWorkDBStore) mergePersistedTokenUsage(manifest *localWorkManifest) {
+	if s == nil || manifest == nil || strings.TrimSpace(manifest.RunID) == "" {
+		return
+	}
+	existing, err := s.readManifest(manifest.RunID)
+	if err != nil {
+		return
+	}
+	mergeLocalWorkTokenUsageTotals(manifest, existing.TokenUsage)
+}
+
+func mergeLocalWorkTokenUsageTotals(manifest *localWorkManifest, existing *localWorkTokenUsageTotals) {
+	if manifest == nil || existing == nil {
+		return
+	}
+	if manifest.TokenUsage == nil {
+		copy := *existing
+		manifest.TokenUsage = &copy
+		return
+	}
+	manifest.TokenUsage.InputTokens = max(manifest.TokenUsage.InputTokens, existing.InputTokens)
+	manifest.TokenUsage.CachedInputTokens = max(manifest.TokenUsage.CachedInputTokens, existing.CachedInputTokens)
+	manifest.TokenUsage.OutputTokens = max(manifest.TokenUsage.OutputTokens, existing.OutputTokens)
+	manifest.TokenUsage.ReasoningOutputTokens = max(manifest.TokenUsage.ReasoningOutputTokens, existing.ReasoningOutputTokens)
+	manifest.TokenUsage.TotalTokens = max(manifest.TokenUsage.TotalTokens, existing.TotalTokens)
+	manifest.TokenUsage.SessionsAccounted = max(manifest.TokenUsage.SessionsAccounted, existing.SessionsAccounted)
+	if strings.TrimSpace(manifest.TokenUsage.UpdatedAt) == "" {
+		manifest.TokenUsage.UpdatedAt = existing.UpdatedAt
+	}
+}
+
+func captureLocalWorkProcessSnapshot() (string, error) {
+	output, err := exec.Command("ps", "-eo", "pid,args").CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
+}
+
+func localWorkManifestLastHeartbeat(manifest localWorkManifest) time.Time {
+	for _, candidate := range []string{
+		strings.TrimSpace(manifest.UpdatedAt),
+		strings.TrimSpace(manifest.CreatedAt),
+	} {
+		if candidate == "" {
+			continue
+		}
+		if parsed, err := time.Parse(time.RFC3339Nano, candidate); err == nil {
+			return parsed
+		}
+		if parsed, err := time.Parse(time.RFC3339, candidate); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
+func localWorkManifestHasLiveProcess(manifest localWorkManifest, snapshot string) bool {
+	for _, line := range strings.Split(snapshot, "\n") {
+		if line == "" {
+			continue
+		}
+		if !strings.Contains(line, "codex exec -C ") && !strings.Contains(line, "/codex/codex exec -C ") {
+			continue
+		}
+		for _, candidate := range []string{
+			strings.TrimSpace(manifest.RunID),
+			strings.TrimSpace(manifest.SandboxPath),
+			strings.TrimSpace(manifest.SandboxRepoPath),
+		} {
+			if candidate != "" && strings.Contains(line, candidate) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func cleanupStaleLocalWorkRunsForRepo(repoRoot string) (int, error) {
+	cleaned, _, err := cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot)
+	return cleaned, err
+}
+
+func cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot string) (int, []localWorkManifest, error) {
+	repoRoot = strings.TrimSpace(repoRoot)
+	if repoRoot == "" {
+		return 0, nil, nil
+	}
+	snapshot, err := localWorkProcessSnapshot()
+	if err != nil {
+		return 0, nil, err
+	}
+	store, err := openLocalWorkDB()
+	if err != nil {
+		return 0, nil, err
+	}
+	defer store.Close()
+	rows, err := store.db.Query(`SELECT manifest_json FROM runs WHERE repo_root = ? AND status = ?`, repoRoot, "running")
+	if err != nil {
+		return 0, nil, err
+	}
+	defer rows.Close()
+	manifests := []localWorkManifest{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return 0, nil, err
+		}
+		var manifest localWorkManifest
+		if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
+			return 0, nil, err
+		}
+		normalizeLocalWorkManifest(&manifest)
+		manifests = append(manifests, manifest)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, nil, err
+	}
+	now := ISOTimeNow()
+	nowTime := time.Now().UTC()
+	cleaned := 0
+	cleanedManifests := []localWorkManifest{}
+	for _, manifest := range manifests {
+		lastHeartbeat := localWorkManifestLastHeartbeat(manifest)
+		if !lastHeartbeat.IsZero() && nowTime.Sub(lastHeartbeat) < localWorkStaleRunThreshold {
+			continue
+		}
+		if localWorkManifestHasLiveProcess(manifest, snapshot) {
+			continue
+		}
+		manifest.Status = "failed"
+		manifest.UpdatedAt = now
+		if strings.TrimSpace(manifest.CompletedAt) == "" {
+			manifest.CompletedAt = now
+		}
+		manifest.LastError = "stale running run cleaned up at start: no active process found"
+		if err := store.writeManifest(manifest); err != nil {
+			return cleaned, cleanedManifests, err
+		}
+		cleaned++
+		cleanedManifests = append(cleanedManifests, manifest)
+	}
+	return cleaned, cleanedManifests, nil
+}
+
 func localWorkRunIndexEntry(manifest localWorkManifest) workRunIndexEntry {
 	normalizeLocalWorkManifest(&manifest)
+	manifest.RepoSlug = localWorkResolvedRepoSlug(manifest.RepoRoot, manifest.RepoSlug)
 	if strings.TrimSpace(manifest.RepoID) == "" {
 		manifest.RepoID = localWorkRepoID(manifest.RepoRoot)
 	}
@@ -685,6 +1173,7 @@ func localWorkRunIndexEntry(manifest localWorkManifest) workRunIndexEntry {
 		RepoKey:    manifest.RepoID,
 		RepoRoot:   manifest.RepoRoot,
 		RepoName:   manifest.RepoName,
+		RepoSlug:   manifest.RepoSlug,
 		UpdatedAt:  manifest.UpdatedAt,
 		TargetKind: "local",
 	}
@@ -700,13 +1189,14 @@ func writeWorkRunIndexTx(tx *sql.Tx, entry workRunIndexEntry) error {
 		entry.UpdatedAt = ISOTimeNow()
 	}
 	_, err := tx.Exec(
-		`INSERT INTO work_run_index(run_id, backend, repo_key, repo_root, repo_name, manifest_path, updated_at, target_kind)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO work_run_index(run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(run_id) DO UPDATE SET
 		   backend=excluded.backend,
 		   repo_key=excluded.repo_key,
 		   repo_root=excluded.repo_root,
 		   repo_name=excluded.repo_name,
+		   repo_slug=excluded.repo_slug,
 		   manifest_path=excluded.manifest_path,
 		   updated_at=excluded.updated_at,
 		   target_kind=excluded.target_kind`,
@@ -715,6 +1205,7 @@ func writeWorkRunIndexTx(tx *sql.Tx, entry workRunIndexEntry) error {
 		nullableString(entry.RepoKey),
 		nullableString(entry.RepoRoot),
 		nullableString(entry.RepoName),
+		nullableString(entry.RepoSlug),
 		nullableString(entry.ManifestPath),
 		entry.UpdatedAt,
 		nullableString(entry.TargetKind),
@@ -740,33 +1231,24 @@ func writeWorkRunIndex(entry workRunIndexEntry) error {
 }
 
 func readWorkRunIndex(runID string) (workRunIndexEntry, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return workRunIndexEntry{}, err
-	}
-	defer store.Close()
-	row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, manifest_path, updated_at, target_kind FROM work_run_index WHERE run_id = ?`, runID)
-	return scanWorkRunIndexEntry(row)
+	return withLocalWorkReadStore(func(store *localWorkDBStore) (workRunIndexEntry, error) {
+		row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index WHERE run_id = ?`, runID)
+		return scanWorkRunIndexEntry(row)
+	})
 }
 
 func latestWorkRunIndex(backend string) (workRunIndexEntry, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return workRunIndexEntry{}, err
-	}
-	defer store.Close()
-	row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, manifest_path, updated_at, target_kind FROM work_run_index WHERE backend = ? ORDER BY updated_at DESC LIMIT 1`, backend)
-	return scanWorkRunIndexEntry(row)
+	return withLocalWorkReadStore(func(store *localWorkDBStore) (workRunIndexEntry, error) {
+		row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index WHERE backend = ? ORDER BY updated_at DESC LIMIT 1`, backend)
+		return scanWorkRunIndexEntry(row)
+	})
 }
 
 func latestAnyWorkRunIndex() (workRunIndexEntry, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return workRunIndexEntry{}, err
-	}
-	defer store.Close()
-	row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, manifest_path, updated_at, target_kind FROM work_run_index ORDER BY updated_at DESC LIMIT 1`)
-	return scanWorkRunIndexEntry(row)
+	return withLocalWorkReadStore(func(store *localWorkDBStore) (workRunIndexEntry, error) {
+		row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index ORDER BY updated_at DESC LIMIT 1`)
+		return scanWorkRunIndexEntry(row)
+	})
 }
 
 type workRunIndexScanner interface {
@@ -775,25 +1257,23 @@ type workRunIndexScanner interface {
 
 func scanWorkRunIndexEntry(row workRunIndexScanner) (workRunIndexEntry, error) {
 	var entry workRunIndexEntry
-	var repoKey, repoRoot, repoName, manifestPath, targetKind sql.NullString
-	if err := row.Scan(&entry.RunID, &entry.Backend, &repoKey, &repoRoot, &repoName, &manifestPath, &entry.UpdatedAt, &targetKind); err != nil {
+	var repoKey, repoRoot, repoName, repoSlug, manifestPath, targetKind sql.NullString
+	if err := row.Scan(&entry.RunID, &entry.Backend, &repoKey, &repoRoot, &repoName, &repoSlug, &manifestPath, &entry.UpdatedAt, &targetKind); err != nil {
 		return workRunIndexEntry{}, err
 	}
 	entry.RepoKey = repoKey.String
 	entry.RepoRoot = repoRoot.String
 	entry.RepoName = repoName.String
+	entry.RepoSlug = repoSlug.String
 	entry.ManifestPath = manifestPath.String
 	entry.TargetKind = targetKind.String
 	return entry, nil
 }
 
 func readLocalWorkManifestByRunID(runID string) (localWorkManifest, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return localWorkManifest{}, err
-	}
-	defer store.Close()
-	return store.readManifest(runID)
+	return withLocalWorkReadStore(func(store *localWorkDBStore) (localWorkManifest, error) {
+		return store.readManifest(runID)
+	})
 }
 
 func (s *localWorkDBStore) resolveRunID(cwd string, selection localWorkRunSelection) (string, error) {
@@ -880,6 +1360,8 @@ func parseLocalWorkStartArgs(args []string) (localWorkStartOptions, error) {
 	for index := 0; index < len(parseArgs); index++ {
 		token := parseArgs[index]
 		switch {
+		case token == "--detach":
+			options.Detach = true
 		case token == "--repo":
 			value, err := requireLocalWorkFlagValue(parseArgs, index, "--repo")
 			if err != nil {
@@ -1022,6 +1504,14 @@ func parseLocalWorkResumeArgs(args []string) (localWorkResumeOptions, error) {
 	return options, nil
 }
 
+func parseLocalWorkResolveArgs(args []string) (localWorkResolveOptions, error) {
+	selection, err := parseLocalWorkRunSelection(args, true)
+	if err != nil {
+		return localWorkResolveOptions{}, err
+	}
+	return localWorkResolveOptions{RunSelection: selection}, nil
+}
+
 func parseLocalWorkLogsArgs(args []string) (localWorkLogsOptions, error) {
 	options := localWorkLogsOptions{
 		RunSelection: localWorkRunSelection{UseLast: true},
@@ -1120,52 +1610,72 @@ func requireLocalWorkFlagValue(args []string, index int, flag string) (string, e
 }
 
 func startLocalWork(cwd string, options localWorkStartOptions) error {
+	_, err := startLocalWorkWithRunID(cwd, options)
+	return err
+}
+
+func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string, error) {
 	repoRoot, err := resolveLocalWorkRepoRoot(cwd, options.RepoPath)
 	if err != nil {
-		return err
+		return "", err
+	}
+	if err := cleanupDirtyManagedLocalWorkRepo(repoRoot, "before local work start"); err != nil {
+		return "", err
 	}
 	if err := ensureLocalWorkRepoClean(repoRoot); err != nil {
-		return err
+		return "", err
+	}
+	sourceBranchOutput, err := githubGitOutput(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	sourceBranch := strings.TrimSpace(sourceBranchOutput)
+	if _, err := syncLocalWorkTrackedBranch(repoRoot, sourceBranch, "before local work start"); err != nil {
+		return "", err
+	}
+	if err := ensureLocalWorkRepoClean(repoRoot); err != nil {
+		return "", err
 	}
 
 	baselineSHAOutput, err := githubGitOutput(repoRoot, "rev-parse", "HEAD")
 	if err != nil {
-		return err
+		return "", err
 	}
-	sourceBranchOutput, err := githubGitOutput(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
+	sourceBranchOutput, err = githubGitOutput(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
-		return err
+		return "", err
 	}
 	baselineSHA := strings.TrimSpace(baselineSHAOutput)
-	sourceBranch := strings.TrimSpace(sourceBranchOutput)
+	sourceBranch = strings.TrimSpace(sourceBranchOutput)
 	inputContent, inputMode, err := readLocalWorkInput(cwd, options, sourceBranch)
 	if err != nil {
-		return err
+		return "", err
 	}
 	repoID := localWorkRepoID(repoRoot)
 	repoName := filepath.Base(repoRoot)
+	repoSlug := localWorkResolvedRepoSlug(repoRoot, "")
 	runID := fmt.Sprintf("lw-%d", time.Now().UnixNano())
 
 	repoDir := localWorkRepoDirByID(repoID)
 	runDir := filepath.Join(repoDir, "runs", runID)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return err
+		return "", err
 	}
 	inputPath := filepath.Join(runDir, "input-plan.md")
 	if err := os.WriteFile(inputPath, []byte(strings.TrimSpace(inputContent)+"\n"), 0o644); err != nil {
-		return err
+		return "", err
 	}
 
 	sandboxPath := filepath.Join(localWorkSandboxesDir(), repoID, runID)
 	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
 	if err := cloneGithubSourceToSandbox(repoRoot, sandboxRepoPath); err != nil {
-		return err
+		return "", err
 	}
 
 	verificationPlan := detectGithubVerificationPlan(sandboxRepoPath)
 	verificationScriptsDir, err := writeVerificationScripts(localWorkRuntimeName, sandboxPath, sandboxRepoPath, verificationPlan, []string{"nana", "work", "verify-refresh", "--run-id", runID})
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	now := ISOTimeNow()
@@ -1179,6 +1689,7 @@ func startLocalWork(cwd string, options localWorkStartOptions) error {
 		CurrentIteration:       0,
 		RepoRoot:               repoRoot,
 		RepoName:               repoName,
+		RepoSlug:               repoSlug,
 		RepoID:                 repoID,
 		SourceBranch:           sourceBranch,
 		BaselineSHA:            baselineSHA,
@@ -1194,7 +1705,7 @@ func startLocalWork(cwd string, options localWorkStartOptions) error {
 		MaxIterations:          options.MaxIterations,
 	}
 	if err := writeLocalWorkManifest(manifest); err != nil {
-		return err
+		return "", err
 	}
 
 	fmt.Fprintf(os.Stdout, "[local] Starting run %s for %s\n", runID, repoRoot)
@@ -1207,7 +1718,58 @@ func startLocalWork(cwd string, options localWorkStartOptions) error {
 		fmt.Fprintf(os.Stdout, "[local] Verification warning: %s\n", warning)
 	}
 
-	return executeLocalWorkLoop(runID, options.CodexArgs)
+	if options.Detach {
+		logPath := filepath.Join(runDir, "runtime.log")
+		if err := localWorkStartDetachedRunner(repoRoot, runID, options.CodexArgs, logPath); err != nil {
+			failedAt := ISOTimeNow()
+			manifest.Status = "failed"
+			manifest.LastError = "detached local work runner failed to start: " + err.Error()
+			manifest.UpdatedAt = failedAt
+			manifest.CompletedAt = failedAt
+			setLocalWorkProgress(&manifest, nil, "failed", "launch-detached", 0)
+			if writeErr := writeLocalWorkManifest(manifest); writeErr != nil {
+				return runID, fmt.Errorf("%w (additionally failed to persist detached launch failure: %v)", err, writeErr)
+			}
+			return runID, err
+		}
+		fmt.Fprintf(os.Stdout, "[local] Detached run %s; runtime log: %s\n", runID, logPath)
+		return runID, nil
+	}
+
+	return runID, localWorkExecuteLoop(runID, options.CodexArgs, options.RateLimitPolicy)
+}
+
+func launchLocalWorkDetachedRunner(repoRoot string, runID string, codexArgs []string, logPath string) error {
+	executablePath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	args := []string{"work", "resume", "--run-id", runID, "--repo", repoRoot}
+	if len(codexArgs) > 0 {
+		args = append(args, "--")
+		args = append(args, codexArgs...)
+	}
+	cmd := exec.Command(executablePath, args...)
+	cmd.Dir = repoRoot
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Env = append([]string{}, os.Environ()...)
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		return err
+	}
+	go func() {
+		defer logFile.Close()
+		_ = cmd.Wait()
+	}()
+	return nil
 }
 
 func resumeLocalWork(cwd string, options localWorkResumeOptions) error {
@@ -1217,6 +1779,15 @@ func resumeLocalWork(cwd string, options localWorkResumeOptions) error {
 	}
 	if manifest.Status == "completed" {
 		return fmt.Errorf("work run %s is already completed", manifest.RunID)
+	}
+	if supersededBy, supersededReason, err := localWorkEffectiveSupersededInfo(manifest); err != nil {
+		return err
+	} else if supersededBy != "" {
+		manifest.SupersededByRunID = supersededBy
+		manifest.SupersededReason = supersededReason
+	}
+	if manifest.Status == "blocked" && localWorkIsSuperseded(manifest) {
+		return fmt.Errorf("work run %s is blocked: %s", manifest.RunID, defaultString(localWorkBlockedNextAction(manifest), defaultString(manifest.LastError, manifest.FinalApplyError)))
 	}
 	if manifest.Status == "blocked" && manifest.FinalApplyStatus == "blocked-before-apply" {
 		return retryBlockedLocalWorkFinalApply(manifest)
@@ -1228,12 +1799,106 @@ func resumeLocalWork(cwd string, options localWorkResumeOptions) error {
 		return fmt.Errorf("work run %s has already exhausted max iterations (%d)", manifest.RunID, manifest.MaxIterations)
 	}
 	fmt.Fprintf(os.Stdout, "[local] Resuming run %s for %s\n", manifest.RunID, manifest.RepoRoot)
-	return executeLocalWorkLoop(manifest.RunID, options.CodexArgs)
+	return localWorkExecuteLoop(manifest.RunID, options.CodexArgs, options.RateLimitPolicy)
+}
+
+func resolveLocalWork(cwd string, options localWorkResolveOptions) error {
+	manifest, _, err := resolveLocalWorkRun(cwd, options.RunSelection)
+	if err != nil {
+		return err
+	}
+	return resolveLocalWorkManifest(manifest)
+}
+
+func resolveLocalWorkManifest(manifest localWorkManifest) error {
+	if manifest.Status == "completed" {
+		return fmt.Errorf("work run %s is already completed", manifest.RunID)
+	}
+	if supersededBy, supersededReason, err := localWorkEffectiveSupersededInfo(manifest); err != nil {
+		return err
+	} else if supersededBy != "" {
+		manifest.SupersededByRunID = supersededBy
+		manifest.SupersededReason = supersededReason
+	}
+	if !localWorkResolveAllowed(manifest) {
+		if manifest.Status == "blocked" {
+			return fmt.Errorf("work run %s is blocked and cannot be resolved automatically: %s", manifest.RunID, defaultString(localWorkBlockedNextAction(manifest), defaultString(manifest.LastError, manifest.FinalApplyError)))
+		}
+		return fmt.Errorf("work run %s is not blocked in an automatically resolvable state", manifest.RunID)
+	}
+	switch manifest.FinalApplyStatus {
+	case "blocked-after-apply":
+		return retryBlockedLocalWorkPostApply(manifest)
+	default:
+		return retryBlockedLocalWorkFinalApply(manifest)
+	}
 }
 
 func retryBlockedLocalWorkFinalApply(manifest localWorkManifest) error {
 	fmt.Fprintf(os.Stdout, "[local] Retrying final source commit for run %s\n", manifest.RunID)
 	applyResult := applyLocalWorkFinalDiff(manifest)
+	return finalizeResolvedLocalWork(manifest, applyResult)
+}
+
+func retryBlockedLocalWorkPostApply(manifest localWorkManifest) error {
+	fmt.Fprintf(os.Stdout, "[local] Resolving post-apply blocker for run %s\n", manifest.RunID)
+	applyResult, err := continueLocalWorkPostApply(manifest)
+	if err != nil {
+		manifest.FinalApplyStatus = applyResult.Status
+		manifest.FinalApplyCommitSHA = applyResult.CommitSHA
+		manifest.FinalApplyError = applyResult.Error
+		manifest.FinalAppliedAt = ISOTimeNow()
+		manifest.UpdatedAt = manifest.FinalAppliedAt
+		manifest.LastError = applyResult.Error
+		setLocalWorkProgress(&manifest, nil, "apply-blocked", "commit-source", manifest.CurrentRound)
+		if writeErr := writeLocalWorkManifest(manifest); writeErr != nil {
+			return writeErr
+		}
+		return err
+	}
+	return finalizeResolvedLocalWork(manifest, applyResult)
+}
+
+func continueLocalWorkPostApply(manifest localWorkManifest) (localWorkFinalApplyResult, error) {
+	releaseFinalApplyLock, err := acquireLocalWorkFinalApplyLock(manifest, "post-apply-resolve")
+	if err != nil {
+		return localWorkFinalApplyResult{Status: "blocked-after-apply", CommitSHA: strings.TrimSpace(manifest.FinalApplyCommitSHA), Error: err.Error()}, err
+	}
+	defer releaseFinalApplyLock()
+	sourceStatus, err := githubGitOutput(manifest.RepoRoot, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return localWorkFinalApplyResult{Status: "blocked-after-apply", CommitSHA: strings.TrimSpace(manifest.FinalApplyCommitSHA), Error: err.Error()}, err
+	}
+	if strings.TrimSpace(manifest.FinalApplyCommitSHA) == "" {
+		if strings.TrimSpace(sourceStatus) == "" {
+			err := fmt.Errorf("blocked-after-apply state has no pending source changes or recorded commit")
+			return localWorkFinalApplyResult{Status: "blocked-after-apply", Error: err.Error()}, err
+		}
+		if err := githubRunGit(manifest.RepoRoot, "commit", "-m", fmt.Sprintf("nana work: apply %s", manifest.RunID)); err != nil {
+			err = fmt.Errorf("source checkout contains staged final-apply changes, but commit retry failed: %w", err)
+			return localWorkFinalApplyResult{Status: "blocked-after-apply", Error: err.Error()}, err
+		}
+		commitSHA, err := githubGitOutput(manifest.RepoRoot, "rev-parse", "HEAD")
+		if err != nil {
+			return localWorkFinalApplyResult{Status: "blocked-after-apply", Error: err.Error()}, err
+		}
+		manifest.FinalApplyCommitSHA = strings.TrimSpace(commitSHA)
+	}
+	target, err := resolveLocalWorkFinalApplyTarget(manifest.RepoRoot, manifest.SourceBranch)
+	if err != nil {
+		return localWorkFinalApplyResult{Status: "blocked-after-apply", CommitSHA: strings.TrimSpace(manifest.FinalApplyCommitSHA), Error: err.Error()}, err
+	}
+	if target.RemoteName != "" {
+		if err := pushLocalWorkFinalApplyTarget(manifest.RepoRoot, target); err != nil {
+			err = fmt.Errorf("source checkout contains committed final-apply changes, but push retry to %s failed: %w", localWorkFinalApplyTargetLabel(target, manifest.SourceBranch), err)
+			return localWorkFinalApplyResult{Status: "blocked-after-apply", CommitSHA: strings.TrimSpace(manifest.FinalApplyCommitSHA), Error: err.Error()}, err
+		}
+		return localWorkFinalApplyResult{Status: "pushed", CommitSHA: strings.TrimSpace(manifest.FinalApplyCommitSHA)}, nil
+	}
+	return localWorkFinalApplyResult{Status: "committed", CommitSHA: strings.TrimSpace(manifest.FinalApplyCommitSHA)}, nil
+}
+
+func finalizeResolvedLocalWork(manifest localWorkManifest, applyResult localWorkFinalApplyResult) error {
 	manifest.FinalApplyStatus = applyResult.Status
 	manifest.FinalApplyCommitSHA = applyResult.CommitSHA
 	manifest.FinalApplyError = applyResult.Error
@@ -1257,10 +1922,15 @@ func retryBlockedLocalWorkFinalApply(manifest localWorkManifest) error {
 	if err := writeLocalWorkManifest(manifest); err != nil {
 		return err
 	}
+	if err := markSupersededLocalWorkRuns(manifest); err != nil {
+		return err
+	}
 	if _, err := writeLocalWorkRetrospective(manifest); err != nil {
 		return err
 	}
 	switch applyResult.Status {
+	case "pushed":
+		fmt.Fprintf(os.Stdout, "[local] Completed run %s; committed and pushed source branch %s at %s.\n", manifest.RunID, defaultString(manifest.SourceBranch, "HEAD"), applyResult.CommitSHA)
 	case "committed":
 		fmt.Fprintf(os.Stdout, "[local] Completed run %s; committed to source branch at %s.\n", manifest.RunID, applyResult.CommitSHA)
 	case "no-op":
@@ -1269,11 +1939,12 @@ func retryBlockedLocalWorkFinalApply(manifest localWorkManifest) error {
 	return nil
 }
 
-func executeLocalWorkLoop(runID string, codexArgs []string) error {
+func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy codexRateLimitPolicy) error {
 	manifest, err := readLocalWorkManifestByRunID(runID)
 	if err != nil {
 		return err
 	}
+	manifest.RateLimitPolicy = string(codexRateLimitPolicyDefault(rateLimitPolicy))
 	nextIteration := localWorkNextIteration(manifest)
 	if nextIteration <= 0 {
 		nextIteration = 1
@@ -1305,6 +1976,9 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 		manifest.Status = "running"
 		manifest.CurrentIteration = iteration
 		manifest.LastError = ""
+		manifest.PauseReason = ""
+		manifest.PauseUntil = ""
+		manifest.PausedAt = ""
 
 		setLocalWorkProgress(&manifest, &state, defaultString(state.CurrentPhase, "implement"), defaultString(state.CurrentSubphase, "implement"), state.CurrentRound)
 		if state.CurrentPhase == "" {
@@ -1329,7 +2003,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			if err := os.WriteFile(filepath.Join(iterationDir, "implement-prompt.md"), []byte(implementPrompt), 0o644); err != nil {
 				return err
 			}
-			implementResult, err := runLocalWorkCodexPrompt(manifest, codexArgs, implementPrompt, "leader")
+			implementResult, err := runLocalWorkCodexPrompt(manifest, codexArgs, implementPrompt, "leader", filepath.Join(iterationDir, "implement-checkpoint.json"))
 			if err := os.WriteFile(implementStdoutPath, []byte(implementResult.Stdout), 0o644); err != nil {
 				return err
 			}
@@ -1420,7 +2094,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			if err := os.WriteFile(reviewPromptPath, []byte(reviewPrompt), 0o644); err != nil {
 				return err
 			}
-			reviewResult, findings, err := runLocalWorkReview(manifest, codexArgs, reviewPrompt)
+			reviewResult, findings, err := runLocalWorkReview(manifest, codexArgs, reviewPrompt, filepath.Join(iterationDir, "review-checkpoint.json"))
 			if err := os.WriteFile(reviewStdoutPath, []byte(reviewResult.Stdout), 0o644); err != nil {
 				return err
 			}
@@ -1475,7 +2149,11 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 					if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 						return err
 					}
-					fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: running final review gate (%d roles).\n", iteration, manifest.MaxIterations, len(localWorkFinalReviewGateRoles))
+					gateRolesToRun, gateRolesErr := selectLocalWorkFinalGateRolesForManifest(manifest)
+					if gateRolesErr != nil {
+						return gateRolesErr
+					}
+					fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: running final review gate (%d roles).\n", iteration, manifest.MaxIterations, len(gateRolesToRun))
 					gateFindings, gateRoles, gateRoleResults, gateCount, err := runLocalWorkFinalReviewGate(manifest, codexArgs, iterationDir, "initial")
 					if err != nil {
 						manifest.Status = "failed"
@@ -1581,7 +2259,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 				if err := os.WriteFile(hardeningPromptPath, []byte(hardeningPrompt), 0o644); err != nil {
 					return err
 				}
-				hardeningResult, err := runLocalWorkCodexPrompt(manifest, codexArgs, hardeningPrompt, fmt.Sprintf("hardener-round-%d", round))
+				hardeningResult, err := runLocalWorkCodexPrompt(manifest, codexArgs, hardeningPrompt, fmt.Sprintf("hardener-round-%d", round), filepath.Join(iterationDir, fmt.Sprintf("hardening-round-%d-checkpoint.json", round)))
 				if err := os.WriteFile(hardeningStdoutPath, []byte(hardeningResult.Stdout), 0o644); err != nil {
 					return err
 				}
@@ -1653,7 +2331,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 				if err := os.WriteFile(postReviewPromptPath, []byte(finalReviewPrompt), 0o644); err != nil {
 					return err
 				}
-				finalReviewResult, findings, err := runLocalWorkReview(manifest, codexArgs, finalReviewPrompt)
+				finalReviewResult, findings, err := runLocalWorkReview(manifest, codexArgs, finalReviewPrompt, filepath.Join(iterationDir, fmt.Sprintf("review-round-%d-checkpoint.json", round)))
 				if err := os.WriteFile(postReviewStdoutPath, []byte(finalReviewResult.Stdout), 0o644); err != nil {
 					return err
 				}
@@ -1705,7 +2383,11 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 						if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 							return err
 						}
-						fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d round %d: running final review gate (%d roles).\n", iteration, manifest.MaxIterations, round, len(localWorkFinalReviewGateRoles))
+						gateRolesToRun, gateRolesErr := selectLocalWorkFinalGateRolesForManifest(manifest)
+						if gateRolesErr != nil {
+							return gateRolesErr
+						}
+						fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d round %d: running final review gate (%d roles).\n", iteration, manifest.MaxIterations, round, len(gateRolesToRun))
 						gateFindings, gateRoles, gateRoleResults, gateCount, err := runLocalWorkFinalReviewGate(manifest, codexArgs, iterationDir, fmt.Sprintf("round-%d", round))
 						if err != nil {
 							manifest.Status = "failed"
@@ -1902,6 +2584,11 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 		if err := writeLocalWorkManifest(manifest); err != nil {
 			return err
 		}
+		if summary.Status == "completed" {
+			if err := markSupersededLocalWorkRuns(manifest); err != nil {
+				return err
+			}
+		}
 		if err := removeLocalWorkRuntimeState(manifest.RunID, iteration); err != nil {
 			return err
 		}
@@ -1917,6 +2604,8 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			}
 			printLocalWorkRememberedFindings(os.Stdout, "Pre-existing issues excluded from propagation", manifest.PreexistingFindings)
 			switch manifest.FinalApplyStatus {
+			case "pushed":
+				fmt.Fprintf(os.Stdout, "[local] Completed run %s after %d iteration(s); committed and pushed source branch %s at %s.\n", manifest.RunID, iteration, defaultString(manifest.SourceBranch, "HEAD"), manifest.FinalApplyCommitSHA)
 			case "committed":
 				fmt.Fprintf(os.Stdout, "[local] Completed run %s after %d iteration(s); committed to source branch at %s.\n", manifest.RunID, iteration, manifest.FinalApplyCommitSHA)
 			case "no-op":
@@ -2122,6 +2811,8 @@ type localWorkStatusSnapshot struct {
 	CandidateBlockedPaths    []string                         `json:"candidate_blocked_paths,omitempty"`
 	NextAction               string                           `json:"next_action,omitempty"`
 	LastError                string                           `json:"last_error,omitempty"`
+	PauseReason              string                           `json:"pause_reason,omitempty"`
+	PauseUntil               string                           `json:"pause_until,omitempty"`
 }
 
 func localWorkStatus(cwd string, options localWorkStatusOptions) error {
@@ -2142,6 +2833,13 @@ func localWorkStatus(cwd string, options localWorkStatusOptions) error {
 	fmt.Fprintf(os.Stdout, "[local] Run artifacts: %s\n", snapshot.RunArtifacts)
 	fmt.Fprintf(os.Stdout, "[local] Sandbox: %s\n", snapshot.Sandbox)
 	fmt.Fprintf(os.Stdout, "[local] Status: %s\n", snapshot.Status)
+	if strings.TrimSpace(snapshot.PauseUntil) != "" {
+		fmt.Fprintf(os.Stdout, "[local] Pause until: %s", snapshot.PauseUntil)
+		if strings.TrimSpace(snapshot.PauseReason) != "" {
+			fmt.Fprintf(os.Stdout, " reason=%s", snapshot.PauseReason)
+		}
+		fmt.Fprintln(os.Stdout)
+	}
 	if strings.TrimSpace(snapshot.FinalApplyStatus) != "" {
 		fmt.Fprintf(os.Stdout, "[local] Final apply: %s", snapshot.FinalApplyStatus)
 		if strings.TrimSpace(snapshot.FinalApplyCommitSHA) != "" {
@@ -2266,6 +2964,8 @@ func localWorkBuildStatusSnapshot(manifest localWorkManifest, runDir string) (lo
 		CandidateBlockedPaths:    append([]string{}, manifest.CandidateBlockedPaths...),
 		NextAction:               localWorkBlockedNextAction(manifest),
 		LastError:                manifest.LastError,
+		PauseReason:              manifest.PauseReason,
+		PauseUntil:               manifest.PauseUntil,
 	}
 	if runtimeState != nil {
 		snapshot.Phase = runtimeState.CurrentPhase
@@ -2558,8 +3258,9 @@ func refreshLocalWorkVerificationArtifactsInPlace(manifest *localWorkManifest) (
 
 func normalizeLocalWorkManifest(manifest *localWorkManifest) {
 	if manifest.Version == 0 {
-		manifest.Version = 4
+		manifest.Version = 5
 	}
+	manifest.RepoSlug = localWorkResolvedRepoSlug(manifest.RepoRoot, manifest.RepoSlug)
 	if strings.TrimSpace(manifest.GroupingPolicy) == "" {
 		manifest.GroupingPolicy = localWorkDefaultGroupingPolicy
 	}
@@ -2569,6 +3270,158 @@ func normalizeLocalWorkManifest(manifest *localWorkManifest) {
 	if manifest.ValidationParallelism > localWorkMaxValidationParallel {
 		manifest.ValidationParallelism = localWorkMaxValidationParallel
 	}
+}
+
+func localWorkHasResolvableBlockedApply(manifest localWorkManifest) bool {
+	if manifest.Status != "blocked" {
+		return false
+	}
+	switch strings.TrimSpace(manifest.FinalApplyStatus) {
+	case "blocked-before-apply", "blocked-after-apply":
+		return true
+	default:
+		return false
+	}
+}
+
+func localWorkIsSuperseded(manifest localWorkManifest) bool {
+	return strings.TrimSpace(manifest.SupersededByRunID) != ""
+}
+
+func localWorkSupersededReason(manifest localWorkManifest) string {
+	if reason := strings.TrimSpace(manifest.SupersededReason); reason != "" {
+		return reason
+	}
+	if runID := strings.TrimSpace(manifest.SupersededByRunID); runID != "" {
+		return "run superseded by " + runID
+	}
+	return ""
+}
+
+func localWorkEffectiveSupersededInfo(manifest localWorkManifest) (string, string, error) {
+	if localWorkIsSuperseded(manifest) {
+		return strings.TrimSpace(manifest.SupersededByRunID), localWorkSupersededReason(manifest), nil
+	}
+	if !localWorkHasResolvableBlockedApply(manifest) {
+		return "", "", nil
+	}
+	type supersededInfo struct {
+		runID  string
+		reason string
+	}
+	info, err := withLocalWorkReadStore(func(store *localWorkDBStore) (supersededInfo, error) {
+		rows, err := store.db.Query(`SELECT manifest_json FROM runs WHERE repo_root = ? AND updated_at > ? ORDER BY updated_at DESC`, manifest.RepoRoot, manifest.UpdatedAt)
+		if err != nil {
+			return supersededInfo{}, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var raw string
+			if err := rows.Scan(&raw); err != nil {
+				return supersededInfo{}, err
+			}
+			var candidate localWorkManifest
+			if err := json.Unmarshal([]byte(raw), &candidate); err != nil {
+				return supersededInfo{}, err
+			}
+			normalizeLocalWorkManifest(&candidate)
+			if strings.TrimSpace(candidate.RunID) == strings.TrimSpace(manifest.RunID) {
+				continue
+			}
+			if strings.TrimSpace(candidate.SourceBranch) != strings.TrimSpace(manifest.SourceBranch) {
+				continue
+			}
+			if strings.TrimSpace(candidate.Status) != "completed" {
+				continue
+			}
+			switch strings.TrimSpace(candidate.FinalApplyStatus) {
+			case "committed", "pushed":
+				reason := fmt.Sprintf("newer completed run %s already applied branch %s", candidate.RunID, defaultString(strings.TrimSpace(candidate.SourceBranch), "HEAD"))
+				return supersededInfo{runID: candidate.RunID, reason: reason}, nil
+			}
+		}
+		return supersededInfo{}, rows.Err()
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return info.runID, info.reason, nil
+}
+
+func markSupersededLocalWorkRuns(completed localWorkManifest) error {
+	if strings.TrimSpace(completed.Status) != "completed" {
+		return nil
+	}
+	switch strings.TrimSpace(completed.FinalApplyStatus) {
+	case "committed", "pushed":
+	default:
+		return nil
+	}
+	store, err := openLocalWorkDB()
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	rows, err := store.db.Query(`SELECT manifest_json FROM runs WHERE repo_root = ? AND updated_at < ? ORDER BY updated_at DESC`, completed.RepoRoot, completed.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	reason := fmt.Sprintf("newer completed run %s already applied branch %s", completed.RunID, defaultString(strings.TrimSpace(completed.SourceBranch), "HEAD"))
+	updates := []localWorkManifest{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return err
+		}
+		var candidate localWorkManifest
+		if err := json.Unmarshal([]byte(raw), &candidate); err != nil {
+			return err
+		}
+		normalizeLocalWorkManifest(&candidate)
+		if strings.TrimSpace(candidate.RunID) == strings.TrimSpace(completed.RunID) {
+			continue
+		}
+		if strings.TrimSpace(candidate.SourceBranch) != strings.TrimSpace(completed.SourceBranch) {
+			continue
+		}
+		if !localWorkHasResolvableBlockedApply(candidate) {
+			continue
+		}
+		if strings.TrimSpace(candidate.SupersededByRunID) == strings.TrimSpace(completed.RunID) &&
+			strings.TrimSpace(candidate.SupersededReason) == reason {
+			continue
+		}
+		candidate.SupersededByRunID = completed.RunID
+		candidate.SupersededAt = defaultString(strings.TrimSpace(completed.CompletedAt), completed.UpdatedAt)
+		candidate.SupersededReason = reason
+		updates = append(updates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, candidate := range updates {
+		if err := store.writeManifest(candidate); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func localWorkResolvedRepoSlug(repoRoot string, current string) string {
+	repoSlug := strings.TrimSpace(current)
+	if validRepoSlug(repoSlug) {
+		return repoSlug
+	}
+	repoRoot = strings.TrimSpace(repoRoot)
+	if repoRoot == "" {
+		return ""
+	}
+	inferred := strings.TrimSpace(inferGithubRepoSlugFromRepo(repoRoot))
+	if validRepoSlug(inferred) {
+		return inferred
+	}
+	return ""
 }
 
 func runLocalVerification(repoPath string, plan githubVerificationPlan, includeIntegration bool) (localWorkVerificationReport, error) {
@@ -2668,38 +3521,69 @@ func executeLocalVerificationCommand(repoPath string, command string) (localWork
 	}, nil
 }
 
-func runLocalWorkCodexPrompt(manifest localWorkManifest, codexArgs []string, prompt string, codexHomeAlias string) (localWorkExecutionResult, error) {
+func runLocalWorkCodexPrompt(manifest localWorkManifest, codexArgs []string, prompt string, codexHomeAlias string, checkpointPath string) (localWorkExecutionResult, error) {
 	sourceCodexHome := ResolveCodexHomeForLaunch(manifest.RepoRoot)
 	scopedCodexHome, err := ensureScopedCodexHome(sourceCodexHome, filepath.Join(manifest.SandboxPath, ".nana", localWorkRuntimeName, "codex-home", sanitizePathToken(codexHomeAlias)))
 	if err != nil {
 		return localWorkExecutionResult{}, err
 	}
-	sessionID := fmt.Sprintf("%s-%d", codexHomeAlias, time.Now().UnixNano())
-	sessionInstructionsPath, err := writeSessionModelInstructions(manifest.SandboxPath, sessionID, scopedCodexHome)
-	if err != nil {
-		return localWorkExecutionResult{}, err
-	}
-	defer removeSessionInstructionsFile(manifest.SandboxPath, sessionID)
 
 	normalizedCodexArgs, fastMode := normalizeLocalWorkCodexArgsWithFast(codexArgs)
 	prompt = prefixCodexFastPrompt(prompt, fastMode)
-	args := append([]string{"exec", "-C", manifest.SandboxRepoPath}, normalizedCodexArgs...)
-	args = append(args, "-")
-	args = injectModelInstructionsArgs(args, sessionInstructionsPath)
+	result, err := runManagedCodexPrompt(codexManagedPromptOptions{
+		CommandDir:       manifest.SandboxPath,
+		InstructionsRoot: manifest.SandboxPath,
+		CodexHome:        scopedCodexHome,
+		FreshArgsPrefix:  []string{"exec", "-C", manifest.SandboxRepoPath},
+		CommonArgs:       normalizedCodexArgs,
+		Prompt:           prompt,
+		PromptTransport:  codexPromptTransportStdin,
+		CheckpointPath:   checkpointPath,
+		StepKey:          codexHomeAlias,
+		ResumeStrategy:   codexResumeSamePrompt,
+		Env:              append(buildCodexEnv(NotifyTempContract{}, scopedCodexHome), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
+		RateLimitPolicy:  codexRateLimitPolicyDefault(codexRateLimitPolicy(manifest.RateLimitPolicy)),
+		OnPause: func(info codexRateLimitPauseInfo) {
+			updateLocalWorkPausedManifest(manifest.RunID, info, true)
+		},
+		OnResume: func(info codexRateLimitPauseInfo) {
+			updateLocalWorkPausedManifest(manifest.RunID, info, false)
+		},
+	})
+	execResult := localWorkExecutionResult{
+		Stdout: result.Stdout,
+		Stderr: result.Stderr,
+	}
+	if persistErr := persistLocalWorkTokenUsage(manifest.RunID); persistErr != nil && !os.IsNotExist(persistErr) {
+		if err != nil {
+			return execResult, fmt.Errorf("%w (also failed to persist token usage: %v)", err, persistErr)
+		}
+		return execResult, persistErr
+	}
+	return execResult, err
+}
 
-	cmd := exec.Command("codex", args...)
-	cmd.Dir = manifest.SandboxPath
-	cmd.Stdin = strings.NewReader(prompt)
-	cmd.Env = append(buildCodexEnv(NotifyTempContract{}, scopedCodexHome), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err = cmd.Run()
-	return localWorkExecutionResult{
-		Stdout: stdout.String(),
-		Stderr: stderr.String(),
-	}, err
+func updateLocalWorkPausedManifest(runID string, info codexRateLimitPauseInfo, paused bool) {
+	manifest, err := readLocalWorkManifestByRunID(runID)
+	if err != nil {
+		return
+	}
+	now := ISOTimeNow()
+	if paused {
+		manifest.Status = "paused"
+		manifest.PauseReason = strings.TrimSpace(info.Reason)
+		manifest.PauseUntil = strings.TrimSpace(info.RetryAfter)
+		manifest.PausedAt = now
+		manifest.LastError = codexPauseInfoMessage(info)
+	} else {
+		manifest.Status = "running"
+		manifest.PauseReason = ""
+		manifest.PauseUntil = ""
+		manifest.PausedAt = ""
+		manifest.LastError = ""
+	}
+	manifest.UpdatedAt = now
+	_ = writeLocalWorkManifest(manifest)
 }
 
 func normalizeLocalWorkCodexArgs(args []string) []string {
@@ -2730,12 +3614,12 @@ func hasCodexExecutionPolicyArg(args []string) bool {
 	return false
 }
 
-func runLocalWorkReview(manifest localWorkManifest, codexArgs []string, prompt string) (localWorkExecutionResult, []githubPullReviewFinding, error) {
-	return runLocalWorkReviewWithAlias(manifest, codexArgs, prompt, "reviewer")
+func runLocalWorkReview(manifest localWorkManifest, codexArgs []string, prompt string, checkpointPath string) (localWorkExecutionResult, []githubPullReviewFinding, error) {
+	return runLocalWorkReviewWithAlias(manifest, codexArgs, prompt, "reviewer", checkpointPath)
 }
 
-func runLocalWorkReviewWithAlias(manifest localWorkManifest, codexArgs []string, prompt string, alias string) (localWorkExecutionResult, []githubPullReviewFinding, error) {
-	result, err := runLocalWorkCodexPrompt(manifest, codexArgs, prompt, alias)
+func runLocalWorkReviewWithAlias(manifest localWorkManifest, codexArgs []string, prompt string, alias string, checkpointPath string) (localWorkExecutionResult, []githubPullReviewFinding, error) {
+	result, err := runLocalWorkCodexPrompt(manifest, codexArgs, prompt, alias, checkpointPath)
 	if err != nil {
 		return result, nil, err
 	}
@@ -2816,7 +3700,7 @@ func groupFindingsByAI(manifest *localWorkManifest, codexArgs []string, iteratio
 		if err := os.WriteFile(attemptBase+"-prompt.md", []byte(prompt), 0o644); err != nil {
 			return localWorkGroupingResult{}, nil, err
 		}
-		result, err := runLocalWorkCodexPrompt(*manifest, codexArgs, prompt, alias)
+		result, err := runLocalWorkCodexPrompt(*manifest, codexArgs, prompt, alias, attemptBase+"-checkpoint.json")
 		if err := os.WriteFile(attemptBase+"-stdout.log", []byte(result.Stdout), 0o644); err != nil {
 			return localWorkGroupingResult{}, nil, err
 		}
@@ -3009,7 +3893,7 @@ func validateFindingGroup(manifest localWorkManifest, codexArgs []string, iterat
 		if err := os.WriteFile(attemptBase+"-prompt.md", []byte(prompt), 0o644); err != nil {
 			return nil, nil, attempt - 1, err
 		}
-		result, err := runLocalWorkCodexPrompt(manifest, codexArgs, prompt, fmt.Sprintf("validator-%s-round-%d", sanitizePathToken(group.GroupID), round))
+		result, err := runLocalWorkCodexPrompt(manifest, codexArgs, prompt, fmt.Sprintf("validator-%s-round-%d", sanitizePathToken(group.GroupID), round), attemptBase+"-checkpoint.json")
 		if err := os.WriteFile(attemptBase+"-stdout.log", []byte(result.Stdout), 0o644); err != nil {
 			return nil, nil, attempt - 1, err
 		}
@@ -3391,7 +4275,7 @@ func buildFindingGroupsFromGroupingResult(findings []githubPullReviewFinding, gr
 }
 
 func buildLocalWorkValidationPrompt(manifest localWorkManifest, group localWorkFindingGroup) (string, error) {
-	lines := []string{
+	baseLines := []string{
 		"# NANA Work-local Finding Validation",
 		"",
 		fmt.Sprintf("Run id: %s", manifest.RunID),
@@ -3414,8 +4298,9 @@ func buildLocalWorkValidationPrompt(manifest localWorkManifest, group localWorkF
 		"Findings:",
 	}
 	seenSnippets := map[string]bool{}
+	optionalLines := []string{}
 	for _, finding := range group.Findings {
-		lines = append(lines,
+		baseLines = append(baseLines,
 			fmt.Sprintf("- fingerprint: %s", finding.Fingerprint),
 			fmt.Sprintf("  path: %s", finding.Path),
 			fmt.Sprintf("  line: %d", finding.Line),
@@ -3425,22 +4310,38 @@ func buildLocalWorkValidationPrompt(manifest localWorkManifest, group localWorkF
 			fmt.Sprintf("  detail: %s", promptSnippetLimit(finding.Detail, 800)),
 		)
 		if strings.TrimSpace(finding.Fix) != "" {
-			lines = append(lines, fmt.Sprintf("  fix: %s", promptSnippetLimit(finding.Fix, 600)))
+			baseLines = append(baseLines, fmt.Sprintf("  fix: %s", promptSnippetLimit(finding.Fix, 600)))
 		}
 		if !seenSnippets[finding.Path] {
 			seenSnippets[finding.Path] = true
 			if snippet := localWorkFindingSnippet(manifest.SandboxRepoPath, finding); strings.TrimSpace(snippet) != "" {
-				lines = append(lines, fmt.Sprintf("  code: %s", promptSnippetLimit(snippet, 1200)))
+				optionalLines = append(optionalLines, fmt.Sprintf("  code: %s", promptSnippetLimit(snippet, 1200)))
 			}
 			if baseline := localWorkFindingBaselineSnippet(manifest, finding); strings.TrimSpace(baseline) != "" {
-				lines = append(lines, fmt.Sprintf("  baseline code: %s", promptSnippetLimit(baseline, 1200)))
+				optionalLines = append(optionalLines, fmt.Sprintf("  baseline code: %s", promptSnippetLimit(baseline, 1200)))
 			}
 			if diff := localWorkFindingDiffSnippet(manifest, finding.Path); strings.TrimSpace(diff) != "" {
-				lines = append(lines, fmt.Sprintf("  diff: %s", promptSnippetLimit(diff, 1800)))
+				optionalLines = append(optionalLines, fmt.Sprintf("  diff: %s", promptSnippetLimit(diff, 1800)))
 			}
 		}
 	}
-	return capPromptSize(strings.Join(lines, "\n")+"\n", localWorkValidationPromptLimit), nil
+	prompt := strings.Join(baseLines, "\n") + "\n"
+	omittedOptional := false
+	for _, optionalLine := range optionalLines {
+		candidate := prompt + optionalLine + "\n"
+		if len(candidate) > localWorkValidationPromptLimit {
+			omittedOptional = true
+			continue
+		}
+		prompt = candidate
+	}
+	if omittedOptional {
+		notice := "[Optional code snippets omitted to fit runtime limits]\n"
+		if len(prompt)+len(notice) <= localWorkValidationPromptLimit {
+			prompt += notice
+		}
+	}
+	return capPromptSize(prompt, localWorkValidationPromptLimit), nil
 }
 
 func parseLocalWorkValidationGroupResult(raw string, group localWorkFindingGroup) (localWorkValidationGroupResult, error) {
@@ -3806,11 +4707,6 @@ func writeLocalWorkActiveState(runDir string, manifest *localWorkManifest, state
 	if manifest == nil {
 		return nil
 	}
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return err
-	}
-	defer store.Close()
 	if state != nil {
 		if state.Iteration == 0 {
 			state.Iteration = manifest.CurrentIteration
@@ -3819,7 +4715,14 @@ func writeLocalWorkActiveState(runDir string, manifest *localWorkManifest, state
 			manifest.CurrentIteration = state.Iteration
 		}
 	}
-	return store.writeActiveState(*manifest, state)
+	return withLocalWorkWriteRetry(func() error {
+		store, err := openLocalWorkDB()
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		return store.writeActiveState(*manifest, state)
+	})
 }
 
 func latestCompletedLocalWorkIteration(manifest localWorkManifest) int {
@@ -3909,32 +4812,29 @@ func buildLocalWorkImplementPrompt(manifest localWorkManifest, iteration int) (s
 			fmt.Sprintf("- Verification: %s", defaultString(last.VerificationSummary, "(none)")),
 			fmt.Sprintf("- Final review findings: %d", last.ReviewFindings),
 		)
-		for _, title := range last.ReviewFindingTitles {
+		for _, title := range limitPromptList(last.ReviewFindingTitles, 10) {
 			lines = append(lines, "- Review item: "+title)
 		}
+		if len(last.ReviewFindingTitles) > 10 {
+			lines = append(lines, fmt.Sprintf("- ... %d additional review items omitted", len(last.ReviewFindingTitles)-10))
+		}
 	}
-	if promptSurface, err := readGithubPromptSurface("executor"); err == nil && strings.TrimSpace(promptSurface) != "" {
-		lines = append(lines, "", strings.TrimSpace(promptSurface))
+	if promptSurface, err := readGithubEmbeddedPromptSurface("executor"); err == nil && strings.TrimSpace(promptSurface) != "" {
+		lines = append(lines, "", compactPromptHeadValue(promptSurface, 0, localWorkPromptSurfaceCharLimit))
 	}
-	lines = append(lines, "", "Plan:", strings.TrimSpace(string(inputContent)))
-	return strings.Join(lines, "\n") + "\n", nil
+	lines = append(lines, "", "Plan:", compactPromptHeadValue(string(inputContent), 0, localWorkPlanPayloadCharLimit))
+	return capPromptChars(strings.Join(lines, "\n")+"\n", localWorkImplementPromptCharLimit), nil
 }
 
 func buildLocalWorkReviewPrompt(manifest localWorkManifest) (string, error) {
-	changedFilesOutput, err := githubGitOutput(manifest.SandboxRepoPath, "diff", "--name-only", manifest.BaselineSHA)
+	context, err := buildReviewPromptContext(manifest.SandboxRepoPath, []string{manifest.BaselineSHA}, reviewPromptContextOptions{
+		ChangedFilesLimit: reviewPromptChangedFilesLimit,
+		MaxHunksPerFile:   reviewPromptMaxHunksPerFile,
+		MaxLinesPerFile:   reviewPromptMaxLinesPerFile,
+		MaxCharsPerFile:   reviewPromptMaxCharsPerFile,
+	})
 	if err != nil {
 		return "", err
-	}
-	diffOutput, err := githubGitOutput(manifest.SandboxRepoPath, "diff", manifest.BaselineSHA)
-	if err != nil {
-		return "", err
-	}
-	changedFiles := []string{}
-	for _, line := range strings.Split(changedFilesOutput, "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			changedFiles = append(changedFiles, line)
-		}
 	}
 	lines := []string{
 		"Review this local implementation and return JSON only.",
@@ -3942,14 +4842,16 @@ func buildLocalWorkReviewPrompt(manifest localWorkManifest) (string, error) {
 		"If there are no actionable issues, return {\"findings\":[]}.",
 		fmt.Sprintf("Repo root: %s", manifest.RepoRoot),
 		fmt.Sprintf("Baseline SHA: %s", manifest.BaselineSHA),
-		fmt.Sprintf("Changed files: %s", strings.Join(changedFiles, ", ")),
-		"Diff:",
-		diffOutput,
+		fmt.Sprintf("Changed files: %s", context.ChangedFilesText),
 	}
-	if promptSurface, err := readGithubPromptSurface("critic"); err == nil && strings.TrimSpace(promptSurface) != "" {
+	if promptSurface, err := readGithubEmbeddedPromptSurface("critic"); err == nil && strings.TrimSpace(promptSurface) != "" {
 		lines = append(lines, "", strings.TrimSpace(promptSurface))
 	}
-	return strings.Join(lines, "\n\n"), nil
+	if context.Shortstat != "" {
+		lines = append(lines, "Shortstat:", context.Shortstat)
+	}
+	lines = append(lines, "Diff summary:", context.DiffSummary)
+	return capPromptChars(strings.Join(lines, "\n\n"), reviewPromptLocalCharLimit), nil
 }
 
 func buildLocalWorkHardeningPrompt(manifest localWorkManifest, verification localWorkVerificationReport, findings []githubPullReviewFinding) (string, error) {
@@ -3970,8 +4872,8 @@ func buildLocalWorkHardeningPrompt(manifest localWorkManifest, verification loca
 	if manifest.IntegrationPolicy == "final" && manifest.CurrentIteration <= 1 {
 		lines = append(lines, "- Avoid rerunning full integration/container-heavy checks manually in this early iteration unless the fix specifically requires them.")
 	}
-	if promptSurface, err := readGithubPromptSurface("test-engineer"); err == nil && strings.TrimSpace(promptSurface) != "" {
-		lines = append(lines, "", strings.TrimSpace(promptSurface))
+	if promptSurface, err := readGithubEmbeddedPromptSurface("test-engineer"); err == nil && strings.TrimSpace(promptSurface) != "" {
+		lines = append(lines, "", compactPromptHeadValue(promptSurface, 0, localWorkPromptSurfaceCharLimit))
 	}
 	lines = append(lines, "", "Verification status:", summarizeLocalVerification(verification))
 	failedCommandCount := 0
@@ -3990,7 +4892,7 @@ func buildLocalWorkHardeningPrompt(manifest localWorkManifest, verification loca
 			}
 			lines = append(lines, fmt.Sprintf("  command: %s", command.Command))
 			if strings.TrimSpace(command.Output) != "" {
-				lines = append(lines, fmt.Sprintf("  output: %s", promptSnippet(command.Output)))
+				lines = append(lines, fmt.Sprintf("  output: %s", compactPromptValue(command.Output, localWorkPromptSnippetLines, 600)))
 			}
 			failedCommandCount++
 		}
@@ -3998,7 +4900,7 @@ func buildLocalWorkHardeningPrompt(manifest localWorkManifest, verification loca
 	if len(findings) > 0 {
 		lines = append(lines, "", "Review findings:")
 		for index, finding := range findings {
-			if index >= 10 {
+			if index >= 6 {
 				lines = append(lines, "- additional findings omitted for brevity")
 				break
 			}
@@ -4007,9 +4909,9 @@ func buildLocalWorkHardeningPrompt(manifest localWorkManifest, verification loca
 				ref = fmt.Sprintf("%s:%d", finding.Path, finding.Line)
 			}
 			lines = append(lines, fmt.Sprintf("- [%s] %s (%s)", strings.ToUpper(finding.Severity), finding.Title, ref))
-			lines = append(lines, "  "+promptSnippet(finding.Detail))
+			lines = append(lines, "  "+compactPromptValue(finding.Detail, localWorkPromptSnippetLines, 600))
 			if strings.TrimSpace(finding.Fix) != "" {
-				lines = append(lines, "  Fix hint: "+promptSnippet(finding.Fix))
+				lines = append(lines, "  Fix hint: "+compactPromptValue(finding.Fix, localWorkPromptSnippetLines, 400))
 			}
 		}
 	}
@@ -4227,13 +5129,259 @@ func localWorkRepoID(repoRoot string) string {
 	return base + "-" + shortHash(filepath.Clean(repoRoot))
 }
 
-func writeLocalWorkManifest(manifest localWorkManifest) error {
-	store, err := openLocalWorkDB()
+func persistLocalWorkTokenUsage(runID string) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil
+	}
+	localWorkTokenUsagePersistMu.Lock()
+	defer localWorkTokenUsagePersistMu.Unlock()
+
+	manifest, err := readLocalWorkManifestByRunID(runID)
 	if err != nil {
 		return err
 	}
-	defer store.Close()
-	return store.writeManifest(manifest)
+	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
+	sessionsRoot := filepath.Join(manifest.SandboxPath, ".nana", localWorkRuntimeName, "codex-home")
+	artifact, err := writeLocalWorkThreadUsageArtifact(runDir, manifest.SandboxPath, sessionsRoot)
+	if err != nil {
+		return err
+	}
+	if artifact == nil || len(artifact.Threads) == 0 {
+		return nil
+	}
+	manifest.TokenUsage = &artifact.Totals
+	return writeLocalWorkManifest(manifest)
+}
+
+func writeLocalWorkThreadUsageArtifact(runDir string, sandboxPath string, sessionsRoot string) (*localWorkThreadUsageArtifact, error) {
+	artifact := &localWorkThreadUsageArtifact{
+		Version:     1,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		SandboxPath: sandboxPath,
+	}
+	rows, err := readLocalWorkThreadUsageRowsFromRollouts(sessionsRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return artifact, nil
+		}
+		return nil, err
+	}
+	artifact.Threads = rows
+	artifact.Totals = localWorkTokenUsageTotalsFromRows(rows, artifact.GeneratedAt)
+
+	path := filepath.Join(runDir, "thread-usage.json")
+	if existing, err := readLocalWorkThreadUsageArtifact(path); err == nil {
+		artifact = mergeLocalWorkThreadUsageArtifacts(existing, artifact)
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	if err := writeLocalWorkJSONAtomically(path, artifact); err != nil {
+		return nil, err
+	}
+	return artifact, nil
+}
+
+func readLocalWorkThreadUsageArtifact(path string) (*localWorkThreadUsageArtifact, error) {
+	var artifact localWorkThreadUsageArtifact
+	if err := readGithubJSON(path, &artifact); err != nil {
+		return nil, err
+	}
+	return &artifact, nil
+}
+
+func mergeLocalWorkThreadUsageArtifacts(existing *localWorkThreadUsageArtifact, current *localWorkThreadUsageArtifact) *localWorkThreadUsageArtifact {
+	if existing == nil {
+		return current
+	}
+	if current == nil {
+		return existing
+	}
+	index := map[string]localWorkThreadUsageRow{}
+	addRow := func(row localWorkThreadUsageRow) {
+		key := localWorkThreadUsageRowKey(row)
+		merged, ok := index[key]
+		if !ok {
+			index[key] = row
+			return
+		}
+		if merged.SessionID == "" {
+			merged.SessionID = row.SessionID
+		}
+		if merged.Nickname == "" {
+			merged.Nickname = row.Nickname
+		}
+		if merged.Role == "" {
+			merged.Role = row.Role
+		}
+		merged.InputTokens = max(merged.InputTokens, row.InputTokens)
+		merged.CachedInputTokens = max(merged.CachedInputTokens, row.CachedInputTokens)
+		merged.OutputTokens = max(merged.OutputTokens, row.OutputTokens)
+		merged.ReasoningOutputTokens = max(merged.ReasoningOutputTokens, row.ReasoningOutputTokens)
+		merged.TotalTokens = max(merged.TotalTokens, row.TotalTokens)
+		if merged.StartedAt == 0 || (row.StartedAt > 0 && row.StartedAt < merged.StartedAt) {
+			merged.StartedAt = row.StartedAt
+		}
+		if row.UpdatedAt > merged.UpdatedAt {
+			merged.UpdatedAt = row.UpdatedAt
+		}
+		index[key] = merged
+	}
+	for _, row := range existing.Threads {
+		addRow(row)
+	}
+	for _, row := range current.Threads {
+		addRow(row)
+	}
+	threads := make([]localWorkThreadUsageRow, 0, len(index))
+	for _, row := range index {
+		threads = append(threads, row)
+	}
+	sort.Slice(threads, func(i, j int) bool {
+		if threads[i].StartedAt == threads[j].StartedAt {
+			return localWorkThreadUsageRowKey(threads[i]) < localWorkThreadUsageRowKey(threads[j])
+		}
+		if threads[i].StartedAt == 0 {
+			return false
+		}
+		if threads[j].StartedAt == 0 {
+			return true
+		}
+		return threads[i].StartedAt < threads[j].StartedAt
+	})
+	generatedAt := current.GeneratedAt
+	if strings.TrimSpace(generatedAt) == "" {
+		generatedAt = existing.GeneratedAt
+	}
+	artifact := &localWorkThreadUsageArtifact{
+		Version:     max(existing.Version, current.Version),
+		GeneratedAt: generatedAt,
+		SandboxPath: defaultString(strings.TrimSpace(current.SandboxPath), existing.SandboxPath),
+		Threads:     threads,
+	}
+	artifact.Totals = localWorkTokenUsageTotalsFromRows(threads, artifact.GeneratedAt)
+	return artifact
+}
+
+func localWorkThreadUsageRowKey(row localWorkThreadUsageRow) string {
+	if strings.TrimSpace(row.SessionID) != "" {
+		return strings.TrimSpace(row.SessionID)
+	}
+	return fmt.Sprintf("%s|%s|%d|%d", strings.TrimSpace(row.Nickname), strings.TrimSpace(row.Role), row.StartedAt, row.UpdatedAt)
+}
+
+func localWorkTokenUsageTotalsFromRows(rows []localWorkThreadUsageRow, updatedAt string) localWorkTokenUsageTotals {
+	totals := localWorkTokenUsageTotals{UpdatedAt: updatedAt}
+	for _, row := range rows {
+		totals.InputTokens += row.InputTokens
+		totals.CachedInputTokens += row.CachedInputTokens
+		totals.OutputTokens += row.OutputTokens
+		totals.ReasoningOutputTokens += row.ReasoningOutputTokens
+		totals.TotalTokens += row.TotalTokens
+	}
+	totals.SessionsAccounted = len(rows)
+	return totals
+}
+
+func readLocalWorkThreadUsageRowsFromRollouts(sessionsRoot string) ([]localWorkThreadUsageRow, error) {
+	files := []string{}
+	err := filepath.Walk(sessionsRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info != nil && !info.IsDir() && strings.HasSuffix(path, ".jsonl") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(files)
+	rows := make([]localWorkThreadUsageRow, 0, len(files))
+	for _, path := range files {
+		row, ok, err := readLocalWorkThreadUsageRow(path)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			rows = append(rows, row)
+		}
+	}
+	return rows, nil
+}
+
+func readLocalWorkThreadUsageRow(filePath string) (localWorkThreadUsageRow, bool, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return localWorkThreadUsageRow{}, false, err
+	}
+	defer file.Close()
+
+	row := localWorkThreadUsageRow{}
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		var parsed map[string]any
+		_ = json.Unmarshal([]byte(line), &parsed)
+
+		if row.SessionID == "" {
+			meta := extractSessionMeta(parsed, filePath)
+			row.SessionID = meta.SessionID
+		}
+		if timestamp, ok := parsed["timestamp"].(string); ok {
+			if parsedTime, err := time.Parse(time.RFC3339Nano, timestamp); err == nil {
+				if row.StartedAt == 0 || parsedTime.Unix() < row.StartedAt {
+					row.StartedAt = parsedTime.Unix()
+				}
+				if parsedTime.Unix() > row.UpdatedAt {
+					row.UpdatedAt = parsedTime.Unix()
+				}
+			}
+		}
+		if parsed["type"] == "session_meta" {
+			if payload, ok := parsed["payload"].(map[string]any); ok {
+				if nickname, ok := payload["agent_nickname"].(string); ok && strings.TrimSpace(row.Nickname) == "" {
+					row.Nickname = strings.TrimSpace(nickname)
+				}
+				if role, ok := payload["agent_role"].(string); ok && strings.TrimSpace(row.Role) == "" {
+					row.Role = strings.TrimSpace(role)
+				}
+			}
+		}
+		if parsed["type"] == "event_msg" {
+			if payload, ok := parsed["payload"].(map[string]any); ok && payload["type"] == "token_count" {
+				if info, ok := payload["info"].(map[string]any); ok {
+					if usage, ok := info["total_token_usage"].(map[string]any); ok {
+						row.InputTokens = max(row.InputTokens, usageIntValue(usage["input_tokens"]))
+						row.CachedInputTokens = max(row.CachedInputTokens, usageIntValue(usage["cached_input_tokens"]))
+						row.OutputTokens = max(row.OutputTokens, usageIntValue(usage["output_tokens"]))
+						row.ReasoningOutputTokens = max(row.ReasoningOutputTokens, usageIntValue(usage["reasoning_output_tokens"]))
+						row.TotalTokens = max(row.TotalTokens, usageIntValue(usage["total_tokens"]))
+					}
+				}
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return localWorkThreadUsageRow{}, false, err
+	}
+	if row.TotalTokens == 0 && row.InputTokens == 0 && row.CachedInputTokens == 0 && row.OutputTokens == 0 && row.ReasoningOutputTokens == 0 {
+		return localWorkThreadUsageRow{}, false, nil
+	}
+	return row, true, nil
+}
+
+func writeLocalWorkManifest(manifest localWorkManifest) error {
+	return withLocalWorkWriteRetry(func() error {
+		store, err := openLocalWorkDB()
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		return store.writeManifest(manifest)
+	})
 }
 
 func detectLocalWorkStall(iterations []localWorkIterationSummary) string {
@@ -4320,38 +5468,15 @@ func promptSnippet(value string) string {
 }
 
 func promptSnippetLimit(value string, charLimit int) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return ""
-	}
-	trimmed = tailLines(trimmed, localWorkPromptSnippetLines)
-	if charLimit <= 0 || len(trimmed) <= charLimit {
-		return trimmed
-	}
-	return strings.TrimSpace(trimmed[:charLimit]) + "... [truncated]"
+	return compactPromptValue(value, localWorkPromptSnippetLines, charLimit)
 }
 
 func capPromptSize(value string, limit int) string {
-	if limit <= 0 || len(value) <= limit {
-		return value
-	}
-	const notice = "\n\n[Prompt truncated to fit runtime limits]\n"
-	if limit <= len(notice) {
-		return notice[:limit]
-	}
-	return value[:limit-len(notice)] + notice
+	return capPromptChars(value, limit)
 }
 
 func tailLines(content string, limit int) string {
-	if limit <= 0 {
-		return content
-	}
-	lines := strings.Split(content, "\n")
-	if len(lines) <= limit {
-		return content
-	}
-	start := len(lines) - limit
-	return strings.Join(lines[start:], "\n")
+	return tailLinesLimited(content, limit)
 }
 
 func localWorkFindingDiffSnippet(manifest localWorkManifest, path string) string {

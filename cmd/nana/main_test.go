@@ -40,6 +40,19 @@ func runCommand(t *testing.T, name string, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, name, args...)
 }
 
+func configureBinaryTestGitInsteadOf(t *testing.T, home string, from string, to string) {
+	t.Helper()
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("mkdir binary test home: %v", err)
+	}
+	cmd := runCommand(t, "git", "config", "--global", fmt.Sprintf("url.%s.insteadOf", to), from)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git config insteadOf failed: %v\n%s", err, output)
+	}
+}
+
 func buildNanaBinary(t *testing.T) string {
 	t.Helper()
 	buildNanaBinaryOnce.Do(func() {
@@ -146,7 +159,10 @@ func TestBinaryNestedGithubHelpRoutesLocally(t *testing.T) {
 		{args: []string{"review-rules", "--help"}, expected: "nana review-rules - Persistent repo rules mined from PR review history"},
 		{args: []string{"repo", "--help"}, expected: "nana repo - Repository onboarding and verification-plan inspection"},
 		{args: []string{"start", "--help"}, expected: "nana start - Run repo automation or scout startup"},
+		{args: []string{"next", "--help"}, expected: "nana next - Show the highest-priority item that needs operator attention"},
+		{args: []string{"ui-scout", "--help"}, expected: "nana ui-scout - Audit UI pages and flows with issue-style findings"},
 		{args: []string{"work", "--help"}, expected: "nana work - Unified local and GitHub-backed implementation runtime"},
+		{args: []string{"usage", "--help"}, expected: "nana usage - Report token spend across NANA-managed sessions"},
 		{args: []string{"config", "--help"}, expected: "Usage:\n  nana config show"},
 		{args: []string{"hud", "--help"}, expected: "Usage:\n  nana hud"},
 		{args: []string{"work-on", "--help"}, expected: "has been replaced by `nana work`"},
@@ -180,6 +196,7 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 	expectedSnippets := []string{
 		"Start and session:",
 		"Recommended in-session workflow:",
+		"nana next",
 		`$deep-interview "..."`,
 		`$ralplan "..."`,
 		"Investigate and review:",
@@ -198,11 +215,15 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 		"nana start",
 		"nana improve [owner/repo]",
 		"nana enhance [owner/repo]",
+		"nana ui-scout [owner/repo]",
 		"nana repo onboard [--json]",
+		"nana repo drop <owner/repo>",
 		"nana repo explain <owner/repo>",
 		"nana repo scout ...",
 		"Local tools and support:",
+		"nana next",
 		"nana config",
+		"nana usage",
 		"nana account <subcommand>",
 		"nana reflect | nana explore",
 		"nana hud",
@@ -210,6 +231,7 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 		"nana help work",
 		"nana help investigate",
 		"nana help repo",
+		"nana help usage",
 	}
 	for _, snippet := range expectedSnippets {
 		if !strings.Contains(help, snippet) {
@@ -429,6 +451,7 @@ func TestBinaryGithubWorkStartRunsNatively(t *testing.T) {
 			t.Fatalf("git %v failed: %v\n%s", args, err, output)
 		}
 	}
+	configureBinaryTestGitInsteadOf(t, filepath.Join(cwd, "home"), "git@github.com:acme/widget.git", originRepo)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/acme/widget":
@@ -539,8 +562,8 @@ func TestBinaryLocalWorkStartCommitsVerifiedSandboxResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("local work start failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "committed to source branch") {
-		t.Fatalf("expected committed completion output, got %q", output)
+	if !strings.Contains(string(output), "committed and pushed source branch") {
+		t.Fatalf("expected committed-and-pushed completion output, got %q", output)
 	}
 	subject := runGit(sourceRepo, "log", "-1", "--pretty=%s")
 	if !strings.HasPrefix(subject, "nana work: apply lw-") {
@@ -557,8 +580,12 @@ func TestBinaryLocalWorkStartCommitsVerifiedSandboxResult(t *testing.T) {
 		t.Fatalf("expected no source repo work runtime artifacts, err=%v", err)
 	}
 	originAfter := runGit(originBare, "rev-parse", "refs/heads/main")
-	if originAfter != originBefore {
-		t.Fatalf("local work should not push to remote, before=%s after=%s", originBefore, originAfter)
+	if originAfter == originBefore {
+		t.Fatalf("local work should push the tracked target branch, before=%s after=%s", originBefore, originAfter)
+	}
+	sourceHead := runGit(sourceRepo, "rev-parse", "HEAD")
+	if originAfter != sourceHead {
+		t.Fatalf("expected pushed remote HEAD to match local source HEAD, origin=%s source=%s", originAfter, sourceHead)
 	}
 }
 
@@ -611,6 +638,7 @@ func TestBinaryReviewRunsNatively(t *testing.T) {
 	baseSHABytes, _ := exec.Command("git", "-C", seedRepo, "rev-parse", "main").Output()
 	baseSHA := strings.TrimSpace(string(baseSHABytes))
 	runGit(seedRepo, "push", "-u", "origin", "feature")
+	configureBinaryTestGitInsteadOf(t, filepath.Join(cwd, "home"), "git@github.com:acme/widget.git", originBare)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/user":
@@ -692,6 +720,7 @@ func TestBinaryIssueInvestigateRunsNativelyWithoutLegacyBridge(t *testing.T) {
 			t.Fatalf("git %v failed: %v\n%s", args, err, output)
 		}
 	}
+	configureBinaryTestGitInsteadOf(t, filepath.Join(cwd, "home"), "git@github.com:acme/widget.git", originRepo)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -828,6 +857,7 @@ func TestBinaryIssueImplementRunsNativelyWithoutLegacyBridge(t *testing.T) {
 			t.Fatalf("git %v failed: %v\n%s", args, err, output)
 		}
 	}
+	configureBinaryTestGitInsteadOf(t, filepath.Join(cwd, "home"), "git@github.com:acme/widget.git", originRepo)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

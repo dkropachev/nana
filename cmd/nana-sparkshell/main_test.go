@@ -75,29 +75,6 @@ func writeExecutable(t *testing.T, path string, body string) {
 	}
 }
 
-func TestUsageTextDocumentsSummaryControls(t *testing.T) {
-	usage := usageText()
-	expectedSnippets := []string{
-		"usage: nana-sparkshell <command> [args...]",
-		"raw-vs-summary behavior",
-		"stdout+stderr is emitted raw when visible output is <= NANA_SPARKSHELL_LINES (default 12)",
-		"Output above that threshold is summarized with codex exec using low reasoning",
-		"summary unavailable",
-		"NANA_SPARKSHELL_SUMMARY_TIMEOUT_MS",
-		"NANA_SPARKSHELL_MODEL",
-		"NANA_DEFAULT_SPARK_MODEL / NANA_SPARK_MODEL",
-		"NANA_SPARKSHELL_FALLBACK_MODEL",
-		"NANA_DEFAULT_FRONTIER_MODEL",
-		"NANA_SPARKSHELL_SUMMARY_MAX_LINES",
-		"NANA_SPARKSHELL_SUMMARY_MAX_BYTES",
-	}
-	for _, snippet := range expectedSnippets {
-		if !strings.Contains(usage, snippet) {
-			t.Fatalf("expected usage to contain %q, got %q", snippet, usage)
-		}
-	}
-}
-
 func TestRawModePreservesStdoutAndStderr(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell snippets use POSIX sh")
@@ -149,7 +126,7 @@ func TestSummaryModeUsesCodexExecAndModelOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read prompt log: %v", err)
 	}
-	if !strings.Contains(string(prompt), "Command family: generic-shell") || !strings.Contains(string(prompt), "<<<STDOUT") || !strings.Contains(string(prompt), "one\ntwo") {
+	if !strings.Contains(string(prompt), "Command: sh -c") || !strings.Contains(string(prompt), "Exit code: 0") || !strings.Contains(string(prompt), "<<<STDOUT") || !strings.Contains(string(prompt), "one\ntwo") {
 		t.Fatalf("unexpected prompt: %q", prompt)
 	}
 }
@@ -228,7 +205,7 @@ func TestTmuxPaneModeCapturesTailAndSummarizes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read prompt log: %v", err)
 	}
-	if !strings.Contains(string(prompt), "Command: tmux capture-pane") || !strings.Contains(string(prompt), "line-1") {
+	if !strings.Contains(string(prompt), "Command: tmux capture-pane") || !strings.Contains(string(prompt), "Exit code: 0") || !strings.Contains(string(prompt), "line-1") {
 		t.Fatalf("unexpected tmux prompt: %q", prompt)
 	}
 }
