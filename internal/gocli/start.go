@@ -4,37 +4,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-const StartHelp = `nana start - Run repo automation or scout startup
+const StartHelp = `nana start - Run automation for onboarded repositories
 
 Usage:
-  nana start [automation-options] [-- codex-args...]
-  nana start [scout-target] [scout-options] [-- codex-args...]
+  nana start [--repo <owner/repo>] [--parallel <n>] [--per-repo-workers <n>] [--max-open-prs <n>] [--once|--cycles <n>|--forever] [--interval <duration>] [--no-ui] [--ui-api-port <port>] [--ui-web-port <port>] [-- codex-args...]
   nana start help
 
-Modes:
-  Automation mode (onboarded repos):
-    Usage:
-      nana start [--repo <owner/repo>] [--parallel <n>] [--per-repo-workers <n>] [--max-open-prs <n>] [--once|--cycles <n>|--forever] [--interval <duration>] [--no-ui] [--ui-api-port <port>] [--ui-web-port <port>] [-- codex-args...]
-    Example:
-      nana start --repo acme/widget --once
-
-  Scout mode (startup scouts):
-    Usage:
-      nana start [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [--once|--cycles <n>|--forever] [--interval <duration>] [--no-ui] [--ui-api-port <port>] [--ui-web-port <port>] [-- codex-args...]
-    Example:
-      nana start --repo . --focus ux --dry-run
-
-Selection:
-  - automation mode is selected for onboarded-repo options such as --repo <owner/repo>, --parallel, --per-repo-workers, and --max-open-prs
-  - scout mode is selected for scout targets, repo-path --repo values, --focus, --from-file, --dry-run, --local-only, or a bare local repo with scout policies
-  - each run prints [start] Mode: automation or [start] Mode: scout before execution begins
-
-Automation behavior:
+Behavior:
   - with no options, loops indefinitely until interrupted
   - scans onboarded GitHub repos under ~/.nana/work/repos
   - skips repos where repo-mode is local or issue-pick is manual
@@ -47,19 +29,7 @@ Automation behavior:
   - forwards PRs when pr-forward is auto: fork creates upstream PRs; repo attempts merge
   - launches loopback UI services by default: REST API + web console
   - use --once or --cycles <n> for bounded runs
-
-Scout behavior:
-  - detects scout support from repo policy files
-  - runs improvement-scout when .nana/improvement-policy.json or .github/nana-improvement-policy.json exists
-  - runs enhancement-scout when .nana/enhancement-policy.json or .github/nana-enhancement-policy.json exists
-  - local repos keep proposals under .nana/improvements/ or .nana/enhancements/
-  - GitHub targets follow their scout policy issue_destination
 `
-
-const (
-	startModeBannerAutomation = "[start] Mode: automation (onboarded repo automation).\n"
-	startModeBannerScout      = "[start] Mode: scout (startup scout automation).\n"
-)
 
 const startDefaultGlobalParallel = 3
 
@@ -104,15 +74,9 @@ func Start(cwd string, args []string) error {
 	if len(args) == 0 {
 		runtime.Forever = true
 	}
-	uiOptions, modeArgs, err := parseStartUIOptions(cleanArgs)
+	uiOptions, err := parseStartUIOptions(cleanArgs)
 	if err != nil {
 		return err
-	}
-	runScouts := startShouldRunScouts(cwd, modeArgs)
-	if runScouts {
-		fmt.Fprint(os.Stdout, startModeBannerScout)
-	} else {
-		fmt.Fprint(os.Stdout, startModeBannerAutomation)
 	}
 	var ui *startUISupervisor
 	if !uiOptions.NoUI {
@@ -122,12 +86,12 @@ func Start(cwd string, args []string) error {
 		}
 		defer ui.Close()
 	}
-	if runScouts {
+	if startShouldRunScouts(cwd, cleanArgs) {
 		return runStartLoop(runtime, func() error {
-			return StartScouts(cwd, modeArgs)
+			return StartScouts(cwd, cleanArgs)
 		})
 	}
-	options, err := parseStartArgs(modeArgs)
+	options, err := parseStartArgs(cleanArgs)
 	if err != nil {
 		return err
 	}
@@ -205,8 +169,6 @@ func startShouldRunScouts(cwd string, args []string) bool {
 	if len(args) == 0 {
 		return len(supportedScoutRoles(cwd)) > 0
 	}
-	hasAutomationSelector := false
-	hasUnknownFlag := false
 	for index := 0; index < len(args); index++ {
 		token := args[index]
 		if token == "--" {
@@ -226,31 +188,20 @@ func startShouldRunScouts(cwd string, args []string) bool {
 			if index+1 < len(args) && startRepoValueLooksLikePath(args[index+1]) {
 				return true
 			}
-			hasAutomationSelector = true
 			index++
 		case strings.HasPrefix(token, "--repo="):
 			if startRepoValueLooksLikePath(strings.TrimPrefix(token, "--repo=")) {
 				return true
 			}
-			hasAutomationSelector = true
 		case token == "--parallel", token == "--per-repo-workers", token == "--max-open-prs", token == "--cycles":
-			hasAutomationSelector = true
 			index++
 		case strings.HasPrefix(token, "--parallel="), strings.HasPrefix(token, "--per-repo-workers="), strings.HasPrefix(token, "--max-open-prs="), strings.HasPrefix(token, "--cycles="):
-			hasAutomationSelector = true
 			continue
 		case strings.HasPrefix(token, "-"):
-			hasUnknownFlag = true
 			continue
 		default:
 			return true
 		}
-	}
-	if hasAutomationSelector || hasUnknownFlag {
-		return false
-	}
-	if len(supportedScoutRoles(cwd)) > 0 {
-		return true
 	}
 	return false
 }
@@ -542,16 +493,14 @@ func parseStartArgs(args []string) (startOptions, error) {
 	return options, nil
 }
 
-func parseStartUIOptions(args []string) (startOptions, []string, error) {
+func parseStartUIOptions(args []string) (startOptions, error) {
 	options := startOptions{
 		UIAPIPort: startUIDefaultAPIPort,
 		UIWebPort: startUIDefaultWebPort,
 	}
-	clean := []string{}
 	for index := 0; index < len(args); index++ {
 		token := args[index]
 		if token == "--" {
-			clean = append(clean, args[index:]...)
 			break
 		}
 		switch {
@@ -560,42 +509,40 @@ func parseStartUIOptions(args []string) (startOptions, []string, error) {
 		case token == "--ui-api-port":
 			value, err := requireStartFlagValue(args, index, token)
 			if err != nil {
-				return startOptions{}, nil, err
+				return startOptions{}, err
 			}
 			parsed, err := parsePositiveInt(value, token)
 			if err != nil {
-				return startOptions{}, nil, err
+				return startOptions{}, err
 			}
 			options.UIAPIPort = parsed
 			index++
 		case strings.HasPrefix(token, "--ui-api-port="):
 			parsed, err := parsePositiveInt(strings.TrimPrefix(token, "--ui-api-port="), "--ui-api-port")
 			if err != nil {
-				return startOptions{}, nil, err
+				return startOptions{}, err
 			}
 			options.UIAPIPort = parsed
 		case token == "--ui-web-port":
 			value, err := requireStartFlagValue(args, index, token)
 			if err != nil {
-				return startOptions{}, nil, err
+				return startOptions{}, err
 			}
 			parsed, err := parsePositiveInt(value, token)
 			if err != nil {
-				return startOptions{}, nil, err
+				return startOptions{}, err
 			}
 			options.UIWebPort = parsed
 			index++
 		case strings.HasPrefix(token, "--ui-web-port="):
 			parsed, err := parsePositiveInt(strings.TrimPrefix(token, "--ui-web-port="), "--ui-web-port")
 			if err != nil {
-				return startOptions{}, nil, err
+				return startOptions{}, err
 			}
 			options.UIWebPort = parsed
-		default:
-			clean = append(clean, token)
 		}
 	}
-	return options, clean, nil
+	return options, nil
 }
 
 func resolveStartRepos(repoSlug string) ([]string, error) {
@@ -624,29 +571,80 @@ func resolveStartRepos(repoSlug string) ([]string, error) {
 }
 
 func listOnboardedGithubRepos() ([]string, error) {
-	root := githubWorkReposRoot()
-	if _, err := os.Stat(root); os.IsNotExist(err) {
-		return nil, nil
+	settingsFiles, err := listGithubRepoSettingsFiles()
+	if err != nil {
+		return nil, err
 	}
-	repos := []string{}
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+	repos := make([]string, 0, len(settingsFiles))
+	for _, settingsFile := range settingsFiles {
+		repos = append(repos, settingsFile.RepoSlug)
+	}
+	return uniqueStrings(repos), nil
+}
+
+type twoLevelRepoFile struct {
+	RepoSlug string
+	Path     string
+}
+
+func listGithubRepoSettingsFiles() ([]twoLevelRepoFile, error) {
+	return listTwoLevelRepoFiles(githubWorkReposRoot(), "settings.json")
+}
+
+// listTwoLevelRepoFiles enumerates only <root>/<owner>/<repo>/<fileName>.
+// Managed repo directories can contain large source, runs, issues, and .git
+// subtrees, so this must stay layout-aware rather than using filepath.WalkDir.
+func listTwoLevelRepoFiles(root string, fileName string) ([]twoLevelRepoFile, error) {
+	ownerEntries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	files := []twoLevelRepoFile{}
+	for _, ownerEntry := range ownerEntries {
+		if !ownerEntry.IsDir() {
+			continue
+		}
+		owner := ownerEntry.Name()
+		ownerPath := filepath.Join(root, owner)
+		repoEntries, err := os.ReadDir(ownerPath)
 		if err != nil {
-			return err
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
 		}
-		if entry.IsDir() || entry.Name() != "settings.json" {
-			return nil
+		for _, repoEntry := range repoEntries {
+			if !repoEntry.IsDir() {
+				continue
+			}
+			repoSlug := filepath.ToSlash(filepath.Join(owner, repoEntry.Name()))
+			if !validRepoSlug(repoSlug) {
+				continue
+			}
+			path := filepath.Join(ownerPath, repoEntry.Name(), fileName)
+			info, err := os.Stat(path)
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return nil, err
+			}
+			if info.IsDir() {
+				continue
+			}
+			files = append(files, twoLevelRepoFile{RepoSlug: repoSlug, Path: path})
 		}
-		rel, err := filepath.Rel(root, filepath.Dir(path))
-		if err != nil {
-			return err
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].RepoSlug == files[j].RepoSlug {
+			return files[i].Path < files[j].Path
 		}
-		repoSlug := filepath.ToSlash(rel)
-		if validRepoSlug(repoSlug) {
-			repos = append(repos, repoSlug)
-		}
-		return nil
+		return files[i].RepoSlug < files[j].RepoSlug
 	})
-	return uniqueStrings(repos), err
+	return files, nil
 }
 
 func githubRepoAutomationEnabled(settings *githubRepoSettings) bool {

@@ -24,7 +24,7 @@ import (
 const LocalWorkHelp = `nana work - Local implementation runtime for git-backed repos
 
 Usage:
-  nana work start [--detach] [--repo <path>] [--task <text> | --plan-file <path>] [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [-- codex-args...]
+  nana work start [--repo <path>] [--task <text> | --plan-file <path>] [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [-- codex-args...]
   nana work resume [--run-id <id> | --last | --global-last] [--repo <path>] [-- codex-args...]
   nana work status [--run-id <id> | --last | --global-last] [--repo <path>] [--json]
   nana work logs [--run-id <id> | --last | --global-last] [--repo <path>] [--tail <n>] [--json]
@@ -34,8 +34,8 @@ Usage:
 Behavior:
   - runs only against a local git repo in an isolated managed sandbox
   - infers a task from the current branch when --task and --plan-file are omitted
-  - syncs the local source branch before final apply, commits verified sandbox changes after completion, and pushes to the tracked remote when one exists
-  - never submits, publishes, opens PRs, or calls GitHub APIs
+  - commits verified sandbox changes back to the local source branch after completion
+  - never submits, publishes, pushes to remotes, or calls GitHub APIs
   - loops through implement -> verify -> self-review -> harden -> re-verify with capped hardening rounds
   - runs lint, compile/build, and unit tests every iteration; integration runs on the final pass by default
   - persists run artifacts under ~/.nana/work/
@@ -59,17 +59,7 @@ const (
 	localWorkDefaultGroupingPolicy = "ai"
 	localWorkPathGroupingPolicy    = "path"
 	localWorkSingletonPolicy       = "singleton"
-	localWorkReadRetryAttempts     = 4
-	localWorkWriteRetryAttempts    = 4
-	localWorkStaleRunThreshold     = 5 * time.Minute
 )
-
-var localWorkReadRetryDelay = 200 * time.Millisecond
-var localWorkRetrySleep = time.Sleep
-var localWorkOpenReadStore = openLocalWorkReadDB
-var localWorkProcessSnapshot = captureLocalWorkProcessSnapshot
-var localWorkStartDetachedRunner = launchLocalWorkDetachedRunner
-var localWorkExecuteLoop = executeLocalWorkLoop
 
 var localWorkFinalReviewGateRoles = []string{
 	"quality-reviewer",
@@ -79,7 +69,6 @@ var localWorkFinalReviewGateRoles = []string{
 }
 
 type localWorkStartOptions struct {
-	Detach                bool
 	RepoPath              string
 	Task                  string
 	PlanFile              string
@@ -119,7 +108,6 @@ type workRunIndexEntry struct {
 	RepoKey      string
 	RepoRoot     string
 	RepoName     string
-	RepoSlug     string
 	ManifestPath string
 	UpdatedAt    string
 	TargetKind   string
@@ -136,7 +124,6 @@ type localWorkManifest struct {
 	CurrentIteration               int                            `json:"current_iteration,omitempty"`
 	RepoRoot                       string                         `json:"repo_root"`
 	RepoName                       string                         `json:"repo_name"`
-	RepoSlug                       string                         `json:"repo_slug,omitempty"`
 	RepoID                         string                         `json:"repo_id"`
 	SourceBranch                   string                         `json:"source_branch"`
 	BaselineSHA                    string                         `json:"baseline_sha"`
@@ -393,55 +380,50 @@ type localWorkFindingHistoryEvent struct {
 }
 
 func runLocalWorkCommand(cwd string, args []string) error {
-	_, err := runLocalWorkCommandWithRunID(cwd, args)
-	return err
-}
-
-func runLocalWorkCommandWithRunID(cwd string, args []string) (string, error) {
 	if len(args) == 0 || isHelpToken(args[0]) {
 		fmt.Fprint(os.Stdout, LocalWorkHelp)
-		return "", nil
+		return nil
 	}
 
 	switch args[0] {
 	case "start":
 		options, err := parseLocalWorkStartArgs(args[1:])
 		if err != nil {
-			return "", err
+			return err
 		}
-		return startLocalWorkWithRunID(cwd, options)
+		return startLocalWork(cwd, options)
 	case "resume":
 		options, err := parseLocalWorkResumeArgs(args[1:])
 		if err != nil {
-			return "", err
+			return err
 		}
-		return "", resumeLocalWork(cwd, options)
+		return resumeLocalWork(cwd, options)
 	case "status":
 		options, err := parseLocalWorkStatusArgs(args[1:])
 		if err != nil {
-			return "", err
+			return err
 		}
-		return "", localWorkStatus(cwd, options)
+		return localWorkStatus(cwd, options)
 	case "logs":
 		options, err := parseLocalWorkLogsArgs(args[1:])
 		if err != nil {
-			return "", err
+			return err
 		}
-		return "", localWorkLogs(cwd, options)
+		return localWorkLogs(cwd, options)
 	case "retrospective":
 		selection, err := parseLocalWorkRunSelection(args[1:], true)
 		if err != nil {
-			return "", err
+			return err
 		}
-		return "", localWorkRetrospective(cwd, selection)
+		return localWorkRetrospective(cwd, selection)
 	case "verify-refresh":
 		selection, err := parseLocalWorkRunSelection(args[1:], false)
 		if err != nil {
-			return "", err
+			return err
 		}
-		return "", refreshLocalWorkVerificationArtifacts(cwd, selection)
+		return refreshLocalWorkVerificationArtifacts(cwd, selection)
 	default:
-		return "", fmt.Errorf("Unknown work subcommand: %s\n\n%s", args[0], LocalWorkHelp)
+		return fmt.Errorf("Unknown work subcommand: %s\n\n%s", args[0], LocalWorkHelp)
 	}
 }
 
@@ -457,32 +439,8 @@ func openLocalWorkDB() (*localWorkDBStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
 	store := &localWorkDBStore{db: db}
 	if err := store.init(); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return store, nil
-}
-
-func openLocalWorkReadDB() (*localWorkDBStore, error) {
-	path := localWorkDBPath()
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return openLocalWorkDB()
-		}
-		return nil, err
-	}
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	store := &localWorkDBStore{db: db}
-	if err := store.prepareReadOnly(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -539,83 +497,18 @@ func (s *localWorkDBStore) init() error {
 			event_json TEXT NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS work_run_index (
-				run_id TEXT PRIMARY KEY,
-				backend TEXT NOT NULL,
-				repo_key TEXT,
-				repo_root TEXT,
-				repo_name TEXT,
-				repo_slug TEXT,
-				manifest_path TEXT,
-				updated_at TEXT NOT NULL,
-				target_kind TEXT
-			);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_run_index_updated ON work_run_index(updated_at DESC);`,
+			run_id TEXT PRIMARY KEY,
+			backend TEXT NOT NULL,
+			repo_key TEXT,
+			repo_root TEXT,
+			repo_name TEXT,
+			manifest_path TEXT,
+			updated_at TEXT NOT NULL,
+			target_kind TEXT
+		);`,
 		`CREATE INDEX IF NOT EXISTS idx_work_run_index_backend_updated ON work_run_index(backend, updated_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_work_run_index_repo_updated ON work_run_index(repo_key, updated_at DESC);`,
-		`CREATE TABLE IF NOT EXISTS work_items (
-			id TEXT PRIMARY KEY,
-			dedupe_key TEXT NOT NULL UNIQUE,
-			source TEXT NOT NULL,
-			source_kind TEXT NOT NULL,
-			external_id TEXT NOT NULL,
-			thread_key TEXT,
-			repo_slug TEXT,
-			target_url TEXT,
-			linked_run_id TEXT,
-			subject TEXT NOT NULL,
-			body TEXT,
-			author TEXT,
-			received_at TEXT NOT NULL,
-			status TEXT NOT NULL,
-			priority INTEGER NOT NULL DEFAULT 3,
-			auto_run INTEGER NOT NULL DEFAULT 0,
-			auto_submit INTEGER NOT NULL DEFAULT 0,
-			hidden INTEGER NOT NULL DEFAULT 0,
-			hidden_reason TEXT,
-			submit_profile_json TEXT,
-			metadata_json TEXT,
-			latest_draft_json TEXT,
-			latest_artifact_root TEXT,
-			latest_action_at TEXT,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_items_status_updated ON work_items(status, updated_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_items_repo_updated ON work_items(repo_slug, updated_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_items_hidden_updated ON work_items(hidden, updated_at DESC);`,
-		`CREATE TABLE IF NOT EXISTS work_item_events (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			item_id TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			event_type TEXT NOT NULL,
-			actor TEXT,
-			payload_json TEXT NOT NULL
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_item_events_item_created ON work_item_events(item_id, created_at DESC, id DESC);`,
-		`CREATE TABLE IF NOT EXISTS work_item_links (
-			item_id TEXT NOT NULL,
-			link_type TEXT NOT NULL,
-			target_id TEXT NOT NULL,
-			metadata_json TEXT NOT NULL,
-			PRIMARY KEY(item_id, link_type, target_id)
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_item_links_target ON work_item_links(link_type, target_id);`,
-	}
-	for _, stmt := range statements {
-		if _, err := s.db.Exec(stmt); err != nil {
-			return err
-		}
-	}
-	if err := ensureSQLiteColumn(s.db, "work_run_index", "repo_slug", `ALTER TABLE work_run_index ADD COLUMN repo_slug TEXT`); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *localWorkDBStore) prepareReadOnly() error {
-	statements := []string{
-		`PRAGMA busy_timeout=15000;`,
-		`PRAGMA query_only=ON;`,
+		`CREATE INDEX IF NOT EXISTS idx_work_run_index_updated ON work_run_index(updated_at DESC);`,
 	}
 	for _, stmt := range statements {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -623,109 +516,10 @@ func (s *localWorkDBStore) prepareReadOnly() error {
 		}
 	}
 	return nil
-}
-
-func isLocalWorkDBLockError(err error) bool {
-	if err == nil {
-		return false
-	}
-	lower := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(lower, "database is locked"):
-		return true
-	case strings.Contains(lower, "database table is locked"):
-		return true
-	case strings.Contains(lower, "database schema is locked"):
-		return true
-	case strings.Contains(lower, "sqlite_busy"):
-		return true
-	default:
-		return false
-	}
-}
-
-func withLocalWorkReadStore[T any](readFn func(*localWorkDBStore) (T, error)) (T, error) {
-	var zero T
-	attempts := localWorkReadRetryAttempts
-	if attempts <= 0 {
-		attempts = 1
-	}
-	for attempt := 1; attempt <= attempts; attempt++ {
-		store, err := localWorkOpenReadStore()
-		if err != nil {
-			if !isLocalWorkDBLockError(err) || attempt == attempts {
-				return zero, err
-			}
-			localWorkRetrySleep(localWorkReadRetryDelay)
-			continue
-		}
-		value, readErr := readFn(store)
-		closeErr := store.Close()
-		if readErr == nil && closeErr == nil {
-			return value, nil
-		}
-		err = readErr
-		if err == nil {
-			err = closeErr
-		}
-		if !isLocalWorkDBLockError(err) || attempt == attempts {
-			return zero, err
-		}
-		localWorkRetrySleep(localWorkReadRetryDelay)
-	}
-	return zero, fmt.Errorf("local work DB read retry exhausted")
-}
-
-func withLocalWorkWriteRetry(writeFn func() error) error {
-	attempts := localWorkWriteRetryAttempts
-	if attempts <= 0 {
-		attempts = 1
-	}
-	var lastErr error
-	for attempt := 1; attempt <= attempts; attempt++ {
-		if err := writeFn(); err != nil {
-			lastErr = err
-			if !isLocalWorkDBLockError(err) || attempt == attempts {
-				return err
-			}
-			localWorkRetrySleep(localWorkReadRetryDelay)
-			continue
-		}
-		return nil
-	}
-	return lastErr
-}
-
-func ensureSQLiteColumn(db *sql.DB, table string, column string, alter string) error {
-	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid int
-		var name string
-		var ctype string
-		var notNull int
-		var defaultValue sql.NullString
-		var pk int
-		if err := rows.Scan(&cid, &name, &ctype, &notNull, &defaultValue, &pk); err != nil {
-			return err
-		}
-		if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(column)) {
-			return rows.Err()
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	_, err = db.Exec(alter)
-	return err
 }
 
 func (s *localWorkDBStore) writeManifest(manifest localWorkManifest) error {
 	normalizeLocalWorkManifest(&manifest)
-	manifest.RepoSlug = localWorkResolvedRepoSlug(manifest.RepoRoot, manifest.RepoSlug)
 	if strings.TrimSpace(manifest.RepoID) == "" {
 		manifest.RepoID = localWorkRepoID(manifest.RepoRoot)
 	}
@@ -784,7 +578,6 @@ func (s *localWorkDBStore) writeManifest(manifest localWorkManifest) error {
 
 func (s *localWorkDBStore) writeActiveState(manifest localWorkManifest, state *localWorkIterationRuntimeState) error {
 	normalizeLocalWorkManifest(&manifest)
-	manifest.RepoSlug = localWorkResolvedRepoSlug(manifest.RepoRoot, manifest.RepoSlug)
 	if strings.TrimSpace(manifest.RepoID) == "" {
 		manifest.RepoID = localWorkRepoID(manifest.RepoRoot)
 	}
@@ -878,123 +671,8 @@ func (s *localWorkDBStore) readManifest(runID string) (localWorkManifest, error)
 	return manifest, nil
 }
 
-func captureLocalWorkProcessSnapshot() (string, error) {
-	output, err := exec.Command("ps", "-eo", "pid,args").CombinedOutput()
-	if err != nil {
-		return "", err
-	}
-	return string(output), nil
-}
-
-func localWorkManifestLastHeartbeat(manifest localWorkManifest) time.Time {
-	for _, candidate := range []string{
-		strings.TrimSpace(manifest.UpdatedAt),
-		strings.TrimSpace(manifest.CreatedAt),
-	} {
-		if candidate == "" {
-			continue
-		}
-		if parsed, err := time.Parse(time.RFC3339Nano, candidate); err == nil {
-			return parsed
-		}
-		if parsed, err := time.Parse(time.RFC3339, candidate); err == nil {
-			return parsed
-		}
-	}
-	return time.Time{}
-}
-
-func localWorkManifestHasLiveProcess(manifest localWorkManifest, snapshot string) bool {
-	for _, line := range strings.Split(snapshot, "\n") {
-		if line == "" {
-			continue
-		}
-		if !strings.Contains(line, "codex exec -C ") && !strings.Contains(line, "/codex/codex exec -C ") {
-			continue
-		}
-		for _, candidate := range []string{
-			strings.TrimSpace(manifest.RunID),
-			strings.TrimSpace(manifest.SandboxPath),
-			strings.TrimSpace(manifest.SandboxRepoPath),
-		} {
-			if candidate != "" && strings.Contains(line, candidate) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func cleanupStaleLocalWorkRunsForRepo(repoRoot string) (int, error) {
-	cleaned, _, err := cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot)
-	return cleaned, err
-}
-
-func cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot string) (int, []localWorkManifest, error) {
-	repoRoot = strings.TrimSpace(repoRoot)
-	if repoRoot == "" {
-		return 0, nil, nil
-	}
-	snapshot, err := localWorkProcessSnapshot()
-	if err != nil {
-		return 0, nil, err
-	}
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return 0, nil, err
-	}
-	defer store.Close()
-	rows, err := store.db.Query(`SELECT manifest_json FROM runs WHERE repo_root = ? AND status = ?`, repoRoot, "running")
-	if err != nil {
-		return 0, nil, err
-	}
-	defer rows.Close()
-	manifests := []localWorkManifest{}
-	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
-			return 0, nil, err
-		}
-		var manifest localWorkManifest
-		if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
-			return 0, nil, err
-		}
-		normalizeLocalWorkManifest(&manifest)
-		manifests = append(manifests, manifest)
-	}
-	if err := rows.Err(); err != nil {
-		return 0, nil, err
-	}
-	now := ISOTimeNow()
-	nowTime := time.Now().UTC()
-	cleaned := 0
-	cleanedManifests := []localWorkManifest{}
-	for _, manifest := range manifests {
-		lastHeartbeat := localWorkManifestLastHeartbeat(manifest)
-		if !lastHeartbeat.IsZero() && nowTime.Sub(lastHeartbeat) < localWorkStaleRunThreshold {
-			continue
-		}
-		if localWorkManifestHasLiveProcess(manifest, snapshot) {
-			continue
-		}
-		manifest.Status = "failed"
-		manifest.UpdatedAt = now
-		if strings.TrimSpace(manifest.CompletedAt) == "" {
-			manifest.CompletedAt = now
-		}
-		manifest.LastError = "stale running run cleaned up at start: no active process found"
-		if err := store.writeManifest(manifest); err != nil {
-			return cleaned, cleanedManifests, err
-		}
-		cleaned++
-		cleanedManifests = append(cleanedManifests, manifest)
-	}
-	return cleaned, cleanedManifests, nil
-}
-
 func localWorkRunIndexEntry(manifest localWorkManifest) workRunIndexEntry {
 	normalizeLocalWorkManifest(&manifest)
-	manifest.RepoSlug = localWorkResolvedRepoSlug(manifest.RepoRoot, manifest.RepoSlug)
 	if strings.TrimSpace(manifest.RepoID) == "" {
 		manifest.RepoID = localWorkRepoID(manifest.RepoRoot)
 	}
@@ -1007,7 +685,6 @@ func localWorkRunIndexEntry(manifest localWorkManifest) workRunIndexEntry {
 		RepoKey:    manifest.RepoID,
 		RepoRoot:   manifest.RepoRoot,
 		RepoName:   manifest.RepoName,
-		RepoSlug:   manifest.RepoSlug,
 		UpdatedAt:  manifest.UpdatedAt,
 		TargetKind: "local",
 	}
@@ -1023,14 +700,13 @@ func writeWorkRunIndexTx(tx *sql.Tx, entry workRunIndexEntry) error {
 		entry.UpdatedAt = ISOTimeNow()
 	}
 	_, err := tx.Exec(
-		`INSERT INTO work_run_index(run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO work_run_index(run_id, backend, repo_key, repo_root, repo_name, manifest_path, updated_at, target_kind)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(run_id) DO UPDATE SET
 		   backend=excluded.backend,
 		   repo_key=excluded.repo_key,
 		   repo_root=excluded.repo_root,
 		   repo_name=excluded.repo_name,
-		   repo_slug=excluded.repo_slug,
 		   manifest_path=excluded.manifest_path,
 		   updated_at=excluded.updated_at,
 		   target_kind=excluded.target_kind`,
@@ -1039,7 +715,6 @@ func writeWorkRunIndexTx(tx *sql.Tx, entry workRunIndexEntry) error {
 		nullableString(entry.RepoKey),
 		nullableString(entry.RepoRoot),
 		nullableString(entry.RepoName),
-		nullableString(entry.RepoSlug),
 		nullableString(entry.ManifestPath),
 		entry.UpdatedAt,
 		nullableString(entry.TargetKind),
@@ -1065,24 +740,33 @@ func writeWorkRunIndex(entry workRunIndexEntry) error {
 }
 
 func readWorkRunIndex(runID string) (workRunIndexEntry, error) {
-	return withLocalWorkReadStore(func(store *localWorkDBStore) (workRunIndexEntry, error) {
-		row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index WHERE run_id = ?`, runID)
-		return scanWorkRunIndexEntry(row)
-	})
+	store, err := openLocalWorkDB()
+	if err != nil {
+		return workRunIndexEntry{}, err
+	}
+	defer store.Close()
+	row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, manifest_path, updated_at, target_kind FROM work_run_index WHERE run_id = ?`, runID)
+	return scanWorkRunIndexEntry(row)
 }
 
 func latestWorkRunIndex(backend string) (workRunIndexEntry, error) {
-	return withLocalWorkReadStore(func(store *localWorkDBStore) (workRunIndexEntry, error) {
-		row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index WHERE backend = ? ORDER BY updated_at DESC LIMIT 1`, backend)
-		return scanWorkRunIndexEntry(row)
-	})
+	store, err := openLocalWorkDB()
+	if err != nil {
+		return workRunIndexEntry{}, err
+	}
+	defer store.Close()
+	row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, manifest_path, updated_at, target_kind FROM work_run_index WHERE backend = ? ORDER BY updated_at DESC LIMIT 1`, backend)
+	return scanWorkRunIndexEntry(row)
 }
 
 func latestAnyWorkRunIndex() (workRunIndexEntry, error) {
-	return withLocalWorkReadStore(func(store *localWorkDBStore) (workRunIndexEntry, error) {
-		row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index ORDER BY updated_at DESC LIMIT 1`)
-		return scanWorkRunIndexEntry(row)
-	})
+	store, err := openLocalWorkDB()
+	if err != nil {
+		return workRunIndexEntry{}, err
+	}
+	defer store.Close()
+	row := store.db.QueryRow(`SELECT run_id, backend, repo_key, repo_root, repo_name, manifest_path, updated_at, target_kind FROM work_run_index ORDER BY updated_at DESC LIMIT 1`)
+	return scanWorkRunIndexEntry(row)
 }
 
 type workRunIndexScanner interface {
@@ -1091,23 +775,25 @@ type workRunIndexScanner interface {
 
 func scanWorkRunIndexEntry(row workRunIndexScanner) (workRunIndexEntry, error) {
 	var entry workRunIndexEntry
-	var repoKey, repoRoot, repoName, repoSlug, manifestPath, targetKind sql.NullString
-	if err := row.Scan(&entry.RunID, &entry.Backend, &repoKey, &repoRoot, &repoName, &repoSlug, &manifestPath, &entry.UpdatedAt, &targetKind); err != nil {
+	var repoKey, repoRoot, repoName, manifestPath, targetKind sql.NullString
+	if err := row.Scan(&entry.RunID, &entry.Backend, &repoKey, &repoRoot, &repoName, &manifestPath, &entry.UpdatedAt, &targetKind); err != nil {
 		return workRunIndexEntry{}, err
 	}
 	entry.RepoKey = repoKey.String
 	entry.RepoRoot = repoRoot.String
 	entry.RepoName = repoName.String
-	entry.RepoSlug = repoSlug.String
 	entry.ManifestPath = manifestPath.String
 	entry.TargetKind = targetKind.String
 	return entry, nil
 }
 
 func readLocalWorkManifestByRunID(runID string) (localWorkManifest, error) {
-	return withLocalWorkReadStore(func(store *localWorkDBStore) (localWorkManifest, error) {
-		return store.readManifest(runID)
-	})
+	store, err := openLocalWorkDB()
+	if err != nil {
+		return localWorkManifest{}, err
+	}
+	defer store.Close()
+	return store.readManifest(runID)
 }
 
 func (s *localWorkDBStore) resolveRunID(cwd string, selection localWorkRunSelection) (string, error) {
@@ -1194,8 +880,6 @@ func parseLocalWorkStartArgs(args []string) (localWorkStartOptions, error) {
 	for index := 0; index < len(parseArgs); index++ {
 		token := parseArgs[index]
 		switch {
-		case token == "--detach":
-			options.Detach = true
 		case token == "--repo":
 			value, err := requireLocalWorkFlagValue(parseArgs, index, "--repo")
 			if err != nil {
@@ -1436,58 +1120,52 @@ func requireLocalWorkFlagValue(args []string, index int, flag string) (string, e
 }
 
 func startLocalWork(cwd string, options localWorkStartOptions) error {
-	_, err := startLocalWorkWithRunID(cwd, options)
-	return err
-}
-
-func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string, error) {
 	repoRoot, err := resolveLocalWorkRepoRoot(cwd, options.RepoPath)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if err := ensureLocalWorkRepoClean(repoRoot); err != nil {
-		return "", err
+		return err
 	}
 
 	baselineSHAOutput, err := githubGitOutput(repoRoot, "rev-parse", "HEAD")
 	if err != nil {
-		return "", err
+		return err
 	}
 	sourceBranchOutput, err := githubGitOutput(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
-		return "", err
+		return err
 	}
 	baselineSHA := strings.TrimSpace(baselineSHAOutput)
 	sourceBranch := strings.TrimSpace(sourceBranchOutput)
 	inputContent, inputMode, err := readLocalWorkInput(cwd, options, sourceBranch)
 	if err != nil {
-		return "", err
+		return err
 	}
 	repoID := localWorkRepoID(repoRoot)
 	repoName := filepath.Base(repoRoot)
-	repoSlug := localWorkResolvedRepoSlug(repoRoot, "")
 	runID := fmt.Sprintf("lw-%d", time.Now().UnixNano())
 
 	repoDir := localWorkRepoDirByID(repoID)
 	runDir := filepath.Join(repoDir, "runs", runID)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return "", err
+		return err
 	}
 	inputPath := filepath.Join(runDir, "input-plan.md")
 	if err := os.WriteFile(inputPath, []byte(strings.TrimSpace(inputContent)+"\n"), 0o644); err != nil {
-		return "", err
+		return err
 	}
 
 	sandboxPath := filepath.Join(localWorkSandboxesDir(), repoID, runID)
 	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
 	if err := cloneGithubSourceToSandbox(repoRoot, sandboxRepoPath); err != nil {
-		return "", err
+		return err
 	}
 
 	verificationPlan := detectGithubVerificationPlan(sandboxRepoPath)
 	verificationScriptsDir, err := writeVerificationScripts(localWorkRuntimeName, sandboxPath, sandboxRepoPath, verificationPlan, []string{"nana", "work", "verify-refresh", "--run-id", runID})
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	now := ISOTimeNow()
@@ -1501,7 +1179,6 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 		CurrentIteration:       0,
 		RepoRoot:               repoRoot,
 		RepoName:               repoName,
-		RepoSlug:               repoSlug,
 		RepoID:                 repoID,
 		SourceBranch:           sourceBranch,
 		BaselineSHA:            baselineSHA,
@@ -1517,7 +1194,7 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 		MaxIterations:          options.MaxIterations,
 	}
 	if err := writeLocalWorkManifest(manifest); err != nil {
-		return "", err
+		return err
 	}
 
 	fmt.Fprintf(os.Stdout, "[local] Starting run %s for %s\n", runID, repoRoot)
@@ -1530,58 +1207,7 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 		fmt.Fprintf(os.Stdout, "[local] Verification warning: %s\n", warning)
 	}
 
-	if options.Detach {
-		logPath := filepath.Join(runDir, "runtime.log")
-		if err := localWorkStartDetachedRunner(repoRoot, runID, options.CodexArgs, logPath); err != nil {
-			failedAt := ISOTimeNow()
-			manifest.Status = "failed"
-			manifest.LastError = "detached local work runner failed to start: " + err.Error()
-			manifest.UpdatedAt = failedAt
-			manifest.CompletedAt = failedAt
-			setLocalWorkProgress(&manifest, nil, "failed", "launch-detached", 0)
-			if writeErr := writeLocalWorkManifest(manifest); writeErr != nil {
-				return runID, fmt.Errorf("%w (additionally failed to persist detached launch failure: %v)", err, writeErr)
-			}
-			return runID, err
-		}
-		fmt.Fprintf(os.Stdout, "[local] Detached run %s; runtime log: %s\n", runID, logPath)
-		return runID, nil
-	}
-
-	return runID, localWorkExecuteLoop(runID, options.CodexArgs)
-}
-
-func launchLocalWorkDetachedRunner(repoRoot string, runID string, codexArgs []string, logPath string) error {
-	executablePath, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		return err
-	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	args := []string{"work", "resume", "--run-id", runID, "--repo", repoRoot}
-	if len(codexArgs) > 0 {
-		args = append(args, "--")
-		args = append(args, codexArgs...)
-	}
-	cmd := exec.Command(executablePath, args...)
-	cmd.Dir = repoRoot
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.Env = append([]string{}, os.Environ()...)
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		return err
-	}
-	go func() {
-		defer logFile.Close()
-		_ = cmd.Wait()
-	}()
-	return nil
+	return executeLocalWorkLoop(runID, options.CodexArgs)
 }
 
 func resumeLocalWork(cwd string, options localWorkResumeOptions) error {
@@ -1602,7 +1228,7 @@ func resumeLocalWork(cwd string, options localWorkResumeOptions) error {
 		return fmt.Errorf("work run %s has already exhausted max iterations (%d)", manifest.RunID, manifest.MaxIterations)
 	}
 	fmt.Fprintf(os.Stdout, "[local] Resuming run %s for %s\n", manifest.RunID, manifest.RepoRoot)
-	return localWorkExecuteLoop(manifest.RunID, options.CodexArgs)
+	return executeLocalWorkLoop(manifest.RunID, options.CodexArgs)
 }
 
 func retryBlockedLocalWorkFinalApply(manifest localWorkManifest) error {
@@ -1635,8 +1261,6 @@ func retryBlockedLocalWorkFinalApply(manifest localWorkManifest) error {
 		return err
 	}
 	switch applyResult.Status {
-	case "pushed":
-		fmt.Fprintf(os.Stdout, "[local] Completed run %s; committed and pushed source branch %s at %s.\n", manifest.RunID, defaultString(manifest.SourceBranch, "HEAD"), applyResult.CommitSHA)
 	case "committed":
 		fmt.Fprintf(os.Stdout, "[local] Completed run %s; committed to source branch at %s.\n", manifest.RunID, applyResult.CommitSHA)
 	case "no-op":
@@ -2293,8 +1917,6 @@ func executeLocalWorkLoop(runID string, codexArgs []string) error {
 			}
 			printLocalWorkRememberedFindings(os.Stdout, "Pre-existing issues excluded from propagation", manifest.PreexistingFindings)
 			switch manifest.FinalApplyStatus {
-			case "pushed":
-				fmt.Fprintf(os.Stdout, "[local] Completed run %s after %d iteration(s); committed and pushed source branch %s at %s.\n", manifest.RunID, iteration, defaultString(manifest.SourceBranch, "HEAD"), manifest.FinalApplyCommitSHA)
 			case "committed":
 				fmt.Fprintf(os.Stdout, "[local] Completed run %s after %d iteration(s); committed to source branch at %s.\n", manifest.RunID, iteration, manifest.FinalApplyCommitSHA)
 			case "no-op":
@@ -2938,7 +2560,6 @@ func normalizeLocalWorkManifest(manifest *localWorkManifest) {
 	if manifest.Version == 0 {
 		manifest.Version = 4
 	}
-	manifest.RepoSlug = localWorkResolvedRepoSlug(manifest.RepoRoot, manifest.RepoSlug)
 	if strings.TrimSpace(manifest.GroupingPolicy) == "" {
 		manifest.GroupingPolicy = localWorkDefaultGroupingPolicy
 	}
@@ -2948,22 +2569,6 @@ func normalizeLocalWorkManifest(manifest *localWorkManifest) {
 	if manifest.ValidationParallelism > localWorkMaxValidationParallel {
 		manifest.ValidationParallelism = localWorkMaxValidationParallel
 	}
-}
-
-func localWorkResolvedRepoSlug(repoRoot string, current string) string {
-	repoSlug := strings.TrimSpace(current)
-	if validRepoSlug(repoSlug) {
-		return repoSlug
-	}
-	repoRoot = strings.TrimSpace(repoRoot)
-	if repoRoot == "" {
-		return ""
-	}
-	inferred := strings.TrimSpace(inferGithubRepoSlugFromRepo(repoRoot))
-	if validRepoSlug(inferred) {
-		return inferred
-	}
-	return ""
 }
 
 func runLocalVerification(repoPath string, plan githubVerificationPlan, includeIntegration bool) (localWorkVerificationReport, error) {
@@ -4201,6 +3806,11 @@ func writeLocalWorkActiveState(runDir string, manifest *localWorkManifest, state
 	if manifest == nil {
 		return nil
 	}
+	store, err := openLocalWorkDB()
+	if err != nil {
+		return err
+	}
+	defer store.Close()
 	if state != nil {
 		if state.Iteration == 0 {
 			state.Iteration = manifest.CurrentIteration
@@ -4209,14 +3819,7 @@ func writeLocalWorkActiveState(runDir string, manifest *localWorkManifest, state
 			manifest.CurrentIteration = state.Iteration
 		}
 	}
-	return withLocalWorkWriteRetry(func() error {
-		store, err := openLocalWorkDB()
-		if err != nil {
-			return err
-		}
-		defer store.Close()
-		return store.writeActiveState(*manifest, state)
-	})
+	return store.writeActiveState(*manifest, state)
 }
 
 func latestCompletedLocalWorkIteration(manifest localWorkManifest) int {
@@ -4625,14 +4228,12 @@ func localWorkRepoID(repoRoot string) string {
 }
 
 func writeLocalWorkManifest(manifest localWorkManifest) error {
-	return withLocalWorkWriteRetry(func() error {
-		store, err := openLocalWorkDB()
-		if err != nil {
-			return err
-		}
-		defer store.Close()
-		return store.writeManifest(manifest)
-	})
+	store, err := openLocalWorkDB()
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	return store.writeManifest(manifest)
 }
 
 func detectLocalWorkStall(iterations []localWorkIterationSummary) string {
