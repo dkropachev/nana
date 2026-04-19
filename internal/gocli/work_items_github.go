@@ -261,26 +261,14 @@ func executeGithubReviewRequestWorkItem(item workItem, attemptDir string, codexA
 	if err != nil {
 		return workItemExecutionResult{}, "", err
 	}
-	sourceLock, err := acquireManagedSourceWriteLock(target.repoSlug, repoAccessLockOwner{
+	sourceLockOwner := repoAccessLockOwner{
 		Backend: "work-item",
 		RunID:   item.ID,
 		Purpose: "review-request-source-setup",
 		Label:   "work-item-review-request-source",
-	})
-	if err != nil {
-		return workItemExecutionResult{}, "", err
-	}
-	defer func() {
-		_ = sourceLock.Release()
-	}()
-	if err := ensureGithubSourceClone(paths, repoMeta); err != nil {
-		return workItemExecutionResult{}, "", err
 	}
 	repoPath := filepath.Join(attemptDir, "repo")
-	if err := cloneGithubSourceToSandbox(paths.SourcePath, repoPath); err != nil {
-		return workItemExecutionResult{}, "", err
-	}
-	if err := sourceLock.Release(); err != nil {
+	if err := prepareGithubReviewRequestSource(paths, repoMeta, sourceLockOwner, repoPath, nil); err != nil {
 		return workItemExecutionResult{}, "", err
 	}
 	if err := githubRunGit(repoPath, "fetch", "--all"); err != nil {
@@ -332,6 +320,10 @@ func executeGithubReviewRequestWorkItem(item workItem, attemptDir string, codexA
 		return workItemExecutionResult{}, rawOutput, err
 	}
 	return result, rawOutput, nil
+}
+
+func prepareGithubReviewRequestSource(paths githubManagedRepoPaths, repoMeta *githubManagedRepoMetadata, owner repoAccessLockOwner, repoPath string, observeReadPhase func(sourcePath string) error) error {
+	return cloneGithubManagedSourceForSandbox(paths, repoMeta, owner, repoPath, observeReadPhase)
 }
 
 func generateGithubPullReviewFindingsWithArgs(manifest githubPullReviewManifest, repoPath string, codexArgs []string) ([]githubPullReviewFinding, string, error) {

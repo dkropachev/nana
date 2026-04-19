@@ -228,6 +228,17 @@ func mergeFinalGateRoleResults(existing []localWorkFinalGateRoleResult, incoming
 
 func applyLocalWorkFinalDiff(manifest localWorkManifest) localWorkFinalApplyResult {
 	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
+	diffOutput, err := githubGitOutput(manifest.SandboxRepoPath, "diff", "--binary", manifest.BaselineSHA)
+	if err != nil {
+		return localWorkFinalApplyResult{Status: "blocked-before-apply", Error: err.Error()}
+	}
+	patchPath := filepath.Join(runDir, "final-source-apply.patch")
+	if err := os.WriteFile(patchPath, []byte(diffOutput), 0o644); err != nil {
+		return localWorkFinalApplyResult{Status: "blocked-before-apply", Error: err.Error()}
+	}
+	if strings.TrimSpace(diffOutput) == "" {
+		return localWorkFinalApplyResult{Status: "no-op"}
+	}
 	sourceLock, err := acquireSourceWriteLock(manifest.RepoRoot, repoAccessLockOwner{
 		Backend: "local-work",
 		RunID:   manifest.RunID,
@@ -261,17 +272,6 @@ func applyLocalWorkFinalDiff(manifest localWorkManifest) localWorkFinalApplyResu
 	target, err := syncLocalWorkFinalApplyTarget(manifest)
 	if err != nil {
 		return localWorkFinalApplyResult{Status: "blocked-before-apply", Error: err.Error()}
-	}
-	diffOutput, err := githubGitOutput(manifest.SandboxRepoPath, "diff", "--binary", manifest.BaselineSHA)
-	if err != nil {
-		return localWorkFinalApplyResult{Status: "blocked-before-apply", Error: err.Error()}
-	}
-	patchPath := filepath.Join(runDir, "final-source-apply.patch")
-	if err := os.WriteFile(patchPath, []byte(diffOutput), 0o644); err != nil {
-		return localWorkFinalApplyResult{Status: "blocked-before-apply", Error: err.Error()}
-	}
-	if strings.TrimSpace(diffOutput) == "" {
-		return localWorkFinalApplyResult{Status: "no-op"}
 	}
 	if err := githubRunGit(manifest.RepoRoot, "apply", "--3way", "--index", patchPath); err != nil {
 		resolvedPaths, resolveErr := applyLocalWorkManagedSandboxFallback(manifest)

@@ -1192,19 +1192,14 @@ func ensureImproveGithubCheckout(repoSlug string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	sourceLock, err := acquireManagedSourceWriteLock(repoSlug, repoAccessLockOwner{
+	if err := withManagedSourceWriteLock(repoSlug, repoAccessLockOwner{
 		Backend: "github-improve",
 		RunID:   fmt.Sprintf("improve-%d", time.Now().UTC().UnixNano()),
 		Purpose: "source-setup",
 		Label:   "github-improve-source",
-	})
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		_ = sourceLock.Release()
-	}()
-	if err := ensureGithubSourceClone(paths, meta); err != nil {
+	}, func() error {
+		return ensureGithubSourceClone(paths, meta)
+	}); err != nil {
 		return "", err
 	}
 	return paths.SourcePath, nil

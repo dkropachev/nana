@@ -951,6 +951,53 @@ func TestStartGithubForkDestinationPublishesBothScoutsToForkRepo(t *testing.T) {
 	}
 }
 
+func TestEnsureImproveGithubCheckoutCreatesManagedSourceAndRepairsOrigin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GH_TOKEN", "token")
+
+	paths, repoMeta := createGithubManagedSourceFixture(t, home, "acme/widget")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/acme/widget" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(githubRepositoryPayload{
+			Name:          repoMeta.RepoName,
+			FullName:      repoMeta.RepoSlug,
+			CloneURL:      repoMeta.CloneURL,
+			DefaultBranch: repoMeta.DefaultBranch,
+			HTMLURL:       repoMeta.HTMLURL,
+		})
+	}))
+	defer server.Close()
+	t.Setenv("GITHUB_API_URL", server.URL)
+
+	oldPreflight := githubManagedOriginPreflight
+	githubManagedOriginPreflight = func(repoPath string, repoMeta *githubManagedRepoMetadata) error { return nil }
+	defer func() { githubManagedOriginPreflight = oldPreflight }()
+
+	repoPath, err := ensureImproveGithubCheckout("acme/widget")
+	if err != nil {
+		t.Fatalf("ensureImproveGithubCheckout: %v", err)
+	}
+	if repoPath != paths.SourcePath {
+		t.Fatalf("expected managed source path %q, got %q", paths.SourcePath, repoPath)
+	}
+	if _, err := os.Stat(repoPath); err != nil {
+		t.Fatalf("stat managed source path: %v", err)
+	}
+	gotOrigin := strings.TrimSpace(runLocalWorkTestGitOutput(t, repoPath, "config", "--get", "remote.origin.url"))
+	if gotOrigin != repoMeta.CanonicalOriginURL {
+		t.Fatalf("expected managed source origin repaired to %q, got %q", repoMeta.CanonicalOriginURL, gotOrigin)
+	}
+	head := strings.TrimSpace(runLocalWorkTestGitOutput(t, repoPath, "rev-parse", "HEAD"))
+	remoteHead := strings.TrimSpace(runLocalWorkTestGitOutput(t, "", "--git-dir", repoMeta.CloneURL, "rev-parse", "refs/heads/main"))
+	if head != remoteHead {
+		t.Fatalf("expected managed source head %q to match origin head %q", head, remoteHead)
+	}
+}
+
 func TestPublishImprovementIssuesUsesForkPolicyAndImprovementLabels(t *testing.T) {
 	t.Setenv("GH_TOKEN", "token")
 	var capturedPath string

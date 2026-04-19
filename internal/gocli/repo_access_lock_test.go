@@ -70,6 +70,107 @@ func TestRepoAccessLockReadWriteSemantics(t *testing.T) {
 	}
 }
 
+func TestRepoAccessLockDowngradeToReadAllowsSharedReaders(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+
+	repoPath := filepath.Join(home, "repo")
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+
+	writeLock, err := acquireRepoWriteLock(repoPath, repoAccessLockOwner{Backend: "test", RunID: "write-1", Purpose: "mutate", Label: "writer"})
+	if err != nil {
+		t.Fatalf("acquire write lock: %v", err)
+	}
+	defer func() { _ = writeLock.Release() }()
+
+	writeLock, err = writeLock.DowngradeToRead()
+	if err != nil {
+		t.Fatalf("downgrade write lock: %v", err)
+	}
+	if writeLock.record.Mode != string(repoAccessLockRead) {
+		t.Fatalf("expected downgraded lock mode %q, got %#v", repoAccessLockRead, writeLock.record)
+	}
+
+	readTwo, err := acquireRepoReadLock(repoPath, repoAccessLockOwner{Backend: "test", RunID: "read-2", Purpose: "inspect", Label: "reader-two"})
+	if err != nil {
+		t.Fatalf("acquire second read lock after downgrade: %v", err)
+	}
+	defer func() { _ = readTwo.Release() }()
+
+	lockState, err := buildRepoAccessLockState(repoPath, repoAccessLockRead)
+	if err != nil {
+		t.Fatalf("build lock state after downgrade: %v", err)
+	}
+	if lockState.Writer != nil {
+		t.Fatalf("expected no writer after downgrade, got %+v", lockState)
+	}
+	if len(lockState.Readers) != 2 {
+		t.Fatalf("expected two readers after downgrade, got %+v", lockState)
+	}
+
+	if _, err := acquireRepoWriteLock(repoPath, repoAccessLockOwner{Backend: "test", RunID: "write-2", Purpose: "mutate", Label: "writer-two"}); err == nil || !strings.Contains(err.Error(), "active read locks") {
+		t.Fatalf("expected write lock conflict while downgraded reader held, got %v", err)
+	}
+
+	if err := readTwo.Release(); err != nil {
+		t.Fatalf("release second read lock: %v", err)
+	}
+	if err := writeLock.Release(); err != nil {
+		t.Fatalf("release downgraded read lock: %v", err)
+	}
+	writeThree, err := acquireRepoWriteLock(repoPath, repoAccessLockOwner{Backend: "test", RunID: "write-3", Purpose: "mutate", Label: "writer-three"})
+	if err != nil {
+		t.Fatalf("acquire write lock after downgraded readers released: %v", err)
+	}
+	if err := writeThree.Release(); err != nil {
+		t.Fatalf("release final write lock: %v", err)
+	}
+}
+
+func TestWithSourceWriteThenReadLockRunsReadPhaseUnderReadLock(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+
+	repoPath := filepath.Join(home, "repo")
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+
+	err := withSourceWriteThenReadLock(repoPath, repoAccessLockOwner{Backend: "test", RunID: "owner", Purpose: "source-setup", Label: "write-then-read"}, func() error {
+		if _, err := acquireSourceReadLock(repoPath, repoAccessLockOwner{Backend: "test", RunID: "write-phase-reader", Purpose: "inspect", Label: "write-phase-reader"}); err == nil || !strings.Contains(err.Error(), "repo read lock busy") {
+			t.Fatalf("expected write phase to block readers, got %v", err)
+		}
+		return nil
+	}, func() error {
+		readLock, err := acquireSourceReadLock(repoPath, repoAccessLockOwner{Backend: "test", RunID: "read-phase-reader", Purpose: "inspect", Label: "read-phase-reader"})
+		if err != nil {
+			t.Fatalf("acquire read lock during downgraded read phase: %v", err)
+		}
+		defer func() { _ = readLock.Release() }()
+		if _, err := acquireSourceWriteLock(repoPath, repoAccessLockOwner{Backend: "test", RunID: "read-phase-writer", Purpose: "mutate", Label: "read-phase-writer"}); err == nil || !strings.Contains(err.Error(), "repo write lock busy") {
+			t.Fatalf("expected read phase to block writers, got %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withSourceWriteThenReadLock: %v", err)
+	}
+
+	writeAfter, err := acquireSourceWriteLock(repoPath, repoAccessLockOwner{Backend: "test", RunID: "write-after", Purpose: "mutate", Label: "write-after"})
+	if err != nil {
+		t.Fatalf("acquire write lock after helper: %v", err)
+	}
+	if err := writeAfter.Release(); err != nil {
+		t.Fatalf("release write lock after helper: %v", err)
+	}
+}
+
 func TestBuildRepoAccessLockStatusIncludesHolders(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

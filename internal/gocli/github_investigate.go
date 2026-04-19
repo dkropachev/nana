@@ -120,57 +120,21 @@ func githubInvestigateTarget(targetURL string) error {
 	if err != nil {
 		return err
 	}
-	sourceLock, err := acquireManagedSourceWriteLock(target.repoSlug, repoAccessLockOwner{
+	sourceLockOwner := repoAccessLockOwner{
 		Backend: "github-investigate",
 		RunID:   fmt.Sprintf("investigate-%d", now.UnixNano()),
 		Purpose: "source-inspect",
 		Label:   "github-investigate-source",
-	})
+	}
+	prepared, err := prepareGithubInvestigateSource(paths, repoMeta, sourceLockOwner, now, nil)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = sourceLock.Release()
-	}()
-	if err := ensureGithubSourceClone(paths, repoMeta); err != nil {
-		return err
-	}
-
-	verificationPlan := detectGithubVerificationPlan(paths.SourcePath)
-	if err := writeGithubJSON(paths.RepoVerificationPlanPath, verificationPlan); err != nil {
-		return err
-	}
-	trackedFiles := trackedRepoFiles(paths.SourcePath)
-
-	settings, _ := readGithubRepoSettings(paths.RepoSettingsPath)
-	if settings == nil {
-		inferred := inferGithubInitialRepoConsiderationsFromFiles(trackedFiles, repoMeta.RepoSlug, verificationPlan)
-		settings = &githubRepoSettings{
-			Version:               4,
-			DefaultConsiderations: inferred.Considerations,
-			DefaultRoleLayout:     "split",
-			UpdatedAt:             now.Format(time.RFC3339),
-		}
-	}
-	settings.HotPathAPIProfile = inferGithubHotPathProfileFromFiles(trackedFiles, now)
-	settings.UpdatedAt = now.Format(time.RFC3339)
-	if settings.Version == 0 {
-		settings.Version = 4
-	}
-	if settings.DefaultRoleLayout == "" {
-		settings.DefaultRoleLayout = "split"
-	}
-	if err := writeGithubJSON(paths.RepoSettingsPath, settings); err != nil {
-		return err
-	}
-	profile, profilePath, err := refreshGithubRepoProfile(repoMeta.RepoSlug, paths.SourcePath, verificationPlan, settings.DefaultConsiderations, now)
-	if err != nil {
-		return err
-	}
-	policy, err := resolveGithubWorkPolicy(paths.SourcePath)
-	if err != nil {
-		return err
-	}
+	verificationPlan := prepared.RepoVerificationPlan
+	settings := prepared.Settings
+	profile := prepared.Profile
+	profilePath := prepared.ProfilePath
+	policy := prepared.Policy
 
 	considerations := settings.DefaultConsiderations
 	roleLayout := settings.DefaultRoleLayout
@@ -230,6 +194,10 @@ func githubInvestigateTarget(targetURL string) error {
 	}
 	fmt.Fprintf(os.Stdout, "[github] Next: nana implement %s\n", githubCanonicalTargetURL(target))
 	return nil
+}
+
+func prepareGithubInvestigateSource(paths githubManagedRepoPaths, repoMeta *githubManagedRepoMetadata, owner repoAccessLockOwner, now time.Time, observeReadPhase func(sourcePath string) error) (githubPreparedManagedSource, error) {
+	return inspectGithubManagedSource(paths, repoMeta, owner, now, observeReadPhase, nil)
 }
 
 func githubManagedPaths(repoSlug string) githubManagedRepoPaths {

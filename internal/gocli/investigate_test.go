@@ -95,27 +95,10 @@ func TestBuildInvestigatePromptCapsServerAndViolationLists(t *testing.T) {
 		if !strings.Contains(prompt, needle) {
 			t.Fatalf("expected prompt to contain %q:\n%s", needle, prompt)
 		}
-		for proofIndex := 0; proofIndex < 4; proofIndex++ {
-			issue.Proofs = append(issue.Proofs, investigateProof{
-				Kind:        "github",
-				Title:       fmt.Sprintf("issue proof %d-%d", issueIndex, proofIndex),
-				Link:        "https://example.invalid/issue",
-				WhyItProves: strings.Repeat("because ", 60),
-			})
-		}
-		report.Issues = append(report.Issues, issue)
 	}
 	if len(prompt) > investigatePromptCharLimit {
 		t.Fatalf("expected investigate prompt <= %d bytes, got %d", investigatePromptCharLimit, len(prompt))
 	}
-}
-
-func serversNames(servers []investigateMCPServerStatus) []string {
-	names := make([]string, 0, len(servers))
-	for _, server := range servers {
-		names = append(names, server.ServerName)
-	}
-	return names
 }
 
 func serversNames(servers []investigateMCPServerStatus) []string {

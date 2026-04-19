@@ -133,6 +133,29 @@ func withSourceWriteLock(repoPath string, owner repoAccessLockOwner, fn func() e
 	return withRepoAccessLock(repoPath, repoAccessLockWrite, owner, fn)
 }
 
+func withSourceWriteThenReadLock(repoPath string, owner repoAccessLockOwner, writePhase func() error, readPhase func() error) error {
+	handle, err := acquireSourceWriteLock(repoPath, owner)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = handle.Release()
+	}()
+	if writePhase != nil {
+		if err := writePhase(); err != nil {
+			return err
+		}
+	}
+	if readPhase == nil {
+		return nil
+	}
+	handle, err = handle.DowngradeToRead()
+	if err != nil {
+		return err
+	}
+	return readPhase()
+}
+
 func withManagedSourceReadLock(repoSlug string, owner repoAccessLockOwner, fn func() error) error {
 	return withSourceReadLock(githubManagedPaths(repoSlug).SourcePath, owner, fn)
 }
@@ -255,10 +278,7 @@ func (handle *repoAccessLockHandle) Release() error {
 	}
 	var releaseErr error
 	handle.releaseOnce.Do(func() {
-		if handle.stopCh != nil {
-			close(handle.stopCh)
-			<-handle.doneCh
-		}
+		handle.stopHeartbeat()
 		if _, err := removePathIfExists(handle.filePath); err != nil {
 			releaseErr = err
 			return
@@ -268,7 +288,45 @@ func (handle *repoAccessLockHandle) Release() error {
 	return releaseErr
 }
 
+func (handle *repoAccessLockHandle) DowngradeToRead() (*repoAccessLockHandle, error) {
+	if handle == nil {
+		return nil, fmt.Errorf("repo lock handle is required")
+	}
+	switch repoAccessLockMode(handle.record.Mode) {
+	case repoAccessLockRead:
+		return handle, nil
+	case repoAccessLockWrite:
+	default:
+		return nil, fmt.Errorf("cannot downgrade repo lock mode %q", handle.record.Mode)
+	}
+
+	readerRecord := handle.record
+	readerRecord.Mode = string(repoAccessLockRead)
+	readerRecord.UpdatedAt = repoAccessLockNow().Format(repoAccessLockTimestampLayout)
+	readerPath := filepath.Join(handle.lockRoot, "readers", readerRecord.Token+".json")
+	if err := createRepoAccessLockRecord(readerPath, readerRecord); err != nil {
+		return nil, err
+	}
+
+	writerPath := handle.filePath
+	writerRecord := handle.record
+	handle.stopHeartbeat()
+	if _, err := removePathIfExists(writerPath); err != nil {
+		_, _ = removePathIfExists(readerPath)
+		handle.record = writerRecord
+		handle.filePath = writerPath
+		handle.startHeartbeat()
+		return nil, err
+	}
+
+	handle.record = readerRecord
+	handle.filePath = readerPath
+	handle.startHeartbeat()
+	return handle, nil
+}
+
 func (handle *repoAccessLockHandle) startHeartbeat() {
+	handle.stopHeartbeat()
 	handle.stopCh = make(chan struct{})
 	handle.doneCh = make(chan struct{})
 	go func() {
@@ -288,6 +346,16 @@ func (handle *repoAccessLockHandle) startHeartbeat() {
 			}
 		}
 	}()
+}
+
+func (handle *repoAccessLockHandle) stopHeartbeat() {
+	if handle == nil || handle.stopCh == nil {
+		return
+	}
+	close(handle.stopCh)
+	<-handle.doneCh
+	handle.stopCh = nil
+	handle.doneCh = nil
 }
 
 func normalizeRepoAccessLockPath(repoPath string) (string, error) {

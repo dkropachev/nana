@@ -37,50 +37,25 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 	if err != nil {
 		return githubWorkManifest{}, err
 	}
-	sourceSetupLock, err := acquireManagedSourceWriteLock(options.Target.repoSlug, repoAccessLockOwner{
+	sourceLockOwner := repoAccessLockOwner{
 		Backend: "github-work",
 		RunID:   runID,
 		Purpose: "source-setup",
 		Label:   "github-work-source-setup",
-	})
-	if err != nil {
-		return githubWorkManifest{}, err
-	}
-	defer func() {
-		_ = sourceSetupLock.Release()
-	}()
-	if err := ensureGithubSourceClone(paths, repoMeta); err != nil {
-		return githubWorkManifest{}, err
-	}
-
-	repoVerificationPlan := detectGithubVerificationPlan(paths.SourcePath)
-	if err := writeGithubJSON(paths.RepoVerificationPlanPath, repoVerificationPlan); err != nil {
-		return githubWorkManifest{}, err
-	}
-	trackedFiles := trackedRepoFiles(paths.SourcePath)
-	settings, _ := readGithubRepoSettings(paths.RepoSettingsPath)
-	if settings == nil {
-		inferred := inferGithubInitialRepoConsiderationsFromFiles(trackedFiles, repoMeta.RepoSlug, repoVerificationPlan)
-		settings = &githubRepoSettings{
-			Version:               4,
-			DefaultConsiderations: inferred.Considerations,
-			DefaultRoleLayout:     "split",
-			UpdatedAt:             now.Format(time.RFC3339),
-		}
-	}
-	settings.HotPathAPIProfile = inferGithubHotPathProfileFromFiles(trackedFiles, now)
-	settings.UpdatedAt = now.Format(time.RFC3339)
-	if settings.DefaultRoleLayout == "" {
-		settings.DefaultRoleLayout = "split"
-	}
-	if settings.Version == 0 {
-		settings.Version = 4
-	}
-	if err := writeGithubJSON(paths.RepoSettingsPath, settings); err != nil {
-		return githubWorkManifest{}, err
 	}
 	repoMode := normalizeGithubRepoMode(options.RepoMode)
 	publishTarget := normalizeGithubPublishTarget(options.PublishTarget)
+	sandboxID := buildGithubSandboxID(options.Target, runID)
+	sandboxPath := filepath.Join(paths.RepoRoot, "sandboxes", sandboxID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	prepared, err := prepareGithubWorkSource(paths, repoMeta, sourceLockOwner, now, sandboxRepoPath, nil)
+	if err != nil {
+		return githubWorkManifest{}, err
+	}
+	settings := prepared.Settings
+	profile := prepared.Profile
+	profilePath := prepared.ProfilePath
+	policy := prepared.Policy
 	if repoMode == "" && publishTarget != "" {
 		repoMode = publishTargetToRepoMode(publishTarget)
 	}
@@ -107,16 +82,7 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 	}
 	prForwardMode := resolvedGithubPRForwardMode(settings)
 	createPROnComplete := publishTarget != "local-branch"
-	profile, profilePath, err := refreshGithubRepoProfile(repoMeta.RepoSlug, paths.SourcePath, repoVerificationPlan, settings.DefaultConsiderations, now)
-	if err != nil {
-		return githubWorkManifest{}, err
-	}
-	policy, err := resolveGithubWorkPolicy(paths.SourcePath)
-	if err != nil {
-		return githubWorkManifest{}, err
-	}
 	effectiveReviewerPolicy := resolveGithubEffectiveReviewerPolicy(repoMeta.RepoSlug)
-
 	activeConsiderations := uniqueStrings(append(append([]string{}, settings.DefaultConsiderations...), options.RequestedConsiderations...))
 	roleLayout := options.RoleLayout
 	if roleLayout == "" {
@@ -125,20 +91,11 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 	if roleLayout == "" {
 		roleLayout = "split"
 	}
-	sandboxID := buildGithubSandboxID(options.Target, runID)
-	sandboxPath := filepath.Join(paths.RepoRoot, "sandboxes", sandboxID)
-	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
-	if err := os.MkdirAll(filepath.Join(paths.RepoRoot, "runs", runID), 0o755); err != nil {
-		return githubWorkManifest{}, err
-	}
-	if err := cloneGithubSourceToSandbox(paths.SourcePath, sandboxRepoPath); err != nil {
-		return githubWorkManifest{}, err
-	}
-	if err := sourceSetupLock.Release(); err != nil {
-		return githubWorkManifest{}, err
-	}
 	verificationPlan := detectGithubVerificationPlan(sandboxRepoPath)
 	runDir := filepath.Join(paths.RepoRoot, "runs", runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		return githubWorkManifest{}, err
+	}
 	verificationScriptsDir, err := writeGithubVerificationScripts(sandboxPath, sandboxRepoPath, verificationPlan, runID)
 	if err != nil {
 		return githubWorkManifest{}, err
@@ -307,6 +264,12 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 		fmt.Fprint(os.Stdout, result.Stderr)
 	}
 	return manifest, runErr
+}
+
+func prepareGithubWorkSource(paths githubManagedRepoPaths, repoMeta *githubManagedRepoMetadata, owner repoAccessLockOwner, now time.Time, sandboxRepoPath string, observeReadPhase func(sourcePath string) error) (githubPreparedManagedSource, error) {
+	return inspectGithubManagedSource(paths, repoMeta, owner, now, observeReadPhase, func(sourcePath string, prepared *githubPreparedManagedSource) error {
+		return cloneGithubSourceToSandbox(sourcePath, sandboxRepoPath)
+	})
 }
 
 func buildGithubRunID(now time.Time) string {

@@ -1620,52 +1620,59 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 		return "", err
 	}
 	runID := fmt.Sprintf("lw-%d", time.Now().UnixNano())
-	sourceSetupLock, err := acquireSourceWriteLock(repoRoot, repoAccessLockOwner{
+	sourceLockOwner := repoAccessLockOwner{
 		Backend: "local-work",
 		RunID:   runID,
 		Purpose: "source-setup",
 		Label:   "local-work-source-setup",
-	})
-	if err != nil {
+	}
+	repoID := localWorkRepoID(repoRoot)
+	repoName := filepath.Base(repoRoot)
+	sandboxPath := filepath.Join(localWorkSandboxesDir(), repoID, runID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	baselineSHA := ""
+	sourceBranch := ""
+	if err := withSourceWriteThenReadLock(repoRoot, sourceLockOwner,
+		func() error {
+			if err := cleanupDirtyManagedLocalWorkRepo(repoRoot, "before local work start"); err != nil {
+				return err
+			}
+			if err := ensureLocalWorkRepoClean(repoRoot); err != nil {
+				return err
+			}
+			sourceBranchOutput, err := githubGitOutput(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
+			if err != nil {
+				return err
+			}
+			sourceBranch = strings.TrimSpace(sourceBranchOutput)
+			if _, err := syncLocalWorkTrackedBranch(repoRoot, sourceBranch, "before local work start"); err != nil {
+				return err
+			}
+			if err := ensureLocalWorkRepoClean(repoRoot); err != nil {
+				return err
+			}
+			baselineSHAOutput, err := githubGitOutput(repoRoot, "rev-parse", "HEAD")
+			if err != nil {
+				return err
+			}
+			sourceBranchOutput, err = githubGitOutput(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
+			if err != nil {
+				return err
+			}
+			baselineSHA = strings.TrimSpace(baselineSHAOutput)
+			sourceBranch = strings.TrimSpace(sourceBranchOutput)
+			return nil
+		},
+		func() error {
+			return cloneGithubSourceToSandbox(repoRoot, sandboxRepoPath)
+		},
+	); err != nil {
 		return "", err
 	}
-	defer func() {
-		_ = sourceSetupLock.Release()
-	}()
-	if err := cleanupDirtyManagedLocalWorkRepo(repoRoot, "before local work start"); err != nil {
-		return "", err
-	}
-	if err := ensureLocalWorkRepoClean(repoRoot); err != nil {
-		return "", err
-	}
-	sourceBranchOutput, err := githubGitOutput(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
-	if err != nil {
-		return "", err
-	}
-	sourceBranch := strings.TrimSpace(sourceBranchOutput)
-	if _, err := syncLocalWorkTrackedBranch(repoRoot, sourceBranch, "before local work start"); err != nil {
-		return "", err
-	}
-	if err := ensureLocalWorkRepoClean(repoRoot); err != nil {
-		return "", err
-	}
-
-	baselineSHAOutput, err := githubGitOutput(repoRoot, "rev-parse", "HEAD")
-	if err != nil {
-		return "", err
-	}
-	sourceBranchOutput, err = githubGitOutput(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
-	if err != nil {
-		return "", err
-	}
-	baselineSHA := strings.TrimSpace(baselineSHAOutput)
-	sourceBranch = strings.TrimSpace(sourceBranchOutput)
 	inputContent, inputMode, err := readLocalWorkInput(cwd, options, sourceBranch)
 	if err != nil {
 		return "", err
 	}
-	repoID := localWorkRepoID(repoRoot)
-	repoName := filepath.Base(repoRoot)
 	repoSlug := localWorkResolvedRepoSlug(repoRoot, "")
 
 	repoDir := localWorkRepoDirByID(repoID)
@@ -1675,12 +1682,6 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 	}
 	inputPath := filepath.Join(runDir, "input-plan.md")
 	if err := os.WriteFile(inputPath, []byte(strings.TrimSpace(inputContent)+"\n"), 0o644); err != nil {
-		return "", err
-	}
-
-	sandboxPath := filepath.Join(localWorkSandboxesDir(), repoID, runID)
-	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
-	if err := cloneGithubSourceToSandbox(repoRoot, sandboxRepoPath); err != nil {
 		return "", err
 	}
 
@@ -1717,9 +1718,6 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 		MaxIterations:          options.MaxIterations,
 	}
 	if err := writeLocalWorkManifest(manifest); err != nil {
-		return "", err
-	}
-	if err := sourceSetupLock.Release(); err != nil {
 		return "", err
 	}
 

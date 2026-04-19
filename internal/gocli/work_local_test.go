@@ -703,6 +703,38 @@ func TestStartLocalWorkWithRunIDDetachSpawnsBackgroundRunner(t *testing.T) {
 	}
 }
 
+func TestStartLocalWorkWithRunIDKeepsBaselineAlignedWithSandboxHead(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoRoot := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+
+	oldDetachedRunner := localWorkStartDetachedRunner
+	localWorkStartDetachedRunner = func(repoPath string, runID string, codexArgs []string, logPath string) error {
+		return nil
+	}
+	defer func() {
+		localWorkStartDetachedRunner = oldDetachedRunner
+	}()
+
+	runID, err := startLocalWorkWithRunID(repoRoot, localWorkStartOptions{
+		Detach:                true,
+		RepoPath:              repoRoot,
+		Task:                  "Keep baseline aligned with sandbox",
+		MaxIterations:         1,
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+	})
+	if err != nil {
+		t.Fatalf("startLocalWorkWithRunID: %v", err)
+	}
+	manifest := mustLocalWorkManifestByRunID(t, runID)
+	sandboxHead := strings.TrimSpace(runLocalWorkTestGitOutput(t, manifest.SandboxRepoPath, "rev-parse", "HEAD"))
+	if sandboxHead != strings.TrimSpace(manifest.BaselineSHA) {
+		t.Fatalf("expected sandbox head to match manifest baseline, sandbox=%q baseline=%q", sandboxHead, manifest.BaselineSHA)
+	}
+}
+
 func TestInferLocalWorkTaskFromBranch(t *testing.T) {
 	task, err := inferLocalWorkTaskFromBranch("feature/add-branch-task-inference")
 	if err != nil {
@@ -2247,6 +2279,52 @@ func TestApplyLocalWorkFinalDiffNoOpWhenSandboxHasNoDiff(t *testing.T) {
 	}
 	if strings.TrimSpace(head) != strings.TrimSpace(baseline) {
 		t.Fatalf("expected no-op to leave source HEAD unchanged, head=%q baseline=%q", head, baseline)
+	}
+}
+
+func TestApplyLocalWorkFinalDiffNoOpWhileSourceReadLockHeld(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+
+	baseline, err := githubGitOutput(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("read baseline: %v", err)
+	}
+	runID := "lw-no-op-read-lock"
+	repoID := localWorkRepoID(repo)
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	sandboxPath := filepath.Join(home, "sandbox")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := cloneGithubSourceToSandbox(repo, sandboxRepoPath); err != nil {
+		t.Fatalf("clone sandbox: %v", err)
+	}
+	sourceReadLock, err := acquireSourceReadLock(repo, repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "local-no-op-reader",
+		Purpose: "inspect",
+		Label:   "local-no-op-reader",
+	})
+	if err != nil {
+		t.Fatalf("acquire source read lock: %v", err)
+	}
+	defer func() { _ = sourceReadLock.Release() }()
+
+	result := applyLocalWorkFinalDiff(localWorkManifest{
+		RunID:           runID,
+		RepoRoot:        repo,
+		RepoID:          repoID,
+		BaselineSHA:     strings.TrimSpace(baseline),
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+	})
+	if result.Status != "no-op" || strings.TrimSpace(result.CommitSHA) != "" || strings.TrimSpace(result.Error) != "" {
+		t.Fatalf("expected no-op apply while read lock held, got %#v", result)
 	}
 }
 

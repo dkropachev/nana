@@ -89,27 +89,15 @@ func reviewGithubPullRequest(options githubReviewExecutionOptions) error {
 	} else {
 		runID = fmt.Sprintf("gr-%d", now.UnixNano())
 	}
-	sourceLock, err := acquireManagedSourceWriteLock(options.Target.repoSlug, repoAccessLockOwner{
+	sourceLockOwner := repoAccessLockOwner{
 		Backend: "github-review",
 		RunID:   runID,
 		Purpose: "source-setup",
 		Label:   "github-review-source",
-	})
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = sourceLock.Release()
-	}()
-	if err := ensureGithubSourceClone(paths, repoMeta); err != nil {
-		return err
 	}
 	runDir := filepath.Join(runsDir, runID)
 	repoPath := filepath.Join(runDir, "repo")
-	if err := cloneGithubSourceToSandbox(paths.SourcePath, repoPath); err != nil {
-		return err
-	}
-	if err := sourceLock.Release(); err != nil {
+	if err := prepareGithubPullReviewSource(paths, repoMeta, sourceLockOwner, repoPath, nil); err != nil {
 		return err
 	}
 	if err := githubRunGit(repoPath, "fetch", "--all"); err != nil {
@@ -197,6 +185,10 @@ func reviewGithubPullRequest(options githubReviewExecutionOptions) error {
 		fmt.Fprintf(os.Stdout, "[review] GitHub review: %s\n", manifest.PostedReviewURL)
 	}
 	return nil
+}
+
+func prepareGithubPullReviewSource(paths githubManagedRepoPaths, repoMeta *githubManagedRepoMetadata, owner repoAccessLockOwner, repoPath string, observeReadPhase func(sourcePath string) error) error {
+	return cloneGithubManagedSourceForSandbox(paths, repoMeta, owner, repoPath, observeReadPhase)
 }
 
 type githubPullReviewTargetContext struct {
