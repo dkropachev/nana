@@ -19,6 +19,18 @@ func runStartWorkIssueTriage(repoSlug string, issue startWorkIssueState, codexAr
 	if err != nil {
 		return startWorkTriageResult{}, err
 	}
+	repoLock, err := acquireSourceReadLock(repoPath, repoAccessLockOwner{
+		Backend: "start-triage",
+		RunID:   fmt.Sprintf("issue-%d", issue.SourceNumber),
+		Purpose: "triage",
+		Label:   "start-triage",
+	})
+	if err != nil {
+		return startWorkTriageResult{}, err
+	}
+	defer func() {
+		_ = repoLock.Release()
+	}()
 	scopedCodexHome, err := ensureScopedCodexHome(
 		ResolveCodexHomeForLaunch(repoPath),
 		filepath.Join(githubManagedPaths(repoSlug).RepoRoot, ".nana", "start", "codex-home", "triage"),
@@ -29,6 +41,7 @@ func runStartWorkIssueTriage(repoSlug string, issue startWorkIssueState, codexAr
 	prompt := buildStartWorkTriagePrompt(repoSlug, issue)
 	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(codexArgs)
 	prompt = prefixCodexFastPrompt(prompt, fastMode)
+	transport := promptTransportForSize(prompt, structuredPromptStdinThreshold)
 	result, err := runManagedCodexPrompt(codexManagedPromptOptions{
 		CommandDir:       repoPath,
 		InstructionsRoot: repoPath,
@@ -36,11 +49,12 @@ func runStartWorkIssueTriage(repoSlug string, issue startWorkIssueState, codexAr
 		FreshArgsPrefix:  []string{"exec", "-C", repoPath},
 		CommonArgs:       normalizedCodexArgs,
 		Prompt:           prompt,
-		PromptTransport:  codexPromptTransportArg,
+		PromptTransport:  transport,
 		CheckpointPath:   filepath.Join(githubManagedPaths(repoSlug).RepoRoot, ".nana", "start", "triage-checkpoints", fmt.Sprintf("issue-%d.json", issue.SourceNumber)),
 		StepKey:          fmt.Sprintf("triage-issue-%d", issue.SourceNumber),
 		ResumeStrategy:   codexResumeSamePrompt,
 		Env:              append(buildGithubCodexEnv(NotifyTempContract{}, scopedCodexHome, strings.TrimSpace(os.Getenv("GITHUB_API_URL"))), "NANA_PROJECT_AGENTS_ROOT="+repoPath),
+		RateLimitPolicy:  codexRateLimitPolicyReturnPause,
 	})
 	if err != nil {
 		return startWorkTriageResult{}, fmt.Errorf("%w\n%s", err, strings.TrimSpace(strings.Join([]string{result.Stdout, result.Stderr}, "\n")))

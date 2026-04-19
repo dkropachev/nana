@@ -67,6 +67,37 @@ func TestStartRepoDueScoutRolesSkipsDailyScoutWhenNotDue(t *testing.T) {
 	}
 }
 
+func TestStartRepoDueScoutRolesBlocksWhenManagedSourceWriteLockHeld(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+	if err := writeGithubJSON(repoScoutPolicyPath(sourcePath, improvementScoutRole, false), scoutPolicy{
+		Version: 1,
+	}); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	lock, err := acquireManagedSourceWriteLock(repoSlug, repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "start-scout-writer",
+		Purpose: "source-setup",
+		Label:   "start-scout-writer",
+	})
+	if err != nil {
+		t.Fatalf("acquire managed source write lock: %v", err)
+	}
+	defer func() { _ = lock.Release() }()
+
+	_, err = startRepoDueScoutRoles(repoSlug, time.Now().UTC())
+	if err == nil || !strings.Contains(err.Error(), "repo read lock busy") {
+		t.Fatalf("expected repo read lock busy error, got %v", err)
+	}
+}
+
 func TestScoutScheduleDecisionWhenResolvedUsesOpenIssues(t *testing.T) {
 	repoPath := t.TempDir()
 	if err := recordSuccessfulScoutRun(repoPath, improvementScoutRole, time.Now().Add(-48*time.Hour).UTC()); err != nil {

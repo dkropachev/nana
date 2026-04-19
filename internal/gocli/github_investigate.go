@@ -120,6 +120,18 @@ func githubInvestigateTarget(targetURL string) error {
 	if err != nil {
 		return err
 	}
+	sourceLock, err := acquireManagedSourceWriteLock(target.repoSlug, repoAccessLockOwner{
+		Backend: "github-investigate",
+		RunID:   fmt.Sprintf("investigate-%d", now.UnixNano()),
+		Purpose: "source-inspect",
+		Label:   "github-investigate-source",
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = sourceLock.Release()
+	}()
 	if err := ensureGithubSourceClone(paths, repoMeta); err != nil {
 		return err
 	}
@@ -620,6 +632,18 @@ func refreshGithubVerificationArtifacts(runID string, useLast bool) error {
 	if strings.TrimSpace(manifest.SandboxPath) == "" || strings.TrimSpace(manifest.SandboxRepoPath) == "" {
 		return fmt.Errorf("run %s is missing sandbox paths required for verify-refresh", manifest.RunID)
 	}
+	sandboxLock, err := acquireSandboxWriteLock(manifest.SandboxRepoPath, repoAccessLockOwner{
+		Backend: "github-work",
+		RunID:   manifest.RunID,
+		Purpose: "verification-refresh",
+		Label:   "github-work-verify-refresh",
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = sandboxLock.Release()
+	}()
 	plan := detectGithubVerificationPlan(manifest.SandboxRepoPath)
 	if err := writeGithubJSON(filepath.Join(repoRoot, "verification-plan.json"), plan); err != nil {
 		return err

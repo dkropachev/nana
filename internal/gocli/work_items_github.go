@@ -261,11 +261,26 @@ func executeGithubReviewRequestWorkItem(item workItem, attemptDir string, codexA
 	if err != nil {
 		return workItemExecutionResult{}, "", err
 	}
+	sourceLock, err := acquireManagedSourceWriteLock(target.repoSlug, repoAccessLockOwner{
+		Backend: "work-item",
+		RunID:   item.ID,
+		Purpose: "review-request-source-setup",
+		Label:   "work-item-review-request-source",
+	})
+	if err != nil {
+		return workItemExecutionResult{}, "", err
+	}
+	defer func() {
+		_ = sourceLock.Release()
+	}()
 	if err := ensureGithubSourceClone(paths, repoMeta); err != nil {
 		return workItemExecutionResult{}, "", err
 	}
 	repoPath := filepath.Join(attemptDir, "repo")
 	if err := cloneGithubSourceToSandbox(paths.SourcePath, repoPath); err != nil {
+		return workItemExecutionResult{}, "", err
+	}
+	if err := sourceLock.Release(); err != nil {
 		return workItemExecutionResult{}, "", err
 	}
 	if err := githubRunGit(repoPath, "fetch", "--all"); err != nil {
@@ -330,7 +345,10 @@ func generateGithubPullReviewFindingsWithArgs(manifest githubPullReviewManifest,
 		return nil, "", err
 	}
 	prompt := buildGithubPullReviewPrompt(manifest, context)
-	rawOutput, err := runWorkItemCodexPrompt(repoPath, filepath.Join(workItemsRoot(), "_review-attempts", sanitizePathToken(manifest.RunID)), prompt, codexArgs)
+	rawOutput, err := runWorkItemCodexPrompt(workItemCodexTarget{
+		RepoPath: repoPath,
+		LockKind: workItemCodexLockSandbox,
+	}, filepath.Join(workItemsRoot(), "_review-attempts", sanitizePathToken(manifest.RunID)), prompt, codexArgs)
 	if err != nil {
 		return nil, rawOutput, err
 	}

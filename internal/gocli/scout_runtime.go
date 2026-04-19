@@ -9,11 +9,14 @@ import (
 )
 
 type scoutExecutionRuntime struct {
-	RepoPath    string
-	ArtifactDir string
-	CodexHome   string
-	StateDir    string
-	Cleanup     func()
+	RepoPath        string
+	ArtifactDir     string
+	CodexHome       string
+	StateDir        string
+	Cleanup         func()
+	RateLimitPolicy codexRateLimitPolicy
+	OnPause         func(codexRateLimitPauseInfo)
+	OnResume        func(codexRateLimitPauseInfo)
 }
 
 func prepareScoutExecutionRuntime(repoPath string, artifactDir string, role string) (scoutExecutionRuntime, error) {
@@ -57,7 +60,7 @@ func prepareScoutExecutionRuntime(repoPath string, artifactDir string, role stri
 	}, nil
 }
 
-func persistScoutExecutionArtifacts(runtime scoutExecutionRuntime, artifactDir string) error {
+func persistScoutExecutionArtifacts(runtime scoutExecutionRuntime, repoPath string, artifactDir string) error {
 	if filepath.Clean(runtime.ArtifactDir) == filepath.Clean(artifactDir) {
 		return nil
 	}
@@ -71,7 +74,9 @@ func persistScoutExecutionArtifacts(runtime scoutExecutionRuntime, artifactDir s
 	if !info.IsDir() {
 		return fmt.Errorf("ui-scout artifact staging path is not a directory: %s", runtime.ArtifactDir)
 	}
-	return copyScoutTree(runtime.ArtifactDir, artifactDir, nil)
+	return withScoutRepoWriteLock(repoPath, uiScoutRole, "persist-artifacts", func() error {
+		return copyScoutTree(runtime.ArtifactDir, artifactDir, nil)
+	})
 }
 
 func copyUIScoutSandboxRepo(sourceRoot string, targetRoot string) error {

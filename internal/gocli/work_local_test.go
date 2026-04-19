@@ -2329,6 +2329,93 @@ func TestLocalWorkStatusAndLogsJSON(t *testing.T) {
 	}
 }
 
+func TestLocalWorkStatusJSONIncludesLockState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+
+	repoRoot := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	repoID := localWorkRepoID(repoRoot)
+	runID := "lw-lock-status"
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	sandboxPath := filepath.Join(localWorkSandboxesDir(), repoID, runID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
+		t.Fatalf("mkdir sandbox repo: %v", err)
+	}
+	manifest := localWorkManifest{
+		Version:          4,
+		RunID:            runID,
+		CreatedAt:        ISOTimeNow(),
+		UpdatedAt:        ISOTimeNow(),
+		Status:           "running",
+		CurrentPhase:     "implement",
+		CurrentIteration: 1,
+		RepoRoot:         repoRoot,
+		RepoName:         filepath.Base(repoRoot),
+		RepoID:           repoID,
+		SourceBranch:     "main",
+		BaselineSHA:      strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
+		SandboxPath:      sandboxPath,
+		SandboxRepoPath:  sandboxRepoPath,
+		MaxIterations:    8,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	sourceLock, err := acquireSourceWriteLock(repoRoot, repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "local-source-status",
+		Purpose: "source-final-apply",
+		Label:   "local-source-status",
+	})
+	if err != nil {
+		t.Fatalf("acquire source lock: %v", err)
+	}
+	defer func() { _ = sourceLock.Release() }()
+	sandboxLock, err := acquireSandboxReadLock(sandboxRepoPath, repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "local-sandbox-status",
+		Purpose: "review",
+		Label:   "local-sandbox-status",
+	})
+	if err != nil {
+		t.Fatalf("acquire sandbox lock: %v", err)
+	}
+	defer func() { _ = sandboxLock.Release() }()
+
+	statusOutput, err := captureStdout(t, func() error {
+		return localWorkStatus(repoRoot, localWorkStatusOptions{
+			RunSelection: localWorkRunSelection{RunID: runID, RepoPath: repoRoot},
+			JSON:         true,
+		})
+	})
+	if err != nil {
+		t.Fatalf("localWorkStatus(--json): %v", err)
+	}
+	var status struct {
+		RunID     string                       `json:"run_id"`
+		LockState repoAccessLockStatusSnapshot `json:"lock_state"`
+	}
+	if err := json.Unmarshal([]byte(statusOutput), &status); err != nil {
+		t.Fatalf("unmarshal status json: %v\n%s", err, statusOutput)
+	}
+	if status.RunID != runID {
+		t.Fatalf("unexpected run id: %+v", status)
+	}
+	if status.LockState.Source == nil || status.LockState.Source.Writer == nil || !strings.Contains(status.LockState.Source.Writer.Label, "local-source-status") {
+		t.Fatalf("expected source lock state, got %+v", status.LockState)
+	}
+	if status.LockState.Sandbox == nil || len(status.LockState.Sandbox.Readers) != 1 || !strings.Contains(status.LockState.Sandbox.Readers[0].Label, "local-sandbox-status") {
+		t.Fatalf("expected sandbox lock state, got %+v", status.LockState)
+	}
+}
+
 func TestLocalWorkAIFallbacksToSingletonGrouping(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()

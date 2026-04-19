@@ -117,6 +117,7 @@ type startUIRepoSummary struct {
 	PlannedItemCounts  map[string]int                    `json:"planned_item_counts"`
 	LastRun            *startWorkLastRun                 `json:"last_run,omitempty"`
 	DefaultBranch      string                            `json:"default_branch,omitempty"`
+	LockState          *repoAccessLockStateSnapshot      `json:"lock_state,omitempty"`
 	Settings           *githubRepoSettings               `json:"settings,omitempty"`
 	State              *startWorkState                   `json:"state,omitempty"`
 }
@@ -2776,8 +2777,15 @@ func loadStartUIRepoSummary(repoSlug string, includeState bool) (startUIRepoSumm
 		ScoutJobCounts:    map[string]int{},
 		PlannedItemCounts: map[string]int{},
 	}
+	lockState, err := buildRepoAccessLockState(summary.SourcePath, repoAccessLockRead)
+	if err != nil {
+		return startUIRepoSummary{}, err
+	}
+	summary.LockState = lockState
 	applyStartUIRepoSettings(&summary, settings)
-	applyStartUIRepoScouts(&summary)
+	if err := applyStartUIRepoScouts(&summary); err != nil {
+		return startUIRepoSummary{}, err
+	}
 	if state == nil {
 		return summary, nil
 	}
@@ -2849,18 +2857,37 @@ func startUIDefaultRepoScouts(repoPath string) startUIRepoScouts {
 	return startUIRepoScoutsCompatibility(startUIDefaultRepoScoutsByRole(repoPath))
 }
 
-func applyStartUIRepoScouts(summary *startUIRepoSummary) {
+func applyStartUIRepoScouts(summary *startUIRepoSummary) error {
 	if summary == nil {
-		return
+		return nil
 	}
 	repoPath := strings.TrimSpace(summary.SourcePath)
 	summary.ScoutCatalog = startUIScoutCatalog()
 	summary.ScoutsByRole = startUIDefaultRepoScoutsByRole(repoPath)
-	for _, role := range supportedScoutRoleOrder {
-		spec := scoutRoleSpecFor(role)
-		summary.ScoutsByRole[spec.ConfigKey] = loadStartUIRepoScoutConfig(repoPath, role)
+	if info, err := os.Stat(repoPath); err == nil && info.IsDir() {
+		lockErr := withManagedSourceReadLock(summary.RepoSlug, repoAccessLockOwner{
+			Backend: "start-ui",
+			RunID:   sanitizePathToken(summary.RepoSlug),
+			Purpose: "repo-summary-scout-config",
+			Label:   "start-ui-repo-summary",
+		}, func() error {
+			for _, role := range supportedScoutRoleOrder {
+				spec := scoutRoleSpecFor(role)
+				summary.ScoutsByRole[spec.ConfigKey] = loadStartUIRepoScoutConfig(repoPath, role)
+			}
+			return nil
+		})
+		if lockErr != nil && !repoAccessLockBusy(lockErr) {
+			return lockErr
+		}
+	} else {
+		for _, role := range supportedScoutRoleOrder {
+			spec := scoutRoleSpecFor(role)
+			summary.ScoutsByRole[spec.ConfigKey] = loadStartUIRepoScoutConfig(repoPath, role)
+		}
 	}
 	summary.Scouts = startUIRepoScoutsCompatibility(summary.ScoutsByRole)
+	return nil
 }
 
 func loadStartUIRepoScoutConfig(repoPath string, role string) startUIRepoScoutConfig {
@@ -3656,31 +3683,34 @@ func mutateStartUIScoutItem(repoSlug string, itemID string, action string) (star
 			return startUIScoutItemsResponse{}, fmt.Errorf("local scout jobs no longer support queue-planned; use retry or dismiss")
 		}
 	}
-	state, statePath, err := readLocalScoutPickupState(repoPath)
-	if err != nil {
-		return startUIScoutItemsResponse{}, err
+	if _, _, readErr := readLocalScoutPickupStateWithReadLock(repoPath); readErr != nil {
+		return startUIScoutItemsResponse{}, readErr
 	}
 	switch action {
 	case "dismiss":
 		if selected.Status == "running" {
 			return startUIScoutItemsResponse{}, fmt.Errorf("running scout items cannot be dismissed")
 		}
-		state.Items[itemID] = localScoutPickupItem{
-			Status:     "dismissed",
-			Title:      selected.Title,
-			Artifact:   selected.ArtifactPath,
-			UpdatedAt:  ISOTimeNow(),
-			ProposalID: selected.ID,
-		}
-		if err := writeLocalScoutPickupState(statePath, state); err != nil {
+		if err := updateLocalScoutPickupState(repoPath, func(current *localScoutPickupState) error {
+			current.Items[itemID] = localScoutPickupItem{
+				Status:     "dismissed",
+				Title:      selected.Title,
+				Artifact:   selected.ArtifactPath,
+				UpdatedAt:  ISOTimeNow(),
+				ProposalID: selected.ID,
+			}
+			return nil
+		}); err != nil {
 			return startUIScoutItemsResponse{}, err
 		}
 	case "reset":
 		if selected.Status == "pending" || selected.Status == "external" {
 			return startUIScoutItemsResponse{}, fmt.Errorf("scout item %s is already pending", itemID)
 		}
-		delete(state.Items, itemID)
-		if err := writeLocalScoutPickupState(statePath, state); err != nil {
+		if err := updateLocalScoutPickupState(repoPath, func(current *localScoutPickupState) error {
+			delete(current.Items, itemID)
+			return nil
+		}); err != nil {
 			return startUIScoutItemsResponse{}, err
 		}
 	case "queue-planned":
@@ -3696,24 +3726,26 @@ func mutateStartUIScoutItem(repoSlug string, itemID string, action string) (star
 			return startUIScoutItemsResponse{}, fmt.Errorf("repo %s is configured with repo-mode disabled; update the repo config before queueing scout work", repoSlug)
 		}
 		priority := 3
-		_, plannedItem, err := createStartUIPlannedItem(repoSlug, startUIPlannedItemRequest{
-			Title:       startUIScoutPlannedItemTitle(*selected),
-			Description: startUIScoutPlannedItemDescription(*selected),
-			Priority:    &priority,
-			LaunchKind:  "local_work",
-		})
-		if err != nil {
-			return startUIScoutItemsResponse{}, err
-		}
-		state.Items[itemID] = localScoutPickupItem{
-			Status:        "in_progress",
-			Title:         selected.Title,
-			Artifact:      selected.ArtifactPath,
-			PlannedItemID: plannedItem.ID,
-			UpdatedAt:     ISOTimeNow(),
-			ProposalID:    selected.ID,
-		}
-		if err := writeLocalScoutPickupState(statePath, state); err != nil {
+		if err := updateLocalScoutPickupState(repoPath, func(current *localScoutPickupState) error {
+			_, plannedItem, err := createStartUIPlannedItem(repoSlug, startUIPlannedItemRequest{
+				Title:       startUIScoutPlannedItemTitle(*selected),
+				Description: startUIScoutPlannedItemDescription(*selected),
+				Priority:    &priority,
+				LaunchKind:  "local_work",
+			})
+			if err != nil {
+				return err
+			}
+			current.Items[itemID] = localScoutPickupItem{
+				Status:        "in_progress",
+				Title:         selected.Title,
+				Artifact:      selected.ArtifactPath,
+				PlannedItemID: plannedItem.ID,
+				UpdatedAt:     ISOTimeNow(),
+				ProposalID:    selected.ID,
+			}
+			return nil
+		}); err != nil {
 			return startUIScoutItemsResponse{}, err
 		}
 	default:

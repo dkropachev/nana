@@ -353,7 +353,15 @@ func (c *startRepoCoordinator) refreshRepoState() error {
 		return persistErr
 	}
 	if repoPath := strings.TrimSpace(githubManagedPaths(c.repoSlug).SourcePath); repoPath != "" {
-		if _, syncErr := syncStartWorkScoutJobsIntoState(repoPath, c.state); syncErr != nil {
+		if syncErr := withSourceReadLock(repoPath, repoAccessLockOwner{
+			Backend: "start-scheduler",
+			RunID:   sanitizePathToken(c.repoSlug),
+			Purpose: "sync-scout-jobs",
+			Label:   "start-sync-scout-jobs",
+		}, func() error {
+			_, err := syncStartWorkScoutJobsIntoState(repoPath, c.state)
+			return err
+		}); syncErr != nil {
 			return syncErr
 		}
 	}
@@ -1359,16 +1367,33 @@ func (c *startRepoCoordinator) completeRun() error {
 	return nil
 }
 
-func startRepoSupportedScoutRoles(repoSlug string) []string {
+func startRepoSupportedScoutRoles(repoSlug string) ([]string, error) {
 	sourcePath := githubManagedPaths(repoSlug).SourcePath
 	if info, err := os.Stat(sourcePath); err == nil && info.IsDir() {
-		return supportedScoutRoles(sourcePath)
+		roles := []string{}
+		if lockErr := withSourceReadLock(sourcePath, repoAccessLockOwner{
+			Backend: "start-scheduler",
+			RunID:   sanitizePathToken(repoSlug),
+			Purpose: "supported-scout-roles",
+			Label:   "start-supported-scout-roles",
+		}, func() error {
+			roles = supportedScoutRoles(sourcePath)
+			return nil
+		}); lockErr != nil {
+			return nil, lockErr
+		}
+		return roles, nil
 	}
 	repoPath, err := ensureImproveGithubCheckout(repoSlug)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return supportedScoutRoles(repoPath)
+	return supportedScoutRolesWithReadLock(repoPath, repoAccessLockOwner{
+		Backend: "start-scheduler",
+		RunID:   sanitizePathToken(repoSlug),
+		Purpose: "supported-scout-roles",
+		Label:   "start-supported-scout-roles",
+	})
 }
 
 func startRepoDueScoutRoles(repoSlug string, now time.Time) ([]string, error) {
@@ -1381,17 +1406,29 @@ func startRepoDueScoutRoles(repoSlug string, now time.Time) ([]string, error) {
 			return nil, checkoutErr
 		}
 	}
-	supported := supportedScoutRoles(repoPath)
-	due := make([]string, 0, len(supported))
-	for _, role := range supported {
-		policy := readScoutPolicy(repoPath, role)
-		decision, err := scoutScheduleDecisionForRole(repoPath, repoSlug, role, policy, now)
-		if err != nil {
-			return nil, err
+	due := []string{}
+	err := withSourceReadLock(repoPath, repoAccessLockOwner{
+		Backend: "start-scheduler",
+		RunID:   sanitizePathToken(repoSlug),
+		Purpose: "due-scout-roles",
+		Label:   "start-due-scout-roles",
+	}, func() error {
+		supported := supportedScoutRoles(repoPath)
+		due = make([]string, 0, len(supported))
+		for _, role := range supported {
+			policy := readScoutPolicy(repoPath, role)
+			decision, err := scoutScheduleDecisionForRole(repoPath, repoSlug, role, policy, now)
+			if err != nil {
+				return err
+			}
+			if decision.Due {
+				due = append(due, role)
+			}
 		}
-		if decision.Due {
-			due = append(due, role)
-		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return due, nil
 }

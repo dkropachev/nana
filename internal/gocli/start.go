@@ -42,6 +42,7 @@ Automation mode behavior:
   - service and implementation tasks all consume the shared worker budget
   - triages issues before implementation pickup and persists triage results locally
   - runs supported scouts from the managed source checkout when scout policies exist
+  - scout policy reads from managed source checkouts participate in the shared repo read/write lock model
   - forwards PRs when pr-forward is auto: fork creates upstream PRs; repo attempts merge
   - launches loopback UI services by default: REST API + assistant workspace
   - open the printed [start-ui] Web URL for the assistant workspace; see docs/start-ui.html
@@ -50,6 +51,7 @@ Automation mode behavior:
 Scout mode behavior:
   - detects scout support from repo policy files
   - runs improvement-scout, enhancement-scout, and/or ui-scout when their policies exist
+  - scout policy reads, artifact writes, and auto-mode source mutations participate in the shared repo lock model
   - local repos keep scout artifacts under .nana/improvements/, .nana/enhancements/, or .nana/ui-findings/
   - GitHub targets follow their scout policy issue_destination
 `
@@ -109,7 +111,10 @@ func Start(cwd string, args []string) error {
 	if err != nil {
 		return err
 	}
-	mode := startExecutionModeForArgs(cwd, cleanArgs)
+	mode, err := startExecutionModeForArgs(cwd, cleanArgs)
+	if err != nil {
+		return err
+	}
 	var runOnce func() error
 	if mode == startExecutionModeScout {
 		scoutOptions, err := parseScoutArgs(cleanArgs, ScoutStartHelp, "start")
@@ -152,18 +157,29 @@ func Start(cwd string, args []string) error {
 	return runStartLoop(runtime, runOnce)
 }
 
-func startExecutionModeForArgs(cwd string, args []string) startExecutionMode {
+func startExecutionModeForArgs(cwd string, args []string) (startExecutionMode, error) {
 	if startShouldRunScouts(cwd, args) {
-		return startExecutionModeScout
+		return startExecutionModeScout, nil
 	}
 	if len(args) == 0 {
-		if info, err := os.Stat(cwd); err == nil && info.IsDir() && len(supportedScoutRoles(cwd)) > 0 {
-			if repos, err := resolveStartRepos(""); err == nil && len(repos) == 0 {
-				return startExecutionModeScout
+		if info, err := os.Stat(cwd); err == nil && info.IsDir() {
+			roles, lockErr := supportedScoutRolesWithReadLock(cwd, repoAccessLockOwner{
+				Backend: "start",
+				RunID:   sanitizePathToken(filepath.Base(cwd)),
+				Purpose: "mode-detect",
+				Label:   "start-mode-detect",
+			})
+			if lockErr != nil {
+				return "", lockErr
+			}
+			if len(roles) > 0 {
+				if repos, err := resolveStartRepos(""); err == nil && len(repos) == 0 {
+					return startExecutionModeScout, nil
+				}
 			}
 		}
 	}
-	return startExecutionModeAutomation
+	return startExecutionModeAutomation, nil
 }
 
 func printStartModeBanner(mode startExecutionMode) {
@@ -272,7 +288,20 @@ func runStartRepoCycle(cwd string, repoSlug string, options startOptions) error 
 func startRepoHasScoutPolicies(repoSlug string) bool {
 	sourcePath := githubManagedPaths(repoSlug).SourcePath
 	if info, err := os.Stat(sourcePath); err == nil && info.IsDir() {
-		if len(supportedScoutRoles(sourcePath)) > 0 {
+		roles := []string{}
+		if lockErr := withSourceReadLock(sourcePath, repoAccessLockOwner{
+			Backend: "start",
+			RunID:   sanitizePathToken(repoSlug),
+			Purpose: "scout-policy-check",
+			Label:   "start-scout-policy-check",
+		}, func() error {
+			roles = supportedScoutRoles(sourcePath)
+			return nil
+		}); lockErr != nil {
+			fmt.Fprintf(os.Stdout, "[start] %s: scout policy check skipped: %v\n", repoSlug, lockErr)
+			return false
+		}
+		if len(roles) > 0 {
 			return true
 		}
 	}
@@ -281,7 +310,17 @@ func startRepoHasScoutPolicies(repoSlug string) bool {
 		fmt.Fprintf(os.Stdout, "[start] %s: scout policy check skipped: %v\n", repoSlug, checkoutErr)
 		return false
 	}
-	return len(supportedScoutRoles(repoPath)) > 0
+	roles, lockErr := supportedScoutRolesWithReadLock(repoPath, repoAccessLockOwner{
+		Backend: "start",
+		RunID:   sanitizePathToken(repoSlug),
+		Purpose: "scout-policy-check",
+		Label:   "start-scout-policy-check",
+	})
+	if lockErr != nil {
+		fmt.Fprintf(os.Stdout, "[start] %s: scout policy check skipped: %v\n", repoSlug, lockErr)
+		return false
+	}
+	return len(roles) > 0
 }
 
 func startShouldRunScouts(cwd string, args []string) bool {

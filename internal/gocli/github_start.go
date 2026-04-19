@@ -31,11 +31,24 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 		return githubWorkManifest{}, err
 	}
 	now := time.Now().UTC()
+	runID := buildGithubRunID(now)
 	paths := githubManagedPaths(options.Target.repoSlug)
 	repoMeta, err := ensureGithubManagedRepoMetadata(paths, target, now)
 	if err != nil {
 		return githubWorkManifest{}, err
 	}
+	sourceSetupLock, err := acquireManagedSourceWriteLock(options.Target.repoSlug, repoAccessLockOwner{
+		Backend: "github-work",
+		RunID:   runID,
+		Purpose: "source-setup",
+		Label:   "github-work-source-setup",
+	})
+	if err != nil {
+		return githubWorkManifest{}, err
+	}
+	defer func() {
+		_ = sourceSetupLock.Release()
+	}()
 	if err := ensureGithubSourceClone(paths, repoMeta); err != nil {
 		return githubWorkManifest{}, err
 	}
@@ -112,7 +125,6 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 	if roleLayout == "" {
 		roleLayout = "split"
 	}
-	runID := buildGithubRunID(now)
 	sandboxID := buildGithubSandboxID(options.Target, runID)
 	sandboxPath := filepath.Join(paths.RepoRoot, "sandboxes", sandboxID)
 	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
@@ -120,6 +132,9 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 		return githubWorkManifest{}, err
 	}
 	if err := cloneGithubSourceToSandbox(paths.SourcePath, sandboxRepoPath); err != nil {
+		return githubWorkManifest{}, err
+	}
+	if err := sourceSetupLock.Release(); err != nil {
 		return githubWorkManifest{}, err
 	}
 	verificationPlan := detectGithubVerificationPlan(sandboxRepoPath)
@@ -209,6 +224,19 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 	finalPrompt := buildGithubStartInstructions(manifest) + "\n\nTask:\n" + prompt
 	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(options.CodexArgs)
 	finalPrompt = prefixCodexFastPrompt(finalPrompt, fastMode)
+	transport := promptTransportForSize(finalPrompt, structuredPromptStdinThreshold)
+	sandboxLock, err := acquireSandboxWriteLock(manifest.SandboxRepoPath, repoAccessLockOwner{
+		Backend: "github-work",
+		RunID:   manifest.RunID,
+		Purpose: "leader-execution",
+		Label:   "github-work-leader",
+	})
+	if err != nil {
+		return githubWorkManifest{}, err
+	}
+	defer func() {
+		_ = sandboxLock.Release()
+	}()
 	result, runErr := runManagedCodexPrompt(codexManagedPromptOptions{
 		CommandDir:       sandboxPath,
 		InstructionsRoot: sandboxPath,
@@ -216,12 +244,56 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 		FreshArgsPrefix:  []string{"exec", "-C", sandboxRepoPath},
 		CommonArgs:       normalizedCodexArgs,
 		Prompt:           finalPrompt,
-		PromptTransport:  codexPromptTransportArg,
+		PromptTransport:  transport,
 		CheckpointPath:   filepath.Join(runDir, "leader-checkpoint.json"),
 		StepKey:          "github-leader",
 		ResumeStrategy:   codexResumeConversation,
 		Env:              append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, apiBaseURL), "NANA_PROJECT_AGENTS_ROOT="+sandboxRepoPath),
+		RateLimitPolicy:  codexRateLimitPolicyDefault(options.RateLimitPolicy),
+		OnPause: func(info codexRateLimitPauseInfo) {
+			manifest.ExecutionStatus = "paused"
+			manifest.PauseReason = strings.TrimSpace(info.Reason)
+			manifest.PauseUntil = strings.TrimSpace(info.RetryAfter)
+			manifest.PausedAt = ISOTimeNow()
+			manifest.LastError = codexPauseInfoMessage(info)
+			manifest.UpdatedAt = manifest.PausedAt
+			_ = writeGithubJSON(manifestPath, manifest)
+			_ = indexGithubWorkRunManifest(manifestPath, manifest)
+		},
+		OnResume: func(info codexRateLimitPauseInfo) {
+			manifest.ExecutionStatus = "running"
+			manifest.PauseReason = ""
+			manifest.PauseUntil = ""
+			manifest.PausedAt = ""
+			manifest.LastError = ""
+			manifest.UpdatedAt = ISOTimeNow()
+			_ = writeGithubJSON(manifestPath, manifest)
+			_ = indexGithubWorkRunManifest(manifestPath, manifest)
+		},
 	})
+	manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if pauseErr, ok := isCodexRateLimitPauseError(runErr); ok {
+		manifest.ExecutionStatus = "paused"
+		manifest.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
+		manifest.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+		manifest.PausedAt = manifest.UpdatedAt
+		manifest.LastError = codexPauseInfoMessage(pauseErr.Info)
+	} else if runErr != nil {
+		manifest.ExecutionStatus = "failed"
+		manifest.LastError = runErr.Error()
+	} else {
+		manifest.ExecutionStatus = "completed"
+		manifest.PauseReason = ""
+		manifest.PauseUntil = ""
+		manifest.PausedAt = ""
+		manifest.LastError = ""
+	}
+	if err := writeGithubJSON(manifestPath, manifest); err != nil {
+		return githubWorkManifest{}, err
+	}
+	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+		return githubWorkManifest{}, err
+	}
 
 	fmt.Fprintf(os.Stdout, "[github] Starting run %s for %s %s #%d\n", runID, manifest.RepoSlug, manifest.TargetKind, manifest.TargetNumber)
 	fmt.Fprintf(os.Stdout, "[github] Managed repo root: %s\n", paths.RepoRoot)

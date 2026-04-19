@@ -74,6 +74,14 @@ Local-backed runs keep this loop:
 7. expanded final quality/security/performance review gate
 8. source-checkout apply and local commit
 
+Repo lock behavior:
+
+- source and sandbox checkouts use heartbeat-backed repo locks
+- multiple readers may share the same checkout
+- one writer excludes all readers and other writers on that checkout
+- stale lock holders are recovered automatically after the heartbeat timeout
+- separate sandboxes can still run concurrently because locks are checkout-path based, not issue-identity based
+
 Validation behavior:
 
 - AI grouping retries up to 3 times if the output is malformed or incomplete
@@ -82,8 +90,8 @@ Validation behavior:
 - if a validator group still fails after retries, the run fails and stays resumable
 - `resume` will reuse completed grouping/validator work and rerun only incomplete or failed validator groups for current-format runs
 - when a Codex-backed step fails after the session transcript exists, `resume` reuses that Codex session for the failed step instead of restarting it cold
-- if final source commit is blocked because the source checkout is dirty or no longer at the run baseline, the run remains blocked and `resume` retries the final commit after the checkout is restored
-- if source apply succeeds but commit creation fails, the source checkout is left with staged changes and the run stays blocked for manual recovery
+- if final source commit is blocked because the source checkout is dirty or no longer at the run baseline, the run remains blocked until `resolve` refreshes the source checkout and retries final apply
+- if source apply succeeds but commit creation or push fails, the source checkout remains blocked until `resolve` retries the pending commit/push path
 
 Final commit recovery:
 
@@ -105,6 +113,7 @@ GitHub-backed runs use the same shared runtime home, plus GitHub-specific wrappe
 - leader `resume` / `sync` reruns reuse the stored leader Codex session when one is available
 - `lane-exec` reruns reuse the stored session for that lane alias when one is available
 - `nana work status` and `nana work explain` surface publication state/detail/error for published-PR runs
+- `nana work status --json` includes `lock_state` for the managed source checkout and sandbox checkout when available
 - reviewer feedback refresh: `nana work sync`
 - isolated lane execution: `nana work lane-exec`
 - verification artifact refresh: `nana work verify-refresh`
@@ -124,6 +133,7 @@ Local repo behavior:
 
 - scout artifacts are saved under `.nana/improvements/<run-id>/`, `.nana/enhancements/<run-id>/`, or `.nana/ui-findings/<run-id>/`
 - direct scout runs support `--resume <run-id>` and `--last` to continue an interrupted scout in the same artifact directory and scoped Codex session
+- direct scout policy reads, repo-local scout artifact writes, and auto-mode source mutations participate in the same repo lock model as other work surfaces
 - auto-mode local start picks up one pending discovered item for local implementation per cycle
 - no GitHub APIs are called
 
@@ -172,7 +182,7 @@ nana repo explain owner/repo
 
 `repo-mode` controls how Nana works with the repository: `disabled` keeps it onboarded for observation only and blocks work launch, `local` keeps changes on a local branch and is the default, `fork` pushes implementation work to your fork, and `repo` pushes implementation work to the target repo. For repos with development enabled, `issue-pick` controls automatic issue selection with `manual`, `label`, or `auto`; label mode picks issues with the single opt-in label `nana`, and also picks Nana-generated scout proposal issues labeled `improvement-scout`, `enhancement-scout`, or `ui-scout`. `pr-forward` controls what happens after a PR exists: `approve` waits for approval, while `auto` goes forward automatically. In `fork` mode, going forward creates the matching PR on the target repo. In `repo` mode, going forward means merging the PR.
 
-A `nana start` automation run scans `~/.nana/work/repos`, skips repos where `repo-mode` is `disabled` or `local`, or where `issue-pick` is `manual`, mirrors eligible issues, triages them locally before implementation pickup, and schedules work through one shared worker queue across all selected repos. `--parallel` now limits total workers across that shared queue, `--per-repo-workers` is accepted as a deprecated alias for `--parallel`, and the ten-open-PR cap remains per repo for PR-producing implementation work. Nana only auto-triages `P1` through `P5`; manual `P0` labels always sort first and stay user-controlled. Service tasks such as scout runs, issue-sync, triage, planned launches, and implementation reconciliation are persisted in start state, carry explicit dependencies, retry conservatively on transient failures, and previously running service tasks are requeued on restart. Scout runs are scheduled through the repo service queue, feed an issue-sync pass, and scout-created proposal issues can be mirrored, triaged, and become eligible for implementation in the same cycle. Bare `nana start` repeats forever with a one-minute target cadence between cycle starts; use `--once` for one pass, `--cycles <n>` for a bounded run, or `--interval <duration>` to change that target cadence. Reconcile refreshes published-PR CI state live, treats repos with no CI as green, defers true pending publication until the next outer cycle, and surfaces GitHub CI API failures as explicit blocked publication errors. State is persisted under `~/.nana/work/repos/<owner>/<repo>/start-state.json`. The default assistant workspace caches its overview snapshot and refreshes it only after API mutations or detected start-state/work-database/HUD dependency changes, avoiding a full filesystem and SQLite rebuild on every live-events tick.
+A `nana start` automation run scans `~/.nana/work/repos`, skips repos where `repo-mode` is `disabled` or `local`, or where `issue-pick` is `manual`, mirrors eligible issues, triages them locally before implementation pickup, and schedules work through one shared worker queue across all selected repos. `--parallel` now limits total workers across that shared queue, `--per-repo-workers` is accepted as a deprecated alias for `--parallel`, and the ten-open-PR cap remains per repo for PR-producing implementation work. Nana only auto-triages `P1` through `P5`; manual `P0` labels always sort first and stay user-controlled. Service tasks such as scout runs, issue-sync, triage, planned launches, and implementation reconciliation are persisted in start state, carry explicit dependencies, retry conservatively on transient failures, and previously running service tasks are requeued on restart. Scout runs are scheduled through the repo service queue, feed an issue-sync pass, and scout-created proposal issues can be mirrored, triaged, and become eligible for implementation in the same cycle. Managed-source scout policy reads participate in the same checkout read/write lock model as other work surfaces, so active writers can temporarily block automation-side reads. Bare `nana start` repeats forever with a one-minute target cadence between cycle starts; use `--once` for one pass, `--cycles <n>` for a bounded run, or `--interval <duration>` to change that target cadence. Reconcile refreshes published-PR CI state live, treats repos with no CI as green, defers true pending publication until the next outer cycle, and surfaces GitHub CI API failures as explicit blocked publication errors. State is persisted under `~/.nana/work/repos/<owner>/<repo>/start-state.json`. The default assistant workspace caches its overview snapshot and refreshes it only after API mutations or detected start-state/work-database/HUD dependency changes, avoiding a full filesystem and SQLite rebuild on every live-events tick.
 
 
 ## Troubleshooting
@@ -185,3 +195,5 @@ Common failures:
 - `source checkout has local changes`
 - `source checkout HEAD changed since work started`
 - `source checkout contains staged final-apply changes, but commit failed`
+- `repo read lock busy`
+- `repo write lock busy`

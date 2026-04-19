@@ -77,10 +77,6 @@ func reviewGithubPullRequest(options githubReviewExecutionOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := ensureGithubSourceClone(paths, repoMeta); err != nil {
-		return err
-	}
-
 	reviewRoot := filepath.Join(paths.RepoRoot, "reviews", fmt.Sprintf("pr-%d", options.Target.number))
 	activePath := filepath.Join(reviewRoot, "active.json")
 	runsDir := filepath.Join(reviewRoot, "runs")
@@ -93,14 +89,44 @@ func reviewGithubPullRequest(options githubReviewExecutionOptions) error {
 	} else {
 		runID = fmt.Sprintf("gr-%d", now.UnixNano())
 	}
+	sourceLock, err := acquireManagedSourceWriteLock(options.Target.repoSlug, repoAccessLockOwner{
+		Backend: "github-review",
+		RunID:   runID,
+		Purpose: "source-setup",
+		Label:   "github-review-source",
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = sourceLock.Release()
+	}()
+	if err := ensureGithubSourceClone(paths, repoMeta); err != nil {
+		return err
+	}
 	runDir := filepath.Join(runsDir, runID)
 	repoPath := filepath.Join(runDir, "repo")
 	if err := cloneGithubSourceToSandbox(paths.SourcePath, repoPath); err != nil {
 		return err
 	}
+	if err := sourceLock.Release(); err != nil {
+		return err
+	}
 	if err := githubRunGit(repoPath, "fetch", "--all"); err != nil {
 		return err
 	}
+	sandboxLock, err := acquireSandboxReadLock(repoPath, repoAccessLockOwner{
+		Backend: "github-review",
+		RunID:   runID,
+		Purpose: "review-execution",
+		Label:   "github-review-sandbox",
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = sandboxLock.Release()
+	}()
 	defaultBranchSHA, _ := githubGitOutput(repoPath, "rev-parse", "origin/"+repoMeta.DefaultBranch)
 	defaultBranchSHA = strings.TrimSpace(defaultBranchSHA)
 	manifest := githubPullReviewManifest{

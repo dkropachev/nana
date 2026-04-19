@@ -69,6 +69,18 @@ func executeGithubPublisherLane(runID string, useLast bool) error {
 	if strings.TrimSpace(manifest.SandboxRepoPath) == "" {
 		return fmt.Errorf("run %s is missing sandbox repo path", manifest.RunID)
 	}
+	sandboxLock, err := acquireSandboxWriteLock(manifest.SandboxRepoPath, repoAccessLockOwner{
+		Backend: "github-publisher",
+		RunID:   manifest.RunID,
+		Purpose: "publisher",
+		Label:   "github-publisher",
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = sandboxLock.Release()
+	}()
 	if manifest.Policy != nil {
 		if !manifest.Policy.AllowedActions.Commit {
 			return fmt.Errorf("publication blocked by policy: commit action is disabled")

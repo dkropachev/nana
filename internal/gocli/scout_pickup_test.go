@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunLocalScoutDiscoveredItemsPicksOnePendingProposal(t *testing.T) {
@@ -119,6 +120,45 @@ func TestRunLocalScoutDiscoveredItemsMarksFailureWithoutRetry(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Fatalf("failed proposal should not be retried automatically, attempts=%d", attempts)
+	}
+}
+
+func TestRunLocalScoutDiscoveredItemsBlocksWhenSourceReadLockHeld(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+	writeScoutPickupFixture(t, repo, improvementScoutRole, "Improve help text", "Make help clearer")
+
+	lock, err := acquireSourceReadLock(repo, repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "scout-pickup-reader",
+		Purpose: "inspect",
+		Label:   "scout-pickup-reader",
+	})
+	if err != nil {
+		t.Fatalf("acquire source read lock: %v", err)
+	}
+	defer func() { _ = lock.Release() }()
+
+	picked := true
+	output, err := captureStdout(t, func() error {
+		var runErr error
+		picked, runErr = runLocalScoutDiscoveredItems(repo, nil)
+		return runErr
+	})
+	if err == nil || !strings.Contains(err.Error(), "repo write lock busy") {
+		t.Fatalf("expected repo write lock busy, got %v output=%q", err, output)
+	}
+	if picked {
+		t.Fatalf("expected pickup to fail before claiming work")
+	}
+	_ = lock.Release()
+	state, _, stateErr := readLocalScoutPickupState(repo)
+	if stateErr != nil {
+		t.Fatalf("read pickup state: %v", stateErr)
+	}
+	if len(state.Items) != 0 {
+		t.Fatalf("expected no pickup state to be written on lock failure, got %#v", state.Items)
 	}
 }
 

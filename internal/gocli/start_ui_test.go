@@ -344,6 +344,60 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 	}
 }
 
+func TestMutateStartUIScoutItemBlocksWhenPickupStateWriteIsLocked(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	repo := createLocalWorkRepoAt(t, sourcePath)
+	writeScoutPickupFixture(t, repo, improvementScoutRole, "Improve help text", "Make help clearer")
+	if err := writeGithubJSON(filepath.Join(repo, ".nana", "improvements", "improve-test", "policy.json"), improvementPolicy{
+		Version:          1,
+		IssueDestination: improvementDestinationFork,
+		ForkRepo:         "me/widget",
+		Labels:           []string{"improvement"},
+	}); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+
+	items, err := listStartUIScoutItems(repoSlug)
+	if err != nil {
+		t.Fatalf("listStartUIScoutItems: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one scout item, got %+v", items)
+	}
+	itemID := items[0].ID
+
+	lock, err := acquireSourceReadLock(sourcePath, repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "start-ui-pickup-reader",
+		Purpose: "inspect",
+		Label:   "start-ui-pickup-reader",
+	})
+	if err != nil {
+		t.Fatalf("acquire source read lock: %v", err)
+	}
+	defer func() { _ = lock.Release() }()
+
+	_, err = mutateStartUIScoutItem(repoSlug, itemID, "dismiss")
+	if err == nil || !strings.Contains(err.Error(), "repo write lock busy") {
+		t.Fatalf("expected repo write lock busy, got %v", err)
+	}
+
+	_ = lock.Release()
+	state, _, err := readLocalScoutPickupState(sourcePath)
+	if err != nil {
+		t.Fatalf("read pickup state: %v", err)
+	}
+	if len(state.Items) != 0 {
+		t.Fatalf("expected pickup state to remain unchanged, got %#v", state.Items)
+	}
+}
+
 func TestStartUIAPIUsage(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -2435,6 +2489,45 @@ func TestListStartUIScoutItemsMarksDonePlannedScoutItemsCompleted(t *testing.T) 
 	}
 	if workState.ScoutJobs[proposalID].Status != startScoutJobCompleted {
 		t.Fatalf("expected scout job completion in state, got %+v", workState.ScoutJobs[proposalID])
+	}
+}
+
+func TestLoadStartUIRepoSummaryIncludesSourceLockStateWhenScoutConfigReadIsBlocked(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+	if err := writeGithubJSON(repoScoutPolicyPath(sourcePath, improvementScoutRole, false), scoutPolicy{
+		Version: 1,
+		Mode:    "manual",
+	}); err != nil {
+		t.Fatalf("write scout policy: %v", err)
+	}
+
+	lock, err := acquireManagedSourceWriteLock(repoSlug, repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "start-ui-source-writer",
+		Purpose: "source-setup",
+		Label:   "start-ui-source-writer",
+	})
+	if err != nil {
+		t.Fatalf("acquire managed source write lock: %v", err)
+	}
+	defer func() { _ = lock.Release() }()
+
+	summary, err := loadStartUIRepoSummary(repoSlug, false)
+	if err != nil {
+		t.Fatalf("loadStartUIRepoSummary: %v", err)
+	}
+	if summary.LockState == nil || summary.LockState.Writer == nil || !strings.Contains(summary.LockState.Writer.Label, "start-ui-source-writer") {
+		t.Fatalf("expected source lock state in summary, got %+v", summary.LockState)
+	}
+	if summary.ScoutsByRole["improvement"].Enabled {
+		t.Fatalf("expected scout config to fall back to defaults while source read is blocked, got %+v", summary.ScoutsByRole["improvement"])
 	}
 }
 

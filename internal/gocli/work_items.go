@@ -45,6 +45,7 @@ Behavior:
   - intake reads a normalized work-item JSON payload from stdin
   - sync-github ingests GitHub review requests and thread comments into the queue
   - run generates a draft review/reply/execution result without publishing by default
+  - reply drafting acquires a read lock on the selected repo checkout or linked sandbox before invoking Codex
   - rate-limited runs pause instead of failing and become runnable again after retry_after
   - submit publishes the current draft through GitHub or an adapter submit profile
   - drop records a terminal disposition; high-confidence ignore drafts are silenced
@@ -81,6 +82,16 @@ type workItem struct {
 	CreatedAt          string                 `json:"created_at"`
 	UpdatedAt          string                 `json:"updated_at"`
 }
+
+type workItemCodexTarget struct {
+	RepoPath string
+	LockKind string
+}
+
+const (
+	workItemCodexLockSource  = "source"
+	workItemCodexLockSandbox = "sandbox"
+)
 
 type workItemInput struct {
 	Source        string                 `json:"source"`
@@ -1004,12 +1015,12 @@ func executeGenericTaskWorkItem(cwd string, item workItem, attemptDir string, co
 }
 
 func draftWorkItemReply(cwd string, item workItem, attemptDir string, codexArgs []string, existing *workItemDraft, instruction string) (*workItemDraft, string, error) {
-	repoPath, err := workItemCodexRepoPath(cwd, item)
+	target, err := workItemCodexTargetForItem(cwd, item)
 	if err != nil {
 		return nil, "", err
 	}
 	prompt := buildWorkItemReplyPrompt(item, existing, instruction)
-	rawOutput, err := runWorkItemCodexPrompt(repoPath, attemptDir, prompt, codexArgs)
+	rawOutput, err := runWorkItemCodexPrompt(target, attemptDir, prompt, codexArgs)
 	if err != nil {
 		return nil, rawOutput, err
 	}
@@ -1095,68 +1106,88 @@ func parseWorkItemDraft(raw string) (*workItemDraft, error) {
 	return &draft, nil
 }
 
-func runWorkItemCodexPrompt(repoPath string, attemptDir string, prompt string, codexArgs []string) (string, error) {
-	codexHome, err := ensureScopedCodexHome(ResolveCodexHomeForLaunch(repoPath), filepath.Join(workItemsRoot(), "_codex-home", sanitizePathToken(filepath.Base(repoPath))))
-	if err != nil {
-		return "", err
+var workItemRunManagedPrompt = runManagedCodexPrompt
+
+func runWorkItemCodexPrompt(target workItemCodexTarget, attemptDir string, prompt string, codexArgs []string) (string, error) {
+	repoPath := strings.TrimSpace(target.RepoPath)
+	if repoPath == "" {
+		return "", fmt.Errorf("work item Codex repo path is required")
 	}
-	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(codexArgs)
-	prompt = prefixCodexFastPrompt(prompt, fastMode)
-	transport := promptTransportForSize(prompt, structuredPromptStdinThreshold)
-	result, err := runManagedCodexPrompt(codexManagedPromptOptions{
-		CommandDir:       repoPath,
-		InstructionsRoot: repoPath,
-		CodexHome:        codexHome,
-		FreshArgsPrefix:  []string{"exec", "-C", repoPath},
-		CommonArgs:       normalizedCodexArgs,
-		Prompt:           prompt,
-		PromptTransport:  transport,
-		CheckpointPath:   filepath.Join(attemptDir, "reply-checkpoint.json"),
-		StepKey:          "work-item-reply",
-		ResumeStrategy:   codexResumeSamePrompt,
-		Env: append(buildGithubCodexEnv(NotifyTempContract{}, codexHome, strings.TrimSpace(os.Getenv("GITHUB_API_URL"))),
-			"NANA_PROJECT_AGENTS_ROOT="+repoPath,
-		),
-		RateLimitPolicy: codexRateLimitPolicyReturnPause,
-	})
-	output := strings.TrimSpace(result.Stdout)
-	if err != nil {
-		if _, ok := isCodexRateLimitPauseError(err); ok {
-			return output, err
+	lockOwner := repoAccessLockOwner{
+		Backend: "work-item",
+		RunID:   sanitizePathToken(filepath.Base(attemptDir)),
+		Purpose: "draft-reply",
+		Label:   "work-item-draft",
+	}
+	lockWith := withSourceReadLock
+	if strings.TrimSpace(target.LockKind) == workItemCodexLockSandbox {
+		lockWith = withSandboxReadLock
+	}
+	output := ""
+	err := lockWith(repoPath, lockOwner, func() error {
+		codexHome, err := ensureScopedCodexHome(ResolveCodexHomeForLaunch(repoPath), filepath.Join(workItemsRoot(), "_codex-home", sanitizePathToken(filepath.Base(repoPath))))
+		if err != nil {
+			return err
 		}
-		return output, fmt.Errorf("%v\n%s", err, result.Stderr)
-	}
-	return output, nil
+		normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(codexArgs)
+		prompt = prefixCodexFastPrompt(prompt, fastMode)
+		transport := promptTransportForSize(prompt, structuredPromptStdinThreshold)
+		result, err := workItemRunManagedPrompt(codexManagedPromptOptions{
+			CommandDir:       repoPath,
+			InstructionsRoot: repoPath,
+			CodexHome:        codexHome,
+			FreshArgsPrefix:  []string{"exec", "-C", repoPath},
+			CommonArgs:       normalizedCodexArgs,
+			Prompt:           prompt,
+			PromptTransport:  transport,
+			CheckpointPath:   filepath.Join(attemptDir, "reply-checkpoint.json"),
+			StepKey:          "work-item-reply",
+			ResumeStrategy:   codexResumeSamePrompt,
+			Env: append(buildGithubCodexEnv(NotifyTempContract{}, codexHome, strings.TrimSpace(os.Getenv("GITHUB_API_URL"))),
+				"NANA_PROJECT_AGENTS_ROOT="+repoPath,
+			),
+			RateLimitPolicy: codexRateLimitPolicyReturnPause,
+		})
+		output = strings.TrimSpace(result.Stdout)
+		if err != nil {
+			if _, ok := isCodexRateLimitPauseError(err); ok {
+				return err
+			}
+			return fmt.Errorf("%v\n%s", err, result.Stderr)
+		}
+		return nil
+	})
+	return output, err
 }
 
-func workItemCodexRepoPath(cwd string, item workItem) (string, error) {
+func workItemCodexTargetForItem(cwd string, item workItem) (workItemCodexTarget, error) {
 	if strings.TrimSpace(item.LinkedRunID) != "" {
 		if strings.HasPrefix(item.LinkedRunID, "gh-") {
 			manifest, _, err := resolveGithubWorkRun(localWorkRunSelection{RunID: item.LinkedRunID})
 			if err == nil && strings.TrimSpace(manifest.SandboxRepoPath) != "" {
-				return manifest.SandboxRepoPath, nil
+				return workItemCodexTarget{RepoPath: manifest.SandboxRepoPath, LockKind: workItemCodexLockSandbox}, nil
 			}
 		}
 		if strings.HasPrefix(item.LinkedRunID, "lw-") {
 			manifest, _, err := resolveLocalWorkRun(cwd, localWorkRunSelection{RunID: item.LinkedRunID})
 			if err == nil && strings.TrimSpace(manifest.SandboxRepoPath) != "" {
-				return manifest.SandboxRepoPath, nil
+				return workItemCodexTarget{RepoPath: manifest.SandboxRepoPath, LockKind: workItemCodexLockSandbox}, nil
 			}
 		}
 	}
 	if strings.TrimSpace(item.RepoSlug) != "" {
 		repoPath := githubManagedPaths(item.RepoSlug).SourcePath
 		if info, err := os.Stat(repoPath); err == nil && info.IsDir() {
-			return repoPath, nil
+			return workItemCodexTarget{RepoPath: repoPath, LockKind: workItemCodexLockSource}, nil
 		}
 	}
 	if repoRoot := metadataString(item.Metadata, "repo_root"); repoRoot != "" {
-		return repoRoot, nil
+		return workItemCodexTarget{RepoPath: repoRoot, LockKind: workItemCodexLockSource}, nil
 	}
 	if cwd == "" {
 		cwd = "."
 	}
-	return cwd, nil
+	return workItemCodexTarget{RepoPath: cwd, LockKind: workItemCodexLockSource}, nil
 }
 
 func submitWorkItemByID(itemID string, actor string) (workItem, error) {

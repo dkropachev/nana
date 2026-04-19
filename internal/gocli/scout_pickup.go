@@ -1,6 +1,7 @@
 package gocli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,11 +46,13 @@ type localScoutDiscoveredItem struct {
 	ForkRepo        string
 }
 
+var errLocalScoutPickupAlreadyClaimed = errors.New("local scout pickup already claimed")
+
 func reconcileLocalScoutPickupPlannedItems(repoPath string, repoSlug string) (bool, error) {
 	if strings.TrimSpace(repoPath) == "" || strings.TrimSpace(repoSlug) == "" {
 		return false, nil
 	}
-	state, statePath, err := readLocalScoutPickupState(repoPath)
+	state, _, err := readLocalScoutPickupStateWithReadLock(repoPath)
 	if err != nil {
 		return false, err
 	}
@@ -101,7 +104,13 @@ func reconcileLocalScoutPickupPlannedItems(repoPath string, repoSlug string) (bo
 	if !updated {
 		return false, nil
 	}
-	return true, writeLocalScoutPickupState(statePath, state)
+	if err := updateLocalScoutPickupState(repoPath, func(current *localScoutPickupState) error {
+		current.Items = state.Items
+		return nil
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 var startRunLocalScoutWork = func(repoPath string, task string, codexArgs []string) error {
@@ -135,7 +144,7 @@ func runLocalScoutDiscoveredItems(repoPath string, codexArgs []string) (bool, er
 }
 
 func runLocalScoutDiscoveredItemsLegacy(repoPath string, codexArgs []string) (bool, error) {
-	items, err := listLocalScoutDiscoveredItems(repoPath)
+	items, err := listLocalScoutDiscoveredItemsWithReadLock(repoPath)
 	if err != nil {
 		return false, err
 	}
@@ -143,7 +152,7 @@ func runLocalScoutDiscoveredItemsLegacy(repoPath string, codexArgs []string) (bo
 		fmt.Fprintln(os.Stdout, "[start] Local discovered items: none found.")
 		return false, nil
 	}
-	state, statePath, err := readLocalScoutPickupState(repoPath)
+	state, _, err := readLocalScoutPickupStateWithReadLock(repoPath)
 	if err != nil {
 		return false, err
 	}
@@ -160,40 +169,66 @@ func runLocalScoutDiscoveredItemsLegacy(repoPath string, codexArgs []string) (bo
 	}
 	item := pending[0]
 	fmt.Fprintf(os.Stdout, "[start] Local discovered items: %d pending; working on: %s\n", len(pending), item.Title)
-	state.Items[item.ID] = localScoutPickupItem{
-		Status:     "running",
-		Title:      item.Title,
-		Artifact:   item.Artifact,
-		UpdatedAt:  ISOTimeNow(),
-		ProposalID: item.ID,
-	}
-	if err := writeLocalScoutPickupState(statePath, state); err != nil {
+	if err := updateLocalScoutPickupState(repoPath, func(current *localScoutPickupState) error {
+		if _, ok := current.Items[item.ID]; ok {
+			return errLocalScoutPickupAlreadyClaimed
+		}
+		current.Items[item.ID] = localScoutPickupItem{
+			Status:     "running",
+			Title:      item.Title,
+			Artifact:   item.Artifact,
+			UpdatedAt:  ISOTimeNow(),
+			ProposalID: item.ID,
+		}
+		return nil
+	}); err != nil {
+		if errors.Is(err, errLocalScoutPickupAlreadyClaimed) {
+			return false, nil
+		}
 		return false, err
 	}
 	if err := startRunLocalScoutWork(repoPath, formatLocalScoutWorkTask(item), codexArgs); err != nil {
-		record := state.Items[item.ID]
-		record.Status = "failed"
-		record.Error = err.Error()
-		record.UpdatedAt = ISOTimeNow()
-		state.Items[item.ID] = record
-		if writeErr := writeLocalScoutPickupState(statePath, state); writeErr != nil {
-			return true, writeErr
+		updateErr := updateLocalScoutPickupState(repoPath, func(current *localScoutPickupState) error {
+			record := current.Items[item.ID]
+			record.Status = "failed"
+			record.Error = err.Error()
+			record.UpdatedAt = ISOTimeNow()
+			current.Items[item.ID] = record
+			return nil
+		})
+		if updateErr != nil {
+			return true, updateErr
 		}
 		fmt.Fprintf(os.Stdout, "[start] Local discovered item failed: %s: %v\n", item.Title, err)
 		return true, nil
 	}
-	record := state.Items[item.ID]
-	record.Status = "completed"
-	record.UpdatedAt = ISOTimeNow()
-	if manifest, _, err := resolveLocalWorkRun(repoPath, localWorkRunSelection{UseLast: true, RepoPath: repoPath}); err == nil {
-		record.RunID = manifest.RunID
-	}
-	state.Items[item.ID] = record
-	if err := writeLocalScoutPickupState(statePath, state); err != nil {
+	if err := updateLocalScoutPickupState(repoPath, func(current *localScoutPickupState) error {
+		record := current.Items[item.ID]
+		record.Status = "completed"
+		record.UpdatedAt = ISOTimeNow()
+		if manifest, _, err := resolveLocalWorkRun(repoPath, localWorkRunSelection{UseLast: true, RepoPath: repoPath}); err == nil {
+			record.RunID = manifest.RunID
+		}
+		current.Items[item.ID] = record
+		return nil
+	}); err != nil {
 		return true, err
 	}
 	fmt.Fprintf(os.Stdout, "[start] Local discovered item completed: %s\n", item.Title)
 	return true, nil
+}
+
+func listLocalScoutDiscoveredItemsWithReadLock(repoPath string) ([]localScoutDiscoveredItem, error) {
+	items := []localScoutDiscoveredItem{}
+	err := withScoutPickupStateReadLock(repoPath, func() error {
+		var innerErr error
+		items, innerErr = listLocalScoutDiscoveredItems(repoPath)
+		return innerErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 func listLocalScoutDiscoveredItems(repoPath string) ([]localScoutDiscoveredItem, error) {
@@ -360,12 +395,59 @@ func readLocalScoutPickupState(repoPath string) (localScoutPickupState, string, 
 	return state, path, nil
 }
 
+func readLocalScoutPickupStateWithReadLock(repoPath string) (localScoutPickupState, string, error) {
+	var (
+		state localScoutPickupState
+		path  string
+		err   error
+	)
+	lockErr := withScoutPickupStateReadLock(repoPath, func() error {
+		state, path, err = readLocalScoutPickupState(repoPath)
+		return err
+	})
+	if lockErr != nil {
+		return localScoutPickupState{}, "", lockErr
+	}
+	return state, path, nil
+}
+
 func writeLocalScoutPickupState(path string, state localScoutPickupState) error {
 	if state.Items == nil {
 		state.Items = map[string]localScoutPickupItem{}
 	}
 	state.Version = 1
 	return writeGithubJSON(path, state)
+}
+
+func updateLocalScoutPickupState(repoPath string, update func(*localScoutPickupState) error) error {
+	return withScoutPickupStateWriteLock(repoPath, func() error {
+		state, path, err := readLocalScoutPickupState(repoPath)
+		if err != nil {
+			return err
+		}
+		if err := update(&state); err != nil {
+			return err
+		}
+		return writeLocalScoutPickupState(path, state)
+	})
+}
+
+func withScoutPickupStateReadLock(repoPath string, fn func() error) error {
+	return withSourceReadLock(repoPath, repoAccessLockOwner{
+		Backend: "scout-pickup",
+		RunID:   sanitizePathToken(filepath.Base(repoPath)),
+		Purpose: "pickup-state-read",
+		Label:   "scout-pickup-state",
+	}, fn)
+}
+
+func withScoutPickupStateWriteLock(repoPath string, fn func() error) error {
+	return withSourceWriteLock(repoPath, repoAccessLockOwner{
+		Backend: "scout-pickup",
+		RunID:   sanitizePathToken(filepath.Base(repoPath)),
+		Purpose: "pickup-state-write",
+		Label:   "scout-pickup-state",
+	}, fn)
 }
 
 func localScoutPickupStatePath(repoPath string) (string, error) {

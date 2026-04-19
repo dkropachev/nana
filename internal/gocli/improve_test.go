@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestImprovementPolicyPrecedenceAndLabels(t *testing.T) {
@@ -147,6 +148,143 @@ func TestScoutLocalFromFileIgnoresLegacyMaxIssuesPolicy(t *testing.T) {
 	}
 	if strings.Contains(string(policyArtifact), "max_issues") {
 		t.Fatalf("expected legacy max_issues to be dropped from artifacts, got %s", policyArtifact)
+	}
+}
+
+func TestRunScoutStartBlocksWhenSourceWriteLockHeld(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+
+	repo := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir .nana: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".nana", "improvement-policy.json"), []byte(`{"version":1}`), 0o644); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+
+	lock, err := acquireSourceWriteLock(repo, repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "scout-start-writer",
+		Purpose: "source-setup",
+		Label:   "scout-start-writer",
+	})
+	if err != nil {
+		t.Fatalf("acquire source write lock: %v", err)
+	}
+	defer func() { _ = lock.Release() }()
+
+	err = runScoutStart(repo, ImproveOptions{})
+	if err == nil || !strings.Contains(err.Error(), "repo read lock busy") {
+		t.Fatalf("expected repo read lock busy, got %v", err)
+	}
+}
+
+func TestRunScoutStartBlocksAutoModeWriteWhenReaderHeld(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+
+	repo := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir .nana: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".nana", "improvement-policy.json"), []byte(`{"version":1,"mode":"auto"}`), 0o644); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	inputPath := filepath.Join(home, "proposals.json")
+	if err := os.WriteFile(inputPath, []byte(scoutProposalJSON(1, "docs")), 0o644); err != nil {
+		t.Fatalf("write proposals: %v", err)
+	}
+
+	lock, err := acquireSourceReadLock(repo, repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "scout-start-reader",
+		Purpose: "inspect",
+		Label:   "scout-start-reader",
+	})
+	if err != nil {
+		t.Fatalf("acquire source read lock: %v", err)
+	}
+	defer func() { _ = lock.Release() }()
+
+	err = runScoutStart(repo, ImproveOptions{FromFile: inputPath})
+	if err == nil || !strings.Contains(err.Error(), "repo write lock busy") {
+		t.Fatalf("expected repo write lock busy, got %v", err)
+	}
+}
+
+func TestWriteLocalScoutArtifactsBlocksWhenSourceReadLockHeld(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+
+	repo := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	dir := filepath.Join(repo, ".nana", scoutArtifactRoot(improvementScoutRole), "improve-test")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	lock, err := acquireSourceReadLock(repo, repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "scout-artifact-reader",
+		Purpose: "inspect",
+		Label:   "scout-artifact-reader",
+	})
+	if err != nil {
+		t.Fatalf("acquire source read lock: %v", err)
+	}
+	defer func() { _ = lock.Release() }()
+
+	_, err = writeLocalScoutArtifacts(dir, scoutReport{
+		Version:     1,
+		Repo:        filepath.Base(repo),
+		GeneratedAt: ISOTimeNow(),
+		Proposals: []scoutFinding{{
+			Title:   "Improve help text",
+			Summary: "Make help clearer",
+		}},
+	}, scoutPolicy{Version: 1, IssueDestination: improvementDestinationLocal}, []byte("raw"), improvementScoutRole, nil)
+	if err == nil || !strings.Contains(err.Error(), "repo write lock busy") {
+		t.Fatalf("expected repo write lock busy, got %v", err)
+	}
+}
+
+func TestPersistScoutExecutionArtifactsBlocksWhenSourceReadLockHeld(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+
+	repo := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	artifactDir := filepath.Join(repo, ".nana", scoutArtifactRoot(uiScoutRole), "ui-scout-test")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	staging := filepath.Join(home, "staging")
+	if err := os.MkdirAll(staging, 0o755); err != nil {
+		t.Fatalf("mkdir staging dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "settings.png"), []byte("evidence"), 0o644); err != nil {
+		t.Fatalf("write staged file: %v", err)
+	}
+	lock, err := acquireSourceReadLock(repo, repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "scout-persist-reader",
+		Purpose: "inspect",
+		Label:   "scout-persist-reader",
+	})
+	if err != nil {
+		t.Fatalf("acquire source read lock: %v", err)
+	}
+	defer func() { _ = lock.Release() }()
+
+	err = persistScoutExecutionArtifacts(scoutExecutionRuntime{ArtifactDir: staging}, repo, artifactDir)
+	if err == nil || !strings.Contains(err.Error(), "repo write lock busy") {
+		t.Fatalf("expected repo write lock busy, got %v", err)
 	}
 }
 

@@ -132,16 +132,17 @@ Rules:
 - Keep reason concise and concrete.`
 
 type ImproveOptions struct {
-	Target       string
-	RepoPath     string
-	Focus        []string
-	FromFile     string
-	ResumeRunID  string
-	ResumeLast   bool
-	DryRun       bool
-	LocalOnly    bool
-	SessionLimit int
-	CodexArgs    []string
+	Target          string
+	RepoPath        string
+	Focus           []string
+	FromFile        string
+	ResumeRunID     string
+	ResumeLast      bool
+	DryRun          bool
+	LocalOnly       bool
+	SessionLimit    int
+	CodexArgs       []string
+	RateLimitPolicy codexRateLimitPolicy
 }
 
 type uiScoutPreflight struct {
@@ -171,6 +172,8 @@ type scoutRunManifest struct {
 	UpdatedAt    string   `json:"updated_at"`
 	CompletedAt  string   `json:"completed_at,omitempty"`
 	LastError    string   `json:"last_error,omitempty"`
+	PauseReason  string   `json:"pause_reason,omitempty"`
+	PauseUntil   string   `json:"pause_until,omitempty"`
 }
 
 func Improve(cwd string, args []string) error {
@@ -508,7 +511,15 @@ func runScout(cwd string, options ImproveOptions, role string) (err error) {
 		return err
 	}
 
-	policy := readScoutPolicy(repoPath, role)
+	policy, err := readScoutPolicyWithReadLock(repoPath, role, repoAccessLockOwner{
+		Backend: "scout",
+		RunID:   sanitizePathToken(manifest.RunID),
+		Purpose: "policy-read",
+		Label:   "scout-policy-read",
+	})
+	if err != nil {
+		return err
+	}
 	if !githubTarget || options.LocalOnly {
 		policy.IssueDestination = improvementDestinationLocal
 	}
@@ -518,13 +529,23 @@ func runScout(cwd string, options ImproveOptions, role string) (err error) {
 	policy.Labels = normalizeScoutLabels(policy.Labels, role)
 	defer func() {
 		manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		if err != nil {
+		if pauseErr, ok := isCodexRateLimitPauseError(err); ok {
+			manifest.Status = "paused"
+			manifest.LastError = codexPauseInfoMessage(pauseErr.Info)
+			manifest.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
+			manifest.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+			manifest.CompletedAt = ""
+		} else if err != nil {
 			manifest.Status = "failed"
 			manifest.LastError = err.Error()
+			manifest.PauseReason = ""
+			manifest.PauseUntil = ""
 			manifest.CompletedAt = manifest.UpdatedAt
 		} else {
 			manifest.Status = "completed"
 			manifest.LastError = ""
+			manifest.PauseReason = ""
+			manifest.PauseUntil = ""
 			manifest.CompletedAt = manifest.UpdatedAt
 		}
 		if writeErr := writeScoutRunManifest(artifactDir, manifest); writeErr != nil && err == nil {
@@ -592,7 +613,7 @@ func runScout(cwd string, options ImproveOptions, role string) (err error) {
 			}
 		}
 		rawOutput, err = runScoutRole(runtime, repoSlug, options.Focus, options.CodexArgs, role, policy, preflight)
-		if persistErr := persistScoutExecutionArtifacts(runtime, artifactDir); persistErr != nil {
+		if persistErr := persistScoutExecutionArtifacts(runtime, repoPath, artifactDir); persistErr != nil {
 			return persistErr
 		}
 		if err != nil {
@@ -656,15 +677,39 @@ func runScoutStart(cwd string, options ImproveOptions) error {
 		return err
 	}
 	repoSlug, _ := normalizeImproveGithubRepo(options.Target)
-	roles := supportedScoutRoles(repoPath)
+	roles, err := supportedScoutRolesWithReadLock(repoPath, repoAccessLockOwner{
+		Backend: "scout-start",
+		RunID:   sanitizePathToken(defaultString(strings.TrimSpace(repoSlug), filepath.Base(repoPath))),
+		Purpose: "supported-roles",
+		Label:   "scout-start-supported-roles",
+	})
+	if err != nil {
+		return err
+	}
 	if len(roles) == 0 {
 		fmt.Fprintf(os.Stdout, "[start] No supported scout policies found in %s; nothing to run.\n", repoPath)
 		return nil
 	}
 	_, githubTarget := normalizeImproveGithubRepo(options.Target)
-	autoLocal := !githubTarget && scoutStartAutoMode(repoPath, roles)
+	policies, err := readScoutPoliciesForRolesWithReadLock(repoPath, roles, repoAccessLockOwner{
+		Backend: "scout-start",
+		RunID:   sanitizePathToken(defaultString(strings.TrimSpace(repoSlug), filepath.Base(repoPath))),
+		Purpose: "policy-read",
+		Label:   "scout-start-policy-read",
+	})
+	if err != nil {
+		return err
+	}
+	autoLocal := !githubTarget && scoutStartAutoMode(policies, roles)
 	if autoLocal {
-		if err := ensureScoutDefaultBranch(repoPath); err != nil {
+		if err := withSourceWriteLock(repoPath, repoAccessLockOwner{
+			Backend: "scout-start",
+			RunID:   sanitizePathToken(defaultString(strings.TrimSpace(repoSlug), filepath.Base(repoPath))),
+			Purpose: "auto-default-branch",
+			Label:   "scout-start-default-branch",
+		}, func() error {
+			return ensureScoutDefaultBranch(repoPath)
+		}); err != nil {
 			return err
 		}
 	}
@@ -679,7 +724,7 @@ func runScoutStart(cwd string, options ImproveOptions) error {
 	}
 	dueRoles := make([]string, 0, len(roles))
 	for _, role := range roles {
-		policy := readScoutPolicy(repoPath, role)
+		policy := policies[role]
 		decision, err := scoutScheduleDecisionForRole(repoPath, repoSlug, role, policy, time.Now().UTC())
 		if err != nil {
 			return err
@@ -701,7 +746,17 @@ func runScoutStart(cwd string, options ImproveOptions) error {
 		}
 	}
 	if autoLocal {
-		committed, err := commitScoutArtifactsToDefault(repoPath)
+		committed := false
+		err := withSourceWriteLock(repoPath, repoAccessLockOwner{
+			Backend: "scout-start",
+			RunID:   sanitizePathToken(defaultString(strings.TrimSpace(repoSlug), filepath.Base(repoPath))),
+			Purpose: "commit-artifacts",
+			Label:   "scout-start-commit-artifacts",
+		}, func() error {
+			var lockErr error
+			committed, lockErr = commitScoutArtifactsToDefault(repoPath)
+			return lockErr
+		})
 		if err != nil {
 			return err
 		}
@@ -756,6 +811,18 @@ func supportedScoutRoles(repoPath string) []string {
 	return roles
 }
 
+func supportedScoutRolesWithReadLock(repoPath string, owner repoAccessLockOwner) ([]string, error) {
+	roles := []string{}
+	err := withSourceReadLock(repoPath, owner, func() error {
+		roles = supportedScoutRoles(repoPath)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return roles, nil
+}
+
 func scoutPolicyExists(repoPath string, role string) bool {
 	for _, path := range repoScoutReadPaths(repoPath, role) {
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
@@ -765,17 +832,43 @@ func scoutPolicyExists(repoPath string, role string) bool {
 	return false
 }
 
-func scoutStartAutoMode(repoPath string, roles []string) bool {
+func scoutStartAutoMode(policies map[string]scoutPolicy, roles []string) bool {
 	if len(roles) == 0 {
 		return false
 	}
 	for _, role := range roles {
-		policy := readScoutPolicy(repoPath, role)
+		policy := policies[role]
 		if strings.ToLower(strings.TrimSpace(policy.Mode)) != "auto" {
 			return false
 		}
 	}
 	return true
+}
+
+func readScoutPolicyWithReadLock(repoPath string, role string, owner repoAccessLockOwner) (scoutPolicy, error) {
+	policy := scoutPolicy{}
+	err := withSourceReadLock(repoPath, owner, func() error {
+		policy = readScoutPolicy(repoPath, role)
+		return nil
+	})
+	if err != nil {
+		return scoutPolicy{}, err
+	}
+	return policy, nil
+}
+
+func readScoutPoliciesForRolesWithReadLock(repoPath string, roles []string, owner repoAccessLockOwner) (map[string]scoutPolicy, error) {
+	policies := map[string]scoutPolicy{}
+	err := withSourceReadLock(repoPath, owner, func() error {
+		for _, role := range roles {
+			policies[role] = readScoutPolicy(repoPath, role)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return policies, nil
 }
 
 func ensureScoutDefaultBranch(repoPath string) error {
@@ -1099,6 +1192,18 @@ func ensureImproveGithubCheckout(repoSlug string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	sourceLock, err := acquireManagedSourceWriteLock(repoSlug, repoAccessLockOwner{
+		Backend: "github-improve",
+		RunID:   fmt.Sprintf("improve-%d", time.Now().UTC().UnixNano()),
+		Purpose: "source-setup",
+		Label:   "github-improve-source",
+	})
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		_ = sourceLock.Release()
+	}()
 	if err := ensureGithubSourceClone(paths, meta); err != nil {
 		return "", err
 	}
@@ -1307,6 +1412,18 @@ func parseUIScoutPreflight(content []byte) (*uiScoutPreflight, error) {
 }
 
 func runScoutPrompt(runtime scoutExecutionRuntime, task string, codexArgs []string, alias string) ([]byte, error) {
+	repoLock, err := acquireSourceReadLock(runtime.RepoPath, repoAccessLockOwner{
+		Backend: "scout",
+		RunID:   sanitizePathToken(filepath.Base(runtime.ArtifactDir)),
+		Purpose: "prompt-" + sanitizePathToken(alias),
+		Label:   "scout-" + sanitizePathToken(alias),
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = repoLock.Release()
+	}()
 	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(codexArgs)
 	task = prefixCodexFastPrompt(task, fastMode)
 	result, err := runManagedCodexPrompt(codexManagedPromptOptions{
@@ -1321,6 +1438,9 @@ func runScoutPrompt(runtime scoutExecutionRuntime, task string, codexArgs []stri
 		StepKey:          alias,
 		ResumeStrategy:   codexResumeSamePrompt,
 		Env:              append(buildCodexEnv(NotifyTempContract{}, runtime.CodexHome), "NANA_PROJECT_AGENTS_ROOT="+runtime.RepoPath),
+		RateLimitPolicy:  codexRateLimitPolicyDefault(runtime.RateLimitPolicy),
+		OnPause:          runtime.OnPause,
+		OnResume:         runtime.OnResume,
 	})
 	if err != nil {
 		if strings.TrimSpace(result.Stderr) != "" {
@@ -1461,11 +1581,16 @@ func writeImprovementRawOutput(repoPath string, rawOutput []byte) (string, error
 
 func writeScoutRawOutput(repoPath string, rawOutput []byte, role string) (string, error) {
 	dir := filepath.Join(repoPath, ".nana", scoutArtifactRoot(role), "raw")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	path := filepath.Join(dir, fmt.Sprintf("raw-%d.txt", time.Now().UTC().UnixNano()))
+	if err := withScoutRepoWriteLock(repoPath, role, "raw-output", func() error {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(path, rawOutput, 0o644)
+	}); err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, fmt.Sprintf("raw-%d.txt", time.Now().UTC().UnixNano()))
-	return path, os.WriteFile(path, rawOutput, 0o644)
+	return path, nil
 }
 
 func writeLocalImprovementArtifacts(repoPath string, report scoutReport, policy scoutPolicy, rawOutput []byte) (string, error) {
@@ -1478,7 +1603,9 @@ func writeLocalImprovementArtifacts(repoPath string, report scoutReport, policy 
 
 func prepareLocalScoutArtifactDir(repoPath string, role string) (string, error) {
 	dir := filepath.Join(repoPath, ".nana", scoutArtifactRoot(role), scoutRunID(role))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := withScoutRepoWriteLock(repoPath, role, "prepare-artifact-dir", func() error {
+		return os.MkdirAll(dir, 0o755)
+	}); err != nil {
 		return "", err
 	}
 	return dir, nil
@@ -1500,7 +1627,13 @@ func scoutRunManifestPath(dir string) string {
 }
 
 func writeScoutRunManifest(dir string, manifest scoutRunManifest) error {
-	return writeGithubJSON(scoutRunManifestPath(dir), manifest)
+	repoPath, err := scoutRepoRootForArtifactPath(dir)
+	if err != nil {
+		return err
+	}
+	return withScoutRepoWriteLock(repoPath, manifest.Role, "write-run-manifest", func() error {
+		return writeGithubJSON(scoutRunManifestPath(dir), manifest)
+	})
 }
 
 func readScoutRunManifest(path string) (scoutRunManifest, error) {
@@ -1557,29 +1690,65 @@ func resolveScoutRunDir(repoPath string, role string, options ImproveOptions) (s
 }
 
 func writeLocalScoutArtifacts(dir string, report scoutReport, policy scoutPolicy, rawOutput []byte, role string, preflight *uiScoutPreflight) (string, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	repoPath, err := scoutRepoRootForArtifactPath(dir)
+	if err != nil {
 		return "", err
 	}
-	if err := writeGithubJSON(filepath.Join(dir, "proposals.json"), report); err != nil {
-		return "", err
-	}
-	if err := writeGithubJSON(filepath.Join(dir, "policy.json"), policy); err != nil {
-		return "", err
-	}
-	if preflight != nil {
-		if err := writeGithubJSON(filepath.Join(dir, "preflight.json"), preflight); err != nil {
-			return "", err
+	if err := withScoutRepoWriteLock(repoPath, role, "write-artifacts", func() error {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
 		}
-	}
-	if len(bytes.TrimSpace(rawOutput)) > 0 {
-		if err := os.WriteFile(filepath.Join(dir, "raw-output.txt"), rawOutput, 0o644); err != nil {
-			return "", err
+		if err := writeGithubJSON(filepath.Join(dir, "proposals.json"), report); err != nil {
+			return err
 		}
-	}
-	if err := os.WriteFile(filepath.Join(dir, "issue-drafts.md"), []byte(renderScoutIssueDrafts(report, role, preflight)), 0o644); err != nil {
+		if err := writeGithubJSON(filepath.Join(dir, "policy.json"), policy); err != nil {
+			return err
+		}
+		if preflight != nil {
+			if err := writeGithubJSON(filepath.Join(dir, "preflight.json"), preflight); err != nil {
+				return err
+			}
+		}
+		if len(bytes.TrimSpace(rawOutput)) > 0 {
+			if err := os.WriteFile(filepath.Join(dir, "raw-output.txt"), rawOutput, 0o644); err != nil {
+				return err
+			}
+		}
+		if err := os.WriteFile(filepath.Join(dir, "issue-drafts.md"), []byte(renderScoutIssueDrafts(report, role, preflight)), 0o644); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
 		return "", err
 	}
 	return dir, nil
+}
+
+func scoutRepoRootForArtifactPath(path string) (string, error) {
+	current := filepath.Clean(strings.TrimSpace(path))
+	if current == "" {
+		return "", fmt.Errorf("scout artifact path is required")
+	}
+	for {
+		if filepath.Base(current) == ".nana" {
+			return filepath.Dir(current), nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return "", fmt.Errorf("could not determine scout repo root from %s", path)
+}
+
+func withScoutRepoWriteLock(repoPath string, role string, purpose string, fn func() error) error {
+	return withSourceWriteLock(repoPath, repoAccessLockOwner{
+		Backend: "scout",
+		RunID:   sanitizePathToken(defaultString(strings.TrimSpace(role), filepath.Base(repoPath))),
+		Purpose: purpose,
+		Label:   "scout-" + sanitizePathToken(defaultString(strings.TrimSpace(role), "artifact")),
+	}, fn)
 }
 
 func renderImprovementIssueDrafts(report scoutReport) string {

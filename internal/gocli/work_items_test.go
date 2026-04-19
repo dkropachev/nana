@@ -233,6 +233,106 @@ func TestSubmitWorkItemViaShellUsesDraftEnv(t *testing.T) {
 	}
 }
 
+func TestWorkItemCodexTargetForItemUsesManagedSourceCheckout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	if err := os.MkdirAll(sourcePath, 0o755); err != nil {
+		t.Fatalf("mkdir source path: %v", err)
+	}
+
+	target, err := workItemCodexTargetForItem("", workItem{RepoSlug: repoSlug})
+	if err != nil {
+		t.Fatalf("workItemCodexTargetForItem: %v", err)
+	}
+	if target.RepoPath != sourcePath || target.LockKind != workItemCodexLockSource {
+		t.Fatalf("unexpected Codex target: %+v", target)
+	}
+}
+
+func TestWorkItemCodexTargetForItemUsesLinkedSandbox(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	runID := "gh-linked-run"
+	repoRoot := githubWorkRepoRoot("acme/widget")
+	runDir := filepath.Join(repoRoot, "runs", runID)
+	sandboxPath := filepath.Join(repoRoot, "sandboxes", "issue-1-"+runID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
+		t.Fatalf("mkdir sandbox repo: %v", err)
+	}
+	if err := writeGithubJSON(filepath.Join(runDir, "manifest.json"), githubWorkManifest{
+		Version:         1,
+		RunID:           runID,
+		RepoSlug:        "acme/widget",
+		RepoOwner:       "acme",
+		RepoName:        "widget",
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+		TargetKind:      "issue",
+		TargetNumber:    1,
+		TargetURL:       "https://github.com/acme/widget/issues/1",
+		UpdatedAt:       ISOTimeNow(),
+	}); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	target, err := workItemCodexTargetForItem("", workItem{LinkedRunID: runID})
+	if err != nil {
+		t.Fatalf("workItemCodexTargetForItem: %v", err)
+	}
+	if target.RepoPath != sandboxRepoPath || target.LockKind != workItemCodexLockSandbox {
+		t.Fatalf("unexpected linked-run target: %+v", target)
+	}
+}
+
+func TestRunWorkItemCodexPromptBlocksWhenSourceWriteLockHeld(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+
+	repoPath := filepath.Join(home, "repo")
+	attemptDir := filepath.Join(home, "attempt")
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if err := os.MkdirAll(attemptDir, 0o755); err != nil {
+		t.Fatalf("mkdir attempt dir: %v", err)
+	}
+
+	oldRunner := workItemRunManagedPrompt
+	called := false
+	workItemRunManagedPrompt = func(options codexManagedPromptOptions) (codexManagedPromptResult, error) {
+		called = true
+		return codexManagedPromptResult{}, nil
+	}
+	defer func() { workItemRunManagedPrompt = oldRunner }()
+
+	lock, err := acquireSourceWriteLock(repoPath, repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "work-item-source-writer",
+		Purpose: "source-setup",
+		Label:   "work-item-source-writer",
+	})
+	if err != nil {
+		t.Fatalf("acquire source lock: %v", err)
+	}
+	defer func() { _ = lock.Release() }()
+
+	_, err = runWorkItemCodexPrompt(workItemCodexTarget{RepoPath: repoPath, LockKind: workItemCodexLockSource}, attemptDir, "draft a reply", nil)
+	if err == nil || !strings.Contains(err.Error(), "repo read lock busy") {
+		t.Fatalf("expected source lock conflict, got %v", err)
+	}
+	if called {
+		t.Fatalf("expected prompt runner not to be called while source lock is held")
+	}
+}
+
 func TestWorkItemPauseFieldsHydrateFromMetadataAndDelayAutoRun(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

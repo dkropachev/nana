@@ -30,6 +30,8 @@ Behavior:
   - local mode uses --task, --plan-file, or an inferred task from the current branch
   - local mode syncs the target source branch, commits verified sandbox changes after final review gates pass, pushes to the tracked remote when one exists, and uses resolve to recover blocked final-apply states
   - GitHub mode is selected when start receives a GitHub issue/PR URL
+  - shared source and sandbox checkouts use heartbeat-backed repo locks: multiple readers are allowed, one writer excludes readers, and stale lock holders are recovered automatically
+  - work status --json surfaces current repo lock holders under lock_state when present
   - work items queue inbound GitHub, email, and Slack-style requests into a shared draft/submit workflow
   - authoritative runtime state lives under ~/.nana/work/
   - legacy work-local and work-on entrypoints have been replaced by nana work
@@ -245,22 +247,27 @@ func resolveWorkBackend(cwd string, selection localWorkRunSelection) (string, er
 }
 
 type githubWorkStatusSnapshot struct {
-	RunID                string                   `json:"run_id"`
-	RepoSlug             string                   `json:"repo_slug"`
-	TargetKind           string                   `json:"target_kind"`
-	TargetNumber         int                      `json:"target_number"`
-	TargetURL            string                   `json:"target_url"`
-	Sandbox              string                   `json:"sandbox"`
-	RepoCheckout         string                   `json:"repo_checkout"`
-	UpdatedAt            string                   `json:"updated_at"`
-	ReviewReviewer       string                   `json:"review_reviewer,omitempty"`
-	PublicationState     string                   `json:"publication_state,omitempty"`
-	PublicationDetail    string                   `json:"publication_detail,omitempty"`
-	PublicationError     string                   `json:"publication_error,omitempty"`
-	LeaderSessionID      string                   `json:"leader_session_id,omitempty"`
-	LeaderResumeEligible bool                     `json:"leader_resume_eligible,omitempty"`
-	Lanes                []githubLaneRuntimeState `json:"lanes,omitempty"`
-	FeedbackAvailable    bool                     `json:"feedback_available,omitempty"`
+	RunID                string                        `json:"run_id"`
+	RepoSlug             string                        `json:"repo_slug"`
+	TargetKind           string                        `json:"target_kind"`
+	TargetNumber         int                           `json:"target_number"`
+	TargetURL            string                        `json:"target_url"`
+	Sandbox              string                        `json:"sandbox"`
+	RepoCheckout         string                        `json:"repo_checkout"`
+	UpdatedAt            string                        `json:"updated_at"`
+	ReviewReviewer       string                        `json:"review_reviewer,omitempty"`
+	PublicationState     string                        `json:"publication_state,omitempty"`
+	PublicationDetail    string                        `json:"publication_detail,omitempty"`
+	PublicationError     string                        `json:"publication_error,omitempty"`
+	ExecutionStatus      string                        `json:"execution_status,omitempty"`
+	PauseReason          string                        `json:"pause_reason,omitempty"`
+	PauseUntil           string                        `json:"pause_until,omitempty"`
+	LastError            string                        `json:"last_error,omitempty"`
+	LeaderSessionID      string                        `json:"leader_session_id,omitempty"`
+	LeaderResumeEligible bool                          `json:"leader_resume_eligible,omitempty"`
+	Lanes                []githubLaneRuntimeState      `json:"lanes,omitempty"`
+	FeedbackAvailable    bool                          `json:"feedback_available,omitempty"`
+	LockState            *repoAccessLockStatusSnapshot `json:"lock_state,omitempty"`
 }
 
 func githubWorkStatus(selection localWorkRunSelection, jsonOutput bool) error {
@@ -294,6 +301,27 @@ func githubWorkStatus(selection localWorkRunSelection, jsonOutput bool) error {
 	}
 	if strings.TrimSpace(snapshot.PublicationError) != "" {
 		fmt.Fprintf(os.Stdout, "[work] Publication error: %s\n", snapshot.PublicationError)
+	}
+	if strings.TrimSpace(snapshot.ExecutionStatus) != "" {
+		fmt.Fprintf(os.Stdout, "[work] Execution status: %s\n", snapshot.ExecutionStatus)
+	}
+	if strings.TrimSpace(snapshot.PauseUntil) != "" {
+		fmt.Fprintf(os.Stdout, "[work] Pause until: %s", snapshot.PauseUntil)
+		if strings.TrimSpace(snapshot.PauseReason) != "" {
+			fmt.Fprintf(os.Stdout, " reason=%s", snapshot.PauseReason)
+		}
+		fmt.Fprintln(os.Stdout)
+	}
+	if strings.TrimSpace(snapshot.LastError) != "" {
+		fmt.Fprintf(os.Stdout, "[work] Last error: %s\n", snapshot.LastError)
+	}
+	if snapshot.LockState != nil {
+		if repoAccessLockStateHasHolders(snapshot.LockState.Source) {
+			fmt.Fprintf(os.Stdout, "[work] Repo lock (source): %s\n", repoAccessLockStateSummary(snapshot.LockState.Source))
+		}
+		if repoAccessLockStateHasHolders(snapshot.LockState.Sandbox) {
+			fmt.Fprintf(os.Stdout, "[work] Repo lock (sandbox): %s\n", repoAccessLockStateSummary(snapshot.LockState.Sandbox))
+		}
 	}
 	if strings.TrimSpace(snapshot.LeaderSessionID) != "" {
 		fmt.Fprintf(os.Stdout, "[work] Leader session: %s", snapshot.LeaderSessionID)
@@ -385,6 +413,11 @@ func buildGithubWorkStatusSnapshot(manifest githubWorkManifest, runDir string) (
 	}
 	_, feedbackErr := os.Stat(filepath.Join(runDir, "feedback-instructions.md"))
 	leaderCheckpoint, _ := readCodexStepCheckpoint(filepath.Join(runDir, "leader-checkpoint.json"))
+	sourcePath := defaultString(strings.TrimSpace(manifest.SourcePath), githubManagedPaths(manifest.RepoSlug).SourcePath)
+	lockState, err := buildRepoAccessLockStatus(sourcePath, repoAccessLockWrite, manifest.SandboxRepoPath, repoAccessLockWrite)
+	if err != nil {
+		return githubWorkStatusSnapshot{}, err
+	}
 	return githubWorkStatusSnapshot{
 		RunID:                manifest.RunID,
 		RepoSlug:             manifest.RepoSlug,
@@ -398,10 +431,15 @@ func buildGithubWorkStatusSnapshot(manifest githubWorkManifest, runDir string) (
 		PublicationState:     manifest.PublicationState,
 		PublicationDetail:    manifest.PublicationDetail,
 		PublicationError:     manifest.PublicationError,
+		ExecutionStatus:      manifest.ExecutionStatus,
+		PauseReason:          manifest.PauseReason,
+		PauseUntil:           manifest.PauseUntil,
+		LastError:            manifest.LastError,
 		LeaderSessionID:      strings.TrimSpace(leaderCheckpoint.SessionID),
 		LeaderResumeEligible: leaderCheckpoint.ResumeEligible,
 		Lanes:                lanes,
 		FeedbackAvailable:    feedbackErr == nil,
+		LockState:            lockState,
 	}, nil
 }
 
@@ -468,6 +506,18 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 	if err != nil {
 		return err
 	}
+	sandboxLock, err := acquireSandboxWriteLock(manifest.SandboxRepoPath, repoAccessLockOwner{
+		Backend: "github-work",
+		RunID:   manifest.RunID,
+		Purpose: "leader-resume",
+		Label:   "github-work-resume",
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = sandboxLock.Release()
+	}()
 
 	laneCodexHome, err := ensureGithubLaneCodexHome(manifest.SandboxPath, "leader")
 	if err != nil {
@@ -478,6 +528,7 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 	finalPrompt := instructions + "\n\nTask:\n" + prompt
 	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(options.CodexArgs)
 	finalPrompt = prefixCodexFastPrompt(finalPrompt, fastMode)
+	transport := promptTransportForSize(finalPrompt, structuredPromptStdinThreshold)
 	result, runErr := runManagedCodexPrompt(codexManagedPromptOptions{
 		CommandDir:       manifest.SandboxPath,
 		InstructionsRoot: manifest.SandboxPath,
@@ -485,11 +536,31 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 		FreshArgsPrefix:  []string{"exec", "-C", manifest.SandboxRepoPath},
 		CommonArgs:       normalizedCodexArgs,
 		Prompt:           finalPrompt,
-		PromptTransport:  codexPromptTransportArg,
+		PromptTransport:  transport,
 		CheckpointPath:   filepath.Join(runDir, "leader-checkpoint.json"),
 		StepKey:          "github-leader",
 		ResumeStrategy:   codexResumeConversation,
 		Env:              append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, manifest.APIBaseURL), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
+		OnPause: func(info codexRateLimitPauseInfo) {
+			manifest.ExecutionStatus = "paused"
+			manifest.PauseReason = strings.TrimSpace(info.Reason)
+			manifest.PauseUntil = strings.TrimSpace(info.RetryAfter)
+			manifest.PausedAt = ISOTimeNow()
+			manifest.LastError = codexPauseInfoMessage(info)
+			manifest.UpdatedAt = manifest.PausedAt
+			_ = writeGithubJSON(filepath.Join(runDir, "manifest.json"), manifest)
+			_ = indexGithubWorkRunManifest(filepath.Join(runDir, "manifest.json"), manifest)
+		},
+		OnResume: func(info codexRateLimitPauseInfo) {
+			manifest.ExecutionStatus = "running"
+			manifest.PauseReason = ""
+			manifest.PauseUntil = ""
+			manifest.PausedAt = ""
+			manifest.LastError = ""
+			manifest.UpdatedAt = ISOTimeNow()
+			_ = writeGithubJSON(filepath.Join(runDir, "manifest.json"), manifest)
+			_ = indexGithubWorkRunManifest(filepath.Join(runDir, "manifest.json"), manifest)
+		},
 	})
 
 	manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)

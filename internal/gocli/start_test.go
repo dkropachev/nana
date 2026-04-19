@@ -466,6 +466,36 @@ func TestStartBareLocalScoutPoliciesLoopsForeverUntilStopped(t *testing.T) {
 	}
 }
 
+func TestStartExecutionModeForArgsBlocksWhenLocalScoutProbeIsLocked(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+
+	repo := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir policy dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".nana", "improvement-policy.json"), []byte(`{"version":1}`), 0o644); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	lock, err := acquireSourceWriteLock(repo, repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "start-local-probe-writer",
+		Purpose: "source-setup",
+		Label:   "start-local-probe-writer",
+	})
+	if err != nil {
+		t.Fatalf("acquire source write lock: %v", err)
+	}
+	defer func() { _ = lock.Release() }()
+
+	_, err = startExecutionModeForArgs(repo, nil)
+	if err == nil || !strings.Contains(err.Error(), "repo read lock busy") {
+		t.Fatalf("expected repo read lock busy, got %v", err)
+	}
+}
+
 func TestStartForeverContinuesAfterCycleError(t *testing.T) {
 	oldSleep := startLoopSleep
 	oldContinue := startLoopContinue

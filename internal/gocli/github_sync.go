@@ -123,6 +123,18 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 	}); err != nil {
 		return err
 	}
+	sandboxLock, err := acquireSandboxWriteLock(manifest.SandboxRepoPath, repoAccessLockOwner{
+		Backend: "github-work",
+		RunID:   manifest.RunID,
+		Purpose: "leader-feedback-sync",
+		Label:   "github-work-sync",
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = sandboxLock.Release()
+	}()
 
 	laneCodexHome, err := ensureGithubLaneCodexHome(manifest.SandboxPath, "leader")
 	if err != nil {
@@ -133,6 +145,7 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 	finalPrompt := buildGithubFeedbackInstructions(manifest, actors, newFeedback) + "\n\nTask:\n" + prompt
 	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(options.CodexArgs)
 	finalPrompt = prefixCodexFastPrompt(finalPrompt, fastMode)
+	transport := promptTransportForSize(finalPrompt, structuredPromptStdinThreshold)
 	result, runErr := runManagedCodexPrompt(codexManagedPromptOptions{
 		CommandDir:       manifest.SandboxPath,
 		InstructionsRoot: manifest.SandboxPath,
@@ -140,12 +153,56 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 		FreshArgsPrefix:  []string{"exec", "-C", manifest.SandboxRepoPath},
 		CommonArgs:       normalizedCodexArgs,
 		Prompt:           finalPrompt,
-		PromptTransport:  codexPromptTransportArg,
+		PromptTransport:  transport,
 		CheckpointPath:   filepath.Join(runDir, "leader-checkpoint.json"),
 		StepKey:          "github-leader",
 		ResumeStrategy:   codexResumeConversation,
 		Env:              append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, apiBaseURL), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
+		RateLimitPolicy:  codexRateLimitPolicyDefault(options.RateLimitPolicy),
+		OnPause: func(info codexRateLimitPauseInfo) {
+			manifest.ExecutionStatus = "paused"
+			manifest.PauseReason = strings.TrimSpace(info.Reason)
+			manifest.PauseUntil = strings.TrimSpace(info.RetryAfter)
+			manifest.PausedAt = ISOTimeNow()
+			manifest.LastError = codexPauseInfoMessage(info)
+			manifest.UpdatedAt = manifest.PausedAt
+			_ = writeGithubJSON(manifestPath, manifest)
+			_ = indexGithubWorkRunManifest(manifestPath, manifest)
+		},
+		OnResume: func(info codexRateLimitPauseInfo) {
+			manifest.ExecutionStatus = "running"
+			manifest.PauseReason = ""
+			manifest.PauseUntil = ""
+			manifest.PausedAt = ""
+			manifest.LastError = ""
+			manifest.UpdatedAt = ISOTimeNow()
+			_ = writeGithubJSON(manifestPath, manifest)
+			_ = indexGithubWorkRunManifest(manifestPath, manifest)
+		},
 	})
+	manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if pauseErr, ok := isCodexRateLimitPauseError(runErr); ok {
+		manifest.ExecutionStatus = "paused"
+		manifest.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
+		manifest.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+		manifest.PausedAt = manifest.UpdatedAt
+		manifest.LastError = codexPauseInfoMessage(pauseErr.Info)
+	} else if runErr != nil {
+		manifest.ExecutionStatus = "failed"
+		manifest.LastError = runErr.Error()
+	} else {
+		manifest.ExecutionStatus = "completed"
+		manifest.PauseReason = ""
+		manifest.PauseUntil = ""
+		manifest.PausedAt = ""
+		manifest.LastError = ""
+	}
+	if err := writeGithubJSON(manifestPath, manifest); err != nil {
+		return err
+	}
+	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+		return err
+	}
 
 	fmt.Fprintf(os.Stdout, "[github] Stored new feedback for run %s.\n", manifest.RunID)
 	fmt.Fprintf(os.Stdout, "[github] Feedback file: %s\n", feedbackInstructionsPath)

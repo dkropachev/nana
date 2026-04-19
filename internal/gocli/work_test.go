@@ -1,10 +1,12 @@
 package gocli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestResumeGithubWorkUsesLeaderSessionCheckpoint(t *testing.T) {
@@ -86,5 +88,87 @@ func TestResumeGithubWorkUsesLeaderSessionCheckpoint(t *testing.T) {
 	}
 	if snapshot.LeaderSessionID != "session-gh" || snapshot.LeaderResumeEligible {
 		t.Fatalf("unexpected leader checkpoint snapshot: %#v", snapshot)
+	}
+}
+
+func TestBuildGithubWorkStatusSnapshotIncludesLockState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+
+	repoRoot := githubWorkRepoRoot("acme/widget")
+	runID := "gh-lock-status"
+	runDir := filepath.Join(repoRoot, "runs", runID)
+	sourcePath := filepath.Join(repoRoot, "source")
+	sandboxPath := filepath.Join(repoRoot, "sandboxes", "issue-1-"+runID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := os.MkdirAll(sourcePath, 0o755); err != nil {
+		t.Fatalf("mkdir source: %v", err)
+	}
+	if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
+		t.Fatalf("mkdir sandbox repo: %v", err)
+	}
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	manifest := githubWorkManifest{
+		Version:         1,
+		RunID:           runID,
+		RepoSlug:        "acme/widget",
+		RepoOwner:       "acme",
+		RepoName:        "widget",
+		SourcePath:      sourcePath,
+		TargetURL:       "https://github.com/acme/widget/issues/1",
+		TargetKind:      "issue",
+		TargetNumber:    1,
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+		UpdatedAt:       ISOTimeNow(),
+	}
+	sourceLock, err := acquireManagedSourceWriteLock("acme/widget", repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "source-status",
+		Purpose: "source-setup",
+		Label:   "source-status",
+	})
+	if err != nil {
+		t.Fatalf("acquire source lock: %v", err)
+	}
+	defer func() { _ = sourceLock.Release() }()
+	sandboxLock, err := acquireSandboxReadLock(sandboxRepoPath, repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "sandbox-status",
+		Purpose: "review",
+		Label:   "sandbox-status",
+	})
+	if err != nil {
+		t.Fatalf("acquire sandbox lock: %v", err)
+	}
+	defer func() { _ = sandboxLock.Release() }()
+
+	snapshot, err := buildGithubWorkStatusSnapshot(manifest, runDir)
+	if err != nil {
+		t.Fatalf("buildGithubWorkStatusSnapshot: %v", err)
+	}
+	if snapshot.LockState == nil || snapshot.LockState.Source == nil || snapshot.LockState.Sandbox == nil {
+		t.Fatalf("expected lock state in snapshot, got %#v", snapshot)
+	}
+	if snapshot.LockState.Source.Writer == nil || !strings.Contains(snapshot.LockState.Source.Writer.Label, "source-status") {
+		t.Fatalf("expected source writer in lock state, got %#v", snapshot.LockState.Source)
+	}
+	if len(snapshot.LockState.Sandbox.Readers) != 1 || !strings.Contains(snapshot.LockState.Sandbox.Readers[0].Label, "sandbox-status") {
+		t.Fatalf("expected sandbox reader in lock state, got %#v", snapshot.LockState.Sandbox)
+	}
+
+	output, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	if !strings.Contains(string(output), "\"lock_state\"") {
+		t.Fatalf("expected lock_state in json snapshot: %s", output)
+	}
+	if snapshot.LockState.Source.Writer.Stale || snapshot.LockState.Sandbox.Readers[0].Stale {
+		t.Fatalf("expected fresh lock state, got %#v", snapshot.LockState)
 	}
 }

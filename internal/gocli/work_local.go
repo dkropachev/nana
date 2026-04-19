@@ -75,13 +75,6 @@ var localWorkStartDetachedRunner = launchLocalWorkDetachedRunner
 var localWorkExecuteLoop = executeLocalWorkLoop
 var localWorkTokenUsagePersistMu sync.Mutex
 
-var localWorkFinalReviewGateRoles = []string{
-	"quality-reviewer",
-	"security-reviewer",
-	"performance-reviewer",
-	"qa-tester",
-}
-
 type localWorkStartOptions struct {
 	Detach                bool
 	RepoPath              string
@@ -1626,6 +1619,19 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 	if err != nil {
 		return "", err
 	}
+	runID := fmt.Sprintf("lw-%d", time.Now().UnixNano())
+	sourceSetupLock, err := acquireSourceWriteLock(repoRoot, repoAccessLockOwner{
+		Backend: "local-work",
+		RunID:   runID,
+		Purpose: "source-setup",
+		Label:   "local-work-source-setup",
+	})
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		_ = sourceSetupLock.Release()
+	}()
 	if err := cleanupDirtyManagedLocalWorkRepo(repoRoot, "before local work start"); err != nil {
 		return "", err
 	}
@@ -1661,7 +1667,6 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 	repoID := localWorkRepoID(repoRoot)
 	repoName := filepath.Base(repoRoot)
 	repoSlug := localWorkResolvedRepoSlug(repoRoot, "")
-	runID := fmt.Sprintf("lw-%d", time.Now().UnixNano())
 
 	repoDir := localWorkRepoDirByID(repoID)
 	runDir := filepath.Join(repoDir, "runs", runID)
@@ -1712,6 +1717,9 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 		MaxIterations:          options.MaxIterations,
 	}
 	if err := writeLocalWorkManifest(manifest); err != nil {
+		return "", err
+	}
+	if err := sourceSetupLock.Release(); err != nil {
 		return "", err
 	}
 
@@ -1867,6 +1875,18 @@ func retryBlockedLocalWorkPostApply(manifest localWorkManifest) error {
 }
 
 func continueLocalWorkPostApply(manifest localWorkManifest) (localWorkFinalApplyResult, error) {
+	sourceLock, err := acquireSourceWriteLock(manifest.RepoRoot, repoAccessLockOwner{
+		Backend: "local-work",
+		RunID:   manifest.RunID,
+		Purpose: "source-post-apply",
+		Label:   "local-work-post-apply",
+	})
+	if err != nil {
+		return localWorkFinalApplyResult{Status: "blocked-after-apply", CommitSHA: strings.TrimSpace(manifest.FinalApplyCommitSHA), Error: err.Error()}, err
+	}
+	defer func() {
+		_ = sourceLock.Release()
+	}()
 	releaseFinalApplyLock, err := acquireLocalWorkFinalApplyLock(manifest, "post-apply-resolve")
 	if err != nil {
 		return localWorkFinalApplyResult{Status: "blocked-after-apply", CommitSHA: strings.TrimSpace(manifest.FinalApplyCommitSHA), Error: err.Error()}, err
@@ -1951,6 +1971,18 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 	if err != nil {
 		return err
 	}
+	sandboxLock, err := acquireSandboxWriteLock(manifest.SandboxRepoPath, repoAccessLockOwner{
+		Backend: "local-work",
+		RunID:   manifest.RunID,
+		Purpose: "sandbox-execution",
+		Label:   "local-work-sandbox",
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = sandboxLock.Release()
+	}()
 	manifest.RateLimitPolicy = string(codexRateLimitPolicyDefault(rateLimitPolicy))
 	nextIteration := localWorkNextIteration(manifest)
 	if nextIteration <= 0 {
@@ -2820,6 +2852,7 @@ type localWorkStatusSnapshot struct {
 	LastError                string                           `json:"last_error,omitempty"`
 	PauseReason              string                           `json:"pause_reason,omitempty"`
 	PauseUntil               string                           `json:"pause_until,omitempty"`
+	LockState                *repoAccessLockStatusSnapshot    `json:"lock_state,omitempty"`
 }
 
 func localWorkStatus(cwd string, options localWorkStatusOptions) error {
@@ -2933,6 +2966,14 @@ func localWorkStatus(cwd string, options localWorkStatusOptions) error {
 	if strings.TrimSpace(snapshot.LastError) != "" {
 		fmt.Fprintf(os.Stdout, "[local] Last error: %s\n", snapshot.LastError)
 	}
+	if snapshot.LockState != nil {
+		if repoAccessLockStateHasHolders(snapshot.LockState.Source) {
+			fmt.Fprintf(os.Stdout, "[local] Repo lock (source): %s\n", repoAccessLockStateSummary(snapshot.LockState.Source))
+		}
+		if repoAccessLockStateHasHolders(snapshot.LockState.Sandbox) {
+			fmt.Fprintf(os.Stdout, "[local] Repo lock (sandbox): %s\n", repoAccessLockStateSummary(snapshot.LockState.Sandbox))
+		}
+	}
 	return nil
 }
 
@@ -2948,6 +2989,10 @@ func localWorkBuildStatusSnapshot(manifest localWorkManifest, runDir string) (lo
 		}
 	}
 	activeContext := localWorkActiveValidationContextFromRuntimeState(runtimeState)
+	lockState, err := buildRepoAccessLockStatus(manifest.RepoRoot, repoAccessLockWrite, manifest.SandboxRepoPath, repoAccessLockWrite)
+	if err != nil {
+		return localWorkStatusSnapshot{}, err
+	}
 	snapshot := localWorkStatusSnapshot{
 		RunID:                    manifest.RunID,
 		RepoRoot:                 manifest.RepoRoot,
@@ -2973,6 +3018,7 @@ func localWorkBuildStatusSnapshot(manifest localWorkManifest, runDir string) (lo
 		LastError:                manifest.LastError,
 		PauseReason:              manifest.PauseReason,
 		PauseUntil:               manifest.PauseUntil,
+		LockState:                lockState,
 	}
 	if runtimeState != nil {
 		snapshot.Phase = runtimeState.CurrentPhase
@@ -3549,6 +3595,13 @@ func runLocalWorkCodexPrompt(manifest localWorkManifest, codexArgs []string, pro
 		StepKey:          codexHomeAlias,
 		ResumeStrategy:   codexResumeSamePrompt,
 		Env:              append(buildCodexEnv(NotifyTempContract{}, scopedCodexHome), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
+		RateLimitPolicy:  codexRateLimitPolicyDefault(codexRateLimitPolicy(manifest.RateLimitPolicy)),
+		OnPause: func(info codexRateLimitPauseInfo) {
+			updateLocalWorkPausedManifest(manifest.RunID, info, true)
+		},
+		OnResume: func(info codexRateLimitPauseInfo) {
+			updateLocalWorkPausedManifest(manifest.RunID, info, false)
+		},
 	})
 	execResult := localWorkExecutionResult{
 		Stdout: result.Stdout,
@@ -3561,6 +3614,29 @@ func runLocalWorkCodexPrompt(manifest localWorkManifest, codexArgs []string, pro
 		return execResult, persistErr
 	}
 	return execResult, err
+}
+
+func updateLocalWorkPausedManifest(runID string, info codexRateLimitPauseInfo, paused bool) {
+	manifest, err := readLocalWorkManifestByRunID(runID)
+	if err != nil {
+		return
+	}
+	now := ISOTimeNow()
+	if paused {
+		manifest.Status = "paused"
+		manifest.PauseReason = strings.TrimSpace(info.Reason)
+		manifest.PauseUntil = strings.TrimSpace(info.RetryAfter)
+		manifest.PausedAt = now
+		manifest.LastError = codexPauseInfoMessage(info)
+	} else {
+		manifest.Status = "running"
+		manifest.PauseReason = ""
+		manifest.PauseUntil = ""
+		manifest.PausedAt = ""
+		manifest.LastError = ""
+	}
+	manifest.UpdatedAt = now
+	_ = writeLocalWorkManifest(manifest)
 }
 
 func normalizeLocalWorkCodexArgs(args []string) []string {

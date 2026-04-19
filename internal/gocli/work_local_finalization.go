@@ -228,6 +228,18 @@ func mergeFinalGateRoleResults(existing []localWorkFinalGateRoleResult, incoming
 
 func applyLocalWorkFinalDiff(manifest localWorkManifest) localWorkFinalApplyResult {
 	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
+	sourceLock, err := acquireSourceWriteLock(manifest.RepoRoot, repoAccessLockOwner{
+		Backend: "local-work",
+		RunID:   manifest.RunID,
+		Purpose: "source-final-apply",
+		Label:   "local-work-final-apply",
+	})
+	if err != nil {
+		return localWorkFinalApplyResult{Status: "blocked-before-apply", Error: err.Error()}
+	}
+	defer func() {
+		_ = sourceLock.Release()
+	}()
 	releaseFinalApplyLock, err := acquireLocalWorkFinalApplyLock(manifest, "final-apply")
 	if err != nil {
 		return localWorkFinalApplyResult{Status: "blocked-before-apply", Error: err.Error()}
