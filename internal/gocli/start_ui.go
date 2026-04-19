@@ -3545,88 +3545,98 @@ func listStartUIScoutItems(repoSlug string) ([]startUIScoutItem, error) {
 		return nil, err
 	}
 	items := []startUIScoutItem{}
-	for _, role := range supportedScoutRoleOrder {
-		matches, err := filepath.Glob(filepath.Join(repoPath, ".nana", scoutArtifactRoot(role), "*", "proposals.json"))
-		if err != nil {
-			return nil, err
-		}
-		sort.Strings(matches)
-		for _, proposalPath := range matches {
-			var report scoutReport
-			if err := readGithubJSON(proposalPath, &report); err != nil {
-				continue
+	if err := withManagedSourceReadLock(repoSlug, repoAccessLockOwner{
+		Backend: "start-ui",
+		RunID:   sanitizePathToken(repoSlug),
+		Purpose: "list-scout-items",
+		Label:   "start-ui-scout-items",
+	}, func() error {
+		for _, role := range supportedScoutRoleOrder {
+			matches, err := filepath.Glob(filepath.Join(repoPath, ".nana", scoutArtifactRoot(role), "*", "proposals.json"))
+			if err != nil {
+				return err
 			}
-			artifactDir := filepath.Dir(proposalPath)
-			relArtifactDir, _ := filepath.Rel(repoPath, artifactDir)
-			relArtifactDir = filepath.ToSlash(relArtifactDir)
-			policyPath := filepath.Join(artifactDir, "policy.json")
-			policy := scoutPolicy{Version: 1, IssueDestination: improvementDestinationLocal}
-			_ = readGithubJSON(policyPath, &policy)
-			policy.IssueDestination = normalizeScoutDestination(policy.IssueDestination)
-			relPolicyPath := ""
-			if _, err := os.Stat(policyPath); err == nil {
-				relPolicyPath, _ = filepath.Rel(repoPath, policyPath)
-				relPolicyPath = filepath.ToSlash(relPolicyPath)
-			}
-			relProposalPath, _ := filepath.Rel(repoPath, proposalPath)
-			relProposalPath = filepath.ToSlash(relProposalPath)
-			preflightPath := filepath.Join(artifactDir, "preflight.json")
-			issueDraftPath := filepath.Join(artifactDir, "issue-drafts.md")
-			rawOutputPath := filepath.Join(artifactDir, "raw-output.txt")
-			var preflight uiScoutPreflight
-			relPreflightPath := ""
-			relIssueDraftPath := ""
-			relRawOutputPath := ""
-			if _, err := os.Stat(preflightPath); err == nil {
-				relPreflightPath, _ = filepath.Rel(repoPath, preflightPath)
-				relPreflightPath = filepath.ToSlash(relPreflightPath)
-				_ = readGithubJSON(preflightPath, &preflight)
-			}
-			if _, err := os.Stat(issueDraftPath); err == nil {
-				relIssueDraftPath, _ = filepath.Rel(repoPath, issueDraftPath)
-				relIssueDraftPath = filepath.ToSlash(relIssueDraftPath)
-			}
-			if _, err := os.Stat(rawOutputPath); err == nil {
-				relRawOutputPath, _ = filepath.Rel(repoPath, rawOutputPath)
-				relRawOutputPath = filepath.ToSlash(relRawOutputPath)
-			}
-			for _, proposal := range report.Proposals {
-				title := strings.TrimSpace(proposal.Title)
-				summary := strings.TrimSpace(proposal.Summary)
-				if title == "" || summary == "" {
+			sort.Strings(matches)
+			for _, proposalPath := range matches {
+				var report scoutReport
+				if err := readGithubJSON(proposalPath, &report); err != nil {
 					continue
 				}
-				itemID := localScoutProposalID(role, proposal)
-				discovered := localScoutDiscoveredItem{
-					ID:              itemID,
-					Role:            role,
-					Title:           title,
-					Artifact:        relArtifactDir,
-					Proposal:        proposal,
-					ProposalPath:    relProposalPath,
-					PolicyPath:      relPolicyPath,
-					PreflightPath:   relPreflightPath,
-					IssueDraftPath:  relIssueDraftPath,
-					RawOutputPath:   relRawOutputPath,
-					GeneratedAt:     strings.TrimSpace(report.GeneratedAt),
-					AuditMode:       strings.TrimSpace(preflight.Mode),
-					SurfaceKind:     strings.TrimSpace(preflight.SurfaceKind),
-					SurfaceTarget:   strings.TrimSpace(preflight.SurfaceTarget),
-					BrowserReady:    preflight.BrowserReady,
-					PreflightReason: strings.TrimSpace(preflight.Reason),
-					Destination:     startUIScoutDestinationLabel(policy.IssueDestination),
-					ForkRepo:        strings.TrimSpace(policy.ForkRepo),
+				artifactDir := filepath.Dir(proposalPath)
+				relArtifactDir, _ := filepath.Rel(repoPath, artifactDir)
+				relArtifactDir = filepath.ToSlash(relArtifactDir)
+				policyPath := filepath.Join(artifactDir, "policy.json")
+				policy := scoutPolicy{Version: 1, IssueDestination: improvementDestinationLocal}
+				_ = readGithubJSON(policyPath, &policy)
+				policy.IssueDestination = normalizeScoutDestination(policy.IssueDestination)
+				relPolicyPath := ""
+				if _, err := os.Stat(policyPath); err == nil {
+					relPolicyPath, _ = filepath.Rel(repoPath, policyPath)
+					relPolicyPath = filepath.ToSlash(relPolicyPath)
 				}
-				scoutItem := startUIScoutItemFromDiscovered(discovered)
-				if workState != nil && scoutItem.Destination == improvementDestinationLocal {
-					if job, ok := workState.ScoutJobs[itemID]; ok {
-						scoutItem = startWorkScoutJobFromItem(job)
+				relProposalPath, _ := filepath.Rel(repoPath, proposalPath)
+				relProposalPath = filepath.ToSlash(relProposalPath)
+				preflightPath := filepath.Join(artifactDir, "preflight.json")
+				issueDraftPath := filepath.Join(artifactDir, "issue-drafts.md")
+				rawOutputPath := filepath.Join(artifactDir, "raw-output.txt")
+				var preflight uiScoutPreflight
+				relPreflightPath := ""
+				relIssueDraftPath := ""
+				relRawOutputPath := ""
+				if _, err := os.Stat(preflightPath); err == nil {
+					relPreflightPath, _ = filepath.Rel(repoPath, preflightPath)
+					relPreflightPath = filepath.ToSlash(relPreflightPath)
+					_ = readGithubJSON(preflightPath, &preflight)
+				}
+				if _, err := os.Stat(issueDraftPath); err == nil {
+					relIssueDraftPath, _ = filepath.Rel(repoPath, issueDraftPath)
+					relIssueDraftPath = filepath.ToSlash(relIssueDraftPath)
+				}
+				if _, err := os.Stat(rawOutputPath); err == nil {
+					relRawOutputPath, _ = filepath.Rel(repoPath, rawOutputPath)
+					relRawOutputPath = filepath.ToSlash(relRawOutputPath)
+				}
+				for _, proposal := range report.Proposals {
+					title := strings.TrimSpace(proposal.Title)
+					summary := strings.TrimSpace(proposal.Summary)
+					if title == "" || summary == "" {
+						continue
 					}
+					itemID := localScoutProposalID(role, proposal)
+					discovered := localScoutDiscoveredItem{
+						ID:              itemID,
+						Role:            role,
+						Title:           title,
+						Artifact:        relArtifactDir,
+						Proposal:        proposal,
+						ProposalPath:    relProposalPath,
+						PolicyPath:      relPolicyPath,
+						PreflightPath:   relPreflightPath,
+						IssueDraftPath:  relIssueDraftPath,
+						RawOutputPath:   relRawOutputPath,
+						GeneratedAt:     strings.TrimSpace(report.GeneratedAt),
+						AuditMode:       strings.TrimSpace(preflight.Mode),
+						SurfaceKind:     strings.TrimSpace(preflight.SurfaceKind),
+						SurfaceTarget:   strings.TrimSpace(preflight.SurfaceTarget),
+						BrowserReady:    preflight.BrowserReady,
+						PreflightReason: strings.TrimSpace(preflight.Reason),
+						Destination:     startUIScoutDestinationLabel(policy.IssueDestination),
+						ForkRepo:        strings.TrimSpace(policy.ForkRepo),
+					}
+					scoutItem := startUIScoutItemFromDiscovered(discovered)
+					if workState != nil && scoutItem.Destination == improvementDestinationLocal {
+						if job, ok := workState.ScoutJobs[itemID]; ok {
+							scoutItem = startWorkScoutJobFromItem(job)
+						}
+					}
+					scoutItem.AvailableActions = startUIScoutAvailableActions(scoutItem)
+					items = append(items, scoutItem)
 				}
-				scoutItem.AvailableActions = startUIScoutAvailableActions(scoutItem)
-				items = append(items, scoutItem)
 			}
 		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	sort.SliceStable(items, func(i, j int) bool {
 		leftRank := startUIScoutStatusRank(items[i].Status)

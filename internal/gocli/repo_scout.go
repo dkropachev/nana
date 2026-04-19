@@ -218,33 +218,43 @@ func repoScoutEnable(cwd string, options repoScoutEnableOptions) error {
 	written := []string{}
 	for _, role := range options.Roles {
 		path := repoScoutPolicyPath(repoPath, role, options.GithubPolicyPath)
-		policy := readScoutPolicy(repoPath, role)
-		policy.Version = 1
-		if options.ModeSet || strings.TrimSpace(policy.Mode) == "" {
-			policy.Mode = defaultString(options.Mode, "auto")
-		}
-		if options.ScheduleSet || strings.TrimSpace(policy.Schedule) == "" {
-			policy.Schedule = defaultString(options.Schedule, scoutScheduleWhenResolved)
-		}
-		if options.DestinationSet || strings.TrimSpace(policy.IssueDestination) == "" {
-			policy.IssueDestination = defaultString(options.IssueDestination, improvementDestinationLocal)
-		}
-		if options.ForkRepoSet {
-			policy.ForkRepo = options.ForkRepo
-		}
-		if options.LabelsSet {
-			policy.Labels = normalizeScoutLabels(options.Labels, role)
-		}
-		if options.SessionLimitSet && scoutRoleSupportsSessionLimit(role) {
-			policy.SessionLimit = options.SessionLimit
-		}
-		if err := writeGithubJSON(path, policy); err != nil {
-			return err
-		}
-		for _, legacyPath := range repoScoutLegacyPolicyPaths(repoPath, role) {
-			if _, err := removePathIfExists(legacyPath); err != nil {
+		if err := withSourceWriteLock(repoPath, repoAccessLockOwner{
+			Backend: "repo-scout",
+			RunID:   sanitizePathToken(filepath.Base(repoPath)),
+			Purpose: "enable-" + sanitizePathToken(role),
+			Label:   "repo-scout-enable",
+		}, func() error {
+			policy := readScoutPolicy(repoPath, role)
+			policy.Version = 1
+			if options.ModeSet || strings.TrimSpace(policy.Mode) == "" {
+				policy.Mode = defaultString(options.Mode, "auto")
+			}
+			if options.ScheduleSet || strings.TrimSpace(policy.Schedule) == "" {
+				policy.Schedule = defaultString(options.Schedule, scoutScheduleWhenResolved)
+			}
+			if options.DestinationSet || strings.TrimSpace(policy.IssueDestination) == "" {
+				policy.IssueDestination = defaultString(options.IssueDestination, improvementDestinationLocal)
+			}
+			if options.ForkRepoSet {
+				policy.ForkRepo = options.ForkRepo
+			}
+			if options.LabelsSet {
+				policy.Labels = normalizeScoutLabels(options.Labels, role)
+			}
+			if options.SessionLimitSet && scoutRoleSupportsSessionLimit(role) {
+				policy.SessionLimit = options.SessionLimit
+			}
+			if err := writeGithubJSON(path, policy); err != nil {
 				return err
 			}
+			for _, legacyPath := range repoScoutLegacyPolicyPaths(repoPath, role) {
+				if _, err := removePathIfExists(legacyPath); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 		written = append(written, path)
 	}

@@ -575,7 +575,7 @@ func syncStartWorkScoutJobsIntoState(repoPath string, state *startWorkState) (bo
 	if strings.TrimSpace(repoPath) != "" {
 		if info, statErr := os.Stat(repoPath); statErr == nil && info.IsDir() {
 			repoPathAvailable = true
-			items, err := listLocalScoutDiscoveredItems(repoPath)
+			items, err := listLocalScoutDiscoveredItemsWithReadLock(repoPath)
 			if err != nil {
 				return false, err
 			}
@@ -584,8 +584,10 @@ func syncStartWorkScoutJobsIntoState(repoPath string, state *startWorkState) (bo
 	}
 	pickupState := localScoutPickupState{Version: 1, Items: map[string]localScoutPickupItem{}}
 	if repoPathAvailable {
-		if stateValue, _, readErr := readLocalScoutPickupState(repoPath); readErr == nil {
+		if stateValue, _, readErr := readLocalScoutPickupStateWithReadLock(repoPath); readErr == nil {
 			pickupState = stateValue
+		} else if repoAccessLockBusy(readErr) {
+			return false, readErr
 		}
 	}
 	if pickupState.Items == nil {
@@ -740,18 +742,15 @@ func countOutstandingLocalScoutItems(repoPath string, repoSlug string, role stri
 }
 
 func countOutstandingLegacyLocalScoutItems(repoPath string, role string) (int, error) {
-	items, err := listLocalScoutDiscoveredItems(repoPath)
+	items, err := listLocalScoutDiscoveredItemsWithReadLock(repoPath)
 	if err != nil {
 		return 0, err
 	}
 	pickupState := localScoutPickupState{Version: 1, Items: map[string]localScoutPickupItem{}}
-	if statePath, statePathErr := localScoutPickupStatePath(repoPath); statePathErr == nil {
-		if err := readGithubJSON(statePath, &pickupState); err != nil && !os.IsNotExist(err) {
-			return 0, err
-		}
-		if pickupState.Items == nil {
-			pickupState.Items = map[string]localScoutPickupItem{}
-		}
+	if stateValue, _, err := readLocalScoutPickupStateWithReadLock(repoPath); err == nil {
+		pickupState = stateValue
+	} else if repoAccessLockBusy(err) {
+		return 0, err
 	}
 	byID := map[string]localScoutDiscoveredItem{}
 	for _, item := range items {

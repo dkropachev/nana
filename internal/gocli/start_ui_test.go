@@ -2531,6 +2531,41 @@ func TestLoadStartUIRepoSummaryIncludesSourceLockStateWhenScoutConfigReadIsBlock
 	}
 }
 
+func TestListStartUIScoutItemsBlocksWhenSourceArtifactReadIsLocked(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	repo := createLocalWorkRepoAt(t, sourcePath)
+	writeScoutPickupFixture(t, repo, improvementScoutRole, "Improve help text", "Make help clearer")
+	if err := writeGithubJSON(filepath.Join(repo, ".nana", "improvements", "improve-test", "policy.json"), improvementPolicy{
+		Version:          1,
+		IssueDestination: improvementDestinationLocal,
+		Labels:           []string{"improvement"},
+	}); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+
+	lock, err := acquireManagedSourceWriteLock(repoSlug, repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "start-ui-scout-items-writer",
+		Purpose: "source-setup",
+		Label:   "start-ui-scout-items-writer",
+	})
+	if err != nil {
+		t.Fatalf("acquire managed source write lock: %v", err)
+	}
+	defer func() { _ = lock.Release() }()
+
+	_, err = listStartUIScoutItems(repoSlug)
+	if err == nil || !strings.Contains(err.Error(), "repo read lock busy") {
+		t.Fatalf("expected repo read lock busy, got %v", err)
+	}
+}
+
 func TestListStartUIScoutItemsRequeuesLegacyLaunchingScoutWithoutRunID(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

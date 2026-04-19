@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRepoScoutEnableWritesDefaultLocalPolicies(t *testing.T) {
@@ -161,6 +162,55 @@ func TestRepoScoutEnableDropsLegacyMaxIssuesField(t *testing.T) {
 	}
 	if strings.Contains(string(content), "max_issues") {
 		t.Fatalf("expected max_issues to be dropped, got %s", content)
+	}
+}
+
+func TestRepoScoutEnableBlocksWhenSourceReadLockHeld(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	restore := setRepoAccessLockTestTiming(t, 200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	defer restore()
+
+	repo := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	legacyPath := repoScoutLegacyPolicyPaths(repo, improvementScoutRole)[0]
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatalf("mkdir legacy policy dir: %v", err)
+	}
+	if err := os.WriteFile(legacyPath, []byte(`{"version":1,"mode":"manual"}`), 0o644); err != nil {
+		t.Fatalf("write legacy policy: %v", err)
+	}
+	canonicalPath := repoScoutPolicyPath(repo, improvementScoutRole, false)
+
+	lock, err := acquireSourceReadLock(repo, repoAccessLockOwner{
+		Backend: "test",
+		RunID:   "repo-scout-reader",
+		Purpose: "inspect",
+		Label:   "repo-scout-reader",
+	})
+	if err != nil {
+		t.Fatalf("acquire source read lock: %v", err)
+	}
+	defer func() { _ = lock.Release() }()
+
+	err = repoScoutEnable(repo, repoScoutEnableOptions{
+		Roles:     []string{improvementScoutRole},
+		ModeSet:   true,
+		Mode:      "auto",
+		LabelsSet: true,
+		Labels:    []string{"docs"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "repo write lock busy") {
+		t.Fatalf("expected repo write lock busy, got %v", err)
+	}
+	if fileExists(canonicalPath) {
+		t.Fatalf("expected canonical policy to remain absent on lock failure")
+	}
+	content, readErr := os.ReadFile(legacyPath)
+	if readErr != nil {
+		t.Fatalf("read legacy policy: %v", readErr)
+	}
+	if string(content) != `{"version":1,"mode":"manual"}` {
+		t.Fatalf("expected legacy policy to remain unchanged, got %s", content)
 	}
 }
 
