@@ -1,6 +1,7 @@
 package gocli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -232,6 +233,7 @@ func runCodexLaunch(cwd string, commandPrefix []string, rawArgs []string) error 
 	if err := MaybeCheckAndPromptUpdate(repoRoot, launchCwd); err != nil {
 		fmt.Fprintf(os.Stderr, "[nana-go] update warning: %v\n", err)
 	}
+	maybeWarnManagedAssetDrift(launchCwd, codexHome, repoRoot)
 	return runCodexSession(launchCwd, codexArgs, parsedNotify.Contract, codexHome)
 }
 
@@ -326,17 +328,52 @@ func runCodexSession(cwd string, codexArgs []string, notifyContract NotifyTempCo
 	codexArgs = injectModelInstructionsArgs(codexArgs, sessionInstructionsPath)
 
 	cmd := exec.Command("codex", codexArgs...)
-	cmd.Dir = cwd
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = authManager.wrapOutput(os.Stderr)
-	cmd.Env = buildCodexEnv(notifyContract, codexHome)
 	stopAuthMonitor := make(chan struct{})
 	if authManager != nil {
 		authManager.start(stopAuthMonitor, time.Now().UTC())
 	}
 	defer close(stopAuthMonitor)
-	return cmd.Run()
+
+	for {
+		var stdoutCapture bytes.Buffer
+		var stderrCapture bytes.Buffer
+
+		cmd = exec.Command("codex", codexArgs...)
+		cmd.Dir = cwd
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = io.MultiWriter(os.Stdout, &stdoutCapture)
+		cmd.Stderr = authManager.wrapOutput(io.MultiWriter(os.Stderr, &stderrCapture))
+		cmd.Env = buildCodexEnv(notifyContract, codexHome)
+
+		runErr := cmd.Run()
+		if runErr == nil || authManager == nil {
+			return runErr
+		}
+
+		combined := strings.Join([]string{stdoutCapture.String(), stderrCapture.String(), runErr.Error()}, "\n")
+		if !codexOutputLooksRateLimited(combined) {
+			return runErr
+		}
+
+		decision, decisionErr := authManager.handleExecutionRateLimit(codexRateLimitReason(stdoutCapture.String(), stderrCapture.String(), runErr))
+		if decisionErr != nil {
+			return fmt.Errorf("%w (and failed to resolve managed account rate limit: %v)", runErr, decisionErr)
+		}
+		if strings.TrimSpace(decision.SwitchedTo) != "" {
+			fmt.Fprintf(os.Stderr, "[nana] rate limited; switched managed account to %s and retrying.\n", strings.TrimSpace(decision.SwitchedTo))
+			continue
+		}
+
+		retryAt, ok := parseManagedAuthTime(decision.RetryAfter)
+		if !ok {
+			retryAt = time.Now().UTC().Add(time.Minute)
+		}
+		wait := time.Until(retryAt)
+		if wait > 0 {
+			fmt.Fprintf(os.Stderr, "[nana] rate limited; waiting until %s before retrying.\n", retryAt.Format(time.RFC3339))
+			time.Sleep(wait)
+		}
+	}
 }
 
 func buildCodexEnv(notifyContract NotifyTempContract, codexHome string) []string {
@@ -365,15 +402,20 @@ func buildCodexEnvMap(notifyContract NotifyTempContract, codexHome string) map[s
 }
 
 func hydrateGithubAuthEnv(envMap map[string]string, apiBaseURL string) {
-	if token := strings.TrimSpace(envMap["GH_TOKEN"]); token != "" {
-		if strings.TrimSpace(envMap["GITHUB_TOKEN"]) == "" {
-			envMap["GITHUB_TOKEN"] = token
+	if allowGithubTokenEnvFallback() {
+		if token := strings.TrimSpace(envMap["GH_TOKEN"]); token != "" {
+			if strings.TrimSpace(envMap["GITHUB_TOKEN"]) == "" {
+				envMap["GITHUB_TOKEN"] = token
+			}
+			return
 		}
-		return
-	}
-	if token := strings.TrimSpace(envMap["GITHUB_TOKEN"]); token != "" {
-		envMap["GH_TOKEN"] = token
-		return
+		if token := strings.TrimSpace(envMap["GITHUB_TOKEN"]); token != "" {
+			envMap["GH_TOKEN"] = token
+			return
+		}
+	} else {
+		delete(envMap, "GH_TOKEN")
+		delete(envMap, "GITHUB_TOKEN")
 	}
 	token, err := resolveGithubTokenForAPIBase(apiBaseURL)
 	if err != nil || strings.TrimSpace(token) == "" {
@@ -510,7 +552,7 @@ func writeSessionModelInstructions(cwd string, sessionID string, codexHome strin
 		return "", err
 	}
 
-	parts := []string{}
+	documents := []string{}
 	for _, sourcePath := range []string{
 		filepath.Join(codexHome, "AGENTS.md"),
 		filepath.Join(cwd, "AGENTS.md"),
@@ -524,7 +566,7 @@ func writeSessionModelInstructions(cwd string, sessionID string, codexHome strin
 		}
 		trimmed := strings.TrimSpace(string(content))
 		if trimmed != "" {
-			parts = append(parts, trimmed)
+			documents = append(documents, trimmed)
 		}
 	}
 
@@ -539,8 +581,10 @@ func writeSessionModelInstructions(cwd string, sessionID string, codexHome strin
 		"<!-- NANA:RUNTIME:END -->",
 	}, "\n")
 
-	parts = append(parts, overlay)
-	content := strings.Join(parts, "\n\n") + "\n"
+	content := mergePromptDocuments(append(documents, overlay)...)
+	if content != "" {
+		content += "\n"
+	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return "", err
 	}

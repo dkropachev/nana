@@ -18,6 +18,9 @@ This release completes the migration of NANA itself to a Go-only runtime and dis
 - replace npm/Cargo workflow jobs with Go-native CI and release jobs
 - remove the TypeScript/JavaScript product tree and root npm metadata
 - regenerate embedded setup assets from the current `prompts/`, `skills/`, and `templates/` trees
+- distinguish rate limits from ordinary execution failures across managed task runtimes and direct interactive launches
+- switch to another eligible managed account on rate limit when available, otherwise pause queued work or wait until the next known reset time
+- surface retry timing in Start UI run/work-item/investigation/scout views while keeping approvals focused on human-actionable review and launch decisions
 
 ## Verification
 

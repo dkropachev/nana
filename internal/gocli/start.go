@@ -4,34 +4,57 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-const StartHelp = `nana start - Run automation for onboarded repositories
+const StartHelp = `nana start - Run repo automation or scout startup
 
 Usage:
-  nana start [--repo <owner/repo>] [--parallel <n>] [--per-repo-workers <n>] [--max-open-prs <n>] [--once|--cycles <n>|--forever] [--interval <duration>] [--no-ui] [--ui-api-port <port>] [--ui-web-port <port>] [-- codex-args...]
+  Automation mode:
+    nana start [--repo <owner/repo>] [--parallel <n>] [--per-repo-workers <n>] [--max-open-prs <n>] [--once|--cycles <n>|--forever] [--interval <duration>] [--no-ui] [--ui-api-port <port>] [--ui-web-port <port>] [-- codex-args...]
+
+  Scout mode:
+    nana start [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [--once|--cycles <n>|--forever] [--interval <duration>] [-- codex-args...]
+
   nana start help
 
-Behavior:
+Mode selection:
+  - automation mode runs onboarded GitHub repo automation
+  - scout mode runs policy-backed improvement/enhancement/ui scout startup
+  - scout mode is selected by scout flags, positional scout targets, or path-like --repo values
+  - each run prints the selected [start] Mode line before execution begins
+
+Examples:
+  nana start --once --repo owner/repo
+  nana start --repo . --from-file proposals.json --once
+
+Automation mode behavior:
   - with no options, loops indefinitely until interrupted
   - scans onboarded GitHub repos under ~/.nana/work/repos
-  - skips repos where repo-mode is local or issue-pick is manual
-  - --parallel limits how many repos may be active at once
-  - --per-repo-workers limits how many workers a repo may use at once
+  - skips repos where repo-mode is disabled/local or issue-pick is manual
+  - blocks repo automation early when gh auth or managed-source SSH origin preflight fails
+  - --parallel limits total workers across all selected repos (default: 10)
+  - all selected repos share one automation worker queue
+  - --per-repo-workers is accepted as a deprecated alias for --parallel
   - --interval controls the target time between cycle starts in forever mode
-  - uses separate per-repo service and implementation queues that share the repo worker budget
+  - service and implementation tasks all consume the shared worker budget
   - triages issues before implementation pickup and persists triage results locally
   - runs supported scouts from the managed source checkout when scout policies exist
   - forwards PRs when pr-forward is auto: fork creates upstream PRs; repo attempts merge
-  - launches loopback UI services by default: REST API + web console
+  - launches loopback UI services by default: REST API + assistant workspace
+  - open the printed [start-ui] Web URL for the assistant workspace; see docs/start-ui.html
   - use --once or --cycles <n> for bounded runs
+
+Scout mode behavior:
+  - detects scout support from repo policy files
+  - runs improvement-scout, enhancement-scout, and/or ui-scout when their policies exist
+  - local repos keep scout artifacts under .nana/improvements/, .nana/enhancements/, or .nana/ui-findings/
+  - GitHub targets follow their scout policy issue_destination
 `
 
-const startDefaultGlobalParallel = 3
+const startDefaultGlobalParallel = 10
 
 type startOptions struct {
 	RepoSlug       string
@@ -58,9 +81,17 @@ var startPromoteStartWork = startWorkPromote
 var startRunScoutStart = runScoutStart
 var startRunLocalScoutPickup = runLocalScoutDiscoveredItems
 var startRunRepoCycle = runStartRepoCycle
+var startRunRepoCyclesBatch = runStartRepoCyclesSharedWorkers
 var startLoopNow = time.Now
 var startLoopSleep = time.Sleep
 var startLoopContinue = func() bool { return true }
+
+type startExecutionMode string
+
+const (
+	startExecutionModeAutomation startExecutionMode = "automation"
+	startExecutionModeScout      startExecutionMode = "scout"
+)
 
 func Start(cwd string, args []string) error {
 	if len(args) > 0 && isHelpToken(args[0]) {
@@ -78,6 +109,38 @@ func Start(cwd string, args []string) error {
 	if err != nil {
 		return err
 	}
+	mode := startExecutionModeForArgs(cwd, cleanArgs)
+	var runOnce func() error
+	if mode == startExecutionModeScout {
+		scoutOptions, err := parseScoutArgs(cleanArgs, ScoutStartHelp, "start")
+		if err != nil {
+			return err
+		}
+		runOnce = func() error {
+			return startRunScoutStart(cwd, scoutOptions)
+		}
+	} else {
+		options, err := parseStartArgs(cleanArgs)
+		if err != nil {
+			return err
+		}
+		options.Cycles = runtime.Cycles
+		options.Forever = runtime.Forever
+		options.Interval = runtime.Interval
+		runOnce = func() error {
+			repos, err := resolveStartRepos(options.RepoSlug)
+			if err != nil {
+				return err
+			}
+			if len(repos) == 0 {
+				fmt.Fprintln(os.Stdout, "[start] No onboarded repos with development enabled and issue-pick automation active.")
+				return nil
+			}
+			fmt.Fprintf(os.Stdout, "[start] Repos selected: %s\n", strings.Join(repos, ", "))
+			return startRunRepoCyclesBatch(cwd, repos, options)
+		}
+	}
+	printStartModeBanner(mode)
 	var ui *startUISupervisor
 	if !uiOptions.NoUI {
 		ui, err = launchStartUISupervisor(cwd, uiOptions)
@@ -86,34 +149,44 @@ func Start(cwd string, args []string) error {
 		}
 		defer ui.Close()
 	}
-	if startShouldRunScouts(cwd, cleanArgs) {
-		return runStartLoop(runtime, func() error {
-			return StartScouts(cwd, cleanArgs)
-		})
-	}
-	options, err := parseStartArgs(cleanArgs)
-	if err != nil {
-		return err
-	}
-	options.Cycles = runtime.Cycles
-	options.Forever = runtime.Forever
-	options.Interval = runtime.Interval
-	return runStartLoop(runtime, func() error {
-		repos, err := resolveStartRepos(options.RepoSlug)
-		if err != nil {
-			return err
-		}
-		if len(repos) == 0 {
-			fmt.Fprintln(os.Stdout, "[start] No onboarded repos with repo-mode fork/repo and issue-pick automation enabled.")
-			return nil
-		}
-		fmt.Fprintf(os.Stdout, "[start] Repos selected: %s\n", strings.Join(repos, ", "))
-		return runStartRepoCycles(cwd, repos, options)
-	})
+	return runStartLoop(runtime, runOnce)
 }
 
-func runStartRepoCycle(cwd string, repoSlug string, options startOptions) error {
+func startExecutionModeForArgs(cwd string, args []string) startExecutionMode {
+	if startShouldRunScouts(cwd, args) {
+		return startExecutionModeScout
+	}
+	if len(args) == 0 {
+		if info, err := os.Stat(cwd); err == nil && info.IsDir() && len(supportedScoutRoles(cwd)) > 0 {
+			if repos, err := resolveStartRepos(""); err == nil && len(repos) == 0 {
+				return startExecutionModeScout
+			}
+		}
+	}
+	return startExecutionModeAutomation
+}
+
+func printStartModeBanner(mode startExecutionMode) {
+	switch mode {
+	case startExecutionModeScout:
+		fmt.Fprintln(os.Stdout, "[start] Mode: scout (policy-backed scout startup).")
+	default:
+		fmt.Fprintln(os.Stdout, "[start] Mode: automation (onboarded repo automation).")
+	}
+}
+
+type preparedStartRepoCycle struct {
+	repoSlug    string
+	workOptions startWorkOptions
+}
+
+func prepareStartRepoCycle(repoSlug string, options startOptions) (*preparedStartRepoCycle, error) {
 	settings, _ := readGithubRepoSettings(githubRepoSettingsPath(repoSlug))
+	if cleaned, err := cleanupStaleLocalWorkRunsForRepo(githubManagedPaths(repoSlug).SourcePath); err != nil {
+		fmt.Fprintf(os.Stdout, "[start] %s: stale local work cleanup skipped: %v\n", repoSlug, err)
+	} else if cleaned > 0 {
+		fmt.Fprintf(os.Stdout, "[start] %s: cleaned stale local work runs=%d\n", repoSlug, cleaned)
+	}
 	forkMode := "manual"
 	implementMode := "manual"
 	repoMode := resolvedGithubRepoMode(settings)
@@ -125,29 +198,75 @@ func runStartRepoCycle(cwd string, repoSlug string, options startOptions) error 
 		implementMode = defaultString(normalizeGithubAutomationMode(settings.ImplementMode), issuePickModeToAutomationMode(issuePickMode))
 	}
 	fmt.Fprintf(os.Stdout, "[start] %s: repo-mode=%s issue-pick=%s pr-forward=%s\n", repoSlug, repoMode, issuePickMode, prForwardMode)
+	if !githubRepoModeAllowsDevelopment(repoMode) || issuePickMode == "manual" {
+		if err := clearStartRepoAutomationPreflight(repoSlug); err != nil {
+			fmt.Fprintf(os.Stdout, "[start] %s: failed to clear automation preflight state: %v\n", repoSlug, err)
+		}
+		return nil, nil
+	}
+	if err := githubAutomationRepoPreflight(repoSlug, true); err != nil {
+		if stateErr := recordStartRepoAutomationPreflightFailure(repoSlug, err); stateErr != nil {
+			fmt.Fprintf(os.Stdout, "[start] %s: failed to persist automation preflight blocker: %v\n", repoSlug, stateErr)
+		}
+		fmt.Fprintf(os.Stdout, "[start] %s: automation preflight blocked: %v\n", repoSlug, err)
+		return nil, nil
+	}
+	if err := clearStartRepoAutomationPreflight(repoSlug); err != nil {
+		fmt.Fprintf(os.Stdout, "[start] %s: failed to clear automation preflight state: %v\n", repoSlug, err)
+	}
 	if repoMode == "fork" && prForwardMode == "auto" {
 		if _, err := os.Stat(startWorkStatePath(repoSlug)); err == nil {
 			if err := startPromoteStartWork(startWorkOptions{RepoSlug: repoSlug}); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
-	if repoMode == "local" || issuePickMode == "manual" {
+	return &preparedStartRepoCycle{
+		repoSlug: repoSlug,
+		workOptions: startWorkOptions{
+			RepoSlug:       repoSlug,
+			Parallel:       options.Parallel,
+			MaxOpenPR:      options.MaxOpenPR,
+			ForkIssuesMode: forkMode,
+			ImplementMode:  implementMode,
+			PublishTarget:  publishTarget,
+			RepoMode:       repoMode,
+			IssuePickMode:  issuePickMode,
+			PRForwardMode:  prForwardMode,
+			CodexArgs:      options.CodexArgs,
+		},
+	}, nil
+}
+
+func finalizeStartRepoCycle(repoSlug string, options startOptions) error {
+	if _, err := syncGithubWorkItems(workItemSyncCommandOptions{
+		RepoSlug:  repoSlug,
+		Limit:     50,
+		AutoRun:   true,
+		CodexArgs: options.CodexArgs,
+	}); err != nil {
+		fmt.Fprintf(os.Stdout, "[start] %s: work item sync skipped: %v\n", repoSlug, err)
+	}
+	if started, err := dispatchQueuedWorkItems(repoSlug, options.CodexArgs); err != nil {
+		fmt.Fprintf(os.Stdout, "[start] %s: work item dispatch skipped: %v\n", repoSlug, err)
+	} else if started > 0 {
+		fmt.Fprintf(os.Stdout, "[start] %s: auto-started work items=%d\n", repoSlug, started)
+	}
+	return nil
+}
+
+func runStartRepoCycle(cwd string, repoSlug string, options startOptions) error {
+	prepared, err := prepareStartRepoCycle(repoSlug, options)
+	if err != nil {
+		return err
+	}
+	if prepared == nil {
 		return nil
 	}
-	workOptions := startWorkOptions{
-		RepoSlug:       repoSlug,
-		Parallel:       options.PerRepoWorkers,
-		MaxOpenPR:      options.MaxOpenPR,
-		ForkIssuesMode: forkMode,
-		ImplementMode:  implementMode,
-		PublishTarget:  publishTarget,
-		RepoMode:       repoMode,
-		IssuePickMode:  issuePickMode,
-		PRForwardMode:  prForwardMode,
-		CodexArgs:      options.CodexArgs,
+	if err := runStartRepoSchedulerCycle(cwd, repoSlug, prepared.workOptions, options); err != nil {
+		return err
 	}
-	return runStartRepoSchedulerCycle(cwd, repoSlug, workOptions, options)
+	return finalizeStartRepoCycle(repoSlug, options)
 }
 
 func startRepoHasScoutPolicies(repoSlug string) bool {
@@ -166,9 +285,6 @@ func startRepoHasScoutPolicies(repoSlug string) bool {
 }
 
 func startShouldRunScouts(cwd string, args []string) bool {
-	if len(args) == 0 {
-		return len(supportedScoutRoles(cwd)) > 0
-	}
 	for index := 0; index < len(args); index++ {
 		token := args[index]
 		if token == "--" {
@@ -346,7 +462,7 @@ func startRepoValueLooksLikePath(value string) bool {
 func parseStartArgs(args []string) (startOptions, error) {
 	options := startOptions{
 		Parallel:       startDefaultGlobalParallel,
-		PerRepoWorkers: startWorkDefaultParallel,
+		PerRepoWorkers: startDefaultGlobalParallel,
 		MaxOpenPR:      startWorkDefaultOpenPRCap,
 		Cycles:         1,
 		UIAPIPort:      startUIDefaultAPIPort,
@@ -392,6 +508,7 @@ func parseStartArgs(args []string) (startOptions, error) {
 				return startOptions{}, err
 			}
 			options.Parallel = parsed
+			options.PerRepoWorkers = parsed
 			index++
 		case strings.HasPrefix(token, "--parallel="):
 			parsed, err := parsePositiveInt(strings.TrimPrefix(token, "--parallel="), "--parallel")
@@ -399,6 +516,7 @@ func parseStartArgs(args []string) (startOptions, error) {
 				return startOptions{}, err
 			}
 			options.Parallel = parsed
+			options.PerRepoWorkers = parsed
 		case token == "--per-repo-workers":
 			value, err := requireStartFlagValue(parseArgs, index, token)
 			if err != nil {
@@ -408,6 +526,7 @@ func parseStartArgs(args []string) (startOptions, error) {
 			if err != nil {
 				return startOptions{}, err
 			}
+			options.Parallel = parsed
 			options.PerRepoWorkers = parsed
 			index++
 		case strings.HasPrefix(token, "--per-repo-workers="):
@@ -415,6 +534,7 @@ func parseStartArgs(args []string) (startOptions, error) {
 			if err != nil {
 				return startOptions{}, err
 			}
+			options.Parallel = parsed
 			options.PerRepoWorkers = parsed
 		case token == "--max-open-prs":
 			value, err := requireStartFlagValue(parseArgs, index, token)
@@ -549,7 +669,7 @@ func resolveStartRepos(repoSlug string) ([]string, error) {
 	if strings.TrimSpace(repoSlug) != "" {
 		settings, err := readGithubRepoSettings(githubRepoSettingsPath(repoSlug))
 		if err != nil {
-			return nil, fmt.Errorf("repo %s is not onboarded; run `nana repo onboard %s --repo-mode <local|fork|repo> --issue-pick <manual|label|auto> --pr-forward <approve|auto>`", repoSlug, repoSlug)
+			return nil, fmt.Errorf("repo %s is not onboarded; run `nana repo onboard %s --repo-mode <disabled|local|fork|repo> --issue-pick <manual|label|auto> --pr-forward <approve|auto>`", repoSlug, repoSlug)
 		}
 		if !githubRepoAutomationEnabled(settings) {
 			return nil, nil
@@ -571,80 +691,42 @@ func resolveStartRepos(repoSlug string) ([]string, error) {
 }
 
 func listOnboardedGithubRepos() ([]string, error) {
-	settingsFiles, err := listGithubRepoSettingsFiles()
-	if err != nil {
-		return nil, err
+	root := githubWorkReposRoot()
+	if _, err := os.Stat(root); os.IsNotExist(err) {
+		return nil, nil
 	}
-	repos := make([]string, 0, len(settingsFiles))
-	for _, settingsFile := range settingsFiles {
-		repos = append(repos, settingsFile.RepoSlug)
-	}
-	return uniqueStrings(repos), nil
-}
-
-type twoLevelRepoFile struct {
-	RepoSlug string
-	Path     string
-}
-
-func listGithubRepoSettingsFiles() ([]twoLevelRepoFile, error) {
-	return listTwoLevelRepoFiles(githubWorkReposRoot(), "settings.json")
-}
-
-// listTwoLevelRepoFiles enumerates only <root>/<owner>/<repo>/<fileName>.
-// Managed repo directories can contain large source, runs, issues, and .git
-// subtrees, so this must stay layout-aware rather than using filepath.WalkDir.
-func listTwoLevelRepoFiles(root string, fileName string) ([]twoLevelRepoFile, error) {
-	ownerEntries, err := os.ReadDir(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	files := []twoLevelRepoFile{}
-	for _, ownerEntry := range ownerEntries {
-		if !ownerEntry.IsDir() {
-			continue
-		}
-		owner := ownerEntry.Name()
-		ownerPath := filepath.Join(root, owner)
-		repoEntries, err := os.ReadDir(ownerPath)
+	repos := []string{}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return nil, err
+			return err
 		}
-		for _, repoEntry := range repoEntries {
-			if !repoEntry.IsDir() {
-				continue
-			}
-			repoSlug := filepath.ToSlash(filepath.Join(owner, repoEntry.Name()))
-			if !validRepoSlug(repoSlug) {
-				continue
-			}
-			path := filepath.Join(ownerPath, repoEntry.Name(), fileName)
-			info, err := os.Stat(path)
-			if err != nil {
-				if os.IsNotExist(err) {
-					continue
+		if path != root {
+			rel, relErr := filepath.Rel(root, path)
+			if relErr == nil {
+				depth := strings.Count(filepath.ToSlash(rel), "/") + 1
+				if entry.IsDir() {
+					if depth > 2 {
+						return filepath.SkipDir
+					}
+				} else if depth > 3 {
+					return nil
 				}
-				return nil, err
 			}
-			if info.IsDir() {
-				continue
-			}
-			files = append(files, twoLevelRepoFile{RepoSlug: repoSlug, Path: path})
 		}
-	}
-	sort.Slice(files, func(i, j int) bool {
-		if files[i].RepoSlug == files[j].RepoSlug {
-			return files[i].Path < files[j].Path
+		if entry.IsDir() || entry.Name() != "settings.json" {
+			return nil
 		}
-		return files[i].RepoSlug < files[j].RepoSlug
+		rel, err := filepath.Rel(root, filepath.Dir(path))
+		if err != nil {
+			return err
+		}
+		repoSlug := filepath.ToSlash(rel)
+		if validRepoSlug(repoSlug) {
+			repos = append(repos, repoSlug)
+		}
+		return nil
 	})
-	return files, nil
+	return uniqueStrings(repos), err
 }
 
 func githubRepoAutomationEnabled(settings *githubRepoSettings) bool {
@@ -653,7 +735,16 @@ func githubRepoAutomationEnabled(settings *githubRepoSettings) bool {
 	}
 	repoMode := resolvedGithubRepoMode(settings)
 	issuePickMode := resolvedGithubIssuePickMode(settings)
-	return repoMode != "local" && issuePickMode != "manual"
+	return githubRepoModeAllowsDevelopment(repoMode) && issuePickMode != "manual"
+}
+
+func githubRepoModeAllowsDevelopment(repoMode string) bool {
+	switch normalizeGithubRepoMode(repoMode) {
+	case "local", "fork", "repo":
+		return true
+	default:
+		return false
+	}
 }
 
 func requireStartFlagValue(args []string, index int, flag string) (string, error) {

@@ -57,6 +57,8 @@ type ManagedAuthAccountState struct {
 	LastActivatedAt            string `json:"last_activated_at,omitempty"`
 	DepletedAt                 string `json:"depleted_at,omitempty"`
 	RetryAfter                 string `json:"retry_after,omitempty"`
+	PrimaryRetryAfter          string `json:"primary_retry_after,omitempty"`
+	SecondaryRetryAfter        string `json:"secondary_retry_after,omitempty"`
 	LastFailureReason          string `json:"last_failure_reason,omitempty"`
 	LastUsageCheckAt           string `json:"last_usage_check_at,omitempty"`
 	LastUsageSource            string `json:"last_usage_source,omitempty"`
@@ -508,6 +510,12 @@ func statusManagedAccounts(codexHome string) error {
 		}
 		if strings.TrimSpace(accountState.RetryAfter) != "" {
 			flags = append(flags, "retry_after="+accountState.RetryAfter)
+		}
+		if strings.TrimSpace(accountState.PrimaryRetryAfter) != "" {
+			flags = append(flags, "primary_retry_after="+accountState.PrimaryRetryAfter)
+		}
+		if strings.TrimSpace(accountState.SecondaryRetryAfter) != "" {
+			flags = append(flags, "secondary_retry_after="+accountState.SecondaryRetryAfter)
 		}
 		if strings.TrimSpace(accountState.LastFailureReason) != "" {
 			flags = append(flags, "reason="+accountState.LastFailureReason)

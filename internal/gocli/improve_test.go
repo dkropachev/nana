@@ -187,6 +187,66 @@ func TestImproveRunsScoutPromptAfterOptionSeparator(t *testing.T) {
 	}
 }
 
+func TestImproveResumeUsesExecResume(t *testing.T) {
+	repo := t.TempDir()
+	home := t.TempDir()
+	fakeBin := filepath.Join(home, "bin")
+	commandLogPath := filepath.Join(home, "codex-commands.log")
+	failOncePath := filepath.Join(home, "improve-fail-once.marker")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`printf '%s\n' "$*" >> "${FAKE_CODEX_LOG_PATH}"`,
+		`mkdir -p "$CODEX_HOME/sessions/2026/04/17"`,
+		`printf '{"type":"session_meta","payload":{"id":"session-scout","timestamp":"2099-01-01T00:00:00Z","cwd":"%s"}}\n' "$PWD" > "$CODEX_HOME/sessions/2026/04/17/rollout-session-scout.jsonl"`,
+		`if printf '%s' "$*" | grep -q "exec resume session-scout"; then`,
+		`  printf '{"version":1,"repo":"widget","proposals":[{"title":"Clarify empty states","area":"UX","summary":"Explain what to do when a list is empty."}]}\n'`,
+		`  exit 0`,
+		`fi`,
+		`if [ ! -f "${FAKE_IMPROVE_FAIL_ONCE_PATH}" ]; then`,
+		`  : > "${FAKE_IMPROVE_FAIL_ONCE_PATH}"`,
+		`  printf 'rate limited\n' >&2`,
+		`  exit 1`,
+		`fi`,
+		`  printf '{"version":1,"repo":"widget","proposals":[{"title":"Clarify empty states","area":"UX","summary":"Explain what to do when a list is empty."}]}\n'`,
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_LOG_PATH", commandLogPath)
+	t.Setenv("FAKE_IMPROVE_FAIL_ONCE_PATH", failOncePath)
+
+	if err := Improve(repo, nil); err == nil {
+		t.Fatal("expected initial improve run to fail")
+	}
+	output, err := captureStdout(t, func() error {
+		return Improve(repo, []string{"--last"})
+	})
+	if err != nil {
+		t.Fatalf("Improve(resume): %v\n%s", err, output)
+	}
+	commandLog, err := os.ReadFile(commandLogPath)
+	if err != nil {
+		t.Fatalf("read command log: %v", err)
+	}
+	if !strings.Contains(string(commandLog), "exec resume session-scout") {
+		t.Fatalf("expected exec resume in log, got %q", string(commandLog))
+	}
+	matches, err := filepath.Glob(filepath.Join(repo, ".nana", "improvements", "improve-*", "manifest.json"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("expected one scout manifest, matches=%#v err=%v", matches, err)
+	}
+	var manifest scoutRunManifest
+	if err := readGithubJSON(matches[0], &manifest); err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if manifest.Status != "completed" {
+		t.Fatalf("expected completed manifest, got %#v", manifest)
+	}
+}
+
 func TestImproveLocalFromFileWritesArtifactsAndKeepsLocal(t *testing.T) {
 	repo := t.TempDir()
 	inputPath := filepath.Join(repo, "proposals.json")
@@ -306,8 +366,9 @@ func TestUIScoutRunsPreflightAndWritesArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read second CODEX_HOME: %v", err)
 	}
-	if strings.TrimSpace(string(secondCodexHome)) == "" || strings.HasPrefix(strings.TrimSpace(string(secondCodexHome)), repo) {
-		t.Fatalf("expected isolated CODEX_HOME, got %q", strings.TrimSpace(string(secondCodexHome)))
+	codexHomePath := strings.TrimSpace(string(secondCodexHome))
+	if codexHomePath == "" || !strings.Contains(codexHomePath, string(filepath.Separator)+".nana"+string(filepath.Separator)+"ui-findings"+string(filepath.Separator)) || !strings.HasSuffix(codexHomePath, filepath.Join("_runtime", "codex-home")) {
+		t.Fatalf("expected persisted isolated CODEX_HOME under ui-findings runtime, got %q", codexHomePath)
 	}
 	if fileExists(filepath.Join(repo, "ui-scout-sandbox-sentinel.txt")) {
 		t.Fatalf("ui-scout wrote into the source repo instead of the sandbox")
@@ -699,6 +760,7 @@ func TestStartAutoModeIgnoresCodexRuntimeDirectory(t *testing.T) {
 func TestStartGithubRepoDestinationPublishesBothScoutsToTargetRepo(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	repo := createScoutPolicyGitRepo(t, "repo", "")
+	configureTestGitInsteadOf(t, "git@github.com:acme/widget.git", repo)
 	inputPath := filepath.Join(t.TempDir(), "proposals.json")
 	if err := os.WriteFile(inputPath, []byte(scoutProposalJSON(2, "docs")), 0o644); err != nil {
 		t.Fatalf("write proposals: %v", err)
@@ -726,6 +788,7 @@ func TestStartGithubRepoDestinationPublishesBothScoutsToTargetRepo(t *testing.T)
 func TestStartGithubForkDestinationPublishesBothScoutsToForkRepo(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	repo := createScoutPolicyGitRepo(t, "fork", "me/widget")
+	configureTestGitInsteadOf(t, "git@github.com:acme/widget.git", repo)
 	inputPath := filepath.Join(t.TempDir(), "proposals.json")
 	if err := os.WriteFile(inputPath, []byte(scoutProposalJSON(2, "docs")), 0o644); err != nil {
 		t.Fatalf("write proposals: %v", err)

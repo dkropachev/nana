@@ -356,41 +356,23 @@ func writeSetupConfig(configPath string, options SetupOptions) error {
 }
 
 func writeSetupAgentsMd(repoRoot string, cwd string, codexHomeDir string, options SetupOptions) error {
-	templatePath := filepath.Join(repoRoot, "templates", "AGENTS.md")
-	templateBytes, err := os.ReadFile(templatePath)
+	targetPath := resolveManagedAgentsPath(resolveScopeForAgentsTarget(cwd, codexHomeDir), cwd, codexHomeDir)
+	content, err := renderManagedAgentsContent(repoRoot, cwd, codexHomeDir, targetPath)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return err
-		}
-		templates, embeddedErr := gocliassets.Templates()
-		if embeddedErr != nil {
-			return embeddedErr
-		}
-		content, ok := templates["AGENTS.md"]
-		if !ok {
-			return fmt.Errorf("embedded AGENTS template missing")
-		}
-		templateBytes = []byte(content)
+		return err
 	}
-	content := string(templateBytes)
-	targetPath := filepath.Join(cwd, "AGENTS.md")
-	if strings.Contains(codexHomeDir, filepath.Join(cwd, ".nana", "codex-home-investigate")) {
-		targetPath = filepath.Join(codexHomeDir, "AGENTS.md")
-		content = strings.ReplaceAll(content, "~/.codex", "./.nana/codex-home-investigate")
-		content = addGeneratedAgentsMarker(content)
-		return writeFileIfChanged(targetPath, content, options)
-	}
-	if strings.Contains(codexHomeDir, filepath.Join(cwd, ".codex")) {
-		content = strings.ReplaceAll(content, "~/.codex", "./.codex")
-		if fileExists(targetPath) && !options.Force {
-			fmt.Fprintln(os.Stdout, "Skipped AGENTS.md overwrite")
-			return nil
-		}
-	} else {
-		targetPath = filepath.Join(codexHomeDir, "AGENTS.md")
-		content = addGeneratedAgentsMarker(content)
+	if filepath.Clean(targetPath) == filepath.Clean(filepath.Join(cwd, "AGENTS.md")) && fileExists(targetPath) && !options.Force {
+		fmt.Fprintln(os.Stdout, "Skipped AGENTS.md overwrite")
+		return nil
 	}
 	return writeFileIfChanged(targetPath, content, options)
+}
+
+func resolveScopeForAgentsTarget(cwd string, codexHomeDir string) string {
+	if strings.Contains(codexHomeDir, filepath.Join(cwd, ".codex")) {
+		return "project"
+	}
+	return "user"
 }
 
 func addGeneratedAgentsMarker(content string) string {

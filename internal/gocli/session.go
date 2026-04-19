@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -58,6 +57,8 @@ type SessionSearchReport struct {
 	MatchedSessions int                   `json:"matched_sessions"`
 	Results         []SessionSearchResult `json:"results"`
 }
+
+const rolloutDirTimezoneSafetyMargin = 24 * time.Hour
 
 func Session(args []string) error {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
@@ -188,21 +189,16 @@ func SearchSessionHistory(opts SessionSearchOptions) (SessionSearchReport, error
 	results := []SessionSearchResult{}
 	matchedSessions := map[string]bool{}
 	searchedFiles := 0
-	err = walkRolloutFilesNewest(filepath.Join(codexHomeDir, "sessions"), rolloutWalkOptions{
-		SessionFilter: opts.Session,
-		CaseSensitive: opts.CaseSensitive,
-	}, func(filePath string) (bool, error) {
+	err = walkRolloutFiles(filepath.Join(codexHomeDir, "sessions"), sinceCutoff, func(filePath string) (bool, error) {
 		if len(results) >= limit {
+			return true, nil
+		}
+		info, err := os.Stat(filePath)
+		if err != nil {
 			return false, nil
 		}
-		if sinceCutoff > 0 {
-			info, err := os.Stat(filePath)
-			if err != nil {
-				return true, nil
-			}
-			if info.ModTime().UnixMilli() < sinceCutoff {
-				return true, nil
-			}
+		if sinceCutoff > 0 && info.ModTime().UnixMilli() < sinceCutoff {
+			return false, nil
 		}
 		searchedFiles++
 		fileResults, err := searchRolloutFile(filePath, opts.Query, context, limit-len(results), opts.CaseSensitive, opts.Session, projectFilter, sinceCutoff, codexHomeDir)
@@ -216,7 +212,7 @@ func SearchSessionHistory(opts SessionSearchOptions) (SessionSearchReport, error
 				break
 			}
 		}
-		return len(results) < limit, nil
+		return len(results) >= limit, nil
 	})
 	if err != nil {
 		return SessionSearchReport{}, err
@@ -257,112 +253,103 @@ func emptyOr(value string, fallback string) string {
 	return value
 }
 
-type rolloutWalkOptions struct {
-	SessionFilter string
-	CaseSensitive bool
-}
-
-func walkRolloutFilesNewest(root string, options rolloutWalkOptions, visit func(path string) (bool, error)) error {
-	if _, err := os.Stat(root); err != nil {
+func walkRolloutFiles(root string, sinceCutoff int64, visit func(string) (bool, error)) error {
+	info, err := os.Lstat(root)
+	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return err
 	}
-	_, err := walkRolloutDirNewest(root, options, visit)
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil
+	}
+	_, err = walkRolloutDir(root, root, sinceCutoff, visit)
 	return err
 }
 
-func walkRolloutDirNewest(dir string, options rolloutWalkOptions, visit func(path string) (bool, error)) (bool, error) {
+func walkRolloutDir(root string, dir string, sinceCutoff int64, visit func(string) (bool, error)) (bool, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return true, nil
+		return false, nil
 	}
-	sort.Slice(entries, func(i int, j int) bool {
-		return entries[i].Name() > entries[j].Name()
-	})
-	for _, entry := range entries {
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
 		path := filepath.Join(dir, entry.Name())
 		if entry.IsDir() {
-			keepGoing, err := walkRolloutDirNewest(path, options, visit)
-			if err != nil || !keepGoing {
-				return keepGoing, err
+			if rolloutDirEndsBeforeCutoff(root, path, sinceCutoff) {
+				continue
+			}
+			stop, err := walkRolloutDir(root, path, sinceCutoff, visit)
+			if stop || err != nil {
+				return stop, err
 			}
 			continue
 		}
 		if !isRolloutFileName(entry.Name()) {
 			continue
 		}
-		if options.SessionFilter != "" && shouldSkipRolloutBySessionPath(path, options.SessionFilter, options.CaseSensitive) {
-			continue
-		}
-		keepGoing, err := visit(path)
-		if err != nil || !keepGoing {
-			return keepGoing, err
+		stop, err := visit(path)
+		if stop || err != nil {
+			return stop, err
 		}
 	}
-	return true, nil
+	return false, nil
 }
 
 func isRolloutFileName(name string) bool {
 	return strings.HasPrefix(name, "rollout-") && strings.HasSuffix(name, ".jsonl")
 }
 
-func shouldSkipRolloutBySessionPath(path string, sessionFilter string, caseSensitive bool) bool {
-	sessionHint, ok := rolloutSessionHint(path)
+func rolloutDirEndsBeforeCutoff(root string, dir string, sinceCutoff int64) bool {
+	if sinceCutoff <= 0 {
+		return false
+	}
+	_, end, ok := rolloutDirTimeRange(root, dir)
 	if !ok {
 		return false
 	}
-	fallbackSessionID := rolloutFallbackSessionID(path)
-	return !contains(sessionHint, sessionFilter, caseSensitive) && !contains(fallbackSessionID, sessionFilter, caseSensitive)
+	return end.Add(rolloutDirTimezoneSafetyMargin).UnixMilli() <= sinceCutoff
 }
 
-// Standard Codex rollout filenames end with the session id:
-// rollout-YYYY-MM-DDTHH-MM-SS-<session>.jsonl. Only those parseable filenames
-// are used for prefiltering; nonstandard names remain candidates so metadata
-// fallback behavior is preserved.
-func rolloutSessionHint(path string) (string, bool) {
-	name := filepath.Base(path)
-	if !isRolloutFileName(name) {
-		return "", false
+func rolloutDirTimeRange(root string, dir string) (time.Time, time.Time, bool) {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == "." {
+		return time.Time{}, time.Time{}, false
 	}
-	body := rolloutFallbackSessionID(path)
-	const timestampLen = len("2006-01-02T15-04-05")
-	if len(body) <= timestampLen+1 || body[timestampLen] != '-' || !looksLikeRolloutTimestamp(body[:timestampLen]) {
-		return "", false
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	year, err := strconv.Atoi(parts[0])
+	if err != nil || year < 1 {
+		return time.Time{}, time.Time{}, false
 	}
-	sessionHint := strings.TrimSpace(body[timestampLen+1:])
-	if sessionHint == "" {
-		return "", false
+	// Rollout directory names are local wall-clock dates from the host that
+	// created the file; the search host may be in a different timezone. Keep
+	// these ranges in UTC and let rolloutDirEndsBeforeCutoff add a safety
+	// margin before pruning. Exact filtering still happens from file mtime and
+	// session metadata timestamps.
+	location := time.UTC
+	if len(parts) == 1 {
+		start := time.Date(year, time.January, 1, 0, 0, 0, 0, location)
+		return start, start.AddDate(1, 0, 0), true
 	}
-	return sessionHint, true
-}
-
-func rolloutFallbackSessionID(path string) string {
-	return strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "rollout-"), ".jsonl")
-}
-
-func looksLikeRolloutTimestamp(value string) bool {
-	if len(value) != len("2006-01-02T15-04-05") {
-		return false
+	monthValue, err := strconv.Atoi(parts[1])
+	if err != nil || monthValue < 1 || monthValue > 12 {
+		return time.Time{}, time.Time{}, false
 	}
-	for i, r := range value {
-		switch i {
-		case 4, 7, 13, 16:
-			if r != '-' {
-				return false
-			}
-		case 10:
-			if r != 'T' {
-				return false
-			}
-		default:
-			if r < '0' || r > '9' {
-				return false
-			}
-		}
+	month := time.Month(monthValue)
+	if len(parts) == 2 {
+		start := time.Date(year, month, 1, 0, 0, 0, 0, location)
+		return start, start.AddDate(0, 1, 0), true
 	}
-	return true
+	day, err := strconv.Atoi(parts[2])
+	if err != nil || day < 1 || day > 31 {
+		return time.Time{}, time.Time{}, false
+	}
+	start := time.Date(year, month, day, 0, 0, 0, 0, location)
+	if start.Year() != year || start.Month() != month || start.Day() != day {
+		return time.Time{}, time.Time{}, false
+	}
+	return start, start.AddDate(0, 0, 1), true
 }
 
 func parseSinceSpec(value string) (int64, error) {
@@ -467,7 +454,7 @@ func extractSessionMeta(parsed map[string]any, filePath string) struct {
 	Timestamp string
 	CWD       string
 } {
-	fallback := rolloutFallbackSessionID(filePath)
+	fallback := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(filePath), "rollout-"), ".jsonl")
 	meta := struct {
 		SessionID string
 		Timestamp string

@@ -99,6 +99,7 @@ var startRunIssueTriage = func(repoSlug string, issue startWorkIssueState, codex
 }
 
 var startRunScoutRole = func(cwd string, options ImproveOptions, role string) error {
+	options.RateLimitPolicy = codexRateLimitPolicyReturnPause
 	return runScout(cwd, options, role)
 }
 
@@ -450,6 +451,7 @@ func (c *startRepoCoordinator) syncServiceTasks() error {
 			task.Status = startWorkServiceTaskCompleted
 			task.ResultSummary = "schedule_wait"
 			task.WaitCycle = ""
+			task.WaitUntil = ""
 			task.StartedAt = ""
 			task.CompletedAt = now
 			task.UpdatedAt = now
@@ -601,6 +603,7 @@ func (c *startRepoCoordinator) upsertServiceTask(desired startWorkServiceTask, n
 	desired.LastError = current.LastError
 	desired.ResultSummary = current.ResultSummary
 	desired.WaitCycle = current.WaitCycle
+	desired.WaitUntil = current.WaitUntil
 	desired.UpdatedAt = now
 	desired.StartedAt = ""
 	desired.CompletedAt = ""
@@ -618,6 +621,9 @@ func (c *startRepoCoordinator) buildServiceQueue() []startRepoTask {
 			continue
 		}
 		if task.WaitCycle != "" && task.WaitCycle == c.cycleID {
+			continue
+		}
+		if taskWaitUntilPending(task, time.Now().UTC()) {
 			continue
 		}
 		if !c.serviceTaskReady(task) {
@@ -691,6 +697,9 @@ func (c *startRepoCoordinator) buildScoutJobQueue() []startRepoTask {
 	jobIDs := make([]string, 0, len(c.state.ScoutJobs))
 	for jobID, job := range c.state.ScoutJobs {
 		if job.Status != startScoutJobQueued || job.Destination != improvementDestinationLocal {
+			continue
+		}
+		if scoutJobPausePending(job, time.Now().UTC()) {
 			continue
 		}
 		taskKey := startServiceTaskKey(startTaskKindScoutJob, jobID)
@@ -796,6 +805,8 @@ func (c *startRepoCoordinator) markTaskStarted(task startRepoTask) error {
 			issue.Status = startWorkStatusInProgress
 			issue.BlockedReason = ""
 			issue.LastRunError = ""
+			issue.ScheduleAt = ""
+			issue.DeferredReason = ""
 			issue.LastRunUpdatedAt = now
 			issue.UpdatedAt = now
 			c.state.Issues[task.IssueKey] = issue
@@ -805,6 +816,8 @@ func (c *startRepoCoordinator) markTaskStarted(task startRepoTask) error {
 			job := c.state.ScoutJobs[task.ScoutJobID]
 			job.Status = startScoutJobRunning
 			job.LastError = ""
+			job.PauseUntil = ""
+			job.PauseReason = ""
 			job.UpdatedAt = now
 			job.Attempts++
 			c.state.ScoutJobs[task.ScoutJobID] = job
@@ -813,6 +826,8 @@ func (c *startRepoCoordinator) markTaskStarted(task startRepoTask) error {
 			item := c.state.PlannedItems[task.PlannedItemID]
 			item.State = startPlannedItemLaunching
 			item.LastError = ""
+			item.ScheduleAt = ""
+			item.DeferredReason = ""
 			item.UpdatedAt = now
 			c.state.PlannedItems[task.PlannedItemID] = item
 			serviceTask := c.state.ServiceTasks[task.Key]
@@ -822,6 +837,8 @@ func (c *startRepoCoordinator) markTaskStarted(task startRepoTask) error {
 			serviceTask.UpdatedAt = now
 			serviceTask.LastError = ""
 			serviceTask.WaitCycle = ""
+			serviceTask.WaitUntil = ""
+			serviceTask.WaitUntil = ""
 			c.state.ServiceTasks[task.Key] = serviceTask
 			c.serviceStartedCount++
 		default:
@@ -832,6 +849,8 @@ func (c *startRepoCoordinator) markTaskStarted(task startRepoTask) error {
 			serviceTask.UpdatedAt = now
 			serviceTask.LastError = ""
 			serviceTask.WaitCycle = ""
+			serviceTask.WaitUntil = ""
+			serviceTask.WaitUntil = ""
 			c.state.ServiceTasks[task.Key] = serviceTask
 			c.serviceStartedCount++
 		}
@@ -900,6 +919,18 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 			if result.Launch != nil {
 				issue.LastRunID = strings.TrimSpace(result.Launch.RunID)
 			}
+			if pauseErr, ok := isCodexRateLimitPauseError(result.Err); ok {
+				issue.Status = startWorkStatusQueued
+				issue.BlockedReason = ""
+				issue.LastRunError = codexPauseInfoMessage(pauseErr.Info)
+				issue.DeferredReason = defaultString(strings.TrimSpace(pauseErr.Info.Reason), "rate limited")
+				issue.ScheduleAt = strings.TrimSpace(pauseErr.Info.RetryAfter)
+				issue.ScheduleUpdatedAt = now
+				issue.LastRunUpdatedAt = now
+				issue.UpdatedAt = now
+				c.state.Issues[result.Task.IssueKey] = issue
+				return writeStartWorkStateUnlocked(*c.state)
+			}
 			issue.LastRunUpdatedAt = now
 			if result.Err != nil {
 				issue.LastRunError = result.Err.Error()
@@ -918,6 +949,7 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 			serviceTask.Fingerprint = issue.SourceFingerprint
 			serviceTask.RunID = issue.LastRunID
 			serviceTask.WaitCycle = ""
+			serviceTask.WaitUntil = ""
 			serviceTask.UpdatedAt = now
 			c.state.ServiceTasks[serviceTask.ID] = serviceTask
 			if err := writeStartWorkStateUnlocked(*c.state); err != nil {
@@ -931,6 +963,18 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 			job := c.state.ScoutJobs[result.Task.ScoutJobID]
 			if result.Launch != nil && strings.TrimSpace(result.Launch.RunID) != "" {
 				job.RunID = strings.TrimSpace(result.Launch.RunID)
+			}
+			if pauseErr, ok := isCodexRateLimitPauseError(result.Err); ok {
+				job.Status = startScoutJobQueued
+				job.LastError = codexPauseInfoMessage(pauseErr.Info)
+				job.PauseReason = defaultString(strings.TrimSpace(pauseErr.Info.Reason), "rate limited")
+				job.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+				job.UpdatedAt = now
+				c.state.ScoutJobs[result.Task.ScoutJobID] = job
+				if err := writeStartWorkStateUnlocked(*c.state); err != nil {
+					return err
+				}
+				return nil
 			}
 			if result.Err != nil {
 				job.Status = startScoutJobFailed
@@ -956,6 +1000,7 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 			serviceTask.Status = startWorkServiceTaskCompleted
 			serviceTask.ResultSummary = "synced"
 			serviceTask.WaitCycle = ""
+			serviceTask.WaitUntil = ""
 			serviceTask.CompletedAt = now
 			serviceTask.UpdatedAt = now
 			c.state.ServiceTasks[result.Task.Key] = serviceTask
@@ -969,6 +1014,7 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 					serviceTask.LastError = result.Err.Error()
 					serviceTask.ResultSummary = "retrying"
 					serviceTask.WaitCycle = ""
+					serviceTask.WaitUntil = ""
 					serviceTask.StartedAt = ""
 					serviceTask.UpdatedAt = now
 					c.state.ServiceTasks[result.Task.Key] = serviceTask
@@ -982,6 +1028,7 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 				serviceTask.Status = startWorkServiceTaskFailed
 				serviceTask.LastError = result.Err.Error()
 				serviceTask.WaitCycle = ""
+				serviceTask.WaitUntil = ""
 				serviceTask.CompletedAt = now
 				serviceTask.UpdatedAt = now
 				c.state.ServiceTasks[result.Task.Key] = serviceTask
@@ -998,6 +1045,7 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 			serviceTask.Status = startWorkServiceTaskCompleted
 			serviceTask.ResultSummary = startWorkPriorityLabel(result.Triage.Priority)
 			serviceTask.WaitCycle = ""
+			serviceTask.WaitUntil = ""
 			serviceTask.CompletedAt = now
 			serviceTask.UpdatedAt = now
 			serviceTask.Fingerprint = issue.SourceFingerprint
@@ -1048,6 +1096,7 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 					serviceTask.LastError = result.Reconcile.BlockedReason
 					serviceTask.ResultSummary = "waiting"
 					serviceTask.WaitCycle = c.cycleID
+					serviceTask.WaitUntil = ""
 					serviceTask.StartedAt = ""
 					serviceTask.UpdatedAt = now
 					serviceTask.RunID = result.Reconcile.RunID
@@ -1066,6 +1115,7 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 			serviceTask.Status = startWorkServiceTaskCompleted
 			serviceTask.ResultSummary = result.Reconcile.Status
 			serviceTask.WaitCycle = ""
+			serviceTask.WaitUntil = ""
 			serviceTask.CompletedAt = now
 			serviceTask.UpdatedAt = now
 			serviceTask.RunID = result.Reconcile.RunID
@@ -1086,6 +1136,7 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 			}
 			serviceTask.Status = startWorkServiceTaskCompleted
 			serviceTask.WaitCycle = ""
+			serviceTask.WaitUntil = ""
 			serviceTask.CompletedAt = now
 			serviceTask.UpdatedAt = now
 			c.state.ServiceTasks[result.Task.Key] = serviceTask
@@ -1094,6 +1145,33 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 			serviceTask := c.state.ServiceTasks[result.Task.Key]
 			item := c.state.PlannedItems[result.Task.PlannedItemID]
 			scoutJobID, scoutJob, scoutJobOK := findScoutJobByLegacyPlannedItemID(c.state, result.Task.PlannedItemID)
+			if pauseErr, ok := isCodexRateLimitPauseError(result.Err); ok {
+				serviceTask.Status = startWorkServiceTaskQueued
+				serviceTask.LastError = codexPauseInfoMessage(pauseErr.Info)
+				serviceTask.ResultSummary = "paused_rate_limit"
+				serviceTask.WaitCycle = ""
+				serviceTask.WaitUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+				serviceTask.StartedAt = ""
+				serviceTask.CompletedAt = ""
+				serviceTask.UpdatedAt = now
+				c.state.ServiceTasks[result.Task.Key] = serviceTask
+				item.State = startPlannedItemQueued
+				item.LaunchRunID = defaultString(item.LaunchRunID, result.PlannedLaunch.RunID)
+				item.LastError = codexPauseInfoMessage(pauseErr.Info)
+				item.ScheduleAt = strings.TrimSpace(pauseErr.Info.RetryAfter)
+				item.DeferredReason = defaultString(strings.TrimSpace(pauseErr.Info.Reason), "rate limited")
+				item.UpdatedAt = now
+				c.state.PlannedItems[result.Task.PlannedItemID] = item
+				if scoutJobOK {
+					scoutJob.Status = startScoutJobQueued
+					scoutJob.LastError = codexPauseInfoMessage(pauseErr.Info)
+					scoutJob.PauseReason = defaultString(strings.TrimSpace(pauseErr.Info.Reason), "rate limited")
+					scoutJob.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+					scoutJob.UpdatedAt = now
+					c.state.ScoutJobs[scoutJobID] = scoutJob
+				}
+				return writeStartWorkStateUnlocked(*c.state)
+			}
 			if result.Err != nil {
 				serviceTask.Status = startWorkServiceTaskFailed
 				serviceTask.LastError = result.Err.Error()
@@ -1159,6 +1237,16 @@ func (c *startRepoCoordinator) serviceTaskReady(task startWorkServiceTask) bool 
 	return true
 }
 
+func taskWaitUntilPending(task startWorkServiceTask, now time.Time) bool {
+	waitUntil, ok := startWorkScheduleParsed(task.WaitUntil)
+	return ok && waitUntil.After(now)
+}
+
+func scoutJobPausePending(job startWorkScoutJob, now time.Time) bool {
+	waitUntil, ok := startWorkScheduleParsed(job.PauseUntil)
+	return ok && waitUntil.After(now)
+}
+
 func (c *startRepoCoordinator) triageDependencyKeys(syncTaskID string) []string {
 	if syncTaskID == "" {
 		return nil
@@ -1174,11 +1262,24 @@ func (c *startRepoCoordinator) triageDependencyKeys(syncTaskID string) []string 
 }
 
 func (c *startRepoCoordinator) handleServiceTaskFailure(task startWorkServiceTask, taskErr error, now string) error {
+	if pauseErr, ok := isCodexRateLimitPauseError(taskErr); ok {
+		task.Status = startWorkServiceTaskQueued
+		task.LastError = codexPauseInfoMessage(pauseErr.Info)
+		task.ResultSummary = "paused_rate_limit"
+		task.WaitCycle = ""
+		task.WaitUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+		task.StartedAt = ""
+		task.CompletedAt = ""
+		task.UpdatedAt = now
+		c.state.ServiceTasks[task.ID] = task
+		return writeStartWorkStateUnlocked(*c.state)
+	}
 	if task.Attempts < serviceTaskRetryLimit(task.Kind) {
 		task.Status = startWorkServiceTaskQueued
 		task.LastError = taskErr.Error()
 		task.ResultSummary = "retrying"
 		task.WaitCycle = ""
+		task.WaitUntil = ""
 		task.StartedAt = ""
 		task.UpdatedAt = now
 		c.state.ServiceTasks[task.ID] = task
@@ -1187,6 +1288,7 @@ func (c *startRepoCoordinator) handleServiceTaskFailure(task startWorkServiceTas
 	task.Status = startWorkServiceTaskFailed
 	task.LastError = taskErr.Error()
 	task.WaitCycle = ""
+	task.WaitUntil = ""
 	task.CompletedAt = now
 	task.UpdatedAt = now
 	c.state.ServiceTasks[task.ID] = task

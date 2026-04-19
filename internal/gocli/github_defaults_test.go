@@ -836,6 +836,7 @@ func TestGithubWorkCommandStartExecutesNatively(t *testing.T) {
 	runGit("init", "-b", "main")
 	runGit("add", ".")
 	runGit("commit", "-m", "init")
+	configureTestGitInsteadOf(t, "git@github.com:acme/widget.git", originRepo)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -1254,6 +1255,78 @@ func TestGithubAnyHumanFeedbackFiltersBotsAuthorAndBlocked(t *testing.T) {
 	}
 	if snapshot.IgnoredActors["author"] != 1 || snapshot.IgnoredActors["bot"] != 1 || snapshot.IgnoredActors["blocked"] != 1 {
 		t.Fatalf("expected ignored actor reasons, got %+v", snapshot.IgnoredActors)
+	}
+}
+
+func TestBuildGithubFeedbackInstructionsCapsNewestFeedbackFirst(t *testing.T) {
+	feedback := githubFeedbackSnapshot{
+		IssueComments:  []githubIssueCommentPayload{},
+		Reviews:        []githubPullReviewPayload{},
+		ReviewComments: []githubPullReviewCommentPayload{},
+	}
+	for index := 1; index <= 7; index++ {
+		feedback.IssueComments = append(feedback.IssueComments, githubIssueCommentPayload{
+			ID:      index,
+			HTMLURL: fmt.Sprintf("https://example.invalid/issues/%d", index),
+			Body:    fmt.Sprintf("issue %d %s", index, strings.Repeat("body ", 200)),
+			User:    githubActor{Login: fmt.Sprintf("issue-user-%d", index)},
+		})
+	}
+	for index := 1; index <= 6; index++ {
+		feedback.Reviews = append(feedback.Reviews, githubPullReviewPayload{
+			ID:      index,
+			HTMLURL: fmt.Sprintf("https://example.invalid/reviews/%d", index),
+			Body:    fmt.Sprintf("review %d %s", index, strings.Repeat("body ", 200)),
+			State:   "COMMENTED",
+			User: struct {
+				Login string `json:"login"`
+			}{Login: fmt.Sprintf("reviewer-%d", index)},
+		})
+	}
+	for index := 1; index <= 12; index++ {
+		feedback.ReviewComments = append(feedback.ReviewComments, githubPullReviewCommentPayload{
+			ID:           index,
+			HTMLURL:      fmt.Sprintf("https://example.invalid/review-comments/%d", index),
+			Body:         fmt.Sprintf("review comment %d %s", index, strings.Repeat("body ", 200)),
+			Path:         "main.go",
+			Line:         index,
+			OriginalLine: index,
+			User: struct {
+				Login string `json:"login"`
+			}{Login: fmt.Sprintf("commenter-%d", index)},
+		})
+	}
+
+	instructions := buildGithubFeedbackInstructions(githubWorkManifest{
+		RunID:           "gh-1",
+		RepoSlug:        "acme/widget",
+		SandboxPath:     "/tmp/sandbox",
+		SandboxRepoPath: "/tmp/sandbox/repo",
+		TargetKind:      "issue",
+		TargetNumber:    42,
+		TargetURL:       "https://github.com/acme/widget/issues/42",
+	}, []string{"reviewer-a"}, feedback)
+
+	for _, needle := range []string{
+		"## Issue comment 7",
+		"## Review 6",
+		"## Review comment 12",
+		"... 2 older issue comments omitted",
+		"... 1 older reviews omitted",
+		"... 2 older review comments omitted",
+		"... [truncated]",
+	} {
+		if !strings.Contains(instructions, needle) {
+			t.Fatalf("expected feedback instructions to contain %q:\n%s", needle, instructions)
+		}
+	}
+	for _, needle := range []string{"## Issue comment 1\n", "## Review 1\n", "## Review comment 1\n", "## Review comment 2\n"} {
+		if strings.Contains(instructions, needle) {
+			t.Fatalf("expected oldest feedback item to be omitted (%q):\n%s", needle, instructions)
+		}
+	}
+	if len(instructions) > githubFeedbackInstructionCharLimit {
+		t.Fatalf("feedback instructions exceed cap: %d", len(instructions))
 	}
 }
 
@@ -1894,6 +1967,7 @@ func TestGithubIssueInvestigateExecutesNatively(t *testing.T) {
 	run(originRepo, "init", "-b", "main")
 	run(originRepo, "add", ".")
 	run(originRepo, "commit", "-m", "init")
+	configureTestGitInsteadOf(t, "git@github.com:acme/widget.git", originRepo)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -1972,6 +2046,9 @@ func TestGithubReviewExecutesNatively(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("GH_TOKEN", "test-token")
+	oldPreflight := githubManagedOriginPreflight
+	githubManagedOriginPreflight = func(repoPath string, repoMeta *githubManagedRepoMetadata) error { return nil }
+	defer func() { githubManagedOriginPreflight = oldPreflight }()
 
 	fakeBin := filepath.Join(home, "bin")
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
@@ -2019,6 +2096,7 @@ printf '{"findings":[{"title":"Broken check","severity":"medium","path":"CHANGEL
 	}
 	runGit(seedRepo, "add", ".")
 	runGit(seedRepo, "commit", "-m", "feature")
+	configureTestGitInsteadOf(t, "git@github.com:acme/widget.git", originBare)
 	headSHABytes, _ := exec.Command("git", "-C", seedRepo, "rev-parse", "HEAD").Output()
 	headSHA := strings.TrimSpace(string(headSHABytes))
 	baseSHABytes, _ := exec.Command("git", "-C", seedRepo, "rev-parse", "main").Output()
@@ -2277,6 +2355,7 @@ func TestGithubWorkCommandStartHonorsRepoPublishTarget(t *testing.T) {
 	runGit("init", "-b", "main")
 	runGit("add", ".")
 	runGit("commit", "-m", "init")
+	configureTestGitInsteadOf(t, "git@github.com:acme/widget.git", originRepo)
 	if err := writeGithubJSON(githubRepoSettingsPath("acme/widget"), githubRepoSettings{Version: 5, PublishTarget: "fork", DefaultRoleLayout: "split"}); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
@@ -2332,6 +2411,7 @@ func TestGithubWorkCommandStartRejectsDisabledRepoModeFromSettings(t *testing.T)
 	runGit("init", "-b", "main")
 	runGit("add", ".")
 	runGit("commit", "-m", "init")
+	configureTestGitInsteadOf(t, "git@github.com:acme/widget.git", originRepo)
 
 	if err := writeGithubJSON(githubRepoSettingsPath("acme/widget"), githubRepoSettings{Version: 6, RepoMode: "disabled", IssuePickMode: "auto", DefaultRoleLayout: "split"}); err != nil {
 		t.Fatalf("write settings: %v", err)
@@ -2408,6 +2488,9 @@ func TestResolveGithubTokenUsesHostAwareGhAuthLookup(t *testing.T) {
 	script := strings.Join([]string{
 		"#!/bin/sh",
 		"printf '%s\\n' \"$@\" > \"$FAKE_GH_ARGS_PATH\"",
+		"if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ] && [ \"$3\" = \"--hostname\" ] && [ \"$4\" = \"ghe.example.com\" ]; then",
+		"  exit 0",
+		"fi",
 		"if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"token\" ] && [ \"$3\" = \"--hostname\" ] && [ \"$4\" = \"ghe.example.com\" ]; then",
 		"  printf 'host-token\\n'",
 		"  exit 0",
@@ -2451,6 +2534,9 @@ func TestResolveGithubTokenFallsBackToDefaultGhAuthLookup(t *testing.T) {
 	script := strings.Join([]string{
 		"#!/bin/sh",
 		"printf '%s\\n' \"$*\" >> \"$FAKE_GH_CALL_LOG_PATH\"",
+		"if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ] && [ \"$3\" = \"--hostname\" ] && [ \"$4\" = \"ghe.example.com\" ]; then",
+		"  exit 0",
+		"fi",
 		"if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"token\" ] && [ \"$3\" = \"--hostname\" ]; then",
 		"  exit 1",
 		"fi",

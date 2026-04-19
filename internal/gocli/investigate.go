@@ -18,6 +18,7 @@ const InvestigateHelp = `nana investigate - Source-backed investigation with val
 
 Usage:
   nana investigate <user-input> [-- codex-args...]
+  nana investigate --resume <run-id>|--last [-- codex-args...]
   nana investigate onboard
   nana investigate doctor
   nana investigate help
@@ -91,6 +92,8 @@ type investigateManifest struct {
 	RunDir          string                  `json:"run_dir"`
 	FinalReportPath string                  `json:"final_report_path,omitempty"`
 	LastError       string                  `json:"last_error,omitempty"`
+	PauseReason     string                  `json:"pause_reason,omitempty"`
+	PauseUntil      string                  `json:"pause_until,omitempty"`
 	MaxRounds       int                     `json:"max_rounds"`
 	AcceptedRound   int                     `json:"accepted_round,omitempty"`
 	Rounds          []investigateRoundState `json:"rounds,omitempty"`
@@ -151,6 +154,13 @@ type investigateExecutionResult struct {
 	Stderr string
 }
 
+type investigateRunOptions struct {
+	Query       string
+	CodexArgs   []string
+	ResumeRunID string
+	ResumeLast  bool
+}
+
 func Investigate(cwd string, args []string) error {
 	if len(args) == 0 || isHelpToken(args[0]) {
 		fmt.Fprint(os.Stdout, InvestigateHelp)
@@ -177,11 +187,14 @@ func Investigate(cwd string, args []string) error {
 		return fmt.Errorf("nana investigate sources has been removed. Configure MCPs in the dedicated investigate CODEX_HOME and let `nana investigate doctor` probe them")
 	}
 
-	task, codexArgs, err := parseInvestigateRunArgs(args)
+	options, err := parseInvestigateRunArgs(args)
 	if err != nil {
 		return err
 	}
-	return runInvestigation(cwd, task, codexArgs)
+	if strings.TrimSpace(options.ResumeRunID) != "" || options.ResumeLast {
+		return resumeInvestigation(cwd, options)
+	}
+	return runInvestigation(cwd, options.Query, options.CodexArgs)
 }
 
 func MaybeHandleInvestigateHelp(command string, args []string) bool {
@@ -198,26 +211,50 @@ func MaybeHandleInvestigateHelp(command string, args []string) bool {
 	return false
 }
 
-func parseInvestigateRunArgs(args []string) (string, []string, error) {
+func parseInvestigateRunArgs(args []string) (investigateRunOptions, error) {
+	options := investigateRunOptions{}
 	taskParts := []string{}
-	codexArgs := []string{}
 	seenSeparator := false
-	for _, token := range args {
+	for index := 0; index < len(args); index++ {
+		token := args[index]
 		if token == "--" {
 			seenSeparator = true
-			continue
+			options.CodexArgs = append(options.CodexArgs, args[index+1:]...)
+			break
 		}
 		if seenSeparator {
-			codexArgs = append(codexArgs, token)
+			options.CodexArgs = append(options.CodexArgs, token)
 			continue
 		}
-		taskParts = append(taskParts, token)
+		switch {
+		case token == "--resume":
+			if index+1 >= len(args) || strings.HasPrefix(args[index+1], "-") {
+				return investigateRunOptions{}, fmt.Errorf("missing value after --resume\n\n%s", InvestigateHelp)
+			}
+			options.ResumeRunID = strings.TrimSpace(args[index+1])
+			index++
+		case strings.HasPrefix(token, "--resume="):
+			options.ResumeRunID = strings.TrimSpace(strings.TrimPrefix(token, "--resume="))
+		case token == "--last":
+			options.ResumeLast = true
+		default:
+			taskParts = append(taskParts, token)
+		}
 	}
-	task := strings.TrimSpace(strings.Join(taskParts, " "))
-	if task == "" {
-		return "", nil, fmt.Errorf("Usage: nana investigate <user-input> [-- codex-args...]\n\n%s", InvestigateHelp)
+	if strings.TrimSpace(options.ResumeRunID) != "" && options.ResumeLast {
+		return investigateRunOptions{}, fmt.Errorf("use either --resume <run-id> or --last, not both\n\n%s", InvestigateHelp)
 	}
-	return task, codexArgs, nil
+	options.Query = strings.TrimSpace(strings.Join(taskParts, " "))
+	if strings.TrimSpace(options.ResumeRunID) != "" || options.ResumeLast {
+		if options.Query != "" {
+			return investigateRunOptions{}, fmt.Errorf("resume does not accept a new investigation query\n\n%s", InvestigateHelp)
+		}
+		return options, nil
+	}
+	if options.Query == "" {
+		return investigateRunOptions{}, fmt.Errorf("Usage: nana investigate <user-input> [-- codex-args...]\n\n%s", InvestigateHelp)
+	}
+	return options, nil
 }
 
 func investigateOnboard(cwd string, args []string) error {
@@ -318,64 +355,145 @@ func runInvestigation(cwd string, query string, codexArgs []string) error {
 		Rounds:        []investigateRoundState{},
 	}
 	manifestPath := filepath.Join(runDir, "manifest.json")
+	return executeInvestigationRun(manifestPath, &manifest, codexArgs)
+}
 
-	writeFailure := func(status string, err error) error {
-		manifest.Status = status
+func resumeInvestigation(cwd string, options investigateRunOptions) error {
+	manifestPath, err := resolveInvestigateRunManifestPath(resolveInvestigateWorkspaceRoot(cwd), options.ResumeRunID, options.ResumeLast)
+	if err != nil {
+		return err
+	}
+	manifest, err := readInvestigateRunManifest(manifestPath)
+	if err != nil {
+		return err
+	}
+	if manifest.Status == investigateRunStatusCompleted {
+		return fmt.Errorf("investigate run %s is already completed", manifest.RunID)
+	}
+	return executeInvestigationRun(manifestPath, &manifest, options.CodexArgs)
+}
+
+func resolveInvestigateRunManifestPath(workspaceRoot string, runID string, useLast bool) (string, error) {
+	root := filepath.Join(workspaceRoot, ".nana", "logs", "investigate")
+	if strings.TrimSpace(runID) != "" {
+		path := filepath.Join(root, strings.TrimSpace(runID), "manifest.json")
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return "", fmt.Errorf("investigate run %s not found", runID)
+			}
+			return "", err
+		}
+		return path, nil
+	}
+	if !useLast {
+		return "", fmt.Errorf("investigate resume requires --resume <run-id> or --last")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("no prior investigate runs found in %s", root)
+		}
+		return "", err
+	}
+	type candidate struct {
+		path    string
+		modTime time.Time
+	}
+	candidates := []candidate{}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(root, entry.Name(), "manifest.json")
+		info, err := os.Stat(path)
 		if err != nil {
-			manifest.LastError = err.Error()
+			continue
+		}
+		candidates = append(candidates, candidate{path: path, modTime: info.ModTime()})
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no prior investigate runs found in %s", root)
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].modTime.After(candidates[j].modTime) })
+	return candidates[0].path, nil
+}
+
+func readInvestigateRunManifest(path string) (investigateManifest, error) {
+	var manifest investigateManifest
+	if err := readGithubJSON(path, &manifest); err != nil {
+		return investigateManifest{}, err
+	}
+	return manifest, nil
+}
+
+func executeInvestigationRun(manifestPath string, manifest *investigateManifest, codexArgs []string) error {
+	writeFailure := func(status string, runErr error) error {
+		if pauseErr, ok := isCodexRateLimitPauseError(runErr); ok {
+			manifest.Status = "paused"
+			manifest.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
+			manifest.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+			manifest.LastError = codexPauseInfoMessage(pauseErr.Info)
+			manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			manifest.CompletedAt = ""
+			_ = writeGithubJSON(manifestPath, manifest)
+			return runErr
+		}
+		manifest.Status = status
+		manifest.PauseReason = ""
+		manifest.PauseUntil = ""
+		if runErr != nil {
+			manifest.LastError = runErr.Error()
 		}
 		manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		manifest.CompletedAt = manifest.UpdatedAt
 		_ = writeGithubJSON(manifestPath, manifest)
-		return err
+		return runErr
 	}
 
-	mcpStatus, err := probeInvestigateMCPs(workspaceRoot, codexHome)
+	mcpStatus, err := ensureInvestigateMCPStatus(*manifest)
 	if err != nil {
-		return writeFailure(investigateRunStatusFailedExecutor, err)
-	}
-	if err := writeJSONArtifact(manifest.MCPStatusPath, mcpStatus); err != nil {
-		return writeFailure(investigateRunStatusFailedExecutor, err)
-	}
-	if err := writeInvestigateMCPStatus(investigateMCPStatusPath(codexHome), mcpStatus); err != nil {
 		return writeFailure(investigateRunStatusFailedExecutor, err)
 	}
 	if err := writeGithubJSON(manifestPath, manifest); err != nil {
 		return writeFailure(investigateRunStatusFailedExecutor, err)
 	}
-
 	if len(mcpStatus.ConfiguredServers) > 0 && !mcpStatus.AllOK {
 		return writeFailure(investigateRunStatusFailedReadiness, fmt.Errorf("one or more configured investigate MCPs are not working. Run `nana investigate doctor` and fix the MCP configuration"))
 	}
 
-	violations := []investigateViolation{}
+	startRound, violations, err := investigateResumeState(*manifest)
+	if err != nil {
+		return writeFailure(investigateRunStatusFailedExecutor, err)
+	}
 	var finalReport investigateReport
 	accepted := false
 
-	for round := 1; round <= investigateMaxRounds; round++ {
+	for round := startRound; round <= manifest.MaxRounds; round++ {
 		roundState := investigateRoundState{
 			Round:               round,
-			InvestigatorPrompt:  filepath.Join(runDir, fmt.Sprintf("round-%d-investigator-prompt.md", round)),
-			InvestigatorStdout:  filepath.Join(runDir, fmt.Sprintf("round-%d-investigator-stdout.log", round)),
-			InvestigatorStderr:  filepath.Join(runDir, fmt.Sprintf("round-%d-investigator-stderr.log", round)),
-			ReportPath:          filepath.Join(runDir, fmt.Sprintf("round-%d-report.json", round)),
-			ValidatorPrompt:     filepath.Join(runDir, fmt.Sprintf("round-%d-validator-prompt.md", round)),
-			ValidatorStdout:     filepath.Join(runDir, fmt.Sprintf("round-%d-validator-stdout.log", round)),
-			ValidatorStderr:     filepath.Join(runDir, fmt.Sprintf("round-%d-validator-stderr.log", round)),
-			ValidatorResultPath: filepath.Join(runDir, fmt.Sprintf("round-%d-validator-result.json", round)),
+			InvestigatorPrompt:  filepath.Join(manifest.RunDir, fmt.Sprintf("round-%d-investigator-prompt.md", round)),
+			InvestigatorStdout:  filepath.Join(manifest.RunDir, fmt.Sprintf("round-%d-investigator-stdout.log", round)),
+			InvestigatorStderr:  filepath.Join(manifest.RunDir, fmt.Sprintf("round-%d-investigator-stderr.log", round)),
+			ReportPath:          filepath.Join(manifest.RunDir, fmt.Sprintf("round-%d-report.json", round)),
+			ValidatorPrompt:     filepath.Join(manifest.RunDir, fmt.Sprintf("round-%d-validator-prompt.md", round)),
+			ValidatorStdout:     filepath.Join(manifest.RunDir, fmt.Sprintf("round-%d-validator-stdout.log", round)),
+			ValidatorStderr:     filepath.Join(manifest.RunDir, fmt.Sprintf("round-%d-validator-stderr.log", round)),
+			ValidatorResultPath: filepath.Join(manifest.RunDir, fmt.Sprintf("round-%d-validator-result.json", round)),
 			Status:              "running",
+		}
+		if len(manifest.Rounds) >= round {
+			manifest.Rounds = manifest.Rounds[:round-1]
 		}
 		manifest.Rounds = append(manifest.Rounds, roundState)
 
-		investigatorPrompt, err := buildInvestigatePrompt(manifest, mcpStatus, round, violations)
+		investigatorPrompt, err := buildInvestigatePrompt(*manifest, mcpStatus, round, violations)
 		if err != nil {
 			return writeFailure(investigateRunStatusFailedExecutor, err)
 		}
 		if err := os.WriteFile(roundState.InvestigatorPrompt, []byte(investigatorPrompt), 0o644); err != nil {
 			return writeFailure(investigateRunStatusFailedExecutor, err)
 		}
-
-		result, err := runInvestigateCodexPrompt(manifest, codexArgs, investigatorPrompt, fmt.Sprintf("investigator-round-%d", round))
+		result, err := runInvestigateCodexPrompt(manifestPath, *manifest, codexArgs, investigatorPrompt, fmt.Sprintf("investigator-round-%d", round), filepath.Join(manifest.RunDir, fmt.Sprintf("round-%d-investigator-checkpoint.json", round)))
 		if err := os.WriteFile(roundState.InvestigatorStdout, []byte(result.Stdout), 0o644); err != nil {
 			return writeFailure(investigateRunStatusFailedExecutor, err)
 		}
@@ -414,16 +532,15 @@ func runInvestigation(cwd string, query string, codexArgs []string) error {
 			return writeFailure(investigateRunStatusFailedExecutor, err)
 		}
 
-		localViolations := validateInvestigateReport(report, workspaceRoot)
-		validatorPrompt, err := buildInvestigateValidatorPrompt(manifest, round, report, localViolations)
+		localViolations := validateInvestigateReport(report, manifest.WorkspaceRoot)
+		validatorPrompt, err := buildInvestigateValidatorPrompt(*manifest, round, report, localViolations)
 		if err != nil {
 			return writeFailure(investigateRunStatusFailedExecutor, err)
 		}
 		if err := os.WriteFile(roundState.ValidatorPrompt, []byte(validatorPrompt), 0o644); err != nil {
 			return writeFailure(investigateRunStatusFailedExecutor, err)
 		}
-
-		validatorExecResult, err := runInvestigateCodexPrompt(manifest, codexArgs, validatorPrompt, fmt.Sprintf("investigation-validator-round-%d", round))
+		validatorExecResult, err := runInvestigateCodexPrompt(manifestPath, *manifest, codexArgs, validatorPrompt, fmt.Sprintf("investigation-validator-round-%d", round), filepath.Join(manifest.RunDir, fmt.Sprintf("round-%d-validator-checkpoint.json", round)))
 		if err := os.WriteFile(roundState.ValidatorStdout, []byte(validatorExecResult.Stdout), 0o644); err != nil {
 			return writeFailure(investigateRunStatusFailedExecutor, err)
 		}
@@ -460,7 +577,7 @@ func runInvestigation(cwd string, query string, codexArgs []string) error {
 			finalReport = report
 			manifest.Status = investigateRunStatusCompleted
 			manifest.AcceptedRound = round
-			manifest.FinalReportPath = filepath.Join(runDir, "final-report.json")
+			manifest.FinalReportPath = filepath.Join(manifest.RunDir, "final-report.json")
 			manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 			manifest.CompletedAt = manifest.UpdatedAt
 			manifest.Rounds[len(manifest.Rounds)-1].Status = "accepted"
@@ -482,11 +599,64 @@ func runInvestigation(cwd string, query string, codexArgs []string) error {
 	}
 
 	if !accepted {
-		return writeFailure(investigateRunStatusFailedValidatorExhausted, fmt.Errorf("investigation failed after %d rounds; see %s", investigateMaxRounds, runDir))
+		return writeFailure(investigateRunStatusFailedValidatorExhausted, fmt.Errorf("investigation failed after %d rounds; see %s", manifest.MaxRounds, manifest.RunDir))
 	}
-
-	printInvestigationSummary(manifest, finalReport)
+	printInvestigationSummary(*manifest, finalReport)
 	return nil
+}
+
+func ensureInvestigateMCPStatus(manifest investigateManifest) (investigateMCPStatus, error) {
+	if status, err := readInvestigateMCPStatusFile(manifest.MCPStatusPath); err == nil {
+		return status, nil
+	}
+	status, err := probeInvestigateMCPs(manifest.WorkspaceRoot, manifest.CodexHome)
+	if err != nil {
+		return investigateMCPStatus{}, err
+	}
+	if err := writeJSONArtifact(manifest.MCPStatusPath, status); err != nil {
+		return investigateMCPStatus{}, err
+	}
+	if err := writeInvestigateMCPStatus(investigateMCPStatusPath(manifest.CodexHome), status); err != nil {
+		return investigateMCPStatus{}, err
+	}
+	return status, nil
+}
+
+func readInvestigateMCPStatusFile(path string) (investigateMCPStatus, error) {
+	var status investigateMCPStatus
+	if err := readGithubJSON(path, &status); err != nil {
+		return investigateMCPStatus{}, err
+	}
+	return status, nil
+}
+
+func investigateResumeState(manifest investigateManifest) (int, []investigateViolation, error) {
+	if len(manifest.Rounds) == 0 {
+		return 1, nil, nil
+	}
+	last := manifest.Rounds[len(manifest.Rounds)-1]
+	switch last.Status {
+	case "accepted":
+		return manifest.MaxRounds + 1, nil, nil
+	case "needs_revision":
+		result, err := readInvestigateValidatorResult(last.ValidatorResultPath)
+		if err != nil {
+			return last.Round + 1, nil, nil
+		}
+		return last.Round + 1, result.Violations, nil
+	case "failed", "running", "":
+		return last.Round, nil, nil
+	default:
+		return last.Round + 1, nil, nil
+	}
+}
+
+func readInvestigateValidatorResult(path string) (investigateValidatorResult, error) {
+	var result investigateValidatorResult
+	if err := readGithubJSON(path, &result); err != nil {
+		return investigateValidatorResult{}, err
+	}
+	return result, nil
 }
 
 func printInvestigationSummary(manifest investigateManifest, report investigateReport) {
@@ -780,10 +950,13 @@ func buildInvestigatePrompt(manifest investigateManifest, mcpStatus investigateM
 		"",
 		"MCP availability summary:",
 		fmt.Sprintf("- Configured MCP servers: %d", len(mcpStatus.ConfiguredServers)),
-		fmt.Sprintf("- Probe summary: %s", defaultString(strings.TrimSpace(mcpStatus.ProbeSummary), "(none)")),
+		fmt.Sprintf("- Probe summary: %s", defaultString(compactPromptHeadValue(strings.TrimSpace(mcpStatus.ProbeSummary), 0, 200), "(none)")),
 	}
-	for _, server := range mcpStatus.Servers {
-		lines = append(lines, fmt.Sprintf("- MCP %s: %s", server.ServerName, defaultString(strings.TrimSpace(server.Summary), "(no summary)")))
+	for _, server := range limitPromptList(mcpStatus.Servers, investigateMaxPromptServers) {
+		lines = append(lines, fmt.Sprintf("- MCP %s: %s", server.ServerName, defaultString(compactPromptHeadValue(strings.TrimSpace(server.Summary), 0, 200), "(no summary)")))
+	}
+	if len(mcpStatus.Servers) > investigateMaxPromptServers {
+		lines = append(lines, fmt.Sprintf("- ... %d additional MCP servers omitted", len(mcpStatus.Servers)-investigateMaxPromptServers))
 	}
 	lines = append(lines,
 		"",
@@ -792,12 +965,15 @@ func buildInvestigatePrompt(manifest investigateManifest, mcpStatus investigateM
 	)
 	if len(previousViolations) > 0 {
 		lines = append(lines, "", "Previous validator violations to fix:")
-		for _, violation := range previousViolations {
-			lines = append(lines, fmt.Sprintf("- [%s] %s %s", violation.Code, defaultString(violation.Path, "$"), violation.Message))
+		for _, violation := range limitPromptList(previousViolations, investigateMaxPromptViolations) {
+			lines = append(lines, fmt.Sprintf("- [%s] %s %s", compactPromptHeadValue(violation.Code, 0, 80), defaultString(compactPromptHeadValue(violation.Path, 0, 160), "$"), compactPromptHeadValue(violation.Message, 0, 200)))
+		}
+		if len(previousViolations) > investigateMaxPromptViolations {
+			lines = append(lines, fmt.Sprintf("- ... %d additional violations omitted", len(previousViolations)-investigateMaxPromptViolations))
 		}
 	}
-	lines = append(lines, "", strings.TrimSpace(rolePrompt))
-	return strings.Join(lines, "\n") + "\n", nil
+	lines = append(lines, "", compactPromptHeadValue(rolePrompt, 0, investigateRolePromptCharLimit))
+	return capPromptChars(strings.Join(lines, "\n")+"\n", investigatePromptCharLimit), nil
 }
 
 func buildInvestigateValidatorPrompt(manifest investigateManifest, round int, report investigateReport, localViolations []investigateViolation) (string, error) {
@@ -805,7 +981,7 @@ func buildInvestigateValidatorPrompt(manifest investigateManifest, round int, re
 	if err != nil {
 		return "", err
 	}
-	reportJSON := string(mustMarshalJSON(report))
+	reportJSON := compactInvestigateValidatorReportJSON(report)
 	lines := []string{
 		"# NANA Investigation Validator",
 		"",
@@ -824,8 +1000,11 @@ func buildInvestigateValidatorPrompt(manifest investigateManifest, round int, re
 	}
 	if len(localViolations) > 0 {
 		lines = append(lines, "", "Supervisor structural findings:")
-		for _, violation := range localViolations {
-			lines = append(lines, fmt.Sprintf("- [%s] %s %s", violation.Code, defaultString(violation.Path, "$"), violation.Message))
+		for _, violation := range limitPromptList(localViolations, investigateMaxPromptViolations) {
+			lines = append(lines, fmt.Sprintf("- [%s] %s %s", compactPromptHeadValue(violation.Code, 0, 80), defaultString(compactPromptHeadValue(violation.Path, 0, 160), "$"), compactPromptHeadValue(violation.Message, 0, 200)))
+		}
+		if len(localViolations) > investigateMaxPromptViolations {
+			lines = append(lines, fmt.Sprintf("- ... %d additional structural findings omitted", len(localViolations)-investigateMaxPromptViolations))
 		}
 	}
 	lines = append(lines,
@@ -833,9 +1012,71 @@ func buildInvestigateValidatorPrompt(manifest investigateManifest, round int, re
 		"Report JSON:",
 		reportJSON,
 		"",
-		strings.TrimSpace(rolePrompt),
+		compactPromptHeadValue(rolePrompt, 0, investigateRolePromptCharLimit),
 	)
-	return strings.Join(lines, "\n") + "\n", nil
+	return capPromptChars(strings.Join(lines, "\n")+"\n", investigatePromptCharLimit), nil
+}
+
+func compactInvestigateValidatorReportJSON(report investigateReport) string {
+	proofBudget := investigateMaxValidatorProofs
+	compacted := investigateReport{
+		OverallStatus:              compactPromptHeadValue(report.OverallStatus, 0, 64),
+		OverallShortExplanation:    compactPromptHeadValue(report.OverallShortExplanation, 0, 300),
+		OverallDetailedExplanation: compactPromptHeadValue(report.OverallDetailedExplanation, 0, 1200),
+		OverallProofs:              []investigateProof{},
+		Issues:                     []investigateIssue{},
+	}
+
+	for _, proof := range report.OverallProofs {
+		if proofBudget <= 0 {
+			break
+		}
+		compacted.OverallProofs = append(compacted.OverallProofs, compactInvestigateProof(proof))
+		proofBudget--
+	}
+
+	for _, issue := range limitPromptList(report.Issues, investigateMaxValidatorIssues) {
+		compactedIssue := investigateIssue{
+			ID:                  compactPromptHeadValue(issue.ID, 0, 120),
+			ShortExplanation:    compactPromptHeadValue(issue.ShortExplanation, 0, 240),
+			DetailedExplanation: compactPromptHeadValue(issue.DetailedExplanation, 0, 800),
+			Proofs:              []investigateProof{},
+		}
+		for _, proof := range issue.Proofs {
+			if proofBudget <= 0 {
+				break
+			}
+			compactedIssue.Proofs = append(compactedIssue.Proofs, compactInvestigateProof(proof))
+			proofBudget--
+		}
+		compacted.Issues = append(compacted.Issues, compactedIssue)
+	}
+
+	for issueCount := len(compacted.Issues); issueCount >= 0; issueCount-- {
+		candidate := compacted
+		candidate.Issues = append([]investigateIssue(nil), compacted.Issues[:issueCount]...)
+		encoded := string(mustMarshalJSON(candidate))
+		if len(encoded) <= investigateValidatorPayloadCharLimit {
+			return encoded
+		}
+	}
+	return string(mustMarshalJSON(investigateReport{
+		OverallStatus:              compactPromptHeadValue(report.OverallStatus, 0, 64),
+		OverallShortExplanation:    compactPromptHeadValue(report.OverallShortExplanation, 0, 300),
+		OverallDetailedExplanation: compactPromptHeadValue(report.OverallDetailedExplanation, 0, 800),
+	}))
+}
+
+func compactInvestigateProof(proof investigateProof) investigateProof {
+	return investigateProof{
+		Kind:        compactPromptHeadValue(proof.Kind, 0, 64),
+		Title:       compactPromptHeadValue(proof.Title, 0, 160),
+		Link:        compactPromptHeadValue(proof.Link, 0, 240),
+		WhyItProves: compactPromptHeadValue(proof.WhyItProves, 0, 240),
+		IsPrimary:   proof.IsPrimary,
+		Path:        compactPromptHeadValue(proof.Path, 0, 200),
+		Line:        proof.Line,
+	}
 }
 
 func readPromptSurfaceWithFallback(role string) (string, error) {
@@ -885,34 +1126,45 @@ You are Investigation Validator. Accept only evidence-backed reports that satisf
 </constraints>
 `
 
-func runInvestigateCodexPrompt(manifest investigateManifest, codexArgs []string, prompt string, codexHomeAlias string) (investigateExecutionResult, error) {
+func runInvestigateCodexPrompt(manifestPath string, manifest investigateManifest, codexArgs []string, prompt string, codexHomeAlias string, checkpointPath string) (investigateExecutionResult, error) {
 	scopedCodexHome, err := ensureScopedCodexHome(manifest.CodexHome, filepath.Join(manifest.RunDir, "codex-home", sanitizePathToken(codexHomeAlias)))
 	if err != nil {
 		return investigateExecutionResult{}, err
 	}
-	sessionID := fmt.Sprintf("investigate-%d", time.Now().UnixNano())
-	sessionInstructionsPath, err := writeSessionModelInstructions(manifest.WorkspaceRoot, sessionID, scopedCodexHome)
-	if err != nil {
-		return investigateExecutionResult{}, err
-	}
-	defer removeSessionInstructionsFile(manifest.WorkspaceRoot, sessionID)
 
 	args, fastMode := normalizeLocalWorkCodexArgsWithFast(codexArgs)
 	prompt = prefixCodexFastPrompt(prompt, fastMode)
-	args = append([]string{"exec", "-C", manifest.WorkspaceRoot}, args...)
-	args = append(args, "-")
-	args = injectModelInstructionsArgs(args, sessionInstructionsPath)
-
-	cmd := exec.Command("codex", args...)
-	cmd.Dir = manifest.WorkspaceRoot
-	cmd.Stdin = strings.NewReader(prompt)
-	cmd.Env = append(buildCodexEnv(NotifyTempContract{}, scopedCodexHome), "NANA_PROJECT_AGENTS_ROOT="+manifest.WorkspaceRoot)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err = cmd.Run()
-	return investigateExecutionResult{Stdout: stdout.String(), Stderr: stderr.String()}, err
+	result, err := runManagedCodexPrompt(codexManagedPromptOptions{
+		CommandDir:       manifest.WorkspaceRoot,
+		InstructionsRoot: manifest.WorkspaceRoot,
+		CodexHome:        scopedCodexHome,
+		FreshArgsPrefix:  []string{"exec", "-C", manifest.WorkspaceRoot},
+		CommonArgs:       args,
+		Prompt:           prompt,
+		PromptTransport:  codexPromptTransportStdin,
+		CheckpointPath:   checkpointPath,
+		StepKey:          codexHomeAlias,
+		ResumeStrategy:   codexResumeSamePrompt,
+		Env:              append(buildCodexEnv(NotifyTempContract{}, scopedCodexHome), "NANA_PROJECT_AGENTS_ROOT="+manifest.WorkspaceRoot),
+		OnPause: func(info codexRateLimitPauseInfo) {
+			manifest.Status = "paused"
+			manifest.PauseReason = strings.TrimSpace(info.Reason)
+			manifest.PauseUntil = strings.TrimSpace(info.RetryAfter)
+			manifest.LastError = codexPauseInfoMessage(info)
+			manifest.UpdatedAt = ISOTimeNow()
+			manifest.CompletedAt = ""
+			_ = writeGithubJSON(manifestPath, manifest)
+		},
+		OnResume: func(info codexRateLimitPauseInfo) {
+			manifest.Status = investigateRunStatusRunning
+			manifest.PauseReason = ""
+			manifest.PauseUntil = ""
+			manifest.LastError = ""
+			manifest.UpdatedAt = ISOTimeNow()
+			_ = writeGithubJSON(manifestPath, manifest)
+		},
+	})
+	return investigateExecutionResult{Stdout: result.Stdout, Stderr: result.Stderr}, err
 }
 
 func parseInvestigateReport(raw string) (investigateReport, error) {

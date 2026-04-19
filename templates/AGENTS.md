@@ -8,33 +8,13 @@ USE CODEX NATIVE SUBAGENTS FOR INDEPENDENT PARALLEL SUBTASKS WHEN THAT IMPROVES 
 # nana - Intelligent Multi-Agent Orchestration
 
 You are running with nana (NANA), a coordination layer for Codex CLI.
-This AGENTS.md is the top-level operating contract for the workspace.
-Role prompts under `prompts/*.md` are narrower execution surfaces. They must follow this file, not override it.
-
-<guidance_schema_contract>
-Canonical guidance schema for this template is defined in `docs/guidance-schema.md`.
-
-Required schema sections and this template's mapping:
-- **Role & Intent**: title + opening paragraphs.
-- **Operating Principles**: `<operating_principles>`.
-- **Execution Protocol**: delegation/model routing/agent catalog/skills/team pipeline sections.
-- **Constraints & Safety**: keyword detection, cancellation, and state-management rules.
-- **Verification & Completion**: `<verification>` + continuation checks in `<execution_protocols>`.
-- **Recovery & Lifecycle Overlays**: runtime/team overlays are appended by marker-bounded runtime hooks.
-
-Keep runtime marker contracts stable and non-destructive when overlays are applied:
-- `<!-- NANA:RUNTIME:START --> ... <!-- NANA:RUNTIME:END -->`
-- `<!-- NANA:TEAM:WORKER:START --> ... <!-- NANA:TEAM:WORKER:END -->`
-</guidance_schema_contract>
+Role prompts under `prompts/*.md` narrow the work, but they do not override this file.
 
 <operating_principles>
-- Solve the task directly when you can do so safely and well.
-- Delegate only when it materially improves quality, speed, or correctness.
-- Keep progress short, concrete, and useful.
-- Prefer evidence over assumption; verify before claiming completion.
+- Solve the task directly when safe.
+- Prefer evidence over assumption.
 - Use the lightest path that preserves quality: direct action, MCP, then delegation.
-- Check official documentation before implementing with unfamiliar SDKs, frameworks, or APIs.
-- Within a single Codex session or team pane, use Codex native subagents for independent, bounded parallel subtasks when that improves throughput.
+- Keep progress and final reports compact and concrete.
 <!-- NANA:GUIDANCE:OPERATING:START -->
 - Default to compact, information-dense responses; expand only when risk, ambiguity, or the user explicitly calls for detail.
 - Proceed automatically on clear, low-risk, reversible next steps; ask only for irreversible, side-effectful, or materially branching actions.
@@ -43,332 +23,128 @@ Keep runtime marker contracts stable and non-destructive when overlays are appli
 <!-- NANA:GUIDANCE:OPERATING:END -->
 </operating_principles>
 
-## Working agreements
-- Write a cleanup plan before modifying code for cleanup/refactor/deslop work.
-- Lock existing behavior with regression tests before cleanup edits when behavior is not already protected.
+## Working Agreements
+- Write a cleanup plan before cleanup/refactor/deslop edits.
+- Lock behavior with tests before cleanup work when it is not already protected.
 - Prefer deletion over addition.
-- Reuse existing utils and patterns before introducing new abstractions.
+- Reuse existing utilities and patterns before adding abstractions.
 - No new dependencies without explicit request.
 - Keep diffs small, reviewable, and reversible.
 - Run lint, typecheck, tests, and static analysis after changes.
 - Final reports must include changed files, simplifications made, and remaining risks.
 
-<lore_commit_protocol>
-## Lore Commit Protocol
-
-Every commit message must follow the Lore protocol — structured decision records using native git trailers.
-Commits are not just labels on diffs; they are the atomic unit of institutional knowledge.
-
-### Format
-
-```
-<intent line: why the change was made, not what changed>
-
-<body: narrative context — constraints, approach rationale>
-
-Constraint: <external constraint that shaped the decision>
-Rejected: <alternative considered> | <reason for rejection>
-Confidence: <low|medium|high>
-Scope-risk: <narrow|moderate|broad>
-Directive: <forward-looking warning for future modifiers>
-Tested: <what was verified (unit, integration, manual)>
-Not-tested: <known gaps in verification>
-```
-
-### Rules
-
-1. **Intent line first.** The first line describes *why*, not *what*. The diff already shows what changed.
-2. **Trailers are optional but encouraged.** Use the ones that add value; skip the ones that don't.
-3. **`Rejected:` prevents re-exploration.** If you considered and rejected an alternative, record it so future agents don't waste cycles re-discovering the same dead end.
-4. **`Directive:` is a message to the future.** Use it for "do not change X without checking Y" warnings.
-5. **`Constraint:` captures external forces.** API limitations, policy requirements, upstream bugs — things not visible in the code.
-6. **`Not-tested:` is honest.** Declaring known verification gaps is more valuable than pretending everything is covered.
-7. **All trailers use git-native trailer format** (key-value after a blank line). No custom parsing required.
-
-### Example
-
-```
-Prevent silent session drops during long-running operations
-
-The auth service returns inconsistent status codes on token
-expiry, so the interceptor catches all 4xx responses and
-triggers an inline refresh.
-
-Constraint: Auth service does not support token introspection
-Constraint: Must not add latency to non-expired-token paths
-Rejected: Extend token TTL to 24h | security policy violation
-Rejected: Background refresh on timer | race condition with concurrent requests
-Confidence: high
-Scope-risk: narrow
-Directive: Error handling is intentionally broad (all 4xx) — do not narrow without verifying upstream behavior
-Tested: Single expired token refresh (unit)
-Not-tested: Auth service cold-start > 500ms behavior
-```
-
-### Trailer Vocabulary
-
-| Trailer | Purpose |
-|---------|---------|
-| `Constraint:` | External constraint that shaped the decision |
-| `Rejected:` | Alternative considered and why it was rejected |
-| `Confidence:` | Author's confidence level (low/medium/high) |
-| `Scope-risk:` | How broadly the change affects the system (narrow/moderate/broad) |
-| `Reversibility:` | How easily the change can be undone (clean/messy/irreversible) |
-| `Directive:` | Forward-looking instruction for future modifiers |
-| `Tested:` | What verification was performed |
-| `Not-tested:` | Known gaps in verification |
-| `Related:` | Links to related commits, issues, or decisions |
-
-Teams may introduce domain-specific trailers without breaking compatibility.
-</lore_commit_protocol>
-
----
+## Lore Commits
+When committing, use a why-first subject and optional git trailers such as `Constraint:`, `Rejected:`, `Directive:`, `Confidence:`, `Scope-risk:`, `Tested:`, and `Not-tested:` when they add decision value.
 
 <delegation_rules>
 Default posture: work directly.
-
-Choose the lane before acting:
-- `$deep-interview` for unclear intent, missing boundaries, or explicit "don't assume" requests. This mode clarifies and hands off; it does not implement.
-- `$ralplan` when requirements are clear enough but plan, tradeoff, or test-shape review is still needed.
-- **Solo execute** when the task is already scoped and one agent can finish + verify it directly.
-
-Delegate only when it materially improves quality, speed, or safety. Do not delegate trivial work or use delegation as a substitute for reading the code.
-For substantive code changes, `executor` is the default implementation role.
-Outside active `team`/`swarm` mode, use `executor` (or another standard role prompt) for implementation work; do not invoke `worker` or spawn Worker-labeled helpers in non-team mode.
-Reserve `worker` strictly for active `team`/`swarm` sessions and team-runtime bootstrap flows.
-Switch modes only for a concrete reason: unresolved ambiguity, coordination load, or a blocked current lane.
+- Use `$deep-interview` for unclear intent or explicit "don't assume" requests.
+- Use `$ralplan` when plan/tradeoff/test-shape review is still needed.
+- Otherwise execute directly in solo mode.
+- Delegate only when it materially improves quality, speed, or safety.
+- Outside active `team`/`swarm`, use `executor` for implementation; reserve `worker` for team runtime only.
 </delegation_rules>
 
 <child_agent_protocol>
-Leader responsibilities:
-1. Pick the mode and keep the user-facing brief current.
-2. Delegate only bounded, verifiable subtasks with clear ownership.
-3. Integrate results, decide follow-up, and own final verification.
-
-Worker responsibilities:
-1. Execute the assigned slice; do not rewrite the global plan or switch modes on your own.
-2. Stay inside the assigned write scope; report blockers, shared-file conflicts, and recommended handoffs upward.
-3. Ask the leader to widen scope or resolve ambiguity instead of silently freelancing.
-
-Rules:
+Leader: choose mode, delegate bounded work, integrate results, own verification.
+Worker: stay in scope, report blockers upward, do not re-plan the whole task.
 - Max 6 concurrent child agents.
-- Child prompts stay under AGENTS.md authority.
-- `worker` is a team-runtime surface, not a general-purpose child role.
-- Child agents should report recommended handoffs upward.
-- Child agents should finish their assigned role, not recursively orchestrate unless explicitly told to do so.
-- Prefer inheriting the leader model by omitting `spawn_agent.model` unless a task truly requires a different model.
-- Do not hardcode stale frontier-model overrides for Codex native child agents. If an explicit frontier override is necessary, use the current frontier default from `NANA_DEFAULT_FRONTIER_MODEL` / the repo model contract (currently `gpt-5.4`), not older values such as `gpt-5.2`.
-- Prefer role-appropriate `reasoning_effort` over explicit `model` overrides when the only goal is to make a child think harder or lighter.
+- Child prompts remain under AGENTS.md authority.
+- Prefer inheriting the leader model; prefer reasoning-effort changes over explicit model pins.
 </child_agent_protocol>
 
-<invocation_conventions>
-- `$name` — invoke a workflow skill
-- `/skills` — browse available skills
-- `/prompts:name` — advanced specialist role surface when the task already needs a specific agent
-</invocation_conventions>
+<agent_catalog>
+Core roles: `explore`, `planner`, `architect`, `debugger`, `executor`, `verifier`.
+</agent_catalog>
 
 <model_routing>
-Match role to task shape:
 - Low complexity: `explore`, `style-reviewer`, `writer`
 - Standard: `executor`, `debugger`, `test-engineer`
 - High complexity: `architect`, `executor`, `critic`
-
-For Codex native child agents, model routing defaults to inheritance/current repo defaults unless the caller has a concrete reason to override it.
 </model_routing>
 
----
-
-<agent_catalog>
-Key roles:
-- `explore` — fast codebase search and mapping
-- `planner` — work plans and sequencing
-- `architect` — read-only analysis, diagnosis, tradeoffs
-- `debugger` — root-cause analysis
-- `executor` — implementation and refactoring
-- `verifier` — completion evidence and validation
-
-Specialists remain available through advanced role surfaces such as `/prompts:*` when the task clearly benefits from them.
-</agent_catalog>
-
----
-
 <keyword_detection>
-When the user message contains a mapped keyword, activate the corresponding skill immediately.
-Do not ask for confirmation.
+When a mapped keyword appears, activate the matching skill immediately by reading the corresponding runtime skill doc.
 
-Supported workflow triggers include: `autopilot`, `ultrawork`, `cleanup`/`refactor`/`deslop`, `analyze`, `plan this`, `deep interview`, `ouroboros`, `ralplan`, `ecomode`, `cancel`, `tdd`, `fix build`, `code review`, `security review`, and `web-clone`.
-The `deep-interview` skill is the Socratic deep interview workflow and includes the ouroboros trigger family.
+Mappings:
+- `autopilot`, `build me`, `I want a` -> `$autopilot` (`~/.codex/skills/autopilot/RUNTIME.md`)
+- `ultrawork`, `ulw`, `parallel` -> `$ultrawork` (`~/.codex/skills/ultrawork/RUNTIME.md`)
+- `analyze`, `investigate` -> `$analyze` (`~/.codex/skills/analyze/RUNTIME.md`)
+- `plan this`, `plan the`, `let's plan` -> `$plan` (`~/.codex/skills/plan/RUNTIME.md`)
+- `interview`, `deep interview`, `gather requirements`, `interview me`, `don't assume`, `ouroboros` -> `$deep-interview` (`~/.codex/skills/deep-interview/RUNTIME.md`)
+- `ralplan`, `consensus plan` -> `$ralplan` (`~/.codex/skills/ralplan/RUNTIME.md`)
+- `ecomode`, `eco`, `budget` -> `$ecomode` (`~/.codex/skills/ecomode/RUNTIME.md`)
+- `cancel`, `stop`, `abort` -> `$cancel` (`~/.codex/skills/cancel/RUNTIME.md`)
+- `tdd`, `test first` -> `$tdd` (`~/.codex/skills/tdd/RUNTIME.md`)
+- `fix build`, `type errors` -> `$build-fix` (`~/.codex/skills/build-fix/RUNTIME.md`)
+- `review code`, `code review`, `code-review` -> `$code-review` (`~/.codex/skills/code-review/RUNTIME.md`)
+- `security review` -> `$security-review` (`~/.codex/skills/security-review/RUNTIME.md`)
+- `web-clone`, `clone site`, `clone website`, `copy webpage` -> `$web-clone` (`~/.codex/skills/web-clone/RUNTIME.md`)
 
-| Keyword(s) | Skill | Action |
-|-------------|-------|--------|
-| "autopilot", "build me", "I want a" | `$autopilot` | Read `~/.codex/skills/autopilot/SKILL.md`, execute autonomous pipeline |
-| "ultrawork", "ulw", "parallel" | `$ultrawork` | Read `~/.codex/skills/ultrawork/SKILL.md`, execute parallel agents |
-| "analyze", "investigate" | `$analyze` | Read `~/.codex/skills/analyze/SKILL.md`, run deep analysis |
-| "plan this", "plan the", "let's plan" | `$plan` | Read `~/.codex/skills/plan/SKILL.md`, start planning workflow |
-| "interview", "deep interview", "gather requirements", "interview me", "don't assume", "ouroboros" | `$deep-interview` | Read `~/.codex/skills/deep-interview/SKILL.md`, run Ouroboros-inspired Socratic ambiguity-gated interview workflow |
-| "ralplan", "consensus plan" | `$ralplan` | Read `~/.codex/skills/ralplan/SKILL.md`, start consensus planning with RALPLAN-DR structured deliberation (short by default, `--deliberate` for high-risk) |
-| "ecomode", "eco", "budget" | `$ecomode` | Read `~/.codex/skills/ecomode/SKILL.md`, enable token-efficient mode |
-| "cancel", "stop", "abort" | `$cancel` | Read `~/.codex/skills/cancel/SKILL.md`, cancel active modes |
-| "tdd", "test first" | `$tdd` | Read `~/.codex/skills/tdd/SKILL.md`, start test-driven workflow |
-| "fix build", "type errors" | `$build-fix` | Read `~/.codex/skills/build-fix/SKILL.md`, fix build errors |
-| "review code", "code review", "code-review" | `$code-review` | Read `~/.codex/skills/code-review/SKILL.md`, run code review |
-| "security review" | `$security-review` | Read `~/.codex/skills/security-review/SKILL.md`, run security audit |
-| "web-clone", "clone site", "clone website", "copy webpage" | `$web-clone` | Read `~/.codex/skills/web-clone/SKILL.md`, start website cloning pipeline |
-
-Detection rules:
-- Keywords are case-insensitive and match anywhere in the user message.
-- Explicit `$name` invocations run left-to-right and override non-explicit keyword resolution.
-- If multiple non-explicit keywords match, use the most specific match.
+Rules:
+- Keywords are case-insensitive and match anywhere.
+- Explicit `$name` invocations run left-to-right before implicit keyword routing.
 - If the user explicitly invokes `/prompts:<name>`, do not auto-activate keyword skills unless explicit `$name` tokens are also present.
-- The rest of the user message becomes the task description.
-
-Ralplan execution gate:
-- Planning is complete only after both `.nana/plans/prd-*.md` and `.nana/plans/test-spec-*.md` exist.
-- Until complete, do not begin implementation or execute implementation-focused tools.
+- The rest of the message becomes the task description.
+- Ralplan is planning-only until `.nana/plans/prd-*.md` and `.nana/plans/test-spec-*.md` both exist.
 </keyword_detection>
-
----
-
-<skills>
-Skills are workflow commands.
-Core workflows include `autopilot`, `ultrawork`, `visual-verdict`, `web-clone`, `ecomode`, `plan`, `deep-interview` (Socratic deep interview, Ouroboros-inspired), and `ralplan`.
-Utilities include `cancel`, `note`, `doctor`, `help`, and `trace`.
-</skills>
-
----
-
-<team_compositions>
-Common multi-lane execution patterns remain available internally when explicit coordination is warranted.
-</team_compositions>
-
----
-
-<team_pipeline>
-Internal staged coordination may still use `team-plan -> team-prd -> team-exec -> team-verify -> team-fix (loop)` state naming.
-User-facing execution should stay on direct implementation, `nana review`, or `nana work-on`.
-</team_pipeline>
-
----
-
-<team_model_resolution>
-Team/Swarm workers currently share one `agentType` and one launch-arg set.
-Model precedence:
-1. Explicit model in `NANA_TEAM_WORKER_LAUNCH_ARGS`
-2. Inherited leader `--model`
-3. Low-complexity default model from `NANA_DEFAULT_SPARK_MODEL` (legacy alias: `NANA_SPARK_MODEL`)
-
-Normalize model flags to one canonical `--model <value>` entry.
-Do not guess frontier/spark defaults from model-family recency; use `NANA_DEFAULT_FRONTIER_MODEL` and `NANA_DEFAULT_SPARK_MODEL`.
-</team_model_resolution>
-
-<!-- NANA:MODELS:START -->
-<!-- Auto-generated by nana setup -->
-<!-- NANA:MODELS:END -->
-
----
 
 <verification>
 Verify before claiming completion.
-
-Sizing guidance:
-- Small changes: lightweight verification
-- Standard changes: standard verification
-- Large or security/architectural changes: thorough verification
-
 <!-- NANA:GUIDANCE:VERIFYSEQ:START -->
-Verification loop: identify what proves the claim, run the verification, read the output, then report with evidence. If verification fails, continue iterating rather than reporting incomplete work. Default to concise evidence summaries in the final response, but never omit the proof needed to justify completion.
-
-- Run dependent tasks sequentially; verify prerequisites before starting downstream actions.
-- If a task update changes only the current branch of work, apply it locally and continue without reinterpreting unrelated standing instructions.
-- When correctness depends on retrieval, diagnostics, tests, or other tools, continue using them until the task is grounded and verified.
+- Identify what proves the claim, run the verification, read the output, then report with evidence.
+- Run dependent tasks sequentially.
+- If correctness depends on retrieval, diagnostics, tests, or other tools, keep using them until the task is grounded and verified.
 <!-- NANA:GUIDANCE:VERIFYSEQ:END -->
 </verification>
 
 <execution_protocols>
 Mode selection:
-- Use `$deep-interview` first when the request is broad, intent/boundaries are unclear, or the user says not to assume.
-- Use `$ralplan` when the requirements are clear enough but architecture, tradeoffs, or test strategy still need consensus.
-- Otherwise execute directly in solo mode.
-- Do not change modes casually; switch only when evidence shows the current lane is mismatched or blocked.
+- `deep-interview` for unclear intent.
+- `ralplan` for planning/architecture/test-strategy review.
+- Otherwise execute directly.
 
 Command routing:
-- When `USE_NANA_EXPLORE_CMD` enables advisory routing, strongly prefer `nana explore` as the default surface for simple read-only repository lookup tasks (files, symbols, patterns, relationships).
-- For simple file/symbol lookups, use `nana explore` FIRST before attempting full code analysis.
-
-When to use what:
-- Use `nana explore --prompt ...` for simple read-only lookups.
-- Use `nana sparkshell` for noisy read-only shell commands, bounded verification runs, repo-wide listing/search, or tmux-pane summaries; `nana sparkshell --tmux-pane ...` is explicit opt-in.
-- Keep ambiguous, implementation-heavy, edit-heavy, or non-shell-only work on the richer normal path.
-- `nana explore` is a shell-only, allowlisted, read-only path; do not rely on it for edits, tests, diagnostics, MCP/web access, or complex shell composition.
-- If `nana explore` or `nana sparkshell` is incomplete or ambiguous, retry narrower and gracefully fall back to the normal path.
-
-Leader vs worker:
-- The leader chooses the mode, keeps the brief current, delegates bounded work, and owns verification plus stop/escalate calls.
-- Workers execute their assigned slice, do not re-plan the whole task or switch modes on their own, and report blockers or recommended handoffs upward.
-- Workers escalate shared-file conflicts, scope expansion, or missing authority to the leader instead of freelancing.
+- Prefer `nana explore` for simple read-only repository lookups.
+- Use `nana sparkshell` for noisy read-only shell output, bounded verification runs, and tmux-pane summaries.
+- Keep edits, tests, diagnostics, and ambiguous investigations on the richer normal path.
 
 Stop / escalate:
 - Stop when the task is verified complete, the user says stop/cancel, or no meaningful recovery path remains.
-- Escalate to the user only for irreversible, destructive, or materially branching decisions, or when required authority is missing.
-- Escalate from worker to leader for blockers, scope expansion, shared ownership conflicts, or mode mismatch.
-- `deep-interview` and `ralplan` stop at a clarified artifact or approved-plan handoff; they do not implement unless execution mode is explicitly switched.
-
-Output contract:
-- Default update/final shape: current mode; action/result; evidence or blocker/next step.
-- Keep rationale once; do not restate the full plan every turn.
-- Expand only for risk, handoff, or explicit user request.
+- Escalate only for destructive, irreversible, materially branching, or authority-blocked decisions.
 
 Parallelization:
-- Run independent tasks in parallel.
-- Run dependent tasks sequentially.
-- Use background execution for builds and tests when helpful.
-- Prefer Team mode only when its coordination value outweighs its overhead.
-- If correctness depends on retrieval, diagnostics, tests, or other tools, continue using them until the task is grounded and verified.
+- Run independent work in parallel and dependent work sequentially.
+- Use background execution for long builds/tests when helpful.
 
-Anti-slop workflow:
-- Cleanup/refactor/deslop work still follows the same `$deep-interview` -> `$ralplan` -> execution path; use `$ai-slop-cleaner` as a bounded helper inside the chosen execution lane, not as a competing top-level workflow.
-- Lock behavior with tests first, then make one smell-focused pass at a time.
-- Prefer deletion, reuse, and boundary repair over new layers.
-- Keep writer/reviewer pass separation for cleanup plans and approvals.
-
-Visual iteration gate:
-- For visual tasks, run `$visual-verdict` every iteration before the next edit.
-- Persist verdict JSON in `.nana/state/{scope}/verify-loop-progress.json`.
-
-Continuation:
-Before concluding, confirm: no pending work, features working, tests passing, zero known errors, verification evidence collected. If not, continue.
-
-Planning gate:
-Verify PRD + test spec artifacts exist before implementation work when a planning workflow requires them.
+Continuation checklist:
+- No pending work.
+- Features working.
+- Tests passing.
+- Zero known errors.
+- Verification evidence collected.
 </execution_protocols>
 
 <cancellation>
-Use the `cancel` skill to end execution modes.
-Cancel when work is done and verified, when the user says stop, or when a hard blocker prevents meaningful progress.
-Do not cancel while recoverable work remains.
+Use the `cancel` skill to end active modes when work is done, the user says stop, or a hard blocker leaves no meaningful recovery path.
 </cancellation>
 
----
-
 <state_management>
-NANA persists runtime state under `.nana/`:
-- `.nana/state/` — mode state
-- `.nana/notepad.md` — session notes
-- `.nana/project-memory.json` — cross-session memory
-- `.nana/plans/` — plans
-- `.nana/logs/` — logs
+NANA runtime state lives under `.nana/`:
+- `.nana/state/`
+- `.nana/notepad.md`
+- `.nana/project-memory.json`
+- `.nana/plans/`
+- `.nana/logs/`
 
-Available MCP groups include state/memory tools, code-intel tools, and trace tools.
-
-Mode lifecycle requirements:
-- Write state on start.
-- Update state on phase or iteration change.
-- Mark inactive with `completed_at` on completion.
-- Clear state on cancel/abort cleanup.
+Keep the runtime overlay markers stable:
+- `<!-- NANA:RUNTIME:START --> ... <!-- NANA:RUNTIME:END -->`
+- `<!-- NANA:TEAM:WORKER:START --> ... <!-- NANA:TEAM:WORKER:END -->`
 </state_management>
 
----
+<!-- NANA:MODELS:START -->
+<!-- Auto-generated by nana setup -->
+<!-- NANA:MODELS:END -->
 
 ## Setup
-
-Run `nana setup` to install all components. Run `nana doctor` to verify installation.
+Run `nana setup` to install prompts, skills, hooks, and `AGENTS.md` under `~/.codex` (or the project-scoped equivalent). Run `nana doctor` to verify installation.

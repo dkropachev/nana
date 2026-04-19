@@ -224,12 +224,15 @@ func TestAccountStatusShowsUsageState(t *testing.T) {
 		RestartRequired: true,
 		AccountState: map[string]ManagedAuthAccountState{
 			"primary": {
-				AuthMode:         "chatgpt",
-				PlanType:         "pro",
-				FiveHourUsedPct:  intPtr(96),
-				WeeklyUsedPct:    intPtr(20),
-				LastUsageResult:  "ok",
-				LastUsageCheckAt: "2026-04-10T00:01:00Z",
+				AuthMode:            "chatgpt",
+				PlanType:            "pro",
+				FiveHourUsedPct:     intPtr(96),
+				WeeklyUsedPct:       intPtr(20),
+				RetryAfter:          "2026-04-10T02:00:00Z",
+				PrimaryRetryAfter:   "2026-04-10T02:00:00Z",
+				SecondaryRetryAfter: "2026-04-17T00:00:00Z",
+				LastUsageResult:     "ok",
+				LastUsageCheckAt:    "2026-04-10T00:01:00Z",
 			},
 		},
 	})
@@ -248,6 +251,9 @@ func TestAccountStatusShowsUsageState(t *testing.T) {
 		"auth_mode=chatgpt",
 		"plan=pro",
 		"usage=5h:96%,wk:20%",
+		"retry_after=2026-04-10T02:00:00Z",
+		"primary_retry_after=2026-04-10T02:00:00Z",
+		"secondary_retry_after=2026-04-17T00:00:00Z",
 	} {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("expected %q in output, got %q", needle, output)
@@ -402,6 +408,9 @@ func TestManagedAuthManagerQueuesFallbackFromUsageAPI(t *testing.T) {
 	if state.PendingActive != "secondary" || !state.RestartRequired {
 		t.Fatalf("expected queued fallback, got %#v", state)
 	}
+	if strings.TrimSpace(state.Accounts["primary"].RetryAfter) == "" {
+		t.Fatalf("expected primary retry_after to be populated, got %#v", state.Accounts["primary"])
+	}
 }
 
 func TestManagedAuthManagerQueuesPreferredReturnFromUsageAPI(t *testing.T) {
@@ -442,6 +451,97 @@ func TestManagedAuthManagerQueuesPreferredReturnFromUsageAPI(t *testing.T) {
 	}
 	if state.Active != "secondary" || state.PendingActive != "primary" || !state.RestartRequired {
 		t.Fatalf("expected queued preferred return, got %#v", state)
+	}
+}
+
+func TestManagedAuthManagerHandlesExecutionRateLimitBySwitchingAccounts(t *testing.T) {
+	responses := managedAccountTestResponses{
+		usage: map[string]managedAccountUsageReply{
+			"primary-token":   healthyUsageReply(),
+			"secondary-token": healthyUsageReply(),
+		},
+	}
+	server := newManagedAccountTestServer(t, responses)
+	withManagedAccountEndpoints(t, server)
+
+	cwd := t.TempDir()
+	codexHome := filepath.Join(t.TempDir(), ".codex")
+	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
+		Preferred: "primary",
+		Accounts: map[string]managedAccountFixtureEntry{
+			"primary":   {Profile: chatgptProfileJSON("primary-token", "primary-refresh", "primary-acct")},
+			"secondary": {Profile: chatgptProfileJSON("secondary-token", "secondary-refresh", "secondary-acct")},
+		},
+		Active: "primary",
+	})
+
+	manager, err := prepareManagedAuthManager(cwd, codexHome)
+	if err != nil {
+		t.Fatalf("prepareManagedAuthManager(): %v", err)
+	}
+	responses.usage["primary-token"] = nearLimitUsageReply()
+
+	decision, err := manager.handleExecutionRateLimit("rate limited")
+	if err != nil {
+		t.Fatalf("handleExecutionRateLimit(): %v", err)
+	}
+	if decision.SwitchedTo != "secondary" {
+		t.Fatalf("expected switch to secondary, got %#v", decision)
+	}
+	state, err := loadManagedAuthRuntimeState(codexHome)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if state.Active != "secondary" {
+		t.Fatalf("expected active secondary, got %#v", state)
+	}
+	if state.Accounts["primary"].LastFailureReason != "exec-rate-limit" {
+		t.Fatalf("expected primary execution failure reason, got %#v", state.Accounts["primary"])
+	}
+}
+
+func TestManagedAuthManagerHandlesExecutionRateLimitByReturningRetryAfter(t *testing.T) {
+	responses := managedAccountTestResponses{
+		usage: map[string]managedAccountUsageReply{
+			"primary-token":   nearLimitUsageReply(),
+			"secondary-token": nearLimitUsageReply(),
+		},
+	}
+	server := newManagedAccountTestServer(t, responses)
+	withManagedAccountEndpoints(t, server)
+
+	cwd := t.TempDir()
+	codexHome := filepath.Join(t.TempDir(), ".codex")
+	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
+		Preferred: "primary",
+		Accounts: map[string]managedAccountFixtureEntry{
+			"primary":   {Profile: chatgptProfileJSON("primary-token", "primary-refresh", "primary-acct")},
+			"secondary": {Profile: chatgptProfileJSON("secondary-token", "secondary-refresh", "secondary-acct")},
+		},
+		Active: "primary",
+	})
+
+	manager, err := prepareManagedAuthManager(cwd, codexHome)
+	if err != nil {
+		t.Fatalf("prepareManagedAuthManager(): %v", err)
+	}
+
+	decision, err := manager.handleExecutionRateLimit("rate limited")
+	if err != nil {
+		t.Fatalf("handleExecutionRateLimit(): %v", err)
+	}
+	if decision.SwitchedTo != "" {
+		t.Fatalf("did not expect account switch, got %#v", decision)
+	}
+	if strings.TrimSpace(decision.RetryAfter) == "" {
+		t.Fatalf("expected retry_after, got %#v", decision)
+	}
+	state, err := loadManagedAuthRuntimeState(codexHome)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if !state.Degraded {
+		t.Fatalf("expected degraded state, got %#v", state)
 	}
 }
 

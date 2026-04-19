@@ -131,6 +131,9 @@ type managedAccountUsageSnapshot struct {
 	SpendControlHit  bool
 	NearLimit        bool
 	HardLimit        bool
+	PrimaryRetryAt   string
+	SecondaryRetryAt string
+	RetryAfter       string
 }
 
 type managedAccountUsageCheck struct {
@@ -395,6 +398,7 @@ func buildUsageSnapshot(payload *codexUsageResponse, settings managedAuthSetting
 		if payload.RateLimit.PrimaryWindow != nil {
 			value := clampPercent(payload.RateLimit.PrimaryWindow.UsedPercent)
 			snapshot.FiveHourUsedPct = &value
+			snapshot.PrimaryRetryAt = managedAuthTimeString(usageWindowRetryAt(payload.RateLimit.PrimaryWindow))
 			if value >= settings.usageThresholdPct {
 				snapshot.NearLimit = true
 			}
@@ -402,6 +406,7 @@ func buildUsageSnapshot(payload *codexUsageResponse, settings managedAuthSetting
 		if payload.RateLimit.SecondaryWindow != nil {
 			value := clampPercent(payload.RateLimit.SecondaryWindow.UsedPercent)
 			snapshot.WeeklyUsedPct = &value
+			snapshot.SecondaryRetryAt = managedAuthTimeString(usageWindowRetryAt(payload.RateLimit.SecondaryWindow))
 			if value >= settings.usageThresholdPct {
 				snapshot.NearLimit = true
 			}
@@ -421,6 +426,7 @@ func buildUsageSnapshot(payload *codexUsageResponse, settings managedAuthSetting
 		snapshot.SpendControlHit = true
 		snapshot.HardLimit = true
 	}
+	snapshot.RetryAfter = managedAuthTimeString(earliestManagedUsageRetryAt(snapshot, settings))
 	return snapshot
 }
 
@@ -435,6 +441,9 @@ func mergeAccountUsageState(accountState *ManagedAuthAccountState, check managed
 		accountState.CreditsAvailable = check.snapshot.CreditsAvailable
 		accountState.SpendControlHit = check.snapshot.SpendControlHit
 		accountState.LimitReached = check.snapshot.HardLimit
+		accountState.PrimaryRetryAfter = check.snapshot.PrimaryRetryAt
+		accountState.SecondaryRetryAfter = check.snapshot.SecondaryRetryAt
+		accountState.RetryAfter = check.snapshot.RetryAfter
 		accountState.LastSuccessfulUsageCheckAt = now.Format(time.RFC3339Nano)
 		accountState.LastUsageFreshUntil = now.Add(settings.staleAfter).Format(time.RFC3339Nano)
 		accountState.LastUsageResult = accountUsageResultOK
@@ -454,6 +463,54 @@ func mergeAccountUsageState(accountState *ManagedAuthAccountState, check managed
 		accountState.LimitReached = false
 		accountState.SpendControlHit = false
 	}
+}
+
+func usageWindowRetryAt(window *codexUsageWindow) time.Time {
+	if window == nil {
+		return time.Time{}
+	}
+	if window.ResetAt > 0 {
+		return time.Unix(window.ResetAt, 0).UTC()
+	}
+	if window.ResetAfterSeconds > 0 {
+		return time.Now().UTC().Add(time.Duration(window.ResetAfterSeconds) * time.Second)
+	}
+	return time.Time{}
+}
+
+func earliestManagedUsageRetryAt(snapshot *managedAccountUsageSnapshot, settings managedAuthSettings) time.Time {
+	if snapshot == nil {
+		return time.Time{}
+	}
+	candidates := []string{}
+	if snapshot.HardLimit {
+		candidates = append(candidates, snapshot.PrimaryRetryAt, snapshot.SecondaryRetryAt)
+	} else if snapshot.NearLimit {
+		if snapshot.FiveHourUsedPct != nil && *snapshot.FiveHourUsedPct >= settings.usageThresholdPct {
+			candidates = append(candidates, snapshot.PrimaryRetryAt)
+		}
+		if snapshot.WeeklyUsedPct != nil && *snapshot.WeeklyUsedPct >= settings.usageThresholdPct {
+			candidates = append(candidates, snapshot.SecondaryRetryAt)
+		}
+	}
+	best := time.Time{}
+	for _, raw := range candidates {
+		retryAt, ok := parseManagedAuthTime(raw)
+		if !ok {
+			continue
+		}
+		if best.IsZero() || retryAt.Before(best) {
+			best = retryAt
+		}
+	}
+	return best
+}
+
+func managedAuthTimeString(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
 }
 
 func shouldRetryRequest(result managedAccountRequestResult) bool {

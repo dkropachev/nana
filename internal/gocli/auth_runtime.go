@@ -23,6 +23,12 @@ type managedAuthUsageSample struct {
 	check   managedAccountUsageCheck
 }
 
+type managedAuthRateLimitDecision struct {
+	SwitchedTo string
+	RetryAfter string
+	Reason     string
+}
+
 var managedAuthFetchUsage = fetchManagedAccountUsage
 
 func prepareManagedAuthManager(cwd string, codexHome string) (*managedAuthManager, error) {
@@ -102,6 +108,20 @@ func (m *managedAuthManager) evaluateUsage() error {
 	return m.evaluateUsageLocked(now, true, samples)
 }
 
+func (m *managedAuthManager) handleExecutionRateLimit(summary string) (managedAuthRateLimitDecision, error) {
+	if m == nil {
+		return managedAuthRateLimitDecision{}, nil
+	}
+	now := time.Now().UTC()
+	samples := m.collectUsageSamples()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.evaluateUsageLocked(now, false, samples); err != nil {
+		return managedAuthRateLimitDecision{}, err
+	}
+	return m.handleExecutionRateLimitLocked(now, summary)
+}
+
 func (m *managedAuthManager) ensureLaunchAccount(now time.Time, reason string) error {
 	samples := m.collectUsageSamples()
 	m.mu.Lock()
@@ -168,6 +188,7 @@ func (m *managedAuthManager) evaluateUsageLocked(now time.Time, queueOnly bool, 
 				accountState.LastFailureReason = "usage-api-near-limit"
 			} else if account.Name == active || account.Name == normalizeManagedAuthName(m.registry.Preferred) {
 				accountState.DepletedAt = ""
+				accountState.RetryAfter = ""
 				if strings.HasPrefix(accountState.LastFailureReason, "usage-api-") {
 					accountState.LastFailureReason = ""
 				}
@@ -281,7 +302,11 @@ func (m *managedAuthManager) freshEligibleLocked(name string, now time.Time) boo
 		return false
 	}
 	state := m.state.Accounts[name]
-	return state.LastUsageResult == accountUsageResultOK && !state.LimitReached && !usageThresholdExceeded(state, m.settings) && !lastUsageFreshUntilExpired(state, now)
+	return state.LastUsageResult == accountUsageResultOK &&
+		!state.LimitReached &&
+		!usageThresholdExceeded(state, m.settings) &&
+		!lastUsageFreshUntilExpired(state, now) &&
+		!retryAfterPending(state, now)
 }
 
 func (m *managedAuthManager) activeUsableLocked(name string, now time.Time) bool {
@@ -292,9 +317,9 @@ func (m *managedAuthManager) activeUsableLocked(name string, now time.Time) bool
 	state := m.state.Accounts[name]
 	switch state.LastUsageResult {
 	case accountUsageResultOK:
-		return !state.LimitReached && !usageThresholdExceeded(state, m.settings)
+		return !state.LimitReached && !usageThresholdExceeded(state, m.settings) && !retryAfterPending(state, now)
 	case accountUsageResultStale:
-		return !state.LimitReached
+		return !state.LimitReached && !retryAfterPending(state, now)
 	default:
 		return false
 	}
@@ -342,6 +367,7 @@ func (m *managedAuthManager) activateAccountLocked(name string, now time.Time, r
 	accountState := m.state.Accounts[name]
 	accountState.LastActivatedAt = now.Format(time.RFC3339Nano)
 	accountState.DepletedAt = ""
+	accountState.RetryAfter = ""
 	accountState.LastFailureReason = ""
 	m.state.Accounts[name] = accountState
 	m.state.Active = name
@@ -365,6 +391,87 @@ func (m *managedAuthManager) queuePendingAccountSwitchLocked(name string, now ti
 	m.state.RestartRequired = true
 	m.markDecisionLocked(now, reason)
 	return m.persistStateLocked()
+}
+
+func (m *managedAuthManager) handleExecutionRateLimitLocked(now time.Time, summary string) (managedAuthRateLimitDecision, error) {
+	active := normalizeManagedAuthName(m.state.Active)
+	if active == "" {
+		m.markDegradedLocked(now, "rate-limit-no-active-account")
+		if err := m.persistStateLocked(); err != nil {
+			return managedAuthRateLimitDecision{}, err
+		}
+		return managedAuthRateLimitDecision{Reason: defaultString(strings.TrimSpace(summary), "rate limit hit")}, nil
+	}
+
+	activeState := m.state.Accounts[active]
+	activeState.DepletedAt = now.Format(time.RFC3339Nano)
+	activeState.LastFailureReason = "exec-rate-limit"
+	if strings.TrimSpace(activeState.RetryAfter) == "" {
+		activeState.RetryAfter = now.Add(m.settings.pollInterval).Format(time.RFC3339Nano)
+	}
+	m.state.Accounts[active] = activeState
+
+	target := m.chooseExecutionFallbackTargetLocked(active, now)
+	if target != "" && target != active {
+		if err := m.activateAccountLocked(target, now, "exec-rate-limit"); err != nil {
+			return managedAuthRateLimitDecision{}, err
+		}
+		return managedAuthRateLimitDecision{
+			SwitchedTo: target,
+			Reason:     defaultString(strings.TrimSpace(summary), "rate limit hit"),
+		}, nil
+	}
+
+	retryAt := m.earliestRetryAfterLocked(now)
+	if retryAt.IsZero() {
+		retryAt = now.Add(m.settings.pollInterval)
+	}
+	m.markDegradedLocked(now, "rate-limit-all-accounts-exhausted")
+	if err := m.persistStateLocked(); err != nil {
+		return managedAuthRateLimitDecision{}, err
+	}
+	return managedAuthRateLimitDecision{
+		RetryAfter: retryAt.Format(time.RFC3339Nano),
+		Reason:     defaultString(strings.TrimSpace(summary), "rate limit hit"),
+	}, nil
+}
+
+func (m *managedAuthManager) chooseExecutionFallbackTargetLocked(active string, now time.Time) string {
+	preferred := normalizeManagedAuthName(m.registry.Preferred)
+	if preferred != "" && preferred != active && m.executionEligibleLocked(preferred, now) {
+		return preferred
+	}
+	for _, account := range m.registry.orderedAccounts() {
+		if account.Name == active {
+			continue
+		}
+		if m.executionEligibleLocked(account.Name, now) {
+			return account.Name
+		}
+	}
+	return ""
+}
+
+func (m *managedAuthManager) executionEligibleLocked(name string, now time.Time) bool {
+	if m.freshEligibleLocked(name, now) {
+		return true
+	}
+	return m.activeUsableLocked(name, now) && !retryAfterPending(m.state.Accounts[name], now)
+}
+
+func (m *managedAuthManager) earliestRetryAfterLocked(now time.Time) time.Time {
+	best := time.Time{}
+	for _, account := range m.registry.orderedAccounts() {
+		if !account.Enabled {
+			continue
+		}
+		if retryAt, ok := retryAfterTime(m.state.Accounts[account.Name]); ok && retryAt.After(now) {
+			if best.IsZero() || retryAt.Before(best) {
+				best = retryAt
+			}
+		}
+	}
+	return best
 }
 
 func (m *managedAuthManager) clearDegradedLocked(decision string) {
@@ -409,4 +516,13 @@ func dwellSatisfied(raw string, now time.Time, minimum time.Duration) bool {
 		return true
 	}
 	return !activatedAt.Add(minimum).After(now)
+}
+
+func retryAfterPending(state ManagedAuthAccountState, now time.Time) bool {
+	retryAt, ok := retryAfterTime(state)
+	return ok && retryAt.After(now)
+}
+
+func retryAfterTime(state ManagedAuthAccountState) (time.Time, bool) {
+	return parseManagedAuthTime(state.RetryAfter)
 }

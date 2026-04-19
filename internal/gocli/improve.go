@@ -13,22 +13,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Yeachan-Heo/nana/internal/gocliassets"
+	"github.com/dkropachev/nana/internal/gocliassets"
 )
 
 const ImproveHelp = `nana improve - Discover UX and performance improvements
 
 Usage:
   nana improve [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [-- codex-args...]
+  nana improve --resume <run-id>|--last [owner/repo|github-url] [--repo <path>] [-- codex-args...]
   nana improve help
 
 Behavior:
   - runs the improvement-scout role against the selected repo
   - local repos always keep proposals under .nana/improvements/
-  - GitHub repos read .nana/improvement-policy.json or .github/nana-improvement-policy.json from the repo checkout
+  - scout policy is stored in Nana-managed runtime state outside the source checkout
   - GitHub policy issue_destination controls publication: local, repo/target, or fork
-  - emits 5 proposals per run by default; policy max_issues can raise the cap up to 50
-  - created issues are labeled with improvement-scout, never enhancement, and count toward that role's open-issue cap
+  - emits every grounded proposal it finds
+  - created issues are labeled with improvement-scout, never enhancement
 
 Policy example:
   {"version":1,"issue_destination":"repo","labels":["improvement","ux","perf"]}
@@ -39,77 +40,140 @@ const EnhanceHelp = `nana enhance - Discover repo enhancements that help a proje
 
 Usage:
   nana enhance [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [-- codex-args...]
+  nana enhance --resume <run-id>|--last [owner/repo|github-url] [--repo <path>] [-- codex-args...]
   nana enhance help
 
 Behavior:
   - runs the enhancement-scout role against the selected repo
   - local repos always keep proposals under .nana/enhancements/
-  - GitHub repos read .nana/enhancement-policy.json or .github/nana-enhancement-policy.json from the repo checkout
+  - scout policy is stored in Nana-managed runtime state outside the source checkout
   - GitHub policy issue_destination controls publication: local, repo/target, or fork
-  - emits 5 proposals per run by default; policy max_issues can raise the cap up to 50
-  - created issues are labeled with enhancement-scout and count toward that role's open-issue cap
+  - emits every grounded proposal it finds
+  - created issues are labeled with enhancement-scout
 
 Policy example:
   {"version":1,"issue_destination":"repo","labels":["enhancement"]}
   {"version":1,"issue_destination":"fork","fork_repo":"my-user/widget","labels":["enhancement"]}
 `
 
-const ScoutStartHelp = StartHelp
+const UIScoutHelp = `nana ui-scout - Audit UI pages and flows with issue-style findings
+
+Usage:
+  nana ui-scout [owner/repo|github-url] [--repo <path>] [--focus <ui,ux,a11y,perf>] [--from-file <findings.json>] [--dry-run] [--local-only] [--session-limit <1-6>] [-- codex-args...]
+  nana ui-scout --resume <run-id>|--last [owner/repo|github-url] [--repo <path>] [-- codex-args...]
+  nana ui-scout help
+
+Behavior:
+  - runs the ui-scout role against the selected repo
+  - performs a short preflight before the long audit to detect the best UI surface and audit mode
+  - local repos keep findings under .nana/ui-findings/
+  - GitHub policy issue_destination controls publication: local, repo/target, or fork
+  - emits every grounded finding it finds; --session-limit overrides policy session_limit for this run only
+  - prints whether the audit is live-browser or repo-only fallback before the full run starts
+
+Policy example:
+  {"version":1,"issue_destination":"local","labels":["ui"],"session_limit":4}
+`
+
+const ScoutStartHelp = `nana start - Run supported repo startup automation (scout mode)
+
+Usage:
+  nana start [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [-- codex-args...]
+  nana start --resume <run-id>|--last [owner/repo|github-url] [--repo <path>] [-- codex-args...]
+  nana start help
+
+Mode:
+  - selected when nana start receives scout flags, a positional scout target, or a path-like --repo value
+  - prints [start] Mode: scout (policy-backed scout startup). before execution begins
+
+Behavior:
+  - detects scout support from repo policy files
+  - runs improvement-scout when a managed improvement scout policy exists
+  - runs enhancement-scout when a managed enhancement scout policy exists
+  - runs ui-scout when a managed UI scout policy exists
+  - local repos keep findings under .nana/improvements/, .nana/enhancements/, or .nana/ui-findings/
+  - GitHub targets follow their scout policy issue_destination
+  - local repos with mode "auto" in every supported scout policy commit generated artifacts to the repo's default branch
+  - auto mode requires a clean worktree and a resolvable local default branch
+  - exits cleanly when the repo does not declare supported scout policies
+`
 
 const (
 	improvementDestinationLocal  = "local"
 	improvementDestinationTarget = "target"
 	improvementDestinationFork   = "fork"
 
-	improvementScoutRole = "improvement-scout"
-	enhancementScoutRole = "enhancement-scout"
-	defaultScoutIssueCap = 5
-	maxScoutIssueCap     = 50
+	improvementScoutRole     = "improvement-scout"
+	enhancementScoutRole     = "enhancement-scout"
+	uiScoutRole              = "ui-scout"
+	defaultScoutSessionLimit = 4
+	maxScoutSessionLimit     = 6
 )
 
+const uiScoutPreflightPrompt = `You are running a short preflight for ui-scout.
+
+Inspect the repository and determine whether a UI audit can run live against a real or mock/demo surface, or whether the audit must fall back to repository-only evidence.
+
+Return only JSON:
+{
+  "version": 1,
+  "browser_ready": true,
+  "mode": "live|repo_only|blocked",
+  "surface_kind": "app|storybook|demo|mock|unknown",
+  "surface_target": "best surface target",
+  "reason": "short explanation"
+}
+
+Rules:
+- Prefer a real app surface first.
+- If a real surface is unavailable but a storybook/demo/mock UI exists, return mode "live" and surface_kind accordingly.
+- If UI code exists but no live/browser-capable path is evident, return mode "repo_only".
+- If no plausible UI surface or UI code exists, return mode "blocked".
+- Keep reason concise and concrete.`
+
 type ImproveOptions struct {
-	Target    string
-	RepoPath  string
-	Focus     []string
-	FromFile  string
-	DryRun    bool
-	LocalOnly bool
-	CodexArgs []string
+	Target          string
+	RepoPath        string
+	Focus           []string
+	FromFile        string
+	ResumeRunID     string
+	ResumeLast      bool
+	DryRun          bool
+	LocalOnly       bool
+	SessionLimit    int
+	CodexArgs       []string
+	RateLimitPolicy codexRateLimitPolicy
 }
 
-type improvementPolicy struct {
-	Version          int      `json:"version"`
-	Mode             string   `json:"mode,omitempty"`
-	IssueDestination string   `json:"issue_destination,omitempty"`
-	ForkRepo         string   `json:"fork_repo,omitempty"`
-	Labels           []string `json:"labels,omitempty"`
-	MaxIssues        int      `json:"max_issues,omitempty"`
+type uiScoutPreflight struct {
+	Version       int    `json:"version"`
+	GeneratedAt   string `json:"generated_at,omitempty"`
+	BrowserReady  bool   `json:"browser_ready"`
+	Mode          string `json:"mode,omitempty"`
+	SurfaceKind   string `json:"surface_kind,omitempty"`
+	SurfaceTarget string `json:"surface_target,omitempty"`
+	Reason        string `json:"reason,omitempty"`
 }
 
-type improvementReport struct {
-	Version     int                   `json:"version"`
-	Repo        string                `json:"repo,omitempty"`
-	GeneratedAt string                `json:"generated_at,omitempty"`
-	Proposals   []improvementProposal `json:"proposals"`
-}
-
-type improvementProposal struct {
-	Title             string   `json:"title"`
-	Area              string   `json:"area,omitempty"`
-	Summary           string   `json:"summary"`
-	Rationale         string   `json:"rationale,omitempty"`
-	Evidence          string   `json:"evidence,omitempty"`
-	Impact            string   `json:"impact,omitempty"`
-	SuggestedNextStep string   `json:"suggested_next_step,omitempty"`
-	Confidence        string   `json:"confidence,omitempty"`
-	Files             []string `json:"files,omitempty"`
-	Labels            []string `json:"labels,omitempty"`
-}
-
-type improvementIssueResult struct {
-	Title  string
-	URL    string
-	DryRun bool
+type scoutRunManifest struct {
+	Version      int      `json:"version"`
+	RunID        string   `json:"run_id"`
+	Role         string   `json:"role"`
+	Target       string   `json:"target,omitempty"`
+	RepoPath     string   `json:"repo_path"`
+	RepoSlug     string   `json:"repo_slug,omitempty"`
+	ArtifactDir  string   `json:"artifact_dir"`
+	Status       string   `json:"status"`
+	Focus        []string `json:"focus,omitempty"`
+	DryRun       bool     `json:"dry_run,omitempty"`
+	LocalOnly    bool     `json:"local_only,omitempty"`
+	SessionLimit int      `json:"session_limit,omitempty"`
+	CreatedAt    string   `json:"created_at"`
+	UpdatedAt    string   `json:"updated_at"`
+	CompletedAt  string   `json:"completed_at,omitempty"`
+	LastError    string   `json:"last_error,omitempty"`
+	PauseReason  string   `json:"pause_reason,omitempty"`
+	PauseUntil   string   `json:"pause_until,omitempty"`
 }
 
 func Improve(cwd string, args []string) error {
@@ -136,6 +200,18 @@ func Enhance(cwd string, args []string) error {
 	return runScout(cwd, options, enhancementScoutRole)
 }
 
+func UIScout(cwd string, args []string) error {
+	if len(args) > 0 && isHelpToken(args[0]) || len(args) > 0 && args[0] == "help" {
+		fmt.Fprint(os.Stdout, UIScoutHelp)
+		return nil
+	}
+	options, err := parseUIScoutArgs(args)
+	if err != nil {
+		return err
+	}
+	return runScout(cwd, options, uiScoutRole)
+}
+
 func StartScouts(cwd string, args []string) error {
 	if len(args) > 0 && isHelpToken(args[0]) || len(args) > 0 && args[0] == "help" {
 		fmt.Fprint(os.Stdout, ScoutStartHelp)
@@ -145,6 +221,7 @@ func StartScouts(cwd string, args []string) error {
 	if err != nil {
 		return err
 	}
+	printStartModeBanner(startExecutionModeScout)
 	return startRunScoutStart(cwd, options)
 }
 
@@ -152,8 +229,15 @@ func parseImproveArgs(args []string) (ImproveOptions, error) {
 	return parseScoutArgs(args, ImproveHelp, "improve")
 }
 
+func parseUIScoutArgs(args []string) (ImproveOptions, error) {
+	return parseScoutArgs(args, UIScoutHelp, "ui-scout")
+}
+
 func parseScoutArgs(args []string, help string, command string) (ImproveOptions, error) {
 	options := ImproveOptions{Focus: []string{"ux", "perf"}}
+	if command == "ui-scout" {
+		options.Focus = []string{"ui", "ux", "a11y"}
+	}
 	positionals := []string{}
 	for index := 0; index < len(args); index++ {
 		token := args[index]
@@ -177,13 +261,25 @@ func parseScoutArgs(args []string, help string, command string) (ImproveOptions,
 				if err != nil {
 					return ImproveOptions{}, err
 				}
-				options.Focus, err = parseScoutFocus(value, help, command)
+				if command == "ui-scout" {
+					options.Focus, err = parseUIScoutFocus(value)
+				} else {
+					options.Focus, err = parseScoutFocus(value, help, command)
+				}
 				if err != nil {
 					return ImproveOptions{}, err
 				}
 				index++
 			case strings.HasPrefix(token, "--focus="):
-				parsed, err := parseScoutFocus(strings.TrimPrefix(token, "--focus="), help, command)
+				var (
+					parsed []string
+					err    error
+				)
+				if command == "ui-scout" {
+					parsed, err = parseUIScoutFocus(strings.TrimPrefix(token, "--focus="))
+				} else {
+					parsed, err = parseScoutFocus(strings.TrimPrefix(token, "--focus="), help, command)
+				}
 				if err != nil {
 					return ImproveOptions{}, err
 				}
@@ -197,10 +293,44 @@ func parseScoutArgs(args []string, help string, command string) (ImproveOptions,
 				index++
 			case strings.HasPrefix(token, "--from-file="):
 				options.FromFile = strings.TrimSpace(strings.TrimPrefix(token, "--from-file="))
+			case token == "--resume":
+				value, err := requireScoutFlagValue(args, index, token, help)
+				if err != nil {
+					return ImproveOptions{}, err
+				}
+				options.ResumeRunID = strings.TrimSpace(value)
+				index++
+			case strings.HasPrefix(token, "--resume="):
+				options.ResumeRunID = strings.TrimSpace(strings.TrimPrefix(token, "--resume="))
+			case token == "--last":
+				options.ResumeLast = true
 			case token == "--dry-run":
 				options.DryRun = true
 			case token == "--local-only":
 				options.LocalOnly = true
+			case token == "--session-limit":
+				if command != "ui-scout" {
+					return ImproveOptions{}, fmt.Errorf("unknown %s option: %s\n\n%s", command, token, help)
+				}
+				value, err := requireScoutFlagValue(args, index, token, help)
+				if err != nil {
+					return ImproveOptions{}, err
+				}
+				parsed, err := parseScoutSessionLimit(value, command)
+				if err != nil {
+					return ImproveOptions{}, err
+				}
+				options.SessionLimit = parsed
+				index++
+			case strings.HasPrefix(token, "--session-limit="):
+				if command != "ui-scout" {
+					return ImproveOptions{}, fmt.Errorf("unknown %s option: %s\n\n%s", command, token, help)
+				}
+				parsed, err := parseScoutSessionLimit(strings.TrimPrefix(token, "--session-limit="), command)
+				if err != nil {
+					return ImproveOptions{}, err
+				}
+				options.SessionLimit = parsed
 			default:
 				return ImproveOptions{}, fmt.Errorf("unknown %s option: %s\n\n%s", command, token, help)
 			}
@@ -213,6 +343,12 @@ func parseScoutArgs(args []string, help string, command string) (ImproveOptions,
 	}
 	if len(positionals) == 1 {
 		options.Target = positionals[0]
+	}
+	if strings.TrimSpace(options.ResumeRunID) != "" && options.ResumeLast {
+		return ImproveOptions{}, fmt.Errorf("use either --resume <run-id> or --last for nana %s, not both.\n\n%s", command, help)
+	}
+	if (strings.TrimSpace(options.ResumeRunID) != "" || options.ResumeLast) && strings.TrimSpace(options.FromFile) != "" {
+		return ImproveOptions{}, fmt.Errorf("--from-file cannot be combined with scout resume options.\n\n%s", help)
 	}
 	return options, nil
 }
@@ -254,9 +390,44 @@ func parseScoutFocus(value string, help string, command string) ([]string, error
 	return uniqueStrings(focus), nil
 }
 
-func runScout(cwd string, options ImproveOptions, role string) error {
+func parseUIScoutFocus(value string) ([]string, error) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return nil, fmt.Errorf("Missing value after --focus.\n\n%s", UIScoutHelp)
+	}
+	focus := []string{}
+	for _, part := range strings.Split(raw, ",") {
+		normalized := strings.ToLower(strings.TrimSpace(part))
+		switch normalized {
+		case "ui", "ux", "a11y", "accessibility", "perf", "performance":
+			switch normalized {
+			case "accessibility":
+				normalized = "a11y"
+			case "performance":
+				normalized = "perf"
+			}
+			focus = append(focus, normalized)
+		case "":
+		default:
+			return nil, fmt.Errorf("invalid ui-scout focus %q. Expected ui, ux, a11y, perf, or a comma-separated combination", part)
+		}
+	}
+	return uniqueStrings(focus), nil
+}
+
+func parseScoutSessionLimit(value string, command string) (int, error) {
+	parsed, err := parsePositiveInt(strings.TrimSpace(value), "--session-limit")
+	if err != nil || parsed < 1 || parsed > maxScoutSessionLimit {
+		return 0, fmt.Errorf("invalid %s session limit %q. Expected an integer from 1 to %d", command, value, maxScoutSessionLimit)
+	}
+	return parsed, nil
+}
+
+func runScout(cwd string, options ImproveOptions, role string) (err error) {
 	repoSlug, githubTarget := normalizeImproveGithubRepo(options.Target)
 	repoPath := strings.TrimSpace(options.RepoPath)
+	resuming := strings.TrimSpace(options.ResumeRunID) != "" || options.ResumeLast
+	ranScout := strings.TrimSpace(options.FromFile) == ""
 	if repoPath == "" {
 		if strings.TrimSpace(options.Target) != "" && !githubTarget {
 			repoPath = options.Target
@@ -265,7 +436,6 @@ func runScout(cwd string, options ImproveOptions, role string) error {
 		}
 	}
 
-	var err error
 	if githubTarget {
 		repoPath, err = ensureImproveGithubCheckout(repoSlug)
 		if err != nil {
@@ -283,12 +453,104 @@ func runScout(cwd string, options ImproveOptions, role string) error {
 		return fmt.Errorf("%s repo path must be a directory: %s", scoutOutputPrefix(role), repoPath)
 	}
 
+	var (
+		artifactDir string
+		manifest    scoutRunManifest
+	)
+	if resuming {
+		artifactDir, err = resolveScoutRunDir(repoPath, role, options)
+		if err != nil {
+			return err
+		}
+		manifest, err = readScoutRunManifest(scoutRunManifestPath(artifactDir))
+		if err != nil {
+			return err
+		}
+		if manifest.Role != role {
+			return fmt.Errorf("scout run %s belongs to %s, not %s", manifest.RunID, manifest.Role, role)
+		}
+		if manifest.Status == "completed" {
+			return fmt.Errorf("scout run %s is already completed", manifest.RunID)
+		}
+		repoPath = manifest.RepoPath
+		repoSlug = manifest.RepoSlug
+		options.Target = manifest.Target
+		options.Focus = append([]string{}, manifest.Focus...)
+		options.DryRun = manifest.DryRun
+		options.LocalOnly = manifest.LocalOnly
+		options.SessionLimit = manifest.SessionLimit
+		_, githubTarget = normalizeImproveGithubRepo(options.Target)
+	} else {
+		artifactDir, err = prepareLocalScoutArtifactDir(repoPath, role)
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC().Format(time.RFC3339)
+		manifest = scoutRunManifest{
+			Version:      1,
+			RunID:        filepath.Base(artifactDir),
+			Role:         role,
+			Target:       options.Target,
+			RepoPath:     repoPath,
+			RepoSlug:     repoSlug,
+			ArtifactDir:  artifactDir,
+			Status:       "running",
+			Focus:        append([]string{}, options.Focus...),
+			DryRun:       options.DryRun,
+			LocalOnly:    options.LocalOnly,
+			SessionLimit: options.SessionLimit,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+	}
+	manifest.Status = "running"
+	manifest.LastError = ""
+	manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	manifest.CompletedAt = ""
+	if err := writeScoutRunManifest(artifactDir, manifest); err != nil {
+		return err
+	}
+
 	policy := readScoutPolicy(repoPath, role)
 	if !githubTarget || options.LocalOnly {
 		policy.IssueDestination = improvementDestinationLocal
 	}
+	if scoutRoleSupportsSessionLimit(role) && options.SessionLimit > 0 {
+		policy.SessionLimit = options.SessionLimit
+	}
 	policy.Labels = normalizeScoutLabels(policy.Labels, role)
+	defer func() {
+		manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		if pauseErr, ok := isCodexRateLimitPauseError(err); ok {
+			manifest.Status = "paused"
+			manifest.LastError = codexPauseInfoMessage(pauseErr.Info)
+			manifest.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
+			manifest.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+			manifest.CompletedAt = ""
+		} else if err != nil {
+			manifest.Status = "failed"
+			manifest.LastError = err.Error()
+			manifest.PauseReason = ""
+			manifest.PauseUntil = ""
+			manifest.CompletedAt = manifest.UpdatedAt
+		} else {
+			manifest.Status = "completed"
+			manifest.LastError = ""
+			manifest.PauseReason = ""
+			manifest.PauseUntil = ""
+			manifest.CompletedAt = manifest.UpdatedAt
+		}
+		if writeErr := writeScoutRunManifest(artifactDir, manifest); writeErr != nil && err == nil {
+			err = writeErr
+		}
+		if err == nil && ranScout {
+			if recordErr := recordSuccessfulScoutRun(repoPath, role, time.Now().UTC()); recordErr != nil {
+				err = recordErr
+			}
+		}
+	}()
 
+	var preflight *uiScoutPreflight
 	rawOutput := []byte{}
 	if strings.TrimSpace(options.FromFile) != "" {
 		rawOutput, err = os.ReadFile(options.FromFile)
@@ -296,7 +558,56 @@ func runScout(cwd string, options ImproveOptions, role string) error {
 			return err
 		}
 	} else {
-		rawOutput, err = runScoutRole(repoPath, repoSlug, options.Focus, options.CodexArgs, role)
+		runtime, err := prepareScoutExecutionRuntime(repoPath, artifactDir, role)
+		if err != nil {
+			return err
+		}
+		runtime.RateLimitPolicy = codexRateLimitPolicyDefault(options.RateLimitPolicy)
+		runtime.OnPause = func(info codexRateLimitPauseInfo) {
+			manifest.Status = "paused"
+			manifest.LastError = codexPauseInfoMessage(info)
+			manifest.PauseReason = strings.TrimSpace(info.Reason)
+			manifest.PauseUntil = strings.TrimSpace(info.RetryAfter)
+			manifest.UpdatedAt = ISOTimeNow()
+			manifest.CompletedAt = ""
+			_ = writeScoutRunManifest(artifactDir, manifest)
+		}
+		runtime.OnResume = func(info codexRateLimitPauseInfo) {
+			manifest.Status = "running"
+			manifest.LastError = ""
+			manifest.PauseReason = ""
+			manifest.PauseUntil = ""
+			manifest.UpdatedAt = ISOTimeNow()
+			_ = writeScoutRunManifest(artifactDir, manifest)
+		}
+		defer runtime.Cleanup()
+		if scoutRoleUsesPreflight(role) {
+			if err := readGithubJSON(filepath.Join(artifactDir, "preflight.json"), &preflight); err != nil {
+				preflight, err = runUIScoutPreflight(runtime, repoSlug, options.Focus, options.CodexArgs)
+				if err != nil {
+					return err
+				}
+				if err := writeGithubJSON(filepath.Join(artifactDir, "preflight.json"), preflight); err != nil {
+					return err
+				}
+			}
+			if preflight.Mode == "blocked" {
+				return fmt.Errorf("ui-scout preflight could not find a runnable UI surface: %s", defaultString(strings.TrimSpace(preflight.Reason), "no UI surface detected"))
+			}
+			fmt.Fprintf(os.Stdout, "[ui-scout] Preflight: mode=%s surface=%s target=%s session-limit=%d\n",
+				defaultString(strings.TrimSpace(preflight.Mode), "unknown"),
+				defaultString(strings.TrimSpace(preflight.SurfaceKind), "unknown"),
+				defaultString(strings.TrimSpace(preflight.SurfaceTarget), "(none)"),
+				effectiveScoutSessionLimit(policy, role),
+			)
+			if strings.EqualFold(strings.TrimSpace(preflight.Mode), "repo_only") && strings.TrimSpace(preflight.Reason) != "" {
+				fmt.Fprintf(os.Stdout, "[ui-scout] Preflight fallback: %s\n", strings.TrimSpace(preflight.Reason))
+			}
+		}
+		rawOutput, err = runScoutRole(runtime, repoSlug, options.Focus, options.CodexArgs, role, policy, preflight)
+		if persistErr := persistScoutExecutionArtifacts(runtime, artifactDir); persistErr != nil {
+			return persistErr
+		}
 		if err != nil {
 			return err
 		}
@@ -320,31 +631,27 @@ func runScout(cwd string, options ImproveOptions, role string) error {
 		report.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 
-	artifactDir, err := writeLocalScoutArtifacts(repoPath, report, policy, rawOutput, role)
+	artifactDir, err = writeLocalScoutArtifacts(artifactDir, report, policy, rawOutput, role, preflight)
 	if err != nil {
 		return err
 	}
 	prefix := scoutOutputPrefix(role)
-	fmt.Fprintf(os.Stdout, "[%s] Saved proposals locally: %s\n", prefix, artifactDir)
+	fmt.Fprintf(os.Stdout, "[%s] Saved %s locally: %s\n", prefix, scoutProposalNoun(role), artifactDir)
 	if len(report.Proposals) == 0 {
-		fmt.Fprintf(os.Stdout, "[%s] No grounded %s proposals found.\n", prefix, scoutProposalNoun(role))
+		fmt.Fprintf(os.Stdout, "[%s] No grounded %s found.\n", prefix, scoutProposalNoun(role))
 		return nil
 	}
 	if policy.IssueDestination == improvementDestinationLocal {
-		fmt.Fprintf(os.Stdout, "[%s] Keeping %d proposal(s) local by policy.\n", prefix, len(report.Proposals))
+		fmt.Fprintf(os.Stdout, "[%s] Keeping %d %s local by policy.\n", prefix, len(report.Proposals), scoutItemsCountNoun(role))
 		return nil
 	}
 	if !githubTarget {
-		fmt.Fprintf(os.Stdout, "[%s] Local repo detected; keeping proposals local.\n", prefix)
+		fmt.Fprintf(os.Stdout, "[%s] Local repo detected; keeping %s local.\n", prefix, scoutProposalNoun(role))
 		return nil
 	}
 	results, err := publishScoutIssues(repoSlug, report.Proposals, policy, options.DryRun, role)
 	if err != nil {
 		return err
-	}
-	if len(results) == 0 {
-		fmt.Fprintf(os.Stdout, "[%s] Open issue cap reached for %s; no issues created.\n", prefix, role)
-		return nil
 	}
 	for _, result := range results {
 		if result.DryRun {
@@ -361,6 +668,7 @@ func runScoutStart(cwd string, options ImproveOptions) error {
 	if err != nil {
 		return err
 	}
+	repoSlug, _ := normalizeImproveGithubRepo(options.Target)
 	roles := supportedScoutRoles(repoPath)
 	if len(roles) == 0 {
 		fmt.Fprintf(os.Stdout, "[start] No supported scout policies found in %s; nothing to run.\n", repoPath)
@@ -382,7 +690,24 @@ func runScoutStart(cwd string, options ImproveOptions) error {
 			return nil
 		}
 	}
+	dueRoles := make([]string, 0, len(roles))
 	for _, role := range roles {
+		policy := readScoutPolicy(repoPath, role)
+		decision, err := scoutScheduleDecisionForRole(repoPath, repoSlug, role, policy, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if !decision.Due {
+			fmt.Fprintf(os.Stdout, "[start] %s supported; skipped by schedule: %s\n", role, decision.Reason)
+			continue
+		}
+		dueRoles = append(dueRoles, role)
+	}
+	if len(dueRoles) == 0 {
+		fmt.Fprintf(os.Stdout, "[start] No scout roles due in %s.\n", repoPath)
+		return nil
+	}
+	for _, role := range dueRoles {
 		fmt.Fprintf(os.Stdout, "[start] %s supported; running.\n", role)
 		if err := runScout(cwd, options, role); err != nil {
 			return err
@@ -436,7 +761,7 @@ func resolveScoutStartRepoPath(cwd string, options ImproveOptions) (string, erro
 
 func supportedScoutRoles(repoPath string) []string {
 	roles := []string{}
-	for _, role := range []string{improvementScoutRole, enhancementScoutRole} {
+	for _, role := range supportedScoutRoleOrder {
 		if scoutPolicyExists(repoPath, role) {
 			roles = append(roles, role)
 		}
@@ -445,8 +770,8 @@ func supportedScoutRoles(repoPath string) []string {
 }
 
 func scoutPolicyExists(repoPath string, role string) bool {
-	for _, rel := range scoutPolicyPaths(role) {
-		if info, err := os.Stat(filepath.Join(repoPath, rel)); err == nil && !info.IsDir() {
+	for _, path := range repoScoutReadPaths(repoPath, role) {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
 			return true
 		}
 	}
@@ -653,11 +978,11 @@ func buildScoutArtifactCommitMessage(repoPath string) (string, error) {
 	if len(items) == 0 {
 		return "Record scout startup artifacts\n", nil
 	}
-	subject := fmt.Sprintf("Record scout proposal: %s", items[0].Title)
+	subject := fmt.Sprintf("Record scout item: %s", items[0].Title)
 	if len(items) > 1 {
-		subject = fmt.Sprintf("Record %d scout proposals: %s", len(items), items[0].Title)
+		subject = fmt.Sprintf("Record %d scout items: %s", len(items), items[0].Title)
 	}
-	lines := []string{truncateCommitSubject(subject), "", "Scout proposals:"}
+	lines := []string{truncateCommitSubject(subject), "", "Scout items:"}
 	for _, item := range items {
 		lines = append(lines, fmt.Sprintf("- %s: %s", scoutIssueHeading(item.Role), item.Title))
 		lines = append(lines, fmt.Sprintf("  Artifact: %s", item.Artifact))
@@ -666,7 +991,12 @@ func buildScoutArtifactCommitMessage(repoPath string) (string, error) {
 }
 
 func stagedScoutCommitItems(repoPath string) ([]scoutCommitItem, error) {
-	output, err := githubGitOutput(repoPath, "diff", "--cached", "--name-only", "--", ".nana/improvements", ".nana/enhancements")
+	diffTargets := []string{}
+	for _, role := range supportedScoutRoleOrder {
+		diffTargets = append(diffTargets, filepath.ToSlash(filepath.Join(".nana", scoutArtifactRoot(role))))
+	}
+	args := append([]string{"diff", "--cached", "--name-only", "--"}, diffTargets...)
+	output, err := githubGitOutput(repoPath, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -678,7 +1008,7 @@ func stagedScoutCommitItems(repoPath string) ([]scoutCommitItem, error) {
 		}
 	}
 	items := []scoutCommitItem{}
-	for _, role := range []string{improvementScoutRole, enhancementScoutRole} {
+	for _, role := range supportedScoutRoleOrder {
 		matches, err := filepath.Glob(filepath.Join(repoPath, ".nana", scoutArtifactRoot(role), "*", "proposals.json"))
 		if err != nil {
 			return nil, err
@@ -727,12 +1057,13 @@ func existingScoutArtifactRoots(repoPath string) []string {
 	if info, err := os.Stat(filepath.Join(repoPath, ".gitignore")); err == nil && !info.IsDir() {
 		paths = append(paths, ".gitignore")
 	}
-	for _, rel := range []string{".nana/improvements", ".nana/enhancements"} {
+	for _, role := range supportedScoutRoleOrder {
+		rel := filepath.ToSlash(filepath.Join(".nana", scoutArtifactRoot(role)))
 		if info, err := os.Stat(filepath.Join(repoPath, rel)); err == nil && info.IsDir() {
 			paths = append(paths, rel)
 		}
 	}
-	return paths
+	return uniqueStrings(paths)
 }
 
 func scoutGitQuiet(repoPath string, args ...string) bool {
@@ -787,57 +1118,48 @@ func ensureImproveGithubCheckout(repoSlug string) (string, error) {
 	return paths.SourcePath, nil
 }
 
-func defaultImprovementPolicy() improvementPolicy {
-	return improvementPolicy{
+func defaultScoutPolicy() scoutPolicy {
+	return scoutPolicy{
 		Version:          1,
+		Schedule:         scoutScheduleWhenResolved,
 		IssueDestination: improvementDestinationLocal,
 		Labels:           []string{},
-		MaxIssues:        defaultScoutIssueCap,
 	}
 }
 
-func readImprovementPolicy(repoPath string) improvementPolicy {
+func defaultImprovementPolicy() improvementPolicy {
+	return defaultScoutPolicy()
+}
+
+func readImprovementPolicy(repoPath string) scoutPolicy {
 	return readScoutPolicy(repoPath, improvementScoutRole)
 }
 
-func readScoutPolicy(repoPath string, role string) improvementPolicy {
-	policy := defaultImprovementPolicy()
-	for _, rel := range scoutPolicyPaths(role) {
-		var candidate improvementPolicy
-		if err := readGithubJSON(filepath.Join(repoPath, rel), &candidate); err != nil {
+func readScoutPolicy(repoPath string, role string) scoutPolicy {
+	policy := defaultScoutPolicy()
+	for _, path := range repoScoutReadPaths(repoPath, role) {
+		var candidate scoutPolicy
+		if err := readGithubJSON(path, &candidate); err != nil {
 			continue
 		}
-		mergeImprovementPolicy(&policy, candidate)
+		mergeScoutPolicy(&policy, candidate)
 	}
-	policy.IssueDestination = normalizeImprovementDestination(policy.IssueDestination)
+	policy.IssueDestination = normalizeScoutDestination(policy.IssueDestination)
+	policy.Schedule = effectiveScoutSchedule(policy)
 	policy.Labels = normalizeScoutLabels(policy.Labels, role)
-	if policy.MaxIssues <= 0 {
-		policy.MaxIssues = defaultScoutIssueCap
-	} else if policy.MaxIssues > maxScoutIssueCap {
-		policy.MaxIssues = maxScoutIssueCap
-	}
+	policy.SessionLimit = effectiveScoutSessionLimit(policy, role)
 	return policy
 }
 
-func scoutPolicyPaths(role string) []string {
-	if role == enhancementScoutRole {
-		return []string{
-			filepath.Join(".github", "nana-enhancement-policy.json"),
-			filepath.Join(".nana", "enhancement-policy.json"),
-		}
-	}
-	return []string{
-		filepath.Join(".github", "nana-improvement-policy.json"),
-		filepath.Join(".nana", "improvement-policy.json"),
-	}
-}
-
-func mergeImprovementPolicy(target *improvementPolicy, source improvementPolicy) {
+func mergeScoutPolicy(target *scoutPolicy, source scoutPolicy) {
 	if source.Version != 0 {
 		target.Version = source.Version
 	}
 	if strings.TrimSpace(source.Mode) != "" {
 		target.Mode = source.Mode
+	}
+	if strings.TrimSpace(source.Schedule) != "" {
+		target.Schedule = source.Schedule
 	}
 	if strings.TrimSpace(source.IssueDestination) != "" {
 		target.IssueDestination = source.IssueDestination
@@ -848,12 +1170,16 @@ func mergeImprovementPolicy(target *improvementPolicy, source improvementPolicy)
 	if source.Labels != nil {
 		target.Labels = source.Labels
 	}
-	if source.MaxIssues > 0 {
-		target.MaxIssues = source.MaxIssues
+	if source.SessionLimit > 0 {
+		target.SessionLimit = source.SessionLimit
 	}
 }
 
-func normalizeImprovementDestination(value string) string {
+func mergeImprovementPolicy(target *improvementPolicy, source improvementPolicy) {
+	mergeScoutPolicy(target, source)
+}
+
+func normalizeScoutDestination(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case improvementDestinationTarget, "repo":
 		return improvementDestinationTarget
@@ -864,15 +1190,19 @@ func normalizeImprovementDestination(value string) string {
 	}
 }
 
+func normalizeImprovementDestination(value string) string {
+	return normalizeScoutDestination(value)
+}
+
 func normalizeImprovementLabels(labels []string) []string {
 	return normalizeScoutLabels(labels, improvementScoutRole)
 }
 
 func normalizeScoutLabels(labels []string, role string) []string {
-	base := "improvement"
+	spec := scoutRoleSpecFor(role)
+	base := spec.BaseLabel
 	forbidden := "enhancement"
-	if role == enhancementScoutRole {
-		base = "enhancement"
+	if base != "improvement" {
 		forbidden = ""
 	}
 	out := []string{base, role}
@@ -886,41 +1216,153 @@ func normalizeScoutLabels(labels []string, role string) []string {
 	return uniqueStrings(out)
 }
 
-func runScoutRole(repoPath string, repoSlug string, focus []string, codexArgs []string, role string) ([]byte, error) {
+func effectiveScoutSessionLimit(policy scoutPolicy, role string) int {
+	if !scoutRoleSupportsSessionLimit(role) {
+		return 0
+	}
+	if policy.SessionLimit <= 0 {
+		return defaultScoutSessionLimit
+	}
+	if policy.SessionLimit > maxScoutSessionLimit {
+		return maxScoutSessionLimit
+	}
+	return policy.SessionLimit
+}
+
+func runScoutRole(runtime scoutExecutionRuntime, repoSlug string, focus []string, codexArgs []string, role string, policy scoutPolicy, preflight *uiScoutPreflight) ([]byte, error) {
 	promptSurface, err := readScoutPrompt(role)
 	if err != nil {
 		return nil, err
 	}
 	repoLabel := repoSlug
 	if repoLabel == "" {
-		repoLabel = filepath.Base(repoPath)
+		repoLabel = filepath.Base(runtime.RepoPath)
 	}
-	task := strings.Join([]string{
+	taskLines := []string{
 		strings.TrimSpace(promptSurface),
 		"",
 		"Task:",
 		fmt.Sprintf("- Inspect repo: %s", repoLabel),
 		fmt.Sprintf("- Focus: %s", strings.Join(focus, ", ")),
+		fmt.Sprintf("- Artifact directory: %s", runtime.ArtifactDir),
 		"- Return only the JSON output contract.",
-		fmt.Sprintf("- Treat proposals as %s.", scoutProposalNoun(role)),
+		fmt.Sprintf("- Treat results as %s.", scoutProposalNoun(role)),
+	}
+	if scoutRoleUsesPreflight(role) {
+		taskLines = append(taskLines,
+			fmt.Sprintf("- Split page audits across parallel subagents with a hard cap of %d concurrent sessions.", effectiveScoutSessionLimit(policy, role)),
+			"- Prefer real UI pages first; when real pages are blocked, use mocked/demo/storybook pages if present and identify them as mocked.",
+			"- Save screenshots and per-page evidence files inside the artifact directory and reference them in the JSON output.",
+		)
+		if preflight != nil {
+			taskLines = append(taskLines,
+				fmt.Sprintf("- Preflight mode: %s", defaultString(preflight.Mode, "unknown")),
+				fmt.Sprintf("- Preflight surface kind: %s", defaultString(preflight.SurfaceKind, "unknown")),
+				fmt.Sprintf("- Preflight surface target: %s", defaultString(preflight.SurfaceTarget, "(none)")),
+				fmt.Sprintf("- Browser ready: %t", preflight.BrowserReady),
+			)
+			if strings.TrimSpace(preflight.Reason) != "" {
+				taskLines = append(taskLines, fmt.Sprintf("- Preflight reason: %s", preflight.Reason))
+			}
+		}
+	}
+	return runScoutPrompt(runtime, strings.Join(taskLines, "\n"), codexArgs, role)
+}
+
+func runUIScoutPreflight(runtime scoutExecutionRuntime, repoSlug string, focus []string, codexArgs []string) (*uiScoutPreflight, error) {
+	repoLabel := repoSlug
+	if repoLabel == "" {
+		repoLabel = filepath.Base(runtime.RepoPath)
+	}
+	task := strings.Join([]string{
+		uiScoutPreflightPrompt,
+		"",
+		"Task:",
+		fmt.Sprintf("- Inspect repo: %s", repoLabel),
+		fmt.Sprintf("- Focus: %s", strings.Join(focus, ", ")),
+		"- Return only the JSON output contract.",
 	}, "\n")
+	stdout, err := runScoutPrompt(runtime, task, codexArgs, "ui-scout-preflight")
+	if err != nil {
+		return nil, fmt.Errorf("ui-scout preflight failed: %w", err)
+	}
+	preflight, err := parseUIScoutPreflight(stdout)
+	if err != nil {
+		return nil, err
+	}
+	if preflight.GeneratedAt == "" {
+		preflight.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	return preflight, nil
+}
+
+func parseUIScoutPreflight(content []byte) (*uiScoutPreflight, error) {
+	trimmed := bytes.TrimSpace(extractImprovementJSONObject(content))
+	if len(trimmed) == 0 {
+		trimmed = bytes.TrimSpace(content)
+	}
+	var preflight uiScoutPreflight
+	if err := json.Unmarshal(trimmed, &preflight); err != nil {
+		return nil, fmt.Errorf("ui-scout preflight output did not match the expected JSON schema")
+	}
+	preflight.Version = 1
+	preflight.Mode = normalizeUIScoutPreflightMode(preflight.Mode)
+	preflight.SurfaceKind = normalizeUIScoutSurfaceKind(preflight.SurfaceKind)
+	preflight.SurfaceTarget = strings.TrimSpace(preflight.SurfaceTarget)
+	preflight.Reason = strings.TrimSpace(preflight.Reason)
+	if preflight.Mode == "" {
+		preflight.Mode = "repo_only"
+	}
+	if preflight.SurfaceKind == "" {
+		preflight.SurfaceKind = "unknown"
+	}
+	return &preflight, nil
+}
+
+func runScoutPrompt(runtime scoutExecutionRuntime, task string, codexArgs []string, alias string) ([]byte, error) {
 	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(codexArgs)
 	task = prefixCodexFastPrompt(task, fastMode)
-	args := append([]string{"exec", "-C", repoPath}, normalizedCodexArgs...)
-	args = append(args, "--", task)
-	cmd := exec.Command("codex", args...)
-	cmd.Dir = repoPath
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if stderr.Len() > 0 {
-			return nil, fmt.Errorf("%s failed: %w\n%s", role, err, stderr.String())
+	result, err := runManagedCodexPrompt(codexManagedPromptOptions{
+		CommandDir:       runtime.RepoPath,
+		InstructionsRoot: runtime.RepoPath,
+		CodexHome:        runtime.CodexHome,
+		FreshArgsPrefix:  []string{"exec", "-C", runtime.RepoPath},
+		CommonArgs:       normalizedCodexArgs,
+		Prompt:           task,
+		PromptTransport:  codexPromptTransportArgWithDash,
+		CheckpointPath:   filepath.Join(runtime.StateDir, sanitizePathToken(alias)+"-checkpoint.json"),
+		StepKey:          alias,
+		ResumeStrategy:   codexResumeSamePrompt,
+		Env:              append(buildCodexEnv(NotifyTempContract{}, runtime.CodexHome), "NANA_PROJECT_AGENTS_ROOT="+runtime.RepoPath),
+		RateLimitPolicy:  codexRateLimitPolicyDefault(runtime.RateLimitPolicy),
+		OnPause:          runtime.OnPause,
+		OnResume:         runtime.OnResume,
+	})
+	if err != nil {
+		if strings.TrimSpace(result.Stderr) != "" {
+			return nil, fmt.Errorf("%w\n%s", err, result.Stderr)
 		}
 		return nil, err
 	}
-	return stdout.Bytes(), nil
+	return []byte(result.Stdout), nil
+}
+
+func normalizeUIScoutPreflightMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "live", "repo_only", "blocked":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return ""
+	}
+}
+
+func normalizeUIScoutSurfaceKind(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "app", "storybook", "demo", "mock", "unknown":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return ""
+	}
 }
 
 func readImprovementScoutPrompt() (string, error) {
@@ -944,24 +1386,24 @@ func readScoutPrompt(role string) (string, error) {
 	return string(content), nil
 }
 
-func parseImprovementReport(content []byte) (improvementReport, error) {
+func parseImprovementReport(content []byte) (scoutReport, error) {
 	return parseScoutReport(content, improvementScoutRole)
 }
 
-func parseScoutReport(content []byte, role string) (improvementReport, error) {
+func parseScoutReport(content []byte, role string) (scoutReport, error) {
 	trimmed := bytes.TrimSpace(extractImprovementJSONObject(content))
 	if len(trimmed) == 0 {
 		trimmed = bytes.TrimSpace(content)
 	}
-	var report improvementReport
+	var report scoutReport
 	if err := json.Unmarshal(trimmed, &report); err == nil && report.Proposals != nil {
 		return report, nil
 	}
-	var proposals []improvementProposal
+	var proposals []scoutFinding
 	if err := json.Unmarshal(trimmed, &proposals); err == nil {
-		return improvementReport{Version: 1, Proposals: proposals}, nil
+		return scoutReport{Version: 1, Proposals: proposals}, nil
 	}
-	return improvementReport{}, fmt.Errorf("%s output did not match the proposal JSON schema", role)
+	return scoutReport{}, fmt.Errorf("%s output did not match the proposal JSON schema", role)
 }
 
 func extractImprovementJSONObject(content []byte) []byte {
@@ -974,21 +1416,13 @@ func extractImprovementJSONObject(content []byte) []byte {
 	return nil
 }
 
-func normalizeImprovementProposals(proposals []improvementProposal, policy improvementPolicy) []improvementProposal {
+func normalizeImprovementProposals(proposals []scoutFinding, policy scoutPolicy) []scoutFinding {
 	return normalizeScoutProposals(proposals, policy, improvementScoutRole)
 }
 
-func normalizeScoutProposals(proposals []improvementProposal, policy improvementPolicy, role string) []improvementProposal {
-	limit := len(proposals)
-	maxIssues := effectiveScoutMaxIssues(policy)
-	if maxIssues < limit {
-		limit = maxIssues
-	}
-	out := make([]improvementProposal, 0, limit)
+func normalizeScoutProposals(proposals []scoutFinding, policy scoutPolicy, role string) []scoutFinding {
+	out := make([]scoutFinding, 0, len(proposals))
 	for _, proposal := range proposals {
-		if len(out) >= limit {
-			break
-		}
 		proposal.Title = strings.TrimSpace(proposal.Title)
 		proposal.Summary = strings.TrimSpace(proposal.Summary)
 		if proposal.Title == "" || proposal.Summary == "" {
@@ -1000,13 +1434,41 @@ func normalizeScoutProposals(proposals []improvementProposal, policy improvement
 			proposal.Area = "UX"
 		case "perf", "performance":
 			proposal.Area = "Perf"
+		case "ui":
+			proposal.Area = "UI"
+		case "a11y", "accessibility":
+			proposal.Area = "Accessibility"
 		default:
-			proposal.Area = scoutIssueHeading(role)
+			if strings.TrimSpace(proposal.Area) == "" {
+				proposal.Area = scoutDefaultArea(role)
+			}
 		}
+		proposal.Page = strings.TrimSpace(proposal.Page)
+		proposal.Route = strings.TrimSpace(proposal.Route)
+		proposal.Severity = normalizeUIScoutSeverity(proposal.Severity)
+		proposal.TargetKind = normalizeUIScoutTargetKind(proposal.TargetKind)
 		proposal.Labels = normalizeScoutLabels(append(append([]string{}, policy.Labels...), proposal.Labels...), role)
 		out = append(out, proposal)
 	}
 	return out
+}
+
+func normalizeUIScoutSeverity(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "critical", "major", "minor", "cosmetic":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return ""
+	}
+}
+
+func normalizeUIScoutTargetKind(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "real", "mock":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return ""
+	}
 }
 
 func writeImprovementRawOutput(repoPath string, rawOutput []byte) (string, error) {
@@ -1022,16 +1484,95 @@ func writeScoutRawOutput(repoPath string, rawOutput []byte, role string) (string
 	return path, os.WriteFile(path, rawOutput, 0o644)
 }
 
-func writeLocalImprovementArtifacts(repoPath string, report improvementReport, policy improvementPolicy, rawOutput []byte) (string, error) {
-	return writeLocalScoutArtifacts(repoPath, report, policy, rawOutput, improvementScoutRole)
+func writeLocalImprovementArtifacts(repoPath string, report scoutReport, policy scoutPolicy, rawOutput []byte) (string, error) {
+	artifactDir, err := prepareLocalScoutArtifactDir(repoPath, improvementScoutRole)
+	if err != nil {
+		return "", err
+	}
+	return writeLocalScoutArtifacts(artifactDir, report, policy, rawOutput, improvementScoutRole, nil)
 }
 
-func writeLocalScoutArtifacts(repoPath string, report improvementReport, policy improvementPolicy, rawOutput []byte, role string) (string, error) {
-	runID := fmt.Sprintf("improve-%d", time.Now().UTC().UnixNano())
-	if role == enhancementScoutRole {
-		runID = fmt.Sprintf("enhance-%d", time.Now().UTC().UnixNano())
+func prepareLocalScoutArtifactDir(repoPath string, role string) (string, error) {
+	dir := filepath.Join(repoPath, ".nana", scoutArtifactRoot(role), scoutRunID(role))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
 	}
-	dir := filepath.Join(repoPath, ".nana", scoutArtifactRoot(role), runID)
+	return dir, nil
+}
+
+func scoutRunID(role string) string {
+	prefix := "improve"
+	switch role {
+	case enhancementScoutRole:
+		prefix = "enhance"
+	case uiScoutRole:
+		prefix = "ui-scout"
+	}
+	return fmt.Sprintf("%s-%d", prefix, time.Now().UTC().UnixNano())
+}
+
+func scoutRunManifestPath(dir string) string {
+	return filepath.Join(dir, "manifest.json")
+}
+
+func writeScoutRunManifest(dir string, manifest scoutRunManifest) error {
+	return writeGithubJSON(scoutRunManifestPath(dir), manifest)
+}
+
+func readScoutRunManifest(path string) (scoutRunManifest, error) {
+	var manifest scoutRunManifest
+	if err := readGithubJSON(path, &manifest); err != nil {
+		return scoutRunManifest{}, err
+	}
+	return manifest, nil
+}
+
+func resolveScoutRunDir(repoPath string, role string, options ImproveOptions) (string, error) {
+	root := filepath.Join(repoPath, ".nana", scoutArtifactRoot(role))
+	if strings.TrimSpace(options.ResumeRunID) != "" {
+		runDir := filepath.Join(root, strings.TrimSpace(options.ResumeRunID))
+		if _, err := os.Stat(scoutRunManifestPath(runDir)); err != nil {
+			if os.IsNotExist(err) {
+				return "", fmt.Errorf("scout run %s not found for %s at %s", options.ResumeRunID, role, runDir)
+			}
+			return "", err
+		}
+		return runDir, nil
+	}
+	if !options.ResumeLast {
+		return "", fmt.Errorf("scout resume requires --resume <run-id> or --last")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("no prior %s runs found in %s", role, root)
+		}
+		return "", err
+	}
+	type candidate struct {
+		path    string
+		modTime time.Time
+	}
+	candidates := []candidate{}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		runDir := filepath.Join(root, entry.Name())
+		info, err := os.Stat(scoutRunManifestPath(runDir))
+		if err != nil {
+			continue
+		}
+		candidates = append(candidates, candidate{path: runDir, modTime: info.ModTime()})
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no prior %s runs found in %s", role, root)
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].modTime.After(candidates[j].modTime) })
+	return candidates[0].path, nil
+}
+
+func writeLocalScoutArtifacts(dir string, report scoutReport, policy scoutPolicy, rawOutput []byte, role string, preflight *uiScoutPreflight) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
@@ -1041,24 +1582,29 @@ func writeLocalScoutArtifacts(repoPath string, report improvementReport, policy 
 	if err := writeGithubJSON(filepath.Join(dir, "policy.json"), policy); err != nil {
 		return "", err
 	}
+	if preflight != nil {
+		if err := writeGithubJSON(filepath.Join(dir, "preflight.json"), preflight); err != nil {
+			return "", err
+		}
+	}
 	if len(bytes.TrimSpace(rawOutput)) > 0 {
 		if err := os.WriteFile(filepath.Join(dir, "raw-output.txt"), rawOutput, 0o644); err != nil {
 			return "", err
 		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, "issue-drafts.md"), []byte(renderScoutIssueDrafts(report, role)), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "issue-drafts.md"), []byte(renderScoutIssueDrafts(report, role, preflight)), 0o644); err != nil {
 		return "", err
 	}
 	return dir, nil
 }
 
-func renderImprovementIssueDrafts(report improvementReport) string {
-	return renderScoutIssueDrafts(report, improvementScoutRole)
+func renderImprovementIssueDrafts(report scoutReport) string {
+	return renderScoutIssueDrafts(report, improvementScoutRole, nil)
 }
 
-func renderScoutIssueDrafts(report improvementReport, role string) string {
+func renderScoutIssueDrafts(report scoutReport, role string, preflight *uiScoutPreflight) string {
 	lines := []string{
-		"# " + scoutIssueHeading(role) + " Proposals",
+		"# " + scoutIssueHeading(role) + " Drafts",
 		"",
 		fmt.Sprintf("Repo: %s", defaultString(report.Repo, "(local)")),
 		fmt.Sprintf("Generated: %s", defaultString(report.GeneratedAt, "(unknown)")),
@@ -1066,17 +1612,41 @@ func renderScoutIssueDrafts(report improvementReport, role string) string {
 		scoutDraftWording(role),
 		"",
 	}
+	if role == uiScoutRole && preflight != nil {
+		lines = append(lines,
+			fmt.Sprintf("Audit mode: %s", defaultString(preflight.Mode, "unknown")),
+			fmt.Sprintf("Surface kind: %s", defaultString(preflight.SurfaceKind, "unknown")),
+			fmt.Sprintf("Surface target: %s", defaultString(preflight.SurfaceTarget, "(none)")),
+			fmt.Sprintf("Browser ready: %t", preflight.BrowserReady),
+		)
+		if strings.TrimSpace(preflight.Reason) != "" {
+			lines = append(lines, "Reason: "+preflight.Reason)
+		}
+		lines = append(lines, "")
+	}
 	for index, proposal := range report.Proposals {
 		lines = append(lines,
 			fmt.Sprintf("## %d. %s", index+1, proposal.Title),
 			"",
-			fmt.Sprintf("- Area: %s", defaultString(proposal.Area, scoutIssueHeading(role))),
+			fmt.Sprintf("- Area: %s", defaultString(proposal.Area, scoutDefaultArea(role))),
 			fmt.Sprintf("- Labels: %s", strings.Join(normalizeScoutLabels(proposal.Labels, role), ", ")),
 			fmt.Sprintf("- Confidence: %s", defaultString(proposal.Confidence, "unknown")),
 			"",
 			proposal.Summary,
 			"",
 		)
+		if strings.TrimSpace(proposal.Page) != "" {
+			lines = append(lines, "Page: "+proposal.Page, "")
+		}
+		if strings.TrimSpace(proposal.Route) != "" {
+			lines = append(lines, "Route: "+proposal.Route, "")
+		}
+		if strings.TrimSpace(proposal.Severity) != "" {
+			lines = append(lines, "Severity: "+proposal.Severity, "")
+		}
+		if strings.TrimSpace(proposal.TargetKind) != "" {
+			lines = append(lines, "Target kind: "+proposal.TargetKind, "")
+		}
 		if strings.TrimSpace(proposal.Rationale) != "" {
 			lines = append(lines, "Rationale: "+proposal.Rationale, "")
 		}
@@ -1089,6 +1659,9 @@ func renderScoutIssueDrafts(report improvementReport, role string) string {
 		if len(proposal.Files) > 0 {
 			lines = append(lines, "Files: "+strings.Join(proposal.Files, ", "), "")
 		}
+		if len(proposal.Screenshots) > 0 {
+			lines = append(lines, "Screenshots: "+strings.Join(proposal.Screenshots, ", "), "")
+		}
 		if strings.TrimSpace(proposal.SuggestedNextStep) != "" {
 			lines = append(lines, "Suggested next step: "+proposal.SuggestedNextStep, "")
 		}
@@ -1096,12 +1669,12 @@ func renderScoutIssueDrafts(report improvementReport, role string) string {
 	return strings.Join(lines, "\n")
 }
 
-func publishImprovementIssues(repoSlug string, proposals []improvementProposal, policy improvementPolicy, dryRun bool) ([]improvementIssueResult, error) {
+func publishImprovementIssues(repoSlug string, proposals []scoutFinding, policy scoutPolicy, dryRun bool) ([]scoutIssueResult, error) {
 	return publishScoutIssues(repoSlug, proposals, policy, dryRun, improvementScoutRole)
 }
 
-func publishScoutIssues(repoSlug string, proposals []improvementProposal, policy improvementPolicy, dryRun bool, role string) ([]improvementIssueResult, error) {
-	destination := normalizeImprovementDestination(policy.IssueDestination)
+func publishScoutIssues(repoSlug string, proposals []scoutFinding, policy scoutPolicy, dryRun bool, role string) ([]scoutIssueResult, error) {
+	destination := normalizeScoutDestination(policy.IssueDestination)
 	targetRepo := repoSlug
 	apiBaseURL := strings.TrimSpace(os.Getenv("GITHUB_API_URL"))
 	if apiBaseURL == "" {
@@ -1111,43 +1684,21 @@ func publishScoutIssues(repoSlug string, proposals []improvementProposal, policy
 	if err != nil {
 		return nil, err
 	}
-	if destination == improvementDestinationFork {
-		targetRepo = strings.TrimSpace(policy.ForkRepo)
-		if targetRepo == "" {
-			var viewer struct {
-				Login string `json:"login"`
-			}
-			if err := githubAPIGetJSON(apiBaseURL, token, "/user", &viewer); err != nil {
-				return nil, err
-			}
-			parts := strings.Split(repoSlug, "/")
-			if len(parts) != 2 || viewer.Login == "" {
-				return nil, fmt.Errorf("cannot infer fork repo for %s; set fork_repo in %s policy", repoSlug, role)
-			}
-			targetRepo = viewer.Login + "/" + parts[1]
+	if destination == improvementDestinationFork || destination == improvementDestinationTarget {
+		targetRepo, err = resolveScoutIssueTargetRepo(repoSlug, policy, role)
+		if err != nil {
+			return nil, err
 		}
 	}
 	if !validRepoSlug(targetRepo) {
 		return nil, fmt.Errorf("invalid %s issue target repo: %s", role, targetRepo)
 	}
-	maxIssues := effectiveScoutMaxIssues(policy)
-	openCount, err := countOpenScoutIssues(apiBaseURL, token, targetRepo, role)
-	if err != nil {
-		return nil, err
-	}
-	remaining := maxIssues - openCount
-	if remaining <= 0 {
-		return []improvementIssueResult{}, nil
-	}
-	if len(proposals) > remaining {
-		proposals = proposals[:remaining]
-	}
-	results := make([]improvementIssueResult, 0, len(proposals))
+	results := make([]scoutIssueResult, 0, len(proposals))
 	for _, proposal := range proposals {
 		proposal.Labels = normalizeScoutLabels(append(append([]string{}, policy.Labels...), proposal.Labels...), role)
-		title := formatImprovementIssueTitle(proposal)
+		title := formatScoutIssueTitle(proposal, role)
 		if dryRun {
-			results = append(results, improvementIssueResult{Title: title, DryRun: true})
+			results = append(results, scoutIssueResult{Title: title, DryRun: true})
 			continue
 		}
 		payload := map[string]any{
@@ -1161,19 +1712,9 @@ func publishScoutIssues(repoSlug string, proposals []improvementProposal, policy
 		if err := githubAPIRequestJSON(http.MethodPost, apiBaseURL, token, fmt.Sprintf("/repos/%s/issues", targetRepo), payload, &created); err != nil {
 			return nil, err
 		}
-		results = append(results, improvementIssueResult{Title: title, URL: created.HTMLURL})
+		results = append(results, scoutIssueResult{Title: title, URL: created.HTMLURL})
 	}
 	return results, nil
-}
-
-func effectiveScoutMaxIssues(policy improvementPolicy) int {
-	if policy.MaxIssues <= 0 {
-		return defaultScoutIssueCap
-	}
-	if policy.MaxIssues > maxScoutIssueCap {
-		return maxScoutIssueCap
-	}
-	return policy.MaxIssues
 }
 
 func countOpenScoutIssues(apiBaseURL string, token string, repoSlug string, role string) (int, error) {
@@ -1196,9 +1737,9 @@ func countOpenScoutIssues(apiBaseURL string, token string, repoSlug string, role
 	return count, nil
 }
 
-func formatImprovementIssueTitle(proposal improvementProposal) string {
+func formatScoutIssueTitle(proposal scoutFinding, role string) string {
 	area := strings.TrimSpace(proposal.Area)
-	if area == "" || area == "Improvement" {
+	if area == "" || area == scoutIssueHeading(role) || area == scoutDefaultArea(role) {
 		return proposal.Title
 	}
 	if strings.HasPrefix(strings.ToLower(proposal.Title), strings.ToLower(area)+":") {
@@ -1207,11 +1748,11 @@ func formatImprovementIssueTitle(proposal improvementProposal) string {
 	return fmt.Sprintf("%s: %s", area, proposal.Title)
 }
 
-func renderImprovementIssueBody(proposal improvementProposal) string {
+func renderImprovementIssueBody(proposal scoutFinding) string {
 	return renderScoutIssueBody(proposal, improvementScoutRole)
 }
 
-func renderScoutIssueBody(proposal improvementProposal, role string) string {
+func renderScoutIssueBody(proposal scoutFinding, role string) string {
 	lines := []string{
 		"## " + scoutIssueHeading(role),
 		"",
@@ -1222,6 +1763,22 @@ func renderScoutIssueBody(proposal improvementProposal, role string) string {
 	}
 	if strings.TrimSpace(proposal.Rationale) != "" {
 		lines = append(lines, "## Rationale", "", proposal.Rationale, "")
+	}
+	if strings.TrimSpace(proposal.Page) != "" || strings.TrimSpace(proposal.Route) != "" || strings.TrimSpace(proposal.Severity) != "" || strings.TrimSpace(proposal.TargetKind) != "" {
+		lines = append(lines, "## Audit Context", "")
+		if strings.TrimSpace(proposal.Page) != "" {
+			lines = append(lines, fmt.Sprintf("- Page: %s", proposal.Page))
+		}
+		if strings.TrimSpace(proposal.Route) != "" {
+			lines = append(lines, fmt.Sprintf("- Route: %s", proposal.Route))
+		}
+		if strings.TrimSpace(proposal.Severity) != "" {
+			lines = append(lines, fmt.Sprintf("- Severity: %s", proposal.Severity))
+		}
+		if strings.TrimSpace(proposal.TargetKind) != "" {
+			lines = append(lines, fmt.Sprintf("- Target kind: %s", proposal.TargetKind))
+		}
+		lines = append(lines, "")
 	}
 	if strings.TrimSpace(proposal.Evidence) != "" {
 		lines = append(lines, "## Evidence", "", proposal.Evidence, "")
@@ -1239,6 +1796,13 @@ func renderScoutIssueBody(proposal improvementProposal, role string) string {
 		}
 		lines = append(lines, "")
 	}
+	if len(proposal.Screenshots) > 0 {
+		lines = append(lines, "## Screenshots", "")
+		for _, screenshot := range proposal.Screenshots {
+			lines = append(lines, "- `"+screenshot+"`")
+		}
+		lines = append(lines, "")
+	}
 	if strings.TrimSpace(proposal.Confidence) != "" {
 		lines = append(lines, "Confidence: "+proposal.Confidence)
 	}
@@ -1246,43 +1810,33 @@ func renderScoutIssueBody(proposal improvementProposal, role string) string {
 }
 
 func scoutArtifactRoot(role string) string {
-	if role == enhancementScoutRole {
-		return "enhancements"
-	}
-	return "improvements"
+	return scoutRoleSpecFor(role).ArtifactRoot
 }
 
 func scoutOutputPrefix(role string) string {
-	if role == enhancementScoutRole {
-		return "enhance"
-	}
-	return "improve"
+	return scoutRoleSpecFor(role).OutputPrefix
 }
 
 func scoutProposalNoun(role string) string {
-	if role == enhancementScoutRole {
-		return "enhancements"
-	}
-	return "improvements"
+	return scoutRoleSpecFor(role).ResultPlural
 }
 
 func scoutIssueHeading(role string) string {
-	if role == enhancementScoutRole {
-		return "Enhancement"
-	}
-	return "Improvement"
+	return scoutRoleSpecFor(role).IssueHeading
+}
+
+func scoutDefaultArea(role string) string {
+	return scoutRoleSpecFor(role).DefaultArea
 }
 
 func scoutDraftWording(role string) string {
-	if role == enhancementScoutRole {
-		return "These are enhancement proposals intended to help the repo move forward."
-	}
-	return "These are improvement proposals, not enhancement requests."
+	return scoutRoleSpecFor(role).DraftWording
 }
 
 func scoutIssueWording(role string) string {
-	if role == enhancementScoutRole {
-		return "This is an enhancement proposal intended to help the repo move forward."
-	}
-	return "This is an improvement proposal, not an enhancement request."
+	return scoutRoleSpecFor(role).IssueWording
+}
+
+func scoutItemsCountNoun(role string) string {
+	return scoutRoleSpecFor(role).ItemCountNoun
 }

@@ -19,8 +19,35 @@ type startPlannedLaunchResult struct {
 
 var startLaunchPlannedItem = launchStartPlannedItem
 var startLaunchScheduledPlannedItem = launchStartPlannedItemScheduled
-var startRunScheduledPlannedLocalWork = runLocalWorkCommand
-var startRunScheduledPlannedGithubWork = GithubWorkCommand
+var startRunScheduledPlannedLocalWork = func(cwd string, args []string) error {
+	_, err := runLocalWorkCommandWithOptions(cwd, args, codexRateLimitPolicyReturnPause)
+	return err
+}
+
+var startRunScheduledPlannedGithubWork = func(cwd string, args []string) (githubCommandResult, error) {
+	if len(args) < 2 || args[0] != "start" {
+		return GithubWorkCommand(cwd, args)
+	}
+	target, err := parseGithubTargetURL(args[1])
+	if err != nil {
+		return githubCommandResult{}, err
+	}
+	codexArgs := []string{}
+	for index := 2; index < len(args); index++ {
+		if args[index] == "--" {
+			codexArgs = append(codexArgs, args[index+1:]...)
+			break
+		}
+	}
+	run, err := startGithubWork(githubWorkStartOptions{
+		Target:           target,
+		CreatePR:         true,
+		CreatePRExplicit: true,
+		CodexArgs:        codexArgs,
+		RateLimitPolicy:  codexRateLimitPolicyReturnPause,
+	})
+	return githubCommandResult{Handled: true, RunID: run.RunID}, err
+}
 
 func launchStartPlannedItem(cwd string, repoSlug string, workOptions startWorkOptions, item startWorkPlannedItem) (startPlannedLaunchResult, error) {
 	if normalizeGithubRepoMode(workOptions.RepoMode) == "disabled" {
@@ -195,7 +222,7 @@ func launchStartPlannedTrackedIssueScheduled(repoSlug string, item startWorkPlan
 	}
 	run, err := startRunScheduledPlannedGithubWork(repoPath, args)
 	if err != nil {
-		return startPlannedLaunchResult{}, err
+		return startPlannedLaunchResult{RunID: run.RunID}, err
 	}
 	return startPlannedLaunchResult{
 		Status: "completed",

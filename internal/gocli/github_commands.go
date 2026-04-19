@@ -27,6 +27,11 @@ type githubWorkManifest struct {
 	TargetURL               string                     `json:"target_url"`
 	TargetKind              string                     `json:"target_kind"`
 	UpdatedAt               string                     `json:"updated_at"`
+	ExecutionStatus         string                     `json:"execution_status,omitempty"`
+	PauseReason             string                     `json:"pause_reason,omitempty"`
+	PauseUntil              string                     `json:"pause_until,omitempty"`
+	PausedAt                string                     `json:"paused_at,omitempty"`
+	LastError               string                     `json:"last_error,omitempty"`
 	PublishedPRNumber       int                        `json:"published_pr_number"`
 	PublishedPRURL          string                     `json:"published_pr_url,omitempty"`
 	PublishedPRHeadRef      string                     `json:"published_pr_head_ref,omitempty"`
@@ -133,6 +138,7 @@ type githubWorkStartOptions struct {
 	RepoMode                string
 	PublishTarget           string
 	CodexArgs               []string
+	RateLimitPolicy         codexRateLimitPolicy
 }
 
 type githubWorkSyncOptions struct {
@@ -142,6 +148,7 @@ type githubWorkSyncOptions struct {
 	ResumeLast        bool
 	FeedbackTargetURL string
 	CodexArgs         []string
+	RateLimitPolicy   codexRateLimitPolicy
 }
 
 func GithubWorkCommand(cwd string, args []string) (githubCommandResult, error) {

@@ -9,33 +9,40 @@ import (
 )
 
 type scoutExecutionRuntime struct {
-	RepoPath    string
-	ArtifactDir string
-	CodexHome   string
-	Cleanup     func()
+	RepoPath        string
+	ArtifactDir     string
+	CodexHome       string
+	StateDir        string
+	Cleanup         func()
+	RateLimitPolicy codexRateLimitPolicy
+	OnPause         func(codexRateLimitPauseInfo)
+	OnResume        func(codexRateLimitPauseInfo)
 }
 
 func prepareScoutExecutionRuntime(repoPath string, artifactDir string, role string) (scoutExecutionRuntime, error) {
+	runtimeRoot := filepath.Join(artifactDir, "_runtime")
 	runtime := scoutExecutionRuntime{
 		RepoPath:    repoPath,
 		ArtifactDir: artifactDir,
+		StateDir:    runtimeRoot,
 		Cleanup:     func() {},
 	}
-	if role != uiScoutRole {
-		return runtime, nil
-	}
-
-	sandboxRoot, err := os.MkdirTemp("", "nana-ui-scout-*")
+	scopedCodexHome, err := ensureScopedCodexHome(ResolveCodexHomeForLaunch(repoPath), filepath.Join(runtimeRoot, "codex-home"))
 	if err != nil {
 		return scoutExecutionRuntime{}, err
 	}
-	cleanup := func() {
-		_ = os.RemoveAll(sandboxRoot)
+	runtime.CodexHome = scopedCodexHome
+	if role != uiScoutRole {
+		return runtime, nil
 	}
+	sandboxRoot := filepath.Join(runtimeRoot, "ui-sandbox")
 
 	sandboxRepoPath := filepath.Join(sandboxRoot, "repo")
-	if err := copyUIScoutSandboxRepo(repoPath, sandboxRepoPath); err != nil {
-		cleanup()
+	if _, err := os.Stat(sandboxRepoPath); os.IsNotExist(err) {
+		if err := copyUIScoutSandboxRepo(repoPath, sandboxRepoPath); err != nil {
+			return scoutExecutionRuntime{}, err
+		}
+	} else if err != nil {
 		return scoutExecutionRuntime{}, err
 	}
 
@@ -44,17 +51,12 @@ func prepareScoutExecutionRuntime(repoPath string, artifactDir string, role stri
 		relativeArtifactDir = filepath.Join(".nana", scoutArtifactRoot(role), filepath.Base(artifactDir))
 	}
 
-	scopedCodexHome, err := ensureScopedCodexHome(ResolveCodexHomeForLaunch(repoPath), filepath.Join(sandboxRoot, "codex-home"))
-	if err != nil {
-		cleanup()
-		return scoutExecutionRuntime{}, err
-	}
-
 	return scoutExecutionRuntime{
 		RepoPath:    sandboxRepoPath,
 		ArtifactDir: filepath.Join(sandboxRepoPath, relativeArtifactDir),
+		StateDir:    runtimeRoot,
 		CodexHome:   scopedCodexHome,
-		Cleanup:     cleanup,
+		Cleanup:     func() {},
 	}, nil
 }
 

@@ -19,12 +19,12 @@ const (
 	defaultTmuxTailLines    = 200
 	minTmuxTailLines        = 100
 	maxTmuxTailLines        = 1000
-	defaultMaxVisibleLines  = 12
+	defaultMaxVisibleLines  = 40
 	defaultSummaryTimeoutMS = 60_000
 	defaultSparkModel       = "gpt-5.3-codex-spark"
 	defaultFrontierModel    = "gpt-5.4"
-	defaultSummaryMaxLines  = 400
-	defaultSummaryMaxBytes  = 24_000
+	defaultSummaryMaxLines  = 150
+	defaultSummaryMaxBytes  = 8_000
 )
 
 type sparkError struct {
@@ -47,82 +47,6 @@ type commandOutput struct {
 	stdout   []byte
 	stderr   []byte
 }
-
-type commandFamily struct {
-	key         string
-	pattern     string
-	description string
-	whatItDoes  string
-}
-
-var (
-	genericShellFamily = commandFamily{
-		key:         "generic-shell",
-		pattern:     "ls|cat|find|grep|sed|awk|xargs|env|echo|pwd|which|sh|bash|zsh",
-		description: "General shell and filesystem inspection commands.",
-		whatItDoes:  "Inspects files, text, environment state, and shell-visible system output.",
-	}
-	gitFamily = commandFamily{
-		key:         "git",
-		pattern:     "git",
-		description: "Git porcelain and repository inspection commands.",
-		whatItDoes:  "Reads or changes repository state, history, branches, or working tree diffs.",
-	}
-	nodeFamily = commandFamily{
-		key:         "node-js",
-		pattern:     "npm|npx|pnpm|yarn|bun|node",
-		description: "Node.js package management and build/test tooling.",
-		whatItDoes:  "Installs dependencies, runs scripts, builds projects, or executes JavaScript tooling.",
-	}
-	pythonFamily = commandFamily{
-		key:         "python",
-		pattern:     "python|python3|pip|uv|poetry|pytest",
-		description: "Python interpreter, packaging, and test commands.",
-		whatItDoes:  "Runs Python code, manages packages, or executes Python-focused tests and tooling.",
-	}
-	rustFamily = commandFamily{
-		key:         "rust",
-		pattern:     "cargo|rustc",
-		description: "Rust package, build, and test commands.",
-		whatItDoes:  "Builds, checks, formats, lints, runs, or tests Rust projects.",
-	}
-	goFamily = commandFamily{
-		key:         "go",
-		pattern:     "go",
-		description: "Go toolchain commands.",
-		whatItDoes:  "Builds, formats, manages modules, or tests Go projects.",
-	}
-	rubyFamily = commandFamily{
-		key:         "ruby",
-		pattern:     "bundle|bundler|rake|ruby",
-		description: "Ruby dependency and task runner commands.",
-		whatItDoes:  "Runs Ruby code, dependency workflows, or Ruby project tasks.",
-	}
-	javaKotlinFamily = commandFamily{
-		key:         "java-kotlin",
-		pattern:     "mvn|gradle|gradlew|java|kotlinc",
-		description: "Java and Kotlin build commands.",
-		whatItDoes:  "Builds, tests, or runs JVM-based projects and wrappers.",
-	}
-	cCppFamily = commandFamily{
-		key:         "c-cpp",
-		pattern:     "make|cmake|gcc|g++|clang|clang++",
-		description: "C and C++ build tooling.",
-		whatItDoes:  "Configures, compiles, or builds native C/C++ projects.",
-	}
-	csharpFamily = commandFamily{
-		key:         "csharp",
-		pattern:     "dotnet",
-		description: ".NET SDK commands.",
-		whatItDoes:  "Builds, restores, runs, or tests .NET applications.",
-	}
-	swiftFamily = commandFamily{
-		key:         "swift",
-		pattern:     "swift|xcodebuild",
-		description: "Swift Package Manager and Xcode build commands.",
-		whatItDoes:  "Builds, tests, or packages Swift and Apple-platform projects.",
-	}
-)
 
 func main() {
 	args := os.Args[1:]
@@ -187,32 +111,9 @@ func run(args []string, stdout io.Writer, stderr io.Writer) (int, error) {
 
 func usageText() string {
 	return fmt.Sprintf(
-		`usage: nana-sparkshell <command> [args...]
-   or: nana-sparkshell --tmux-pane <pane-id> [--tail-lines <%d-%d>]
-
-Direct command mode executes argv without shell metacharacter parsing.
-Tmux pane mode captures a larger pane tail and applies the same raw-vs-summary behavior.
-
-Summary behavior:
-  stdout+stderr is emitted raw when visible output is <= NANA_SPARKSHELL_LINES (default %d).
-  Output above that threshold is summarized with codex exec using low reasoning.
-  If summarization fails or times out, raw output is emitted with a "summary unavailable" notice.
-
-Environment controls:
-  NANA_SPARKSHELL_LINES                 raw-vs-summary line threshold (default %d)
-  NANA_SPARKSHELL_SUMMARY_TIMEOUT_MS    codex summary timeout in milliseconds (default %d)
-  NANA_SPARKSHELL_MODEL                 primary summary model; then NANA_DEFAULT_SPARK_MODEL / NANA_SPARK_MODEL
-  NANA_SPARKSHELL_FALLBACK_MODEL        retry model for quota/access/capacity errors; then NANA_DEFAULT_FRONTIER_MODEL
-  NANA_SPARKSHELL_SUMMARY_MAX_LINES     max output lines included in summary prompt (default %d)
-  NANA_SPARKSHELL_SUMMARY_MAX_BYTES     max output bytes included in summary prompt (default %d)
-`,
+		"usage: nana-sparkshell <command> [args...]\n   or: nana-sparkshell --tmux-pane <pane-id> [--tail-lines <%d-%d>]\n\nDirect command mode executes argv without shell metacharacter parsing.\nTmux pane mode captures a larger pane tail and applies the same raw-vs-summary behavior.\n",
 		minTmuxTailLines,
 		maxTmuxTailLines,
-		defaultMaxVisibleLines,
-		defaultMaxVisibleLines,
-		defaultSummaryTimeoutMS,
-		defaultSummaryMaxLines,
-		defaultSummaryMaxBytes,
 	)
 }
 
@@ -554,20 +455,11 @@ func renderSection(name string, entries []string) string {
 }
 
 func buildSummaryPrompt(command []string, output commandOutput) string {
-	executable := "unknown"
-	if len(command) > 0 {
-		executable = command[0]
-	}
-	family := selectCommandFamily(executable)
 	stdoutText := string(output.stdout)
 	stderrText := string(output.stderr)
 	return fmt.Sprintf(
-		"You summarize shell command output.\nReturn markdown bullets only. Allowed top-level sections: summary:, failures:, warnings:.\nDo not suggest fixes, next steps, commands, or recommendations.\nKeep the summary descriptive and grounded in the provided output.\n\nCommand: %s\nCommand family: %s\nFamily pattern: %s\nFamily description: %s\nFamily what_it_does: %s\nExit code: %d\n\nSTDOUT total lines: %d\nSTDOUT total bytes: %d\nSTDERR total lines: %d\nSTDERR total bytes: %d\n\nSTDOUT:\n<<<STDOUT\n%s\n>>>STDOUT\n\nSTDERR:\n<<<STDERR\n%s\n>>>STDERR\n",
+		"You summarize shell command output.\nReturn markdown bullets only. Allowed top-level sections: summary:, failures:, warnings:.\nDo not suggest fixes, next steps, commands, or recommendations.\nKeep the summary descriptive and grounded in the provided output.\n\nCommand: %s\nExit code: %d\n\nSTDOUT total lines: %d\nSTDOUT total bytes: %d\nSTDERR total lines: %d\nSTDERR total bytes: %d\n\nSTDOUT:\n<<<STDOUT\n%s\n>>>STDOUT\n\nSTDERR:\n<<<STDERR\n%s\n>>>STDERR\n",
 		shellJoin(command),
-		family.key,
-		family.pattern,
-		family.description,
-		family.whatItDoes,
 		output.exitCode,
 		countVisibleLines(output.stdout),
 		len(stdoutText),
@@ -576,33 +468,6 @@ func buildSummaryPrompt(command []string, output commandOutput) string {
 		truncateForPrompt(stdoutText, "stdout"),
 		truncateForPrompt(stderrText, "stderr"),
 	)
-}
-
-func selectCommandFamily(command string) commandFamily {
-	switch filepath.Base(command) {
-	case "git":
-		return gitFamily
-	case "npm", "npx", "pnpm", "yarn", "bun", "node":
-		return nodeFamily
-	case "python", "python3", "pip", "uv", "poetry", "pytest":
-		return pythonFamily
-	case "cargo", "rustc":
-		return rustFamily
-	case "go":
-		return goFamily
-	case "bundle", "bundler", "rake", "ruby":
-		return rubyFamily
-	case "mvn", "gradle", "gradlew", "java", "kotlinc":
-		return javaKotlinFamily
-	case "make", "cmake", "gcc", "g++", "clang", "clang++":
-		return cCppFamily
-	case "dotnet":
-		return csharpFamily
-	case "swift", "xcodebuild":
-		return swiftFamily
-	default:
-		return genericShellFamily
-	}
 }
 
 func truncateForPrompt(text string, label string) string {

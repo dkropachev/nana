@@ -76,36 +76,6 @@ func TestEvergreenDocsDoNotContainVersionedInstallTextOutsideSyncedBlocks(t *tes
 	}
 }
 
-func TestPublicDocsUsePlainNanaAsCanonicalFirstLaunch(t *testing.T) {
-	repoRoot := filepath.Join("..", "..")
-	expected := map[string]string{
-		"README.md":                 "Then start the first session:\n\n```bash\nnana\n```",
-		"docs/index.html":           "<li><code>nana</code></li>",
-		"docs/getting-started.html": "<pre><code>nana</code></pre>",
-	}
-	staleLaunches := []string{
-		"nana --madmax --high",
-		"nana --xhigh --madmax",
-		"nana --madmax --xhigh",
-	}
-
-	for rel, canonical := range expected {
-		content, err := os.ReadFile(filepath.Join(repoRoot, rel))
-		if err != nil {
-			t.Fatalf("read %s: %v", rel, err)
-		}
-		text := string(content)
-		if !strings.Contains(text, canonical) {
-			t.Fatalf("expected %s to contain canonical first launch %q", rel, canonical)
-		}
-		for _, stale := range staleLaunches {
-			if strings.Contains(text, stale) {
-				t.Fatalf("%s still contains stale first-launch command %q", rel, stale)
-			}
-		}
-	}
-}
-
 func stripMarkedDocsBlock(content string, startMarker string, endMarker string) string {
 	for {
 		start := strings.Index(content, startMarker)

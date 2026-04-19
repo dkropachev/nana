@@ -1901,43 +1901,64 @@ func githubReviewRulesScan(locator string) error {
 	return nil
 }
 
+const githubTokenEnvFallbackEnv = "NANA_ALLOW_ENV_GITHUB_TOKEN"
+
+var githubTokenResolverOverride func(apiBaseURL string) (string, error)
+
+func allowGithubTokenEnvFallback() bool {
+	if strings.TrimSpace(os.Getenv(githubTokenEnvFallbackEnv)) == "1" {
+		return true
+	}
+	return strings.HasSuffix(filepath.Base(strings.TrimSpace(os.Args[0])), ".test")
+}
+
 func resolveGithubToken() (string, error) {
 	return resolveGithubTokenForAPIBase(strings.TrimSpace(os.Getenv("GITHUB_API_URL")))
 }
 
 func resolveGithubTokenForAPIBase(apiBaseURL string) (string, error) {
-	if token := strings.TrimSpace(os.Getenv("GH_TOKEN")); token != "" {
-		return token, nil
+	if githubTokenResolverOverride != nil {
+		return githubTokenResolverOverride(apiBaseURL)
 	}
-	if token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); token != "" {
-		return token, nil
-	}
-	host := githubCLIHostForAPIBase(apiBaseURL)
-	if path, err := exec.LookPath("gh"); err == nil {
-		argSets := [][]string{{"auth", "token"}}
-		if host != "" {
-			argSets = append([][]string{{"auth", "token", "--hostname", host}}, argSets...)
+	return resolveGithubTokenForAPIBaseDefault(apiBaseURL)
+}
+
+func resolveGithubTokenForAPIBaseDefault(apiBaseURL string) (string, error) {
+	if allowGithubTokenEnvFallback() {
+		if token := strings.TrimSpace(os.Getenv("GH_TOKEN")); token != "" {
+			return token, nil
 		}
-		seen := map[string]struct{}{}
-		for _, args := range argSets {
-			key := strings.Join(args, "\x00")
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			cmd := exec.Command(path, args...)
-			output, err := cmd.Output()
-			if err == nil {
-				if token := strings.TrimSpace(string(output)); token != "" {
-					return token, nil
-				}
+		if token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); token != "" {
+			return token, nil
+		}
+	}
+	path, host, err := githubCLIAuthStatus(apiBaseURL)
+	if err != nil {
+		return "", err
+	}
+	argSets := [][]string{{"auth", "token"}}
+	if host != "" {
+		argSets = append([][]string{{"auth", "token", "--hostname", host}}, argSets...)
+	}
+	seen := map[string]struct{}{}
+	for _, args := range argSets {
+		key := strings.Join(args, "\x00")
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		cmd := exec.Command(path, args...)
+		output, err := cmd.Output()
+		if err == nil {
+			if token := strings.TrimSpace(string(output)); token != "" {
+				return token, nil
 			}
 		}
 	}
 	if host != "" {
-		return "", fmt.Errorf("GitHub token not found. Set GH_TOKEN or GITHUB_TOKEN, or configure gh auth for %s.", host)
+		return "", fmt.Errorf("GitHub auth token could not be obtained for %s via `gh auth token --hostname %s`.", host, host)
 	}
-	return "", fmt.Errorf("GitHub token not found. Set GH_TOKEN or GITHUB_TOKEN, or configure gh auth.")
+	return "", fmt.Errorf("GitHub auth token could not be obtained via `gh auth token`.")
 }
 
 func githubCLIHostForAPIBase(apiBaseURL string) string {

@@ -104,6 +104,94 @@ func TestDetectGithubVerificationPlanWarnsWhenUnitAndIntegrationAreMixed(t *test
 	}
 }
 
+func TestBuildLocalWorkImplementPromptCapsReviewTitlesAndPlan(t *testing.T) {
+	repo := t.TempDir()
+	inputPath := filepath.Join(repo, "plan.md")
+	if err := os.WriteFile(inputPath, []byte(strings.Repeat("plan-line\n", 4000)), 0o644); err != nil {
+		t.Fatalf("write plan: %v", err)
+	}
+	titles := []string{}
+	for index := 1; index <= 12; index++ {
+		titles = append(titles, fmt.Sprintf("review item %02d", index))
+	}
+	prompt, err := buildLocalWorkImplementPrompt(localWorkManifest{
+		RunID:             "lw-1",
+		RepoRoot:          repo,
+		SandboxRepoPath:   repo,
+		BaselineSHA:       "abc123",
+		SourceBranch:      "feature/test",
+		MaxIterations:     4,
+		IntegrationPolicy: "final",
+		InputPath:         inputPath,
+		Iterations: []localWorkIterationSummary{{
+			VerificationSummary: "failed",
+			ReviewFindings:      12,
+			ReviewFindingTitles: titles,
+		}},
+	}, 2)
+	if err != nil {
+		t.Fatalf("buildLocalWorkImplementPrompt: %v", err)
+	}
+	if strings.Contains(prompt, "review item 11") || strings.Contains(prompt, "review item 12") {
+		t.Fatalf("expected review titles to be capped:\n%s", prompt)
+	}
+	for _, needle := range []string{"... 2 additional review items omitted", "... [truncated]"} {
+		if !strings.Contains(prompt, needle) {
+			t.Fatalf("expected implement prompt to contain %q:\n%s", needle, prompt)
+		}
+	}
+	if len(prompt) > localWorkImplementPromptCharLimit+128 {
+		t.Fatalf("expected implement prompt to stay near cap, len=%d", len(prompt))
+	}
+}
+
+func TestBuildLocalWorkHardeningPromptCapsFindingsAndCommandOutput(t *testing.T) {
+	findings := make([]githubPullReviewFinding, 0, 8)
+	for index := 0; index < 8; index++ {
+		findings = append(findings, githubPullReviewFinding{
+			Title:    fmt.Sprintf("finding %d", index),
+			Severity: "medium",
+			Path:     "README.md",
+			Line:     index + 1,
+			Detail:   strings.Repeat("detail ", 300),
+			Fix:      strings.Repeat("fix ", 150),
+		})
+	}
+	prompt, err := buildLocalWorkHardeningPrompt(localWorkManifest{
+		RunID:             "lw-2",
+		RepoRoot:          t.TempDir(),
+		SandboxRepoPath:   t.TempDir(),
+		BaselineSHA:       "def456",
+		IntegrationPolicy: "final",
+		CurrentIteration:  1,
+	}, localWorkVerificationReport{
+		Passed: false,
+		Stages: []localWorkVerificationStageResult{{
+			Name:   "unit",
+			Status: "failed",
+			Commands: []localWorkVerificationCommandResult{{
+				Command:  "go test ./...",
+				ExitCode: 1,
+				Output:   strings.Repeat("output ", 500),
+			}},
+		}},
+	}, findings)
+	if err != nil {
+		t.Fatalf("buildLocalWorkHardeningPrompt: %v", err)
+	}
+	if strings.Contains(prompt, "finding 6") || strings.Contains(prompt, "finding 7") {
+		t.Fatalf("expected hardening findings to be capped:\n%s", prompt)
+	}
+	for _, needle := range []string{"additional findings omitted for brevity", "... [truncated]"} {
+		if !strings.Contains(prompt, needle) {
+			t.Fatalf("expected hardening prompt to contain %q:\n%s", needle, prompt)
+		}
+	}
+	if len(prompt) > localWorkHardeningPromptCharLimit+128 {
+		t.Fatalf("expected hardening prompt to stay near cap, len=%d", len(prompt))
+	}
+}
+
 func TestReadWorkRunIndexRetriesWhenDatabaseIsLocked(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -576,7 +664,7 @@ func TestStartLocalWorkWithRunIDDetachSpawnsBackgroundRunner(t *testing.T) {
 		}
 		return nil
 	}
-	localWorkExecuteLoop = func(runID string, codexArgs []string) error {
+	localWorkExecuteLoop = func(runID string, codexArgs []string, rateLimitPolicy codexRateLimitPolicy) error {
 		executeCalls++
 		return nil
 	}
@@ -1030,29 +1118,17 @@ func TestLocalWorkFinalReviewGateBlocksCompletionUntilHardened(t *testing.T) {
 	if summary.FinalGateFindings != 1 || len(summary.FinalGateRoles) != 1 || summary.FinalGateRoles[0] != "quality-reviewer" || summary.ReviewRoundsUsed != 1 {
 		t.Fatalf("expected final gate to drive one hardening round, got %#v", summary)
 	}
-	if manifest.FinalGateStatus != "passed" || summary.FinalGateStatus != "passed" || len(summary.FinalGateRoleResults) != 4 {
+	if manifest.FinalGateStatus != "passed" || summary.FinalGateStatus != "passed" || len(summary.FinalGateRoleResults) != 1 {
 		t.Fatalf("expected persisted final gate role summary, manifest=%#v summary=%#v", manifest, summary)
 	}
 	iterationDir := localWorkIterationDir(runDir, 1)
 	for _, name := range []string{
 		"final-gate-initial-quality-reviewer-findings.json",
-		"final-gate-initial-qa-tester-findings.json",
-		"final-gate-initial-qa-tester-prompt.md",
 		"final-gate-round-1-quality-reviewer-findings.json",
-		"final-gate-round-1-qa-tester-findings.json",
 		"hardening-round-1-prompt.md",
 	} {
 		if _, err := os.Stat(filepath.Join(iterationDir, name)); err != nil {
 			t.Fatalf("expected final gate artifact %s: %v", name, err)
-		}
-	}
-	qaPrompt, err := os.ReadFile(filepath.Join(iterationDir, "final-gate-initial-qa-tester-prompt.md"))
-	if err != nil {
-		t.Fatalf("read qa prompt: %v", err)
-	}
-	for _, needle := range []string{"Review role: qa-tester", "You may run targeted tests", "QA focus:", "user-facing runtime behavior"} {
-		if !strings.Contains(string(qaPrompt), needle) {
-			t.Fatalf("expected QA prompt to contain %q:\n%s", needle, qaPrompt)
 		}
 	}
 	statusOutput, err := captureStdout(t, func() error {
@@ -1068,7 +1144,7 @@ func TestLocalWorkFinalReviewGateBlocksCompletionUntilHardened(t *testing.T) {
 	if err := json.Unmarshal([]byte(statusOutput), &status); err != nil {
 		t.Fatalf("unmarshal status: %v\n%s", err, statusOutput)
 	}
-	if status.FinalGateStatus != "passed" || len(status.FinalGateRoleResults) != 4 {
+	if status.FinalGateStatus != "passed" || len(status.FinalGateRoleResults) != 1 {
 		t.Fatalf("expected final gate summary in status, got %+v", status)
 	}
 }
@@ -1401,6 +1477,473 @@ func TestApplyLocalWorkFinalDiffSyncsTrackedBranchWhenSourceHeadChanged(t *testi
 	}
 }
 
+func TestEnsureGithubSourceCloneRepairsOriginToCanonicalSSH(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	originBare := filepath.Join(home, "origin.git")
+	seedRepo := createLocalWorkRepoAt(t, filepath.Join(home, "seed"))
+	runLocalWorkTestGit(t, home, "init", "--bare", originBare)
+	runLocalWorkTestGit(t, seedRepo, "remote", "add", "origin", originBare)
+	runLocalWorkTestGit(t, seedRepo, "push", "-u", "origin", "main")
+	runLocalWorkTestGit(t, "", "--git-dir", originBare, "symbolic-ref", "HEAD", "refs/heads/main")
+	configureTestGitInsteadOf(t, "git@github.com:acme/widget.git", originBare)
+
+	paths := githubManagedPaths("acme/widget")
+	repoMeta := &githubManagedRepoMetadata{
+		RepoSlug:      "acme/widget",
+		CloneURL:      originBare,
+		DefaultBranch: "main",
+		HTMLURL:       "https://github.com/acme/widget",
+	}
+	if err := ensureGithubSourceClone(paths, repoMeta); err != nil {
+		t.Fatalf("ensureGithubSourceClone: %v", err)
+	}
+	wantOrigin := "git@github.com:acme/widget.git"
+	gotOrigin := strings.TrimSpace(runLocalWorkTestGitOutput(t, paths.SourcePath, "config", "--get", "remote.origin.url"))
+	if gotOrigin != wantOrigin {
+		t.Fatalf("expected canonical ssh origin, got %q want %q", gotOrigin, wantOrigin)
+	}
+
+	runLocalWorkTestGit(t, paths.SourcePath, "remote", "set-url", "origin", originBare)
+	if err := ensureGithubSourceClone(paths, repoMeta); err != nil {
+		t.Fatalf("ensureGithubSourceClone repair: %v", err)
+	}
+	gotOrigin = strings.TrimSpace(runLocalWorkTestGitOutput(t, paths.SourcePath, "config", "--get", "remote.origin.url"))
+	if gotOrigin != wantOrigin {
+		t.Fatalf("expected repaired canonical ssh origin, got %q want %q", gotOrigin, wantOrigin)
+	}
+
+	advanceRepo := filepath.Join(home, "advance-fetch")
+	runLocalWorkTestGit(t, home, "clone", originBare, advanceRepo)
+	if err := os.WriteFile(filepath.Join(advanceRepo, "fetched.txt"), []byte("remote change\n"), 0o644); err != nil {
+		t.Fatalf("write remote change: %v", err)
+	}
+	runLocalWorkTestGit(t, advanceRepo, "add", "fetched.txt")
+	runLocalWorkTestGit(t, advanceRepo, "commit", "-m", "remote advanced")
+	runLocalWorkTestGit(t, advanceRepo, "push", "origin", "main")
+
+	repoMeta.CloneURL = "https://example.invalid/acme/widget.git"
+	if err := ensureGithubSourceClone(paths, repoMeta); err != nil {
+		t.Fatalf("ensureGithubSourceClone fetch: %v", err)
+	}
+	remoteHead := strings.TrimSpace(runLocalWorkTestGitOutput(t, "", "--git-dir", originBare, "rev-parse", "refs/heads/main"))
+	trackingHead := strings.TrimSpace(runLocalWorkTestGitOutput(t, paths.SourcePath, "rev-parse", "refs/remotes/origin/main"))
+	if trackingHead != remoteHead {
+		t.Fatalf("expected origin tracking ref to refresh from clone_url fetch, tracking=%q remote=%q", trackingHead, remoteHead)
+	}
+}
+
+func TestStartLocalWorkWithRunIDRefreshesManagedSourceBeforeSandboxClone(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	originBare := filepath.Join(home, "origin.git")
+	seedRepo := createLocalWorkRepoAt(t, filepath.Join(home, "seed"))
+	runLocalWorkTestGit(t, home, "init", "--bare", originBare)
+	runLocalWorkTestGit(t, seedRepo, "remote", "add", "origin", originBare)
+	runLocalWorkTestGit(t, seedRepo, "push", "-u", "origin", "main")
+	runLocalWorkTestGit(t, "", "--git-dir", originBare, "symbolic-ref", "HEAD", "refs/heads/main")
+	configureTestGitInsteadOf(t, "git@github.com:acme/widget.git", originBare)
+
+	managedRoot := filepath.Join(home, ".nana", "work", "repos", "acme", "widget")
+	if err := os.MkdirAll(managedRoot, 0o755); err != nil {
+		t.Fatalf("mkdir managed root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(managedRoot, "settings.json"), []byte(`{"version":1,"repo_mode":"repo","issue_pick_mode":"auto","pr_forward_mode":"auto","updated_at":"`+ISOTimeNow()+`"}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	managedSource := filepath.Join(managedRoot, "source")
+	runLocalWorkTestGit(t, home, "clone", originBare, managedSource)
+
+	if err := os.WriteFile(filepath.Join(managedSource, "README.md"), []byte("# local work\nlocal managed change\n"), 0o644); err != nil {
+		t.Fatalf("write managed source change: %v", err)
+	}
+	runLocalWorkTestGit(t, managedSource, "add", "README.md")
+	runLocalWorkTestGit(t, managedSource, "commit", "-m", "managed ahead")
+
+	advanceRepo := filepath.Join(home, "advance")
+	runLocalWorkTestGit(t, home, "clone", originBare, advanceRepo)
+	if err := os.WriteFile(filepath.Join(advanceRepo, "README.md"), []byte("# local work\nremote managed change\n"), 0o644); err != nil {
+		t.Fatalf("write remote change: %v", err)
+	}
+	runLocalWorkTestGit(t, advanceRepo, "add", "README.md")
+	runLocalWorkTestGit(t, advanceRepo, "commit", "-m", "remote ahead")
+	runLocalWorkTestGit(t, advanceRepo, "push", "origin", "main")
+	remoteHead := strings.TrimSpace(runLocalWorkTestGitOutput(t, advanceRepo, "rev-parse", "origin/main"))
+
+	oldDetachedRunner := localWorkStartDetachedRunner
+	localWorkStartDetachedRunner = func(repoRoot string, runID string, codexArgs []string, logPath string) error {
+		return nil
+	}
+	defer func() {
+		localWorkStartDetachedRunner = oldDetachedRunner
+	}()
+
+	runID, err := startLocalWorkWithRunID(managedSource, localWorkStartOptions{
+		Detach:                true,
+		Task:                  "Refresh managed source before start",
+		MaxIterations:         localWorkDefaultMaxIterations,
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+	})
+	if err != nil {
+		t.Fatalf("startLocalWorkWithRunID: %v", err)
+	}
+	manifest := mustLocalWorkManifestByRunID(t, runID)
+	if strings.TrimSpace(manifest.BaselineSHA) != remoteHead {
+		t.Fatalf("expected baseline to refresh to remote head, got baseline=%q remote=%q", manifest.BaselineSHA, remoteHead)
+	}
+	sourceHead := strings.TrimSpace(runLocalWorkTestGitOutput(t, managedSource, "rev-parse", "HEAD"))
+	if sourceHead != remoteHead {
+		t.Fatalf("expected managed source HEAD to refresh to remote head, got head=%q remote=%q", sourceHead, remoteHead)
+	}
+	gotOrigin := strings.TrimSpace(runLocalWorkTestGitOutput(t, managedSource, "config", "--get", "remote.origin.url"))
+	if gotOrigin != "git@github.com:acme/widget.git" {
+		t.Fatalf("expected managed source origin repaired to canonical ssh, got %q", gotOrigin)
+	}
+	sandboxHead := strings.TrimSpace(runLocalWorkTestGitOutput(t, manifest.SandboxRepoPath, "rev-parse", "HEAD"))
+	if sandboxHead != remoteHead {
+		t.Fatalf("expected sandbox HEAD to clone refreshed source head, got sandbox=%q remote=%q", sandboxHead, remoteHead)
+	}
+	branches := runLocalWorkTestGitOutput(t, managedSource, "branch", "--format", "%(refname:short)")
+	if !strings.Contains(branches, "nana/autosave/main-") {
+		t.Fatalf("expected autosave backup branch for refreshed managed source, got %q", branches)
+	}
+}
+
+func TestApplyLocalWorkFinalDiffResetsManagedSourceWhenTrackedBranchDiverged(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	originBare := filepath.Join(home, "origin.git")
+	seedRepo := createLocalWorkRepoAt(t, filepath.Join(home, "seed"))
+	runLocalWorkTestGit(t, home, "init", "--bare", originBare)
+	runLocalWorkTestGit(t, seedRepo, "remote", "add", "origin", originBare)
+	runLocalWorkTestGit(t, seedRepo, "push", "-u", "origin", "main")
+	runLocalWorkTestGit(t, "", "--git-dir", originBare, "symbolic-ref", "HEAD", "refs/heads/main")
+	configureTestGitInsteadOf(t, "git@github.com:acme/widget.git", originBare)
+
+	managedRoot := filepath.Join(home, ".nana", "work", "repos", "acme", "widget")
+	if err := os.MkdirAll(managedRoot, 0o755); err != nil {
+		t.Fatalf("mkdir managed root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(managedRoot, "settings.json"), []byte(`{"version":1,"repo_mode":"repo","issue_pick_mode":"auto","pr_forward_mode":"auto","updated_at":"`+ISOTimeNow()+`"}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	managedSource := filepath.Join(managedRoot, "source")
+	runLocalWorkTestGit(t, home, "clone", originBare, managedSource)
+
+	baseline := strings.TrimSpace(runLocalWorkTestGitOutput(t, managedSource, "rev-parse", "HEAD"))
+	runID := "lw-managed-diverged"
+	repoID := localWorkRepoID(managedSource)
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	sandboxPath := filepath.Join(home, "sandbox")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := cloneGithubSourceToSandbox(managedSource, sandboxRepoPath); err != nil {
+		t.Fatalf("clone sandbox: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxRepoPath, "sandbox.txt"), []byte("sandbox change\n"), 0o644); err != nil {
+		t.Fatalf("write sandbox file: %v", err)
+	}
+	if err := refreshLocalWorkSandboxIntentToAdd(sandboxRepoPath); err != nil {
+		t.Fatalf("intent-to-add sandbox.txt: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(managedSource, "README.md"), []byte("# local work\nlocal managed change\n"), 0o644); err != nil {
+		t.Fatalf("write managed source change: %v", err)
+	}
+	runLocalWorkTestGit(t, managedSource, "add", "README.md")
+	runLocalWorkTestGit(t, managedSource, "commit", "-m", "managed ahead")
+
+	advanceRepo := filepath.Join(home, "advance")
+	runLocalWorkTestGit(t, home, "clone", originBare, advanceRepo)
+	if err := os.WriteFile(filepath.Join(advanceRepo, "README.md"), []byte("# local work\nremote managed change\n"), 0o644); err != nil {
+		t.Fatalf("write remote change: %v", err)
+	}
+	runLocalWorkTestGit(t, advanceRepo, "add", "README.md")
+	runLocalWorkTestGit(t, advanceRepo, "commit", "-m", "remote ahead")
+	runLocalWorkTestGit(t, advanceRepo, "push", "origin", "main")
+
+	result := applyLocalWorkFinalDiff(localWorkManifest{
+		RunID:           runID,
+		RepoRoot:        managedSource,
+		RepoID:          repoID,
+		BaselineSHA:     baseline,
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+		SourceBranch:    "main",
+	})
+	if result.Status != "pushed" || strings.TrimSpace(result.CommitSHA) == "" {
+		t.Fatalf("expected managed-source final apply to push successfully, got %#v", result)
+	}
+	readmeContent, err := os.ReadFile(filepath.Join(managedSource, "README.md"))
+	if err != nil {
+		t.Fatalf("read managed source README: %v", err)
+	}
+	if !strings.Contains(string(readmeContent), "remote managed change") {
+		t.Fatalf("expected refreshed remote change preserved, got %q", string(readmeContent))
+	}
+	sandboxContent, err := os.ReadFile(filepath.Join(managedSource, "sandbox.txt"))
+	if err != nil {
+		t.Fatalf("read sandbox.txt: %v", err)
+	}
+	if strings.TrimSpace(string(sandboxContent)) != "sandbox change" {
+		t.Fatalf("expected sandbox change applied, got %q", string(sandboxContent))
+	}
+	gotOrigin := strings.TrimSpace(runLocalWorkTestGitOutput(t, managedSource, "config", "--get", "remote.origin.url"))
+	if gotOrigin != "git@github.com:acme/widget.git" {
+		t.Fatalf("expected managed source origin repaired to canonical ssh, got %q", gotOrigin)
+	}
+	originHead := strings.TrimSpace(runLocalWorkTestGitOutput(t, "", "--git-dir", originBare, "rev-parse", "refs/heads/main"))
+	if originHead != strings.TrimSpace(result.CommitSHA) {
+		t.Fatalf("expected pushed commit on origin/main, origin=%q result=%q", originHead, result.CommitSHA)
+	}
+	branches := runLocalWorkTestGitOutput(t, managedSource, "branch", "--format", "%(refname:short)")
+	if !strings.Contains(branches, "nana/autosave/main-") {
+		t.Fatalf("expected autosave backup branch for refreshed managed source, got %q", branches)
+	}
+}
+
+func TestApplyLocalWorkFinalDiffAutoResolvesManagedSourceConflicts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	originBare := filepath.Join(home, "origin.git")
+	seedRepo := createLocalWorkRepoAt(t, filepath.Join(home, "seed"))
+	runLocalWorkTestGit(t, home, "init", "--bare", originBare)
+	runLocalWorkTestGit(t, seedRepo, "remote", "add", "origin", originBare)
+	runLocalWorkTestGit(t, seedRepo, "push", "-u", "origin", "main")
+	runLocalWorkTestGit(t, "", "--git-dir", originBare, "symbolic-ref", "HEAD", "refs/heads/main")
+	configureTestGitInsteadOf(t, "git@github.com:acme/widget.git", originBare)
+
+	managedRoot := filepath.Join(home, ".nana", "work", "repos", "acme", "widget")
+	if err := os.MkdirAll(managedRoot, 0o755); err != nil {
+		t.Fatalf("mkdir managed root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(managedRoot, "settings.json"), []byte(`{"version":1,"repo_mode":"repo","issue_pick_mode":"auto","pr_forward_mode":"auto","updated_at":"`+ISOTimeNow()+`"}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	managedSource := filepath.Join(managedRoot, "source")
+	runLocalWorkTestGit(t, home, "clone", originBare, managedSource)
+
+	baseline := strings.TrimSpace(runLocalWorkTestGitOutput(t, managedSource, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(managedSource, "README.md"), []byte("# local source change\n"), 0o644); err != nil {
+		t.Fatalf("write managed source change: %v", err)
+	}
+	runLocalWorkTestGit(t, managedSource, "add", "README.md")
+	runLocalWorkTestGit(t, managedSource, "commit", "-m", "managed local change")
+
+	runID := "lw-managed-conflict"
+	repoID := localWorkRepoID(managedSource)
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	sandboxPath := filepath.Join(home, "sandbox-conflict")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := cloneGithubSourceToSandbox(filepath.Join(home, "seed"), sandboxRepoPath); err != nil {
+		t.Fatalf("clone sandbox from baseline seed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxRepoPath, "README.md"), []byte("# sandbox change\n"), 0o644); err != nil {
+		t.Fatalf("write sandbox readme: %v", err)
+	}
+
+	result := applyLocalWorkFinalDiff(localWorkManifest{
+		RunID:           runID,
+		RepoRoot:        managedSource,
+		RepoID:          repoID,
+		BaselineSHA:     baseline,
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+		SourceBranch:    "main",
+	})
+	if result.Status != "pushed" || strings.TrimSpace(result.CommitSHA) == "" {
+		t.Fatalf("expected managed-source final apply to auto-resolve conflicts and push, got %#v", result)
+	}
+	readmeContent, err := os.ReadFile(filepath.Join(managedSource, "README.md"))
+	if err != nil {
+		t.Fatalf("read managed source README: %v", err)
+	}
+	if strings.TrimSpace(string(readmeContent)) != "# sandbox change" {
+		t.Fatalf("expected sandbox version to win conflicted file, got %q", string(readmeContent))
+	}
+	gotOrigin := strings.TrimSpace(runLocalWorkTestGitOutput(t, managedSource, "config", "--get", "remote.origin.url"))
+	if gotOrigin != "git@github.com:acme/widget.git" {
+		t.Fatalf("expected managed source origin repaired to canonical ssh, got %q", gotOrigin)
+	}
+	originContent := runLocalWorkTestGitOutput(t, "", "--git-dir", originBare, "show", strings.TrimSpace(result.CommitSHA)+":README.md")
+	if strings.TrimSpace(originContent) != "# sandbox change" {
+		t.Fatalf("expected pushed commit to contain sandbox version, got %q", originContent)
+	}
+}
+
+func TestApplyLocalWorkFinalDiffBlocksManagedSourceWhenOriginPreflightFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	managedRoot := filepath.Join(home, ".nana", "work", "repos", "acme", "widget")
+	if err := os.MkdirAll(managedRoot, 0o755); err != nil {
+		t.Fatalf("mkdir managed root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(managedRoot, "settings.json"), []byte(`{"version":1,"repo_mode":"repo","issue_pick_mode":"auto","pr_forward_mode":"auto","updated_at":"`+ISOTimeNow()+`"}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	managedSource := createLocalWorkRepoAt(t, filepath.Join(managedRoot, "source"))
+	baseline := strings.TrimSpace(runLocalWorkTestGitOutput(t, managedSource, "rev-parse", "HEAD"))
+
+	runID := "lw-managed-preflight"
+	repoID := localWorkRepoID(managedSource)
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	sandboxPath := filepath.Join(home, "sandbox-preflight")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := cloneGithubSourceToSandbox(managedSource, sandboxRepoPath); err != nil {
+		t.Fatalf("clone sandbox: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxRepoPath, "README.md"), []byte("# preflight change\n"), 0o644); err != nil {
+		t.Fatalf("write sandbox readme: %v", err)
+	}
+
+	oldPreflight := githubManagedOriginPreflight
+	githubManagedOriginPreflight = func(repoPath string, repoMeta *githubManagedRepoMetadata) error {
+		return fmt.Errorf("managed source checkout %s requires working SSH access to git@github.com:acme/widget.git", repoPath)
+	}
+	defer func() {
+		githubManagedOriginPreflight = oldPreflight
+	}()
+
+	result := applyLocalWorkFinalDiff(localWorkManifest{
+		RunID:           runID,
+		RepoRoot:        managedSource,
+		RepoID:          repoID,
+		BaselineSHA:     baseline,
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+		SourceBranch:    "main",
+	})
+	if result.Status != "blocked-before-apply" || !strings.Contains(result.Error, "requires working SSH access") {
+		t.Fatalf("expected managed source preflight blocker, got %#v", result)
+	}
+}
+
+func TestApplyLocalWorkFinalDiffBlocksWhenFinalApplyLockHeld(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	baseline := strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD"))
+	runID := "lw-lock-held"
+	repoID := localWorkRepoID(repo)
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	sandboxPath := filepath.Join(home, "sandbox-lock")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := cloneGithubSourceToSandbox(repo, sandboxRepoPath); err != nil {
+		t.Fatalf("clone sandbox: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxRepoPath, "README.md"), []byte("# local work\nsandbox change\n"), 0o644); err != nil {
+		t.Fatalf("write sandbox readme: %v", err)
+	}
+	if err := writeLocalWorkManifest(localWorkManifest{
+		Version:         4,
+		RunID:           "lw-other",
+		CreatedAt:       ISOTimeNow(),
+		UpdatedAt:       ISOTimeNow(),
+		Status:          "running",
+		CurrentPhase:    "apply-blocked",
+		RepoRoot:        repo,
+		RepoName:        filepath.Base(repo),
+		RepoID:          repoID,
+		SourceBranch:    "main",
+		BaselineSHA:     baseline,
+		SandboxPath:     filepath.Join(home, "sandbox-other"),
+		SandboxRepoPath: filepath.Join(home, "sandbox-other", "repo"),
+	}); err != nil {
+		t.Fatalf("write lock owner manifest: %v", err)
+	}
+	releaseLock, err := acquireLocalWorkFinalApplyLock(localWorkManifest{
+		RunID:        "lw-other",
+		RepoRoot:     repo,
+		SourceBranch: "main",
+	}, "final-apply")
+	if err != nil {
+		t.Fatalf("acquire lock: %v", err)
+	}
+	defer releaseLock()
+
+	result := applyLocalWorkFinalDiff(localWorkManifest{
+		RunID:           runID,
+		RepoRoot:        repo,
+		RepoID:          repoID,
+		BaselineSHA:     baseline,
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+		SourceBranch:    "main",
+	})
+	if result.Status != "blocked-before-apply" || !strings.Contains(result.Error, "final apply already in progress") {
+		t.Fatalf("expected apply lock blocker, got %#v", result)
+	}
+}
+
+func TestApplyLocalWorkFinalDiffReclaimsStaleFinalApplyLock(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	baseline := strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD"))
+	runID := "lw-lock-stale"
+	repoID := localWorkRepoID(repo)
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	sandboxPath := filepath.Join(home, "sandbox-stale-lock")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := cloneGithubSourceToSandbox(repo, sandboxRepoPath); err != nil {
+		t.Fatalf("clone sandbox: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxRepoPath, "README.md"), []byte("# local work\nsandbox change\n"), 0o644); err != nil {
+		t.Fatalf("write sandbox readme: %v", err)
+	}
+	lockPath := localWorkFinalApplyLockPath(repo)
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		t.Fatalf("mkdir lock dir: %v", err)
+	}
+	if err := writeGithubJSON(lockPath, localWorkFinalApplyLockState{
+		Version:      1,
+		RunID:        "lw-stale-owner",
+		RepoRoot:     repo,
+		SourceBranch: "main",
+		Phase:        "final-apply",
+		CreatedAt:    time.Now().UTC().Add(-2 * localWorkStaleRunThreshold).Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("write stale lock: %v", err)
+	}
+
+	result := applyLocalWorkFinalDiff(localWorkManifest{
+		RunID:           runID,
+		RepoRoot:        repo,
+		RepoID:          repoID,
+		BaselineSHA:     baseline,
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+		SourceBranch:    "main",
+	})
+	if result.Status != "committed" || strings.TrimSpace(result.CommitSHA) == "" {
+		t.Fatalf("expected stale lock to be reclaimed, got %#v", result)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("expected stale lock to be removed, stat err=%v", err)
+	}
+}
+
 func TestApplyLocalWorkFinalDiffBlocksAfterApplyWhenCommitFails(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
@@ -1476,6 +2019,194 @@ func TestApplyLocalWorkFinalDiffBlocksAfterApplyWhenCommitFails(t *testing.T) {
 		return runLocalWorkCommand(repo, []string{"resume", "--run-id", runID})
 	}); err == nil || !strings.Contains(err.Error(), "blocked") {
 		t.Fatalf("expected blocked-after-apply resume to refuse retry, got %v", err)
+	}
+}
+
+func TestWorkResolveCompletesBlockedBeforeApplyRun(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	baseline := strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD"))
+	runID := "lw-resolve-before-apply"
+	repoID := localWorkRepoID(repo)
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	inputPath := filepath.Join(runDir, "input-plan.md")
+	if err := os.WriteFile(inputPath, []byte("resolve blocked apply\n"), 0o644); err != nil {
+		t.Fatalf("write input plan: %v", err)
+	}
+	sandboxPath := filepath.Join(home, "sandbox")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := cloneGithubSourceToSandbox(repo, sandboxRepoPath); err != nil {
+		t.Fatalf("clone sandbox: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxRepoPath, "README.md"), []byte("# local work\nresolved\n"), 0o644); err != nil {
+		t.Fatalf("write sandbox readme: %v", err)
+	}
+
+	manifest := localWorkManifest{
+		Version:               4,
+		RunID:                 runID,
+		CreatedAt:             ISOTimeNow(),
+		UpdatedAt:             ISOTimeNow(),
+		Status:                "blocked",
+		CurrentPhase:          "apply-blocked",
+		RepoRoot:              repo,
+		RepoName:              filepath.Base(repo),
+		RepoID:                repoID,
+		SourceBranch:          "main",
+		BaselineSHA:           baseline,
+		SandboxPath:           sandboxPath,
+		SandboxRepoPath:       sandboxRepoPath,
+		InputPath:             inputPath,
+		InputMode:             "task",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+		FinalApplyStatus:      "blocked-before-apply",
+		FinalApplyError:       "blocked for test",
+		LastError:             "blocked for test",
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write blocked manifest: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error {
+		return Work(repo, []string{"resolve", "--run-id", runID})
+	})
+	if err != nil {
+		t.Fatalf("Work(resolve): %v\n%s", err, output)
+	}
+	updated := mustLocalWorkManifestByRunID(t, runID)
+	if updated.Status != "completed" || updated.FinalApplyStatus != "committed" || strings.TrimSpace(updated.FinalApplyCommitSHA) == "" {
+		t.Fatalf("expected blocked-before-apply resolve to complete, got %#v", updated)
+	}
+}
+
+func TestWorkResolveCompletesBlockedAfterApplyRun(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	baseline := strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD"))
+	runID := "lw-resolve-after-apply"
+	repoID := localWorkRepoID(repo)
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	inputPath := filepath.Join(runDir, "input-plan.md")
+	if err := os.WriteFile(inputPath, []byte("resolve blocked post-apply\n"), 0o644); err != nil {
+		t.Fatalf("write input plan: %v", err)
+	}
+	sandboxPath := filepath.Join(home, "sandbox")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := cloneGithubSourceToSandbox(repo, sandboxRepoPath); err != nil {
+		t.Fatalf("clone sandbox: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxRepoPath, "README.md"), []byte("# local work\nsandbox change\n"), 0o644); err != nil {
+		t.Fatalf("write sandbox readme: %v", err)
+	}
+	hooksDir := filepath.Join(repo, ".git", "hooks")
+	if err := os.WriteFile(filepath.Join(hooksDir, "pre-commit"), []byte("#!/bin/sh\nexit 17\n"), 0o755); err != nil {
+		t.Fatalf("write pre-commit hook: %v", err)
+	}
+
+	result := applyLocalWorkFinalDiff(localWorkManifest{
+		RunID:           runID,
+		RepoRoot:        repo,
+		RepoID:          repoID,
+		BaselineSHA:     baseline,
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+		SourceBranch:    "main",
+	})
+	if result.Status != "blocked-after-apply" {
+		t.Fatalf("expected blocked-after-apply setup, got %#v", result)
+	}
+	if err := os.Remove(filepath.Join(hooksDir, "pre-commit")); err != nil {
+		t.Fatalf("remove pre-commit hook: %v", err)
+	}
+
+	manifest := localWorkManifest{
+		Version:               4,
+		RunID:                 runID,
+		CreatedAt:             ISOTimeNow(),
+		UpdatedAt:             ISOTimeNow(),
+		Status:                "blocked",
+		CurrentPhase:          "apply-blocked",
+		RepoRoot:              repo,
+		RepoName:              filepath.Base(repo),
+		RepoID:                repoID,
+		SourceBranch:          "main",
+		BaselineSHA:           baseline,
+		SandboxPath:           sandboxPath,
+		SandboxRepoPath:       sandboxRepoPath,
+		InputPath:             inputPath,
+		InputMode:             "task",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+		FinalApplyStatus:      result.Status,
+		FinalApplyCommitSHA:   result.CommitSHA,
+		FinalApplyError:       result.Error,
+		LastError:             result.Error,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write blocked manifest: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error {
+		return Work(repo, []string{"resolve", "--run-id", runID})
+	})
+	if err != nil {
+		t.Fatalf("Work(resolve post-apply): %v\n%s", err, output)
+	}
+	updated := mustLocalWorkManifestByRunID(t, runID)
+	if updated.Status != "completed" || updated.FinalApplyStatus != "committed" || strings.TrimSpace(updated.FinalApplyCommitSHA) == "" {
+		t.Fatalf("expected blocked-after-apply resolve to complete, got %#v", updated)
+	}
+}
+
+func TestWorkResolveRejectsSupersededBlockedRun(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	runID := "lw-superseded-blocked"
+	manifest := localWorkManifest{
+		Version:               5,
+		RunID:                 runID,
+		CreatedAt:             ISOTimeNow(),
+		UpdatedAt:             ISOTimeNow(),
+		Status:                "blocked",
+		CurrentPhase:          "apply-blocked",
+		RepoRoot:              repo,
+		RepoName:              filepath.Base(repo),
+		RepoID:                localWorkRepoID(repo),
+		SourceBranch:          "main",
+		BaselineSHA:           strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:           filepath.Join(home, "sandbox"),
+		SandboxRepoPath:       filepath.Join(home, "sandbox", "repo"),
+		FinalApplyStatus:      "blocked-before-apply",
+		FinalApplyError:       "blocked for test",
+		LastError:             "blocked for test",
+		SupersededByRunID:     "lw-newer-completed",
+		SupersededAt:          ISOTimeNow(),
+		SupersededReason:      "newer completed run lw-newer-completed already applied branch main",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	err := Work(repo, []string{"resolve", "--run-id", runID})
+	if err == nil || !strings.Contains(err.Error(), "lw-newer-completed") {
+		t.Fatalf("expected resolve to reject superseded run, got %v", err)
 	}
 }
 
@@ -2143,6 +2874,8 @@ func TestLocalWorkDocsMentionRuntimeStateAndValidationControls(t *testing.T) {
 		"reuse completed grouping/validator work",
 		"ignored if they still exist on disk",
 		"Go 1.25 baseline",
+		"nana work resolve",
+		"pushes to the tracked remote when one exists",
 	} {
 		if !strings.Contains(string(workLocalDoc), needle) {
 			t.Fatalf("expected work doc to mention %q", needle)
@@ -2770,6 +3503,70 @@ func TestLocalWorkResumeAfterFailedImplement(t *testing.T) {
 	}
 }
 
+func TestLocalWorkResumeAfterFailedImplementUsesExecResume(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	failOncePath := filepath.Join(home, "fail-once.marker")
+	commandLogPath := filepath.Join(home, "codex-commands.log")
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`printf '%s\n' "$*" >> "${FAKE_CODEX_LOG_PATH}"`,
+		`mkdir -p "$CODEX_HOME/sessions/2026/04/17"`,
+		`printf '{"type":"session_meta","payload":{"id":"session-local","timestamp":"2099-01-01T00:00:00Z","cwd":"%s"}}\n' "$PWD" > "$CODEX_HOME/sessions/2026/04/17/rollout-session-local.jsonl"`,
+		`PAYLOAD="$(cat)"`,
+		`case "$PAYLOAD" in`,
+		`  *"# NANA Work-local Finding Grouping"*)`,
+		`    printf '{"groups":[]}\n'`,
+		`    ;;`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    printf '{"findings":[]}\n'`,
+		`    ;;`,
+		`  *)`,
+		`    if printf '%s' "$*" | grep -q "exec resume session-local"; then`,
+		`      printf 'implemented\n' >> README.md`,
+		`      printf 'fake-codex:%s\n' "$*"`,
+		`      exit 0`,
+		`    fi`,
+		`    if [ "${FAKE_CODEX_FAIL_ONCE_PATH:-}" != "" ] && [ ! -f "${FAKE_CODEX_FAIL_ONCE_PATH}" ]; then`,
+		`      : > "${FAKE_CODEX_FAIL_ONCE_PATH}"`,
+		`      printf 'rate limited\n' >&2`,
+		`      exit 1`,
+		`    fi`,
+		`    printf 'implemented\n' >> README.md`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_FAIL_ONCE_PATH", failOncePath)
+	t.Setenv("FAKE_CODEX_LOG_PATH", commandLogPath)
+
+	startErr := runLocalWorkCommand(repo, []string{"start", "--task", "Recover with exec resume"})
+	if startErr == nil {
+		t.Fatal("expected initial start to fail")
+	}
+	resumeOutput, err := captureStdout(t, func() error {
+		return runLocalWorkCommand(repo, []string{"resume", "--repo", repo, "--last"})
+	})
+	if err != nil {
+		t.Fatalf("runLocalWorkCommand(resume): %v\n%s", err, resumeOutput)
+	}
+	commandLog, err := os.ReadFile(commandLogPath)
+	if err != nil {
+		t.Fatalf("read command log: %v", err)
+	}
+	if !strings.Contains(string(commandLog), "exec resume session-local") {
+		t.Fatalf("expected resume command in log, got %q", string(commandLog))
+	}
+}
+
 func mustLatestLocalWorkRun(t *testing.T, repo string) (localWorkManifest, string) {
 	t.Helper()
 	manifest, runDir, err := resolveLocalWorkRun(repo, localWorkRunSelection{UseLast: true})
@@ -2872,6 +3669,11 @@ func runLocalWorkTestGitOutput(t *testing.T, dir string, args ...string) string 
 	return string(output)
 }
 
+func configureTestGitInsteadOf(t *testing.T, from string, to string) {
+	t.Helper()
+	runLocalWorkTestGit(t, "", "config", "--global", fmt.Sprintf("url.%s.insteadOf", to), from)
+}
+
 func TestLocalWorkDBInitAddsRepoSlugColumnToWorkRunIndex(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -2968,6 +3770,190 @@ func TestLocalWorkDBInitAddsRepoSlugColumnToWorkRunIndex(t *testing.T) {
 	}
 	if written.RepoSlug != "acme/widget" {
 		t.Fatalf("expected repo slug to round-trip, got %+v", written)
+	}
+}
+
+func TestRunLocalWorkCodexPromptPersistsTokenUsageArtifactAndManifest(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	countPath := filepath.Join(home, "codex-count.txt")
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`count=0`,
+		`if [ -f "${FAKE_CODEX_COUNT_PATH:-}" ]; then count=$(cat "$FAKE_CODEX_COUNT_PATH"); fi`,
+		`count=$((count + 1))`,
+		`printf '%s' "$count" > "$FAKE_CODEX_COUNT_PATH"`,
+		`session_dir="$CODEX_HOME/sessions/2026/04/17"`,
+		`mkdir -p "$session_dir"`,
+		`cat > "$session_dir/rollout-$count.jsonl" <<EOF`,
+		`{"timestamp":"2026-04-17T00:00:00Z","type":"session_meta","payload":{"id":"sess-$count","timestamp":"2026-04-17T00:00:00Z","agent_role":"leader","agent_nickname":"lane-$count"}}`,
+		`{"timestamp":"2026-04-17T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":135}}}}`,
+		`EOF`,
+		`printf 'fake-codex:%s\n' "$*"`,
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_COUNT_PATH", countPath)
+
+	sandboxPath := filepath.Join(home, "sandbox-success")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
+		t.Fatalf("mkdir sandbox repo: %v", err)
+	}
+	manifest := localWorkManifest{
+		Version:               4,
+		RunID:                 "lw-token-success",
+		CreatedAt:             "2026-04-17T00:00:00Z",
+		UpdatedAt:             "2026-04-17T00:00:00Z",
+		Status:                "running",
+		RepoRoot:              repo,
+		RepoName:              filepath.Base(repo),
+		RepoID:                localWorkRepoID(repo),
+		SourceBranch:          "main",
+		BaselineSHA:           strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:           sandboxPath,
+		SandboxRepoPath:       sandboxRepoPath,
+		InputPath:             filepath.Join(home, "task.md"),
+		InputMode:             "task",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: 1,
+		MaxIterations:         1,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	result, err := runLocalWorkCodexPrompt(manifest, nil, "Implement token persistence", "leader", filepath.Join(home, "leader-checkpoint.json"))
+	if err != nil {
+		t.Fatalf("runLocalWorkCodexPrompt: %v", err)
+	}
+	if !strings.Contains(result.Stdout, "fake-codex:exec -C") {
+		t.Fatalf("unexpected prompt stdout: %q", result.Stdout)
+	}
+
+	updated, err := readLocalWorkManifestByRunID(manifest.RunID)
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
+	}
+	if updated.TokenUsage == nil {
+		t.Fatalf("expected token usage in manifest, got %#v", updated)
+	}
+	if updated.TokenUsage.InputTokens != 100 || updated.TokenUsage.CachedInputTokens != 10 || updated.TokenUsage.OutputTokens != 20 || updated.TokenUsage.ReasoningOutputTokens != 5 || updated.TokenUsage.TotalTokens != 135 || updated.TokenUsage.SessionsAccounted != 1 {
+		t.Fatalf("unexpected manifest token usage: %#v", updated.TokenUsage)
+	}
+
+	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
+	var artifact localWorkThreadUsageArtifact
+	if err := readGithubJSON(filepath.Join(runDir, "thread-usage.json"), &artifact); err != nil {
+		t.Fatalf("read thread-usage artifact: %v", err)
+	}
+	if artifact.Totals.TotalTokens != 135 || artifact.Totals.SessionsAccounted != 1 || len(artifact.Threads) != 1 {
+		t.Fatalf("unexpected thread-usage artifact: %#v", artifact)
+	}
+
+	stale := manifest
+	stale.Status = "completed"
+	stale.CompletedAt = "2026-04-17T00:05:00Z"
+	stale.UpdatedAt = stale.CompletedAt
+	if err := writeLocalWorkManifest(stale); err != nil {
+		t.Fatalf("write stale manifest: %v", err)
+	}
+	preserved, err := readLocalWorkManifestByRunID(manifest.RunID)
+	if err != nil {
+		t.Fatalf("read preserved manifest: %v", err)
+	}
+	if preserved.TokenUsage == nil || preserved.TokenUsage.TotalTokens != 135 || preserved.TokenUsage.SessionsAccounted != 1 {
+		t.Fatalf("expected token usage to survive stale manifest write, got %#v", preserved.TokenUsage)
+	}
+}
+
+func TestRunLocalWorkCodexPromptPersistsTokenUsageWhenCodexFails(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	countPath := filepath.Join(home, "codex-count.txt")
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`count=0`,
+		`if [ -f "${FAKE_CODEX_COUNT_PATH:-}" ]; then count=$(cat "$FAKE_CODEX_COUNT_PATH"); fi`,
+		`count=$((count + 1))`,
+		`printf '%s' "$count" > "$FAKE_CODEX_COUNT_PATH"`,
+		`session_dir="$CODEX_HOME/sessions/2026/04/17"`,
+		`mkdir -p "$session_dir"`,
+		`cat > "$session_dir/rollout-$count.jsonl" <<EOF`,
+		`{"timestamp":"2026-04-17T00:10:00Z","type":"session_meta","payload":{"id":"fail-$count","timestamp":"2026-04-17T00:10:00Z","agent_role":"leader","agent_nickname":"lane-$count"}}`,
+		`{"timestamp":"2026-04-17T00:10:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":200,"cached_input_tokens":20,"output_tokens":40,"reasoning_output_tokens":6,"total_tokens":266}}}}`,
+		`EOF`,
+		`printf 'codex exploded\n' >&2`,
+		`exit 1`,
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_COUNT_PATH", countPath)
+
+	sandboxPath := filepath.Join(home, "sandbox-fail")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
+		t.Fatalf("mkdir sandbox repo: %v", err)
+	}
+	manifest := localWorkManifest{
+		Version:               4,
+		RunID:                 "lw-token-fail",
+		CreatedAt:             "2026-04-17T00:10:00Z",
+		UpdatedAt:             "2026-04-17T00:10:00Z",
+		Status:                "running",
+		RepoRoot:              repo,
+		RepoName:              filepath.Base(repo),
+		RepoID:                localWorkRepoID(repo),
+		SourceBranch:          "main",
+		BaselineSHA:           strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:           sandboxPath,
+		SandboxRepoPath:       sandboxRepoPath,
+		InputPath:             filepath.Join(home, "task.md"),
+		InputMode:             "task",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: 1,
+		MaxIterations:         1,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	if _, err := runLocalWorkCodexPrompt(manifest, nil, "Fail after writing token usage", "leader", filepath.Join(home, "leader-fail-checkpoint.json")); err == nil {
+		t.Fatal("expected runLocalWorkCodexPrompt to fail")
+	}
+
+	updated, err := readLocalWorkManifestByRunID(manifest.RunID)
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
+	}
+	if updated.TokenUsage == nil {
+		t.Fatalf("expected token usage in failed manifest, got %#v", updated)
+	}
+	if updated.TokenUsage.TotalTokens != 266 || updated.TokenUsage.InputTokens != 200 || updated.TokenUsage.CachedInputTokens != 20 || updated.TokenUsage.OutputTokens != 40 || updated.TokenUsage.ReasoningOutputTokens != 6 || updated.TokenUsage.SessionsAccounted != 1 {
+		t.Fatalf("unexpected failed manifest token usage: %#v", updated.TokenUsage)
+	}
+
+	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
+	var artifact localWorkThreadUsageArtifact
+	if err := readGithubJSON(filepath.Join(runDir, "thread-usage.json"), &artifact); err != nil {
+		t.Fatalf("read failed thread-usage artifact: %v", err)
+	}
+	if artifact.Totals.TotalTokens != 266 || artifact.Totals.SessionsAccounted != 1 {
+		t.Fatalf("unexpected failed thread-usage artifact: %#v", artifact)
 	}
 }
 

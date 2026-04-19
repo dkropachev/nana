@@ -3,27 +3,25 @@ package gocli
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
 
 type doctorCheck struct {
-	Name        string
-	Status      string
-	Message     string
-	Remediation string
+	Name    string
+	Status  string
+	Message string
 }
 
 func Doctor(cwd string, repoRoot string) error {
 	scope, source := resolveDoctorScope(cwd)
 	paths := resolveDoctorPaths(cwd, scope)
-	setupCommand := doctorSetupCommand(scope)
 
 	fmt.Fprintln(os.Stdout, "nana doctor")
 	fmt.Fprintln(os.Stdout, "==================")
@@ -37,32 +35,33 @@ func Doctor(cwd string, repoRoot string) error {
 	checks := []doctorCheck{
 		checkCodexCLI(),
 		checkNodeVersion(),
+		checkGithubCLI(),
+		checkGithubAuth(),
+		checkGithubAutomationRepos(),
+		checkRepoGitDrift(cwd, repoRoot),
 		checkExploreHarness(repoRoot),
-		checkDirectoryWithRemediation("Codex home", paths.codexHomeDir, doctorRunCommand(setupCommand)),
+		checkDirectory("Codex home", paths.codexHomeDir),
 		checkManagedAccounts(paths.codexHomeDir),
-		checkConfigForScope(paths.configPath, scope),
-		checkExploreRoutingForScope(paths.configPath, scope),
-		checkPromptsForScope(paths.promptsDir, scope),
-		checkSkillsForScope(paths.skillsDir, scope),
+		checkConfig(paths.configPath),
+		checkExploreRouting(paths.configPath),
+		checkPrompts(paths.promptsDir),
+		checkSkills(paths.skillsDir),
 	}
 	if scope == "user" {
 		checks = append(checks, checkLegacySkillRootOverlap())
 	}
 	checks = append(checks,
 		checkAgentsMD(scope, cwd, paths.codexHomeDir),
-		checkDirectoryWithRemediation("State dir", BaseStateDir(cwd), doctorRunCommand(setupCommand)),
-		checkMcpServersForScope(paths.configPath, scope),
-		checkDirectoryWithRemediation("Investigate Codex home", ResolveInvestigateCodexHome(cwd), doctorRunCommand(setupCommand)),
+		checkManagedAgentsFreshness(scope, cwd, paths.codexHomeDir, repoRoot),
+		checkManagedPromptFreshness(scope, cwd, paths.codexHomeDir, repoRoot),
+		checkManagedSkillFreshness(scope, cwd, paths.codexHomeDir, repoRoot),
+		checkDirectory("State dir", BaseStateDir(cwd)),
+		checkMcpServers(paths.configPath),
+		checkDirectory("Investigate Codex home", ResolveInvestigateCodexHome(cwd)),
 		checkInvestigateConfig(cwd),
 		checkInvestigateMCPStatus(cwd),
 	)
 
-	passCount, warnCount, failCount := printDoctorChecks(os.Stdout, checks)
-	printDoctorSummary(os.Stdout, checks, passCount, warnCount, failCount)
-	return nil
-}
-
-func printDoctorChecks(w io.Writer, checks []doctorCheck) (int, int, int) {
 	passCount, warnCount, failCount := 0, 0, 0
 	for _, check := range checks {
 		icon := "[OK]"
@@ -76,91 +75,18 @@ func printDoctorChecks(w io.Writer, checks []doctorCheck) (int, int, int) {
 		default:
 			passCount++
 		}
-		fmt.Fprintf(w, "  %s %s: %s\n", icon, check.Name, check.Message)
+		fmt.Fprintf(os.Stdout, "  %s %s: %s\n", icon, check.Name, check.Message)
 	}
-	return passCount, warnCount, failCount
-}
 
-func printDoctorSummary(w io.Writer, checks []doctorCheck, passCount int, warnCount int, failCount int) {
-	fmt.Fprintf(w, "\nResults: %d passed, %d warnings, %d failed\n", passCount, warnCount, failCount)
+	fmt.Fprintf(os.Stdout, "\nResults: %d passed, %d warnings, %d failed\n", passCount, warnCount, failCount)
 	if failCount > 0 {
-		if printDoctorNextSteps(w, checks) {
-			return
-		}
-		fmt.Fprintln(w, "\nRun \"nana setup\" to fix installation issues.")
+		fmt.Fprintln(os.Stdout, "\nRun \"nana setup\" to fix installation issues.")
 	} else if warnCount > 0 {
-		if printDoctorNextSteps(w, checks) {
-			return
-		}
-		fmt.Fprintln(w, "\nRun \"nana setup --force\" to refresh all components.")
+		fmt.Fprintln(os.Stdout, "\nRun \"nana setup --force\" to refresh all components.")
 	} else {
-		fmt.Fprintln(w, "\nAll checks passed! nana is ready.")
+		fmt.Fprintln(os.Stdout, "\nAll checks passed! nana is ready.")
 	}
-}
-
-type doctorRemediation struct {
-	Text   string
-	Checks []string
-}
-
-func printDoctorNextSteps(w io.Writer, checks []doctorCheck) bool {
-	remediations := collectDoctorRemediations(checks)
-	if len(remediations) == 0 {
-		return false
-	}
-	fmt.Fprintln(w, "\nNext steps:")
-	for _, remediation := range remediations {
-		if len(remediation.Checks) == 0 {
-			fmt.Fprintf(w, "  - %s\n", remediation.Text)
-			continue
-		}
-		fmt.Fprintf(w, "  - %s (%s)\n", remediation.Text, strings.Join(remediation.Checks, ", "))
-	}
-	fmt.Fprintln(w, "\nApply the relevant next step, then rerun \"nana doctor\".")
-	return true
-}
-
-func collectDoctorRemediations(checks []doctorCheck) []doctorRemediation {
-	seen := map[string]int{}
-	remediations := []doctorRemediation{}
-	for _, check := range checks {
-		if check.Status != "warn" && check.Status != "fail" {
-			continue
-		}
-		text := strings.TrimSpace(check.Remediation)
-		if text == "" {
-			continue
-		}
-		if index, ok := seen[text]; ok {
-			if !containsString(remediations[index].Checks, check.Name) {
-				remediations[index].Checks = append(remediations[index].Checks, check.Name)
-			}
-			continue
-		}
-		seen[text] = len(remediations)
-		remediations = append(remediations, doctorRemediation{
-			Text:   text,
-			Checks: []string{check.Name},
-		})
-	}
-	return remediations
-}
-
-func doctorSetupCommand(scope string) string {
-	return fmt.Sprintf("nana setup --scope %s --force", scope)
-}
-
-func doctorRunCommand(command string) string {
-	return "Run: " + command
-}
-
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
+	return nil
 }
 
 type teamDoctorIssue struct {
@@ -275,6 +201,126 @@ func checkNodeVersion() doctorCheck {
 	return doctorCheck{Name: "Node.js", Status: "warn", Message: version}
 }
 
+func checkGithubCLI() doctorCheck {
+	path, err := exec.LookPath("gh")
+	if err != nil {
+		return doctorCheck{Name: "GitHub CLI", Status: "warn", Message: "not found - GitHub-backed Nana workflows require `gh`"}
+	}
+	output, err := exec.Command(path, "--version").CombinedOutput()
+	if err != nil {
+		return doctorCheck{Name: "GitHub CLI", Status: "warn", Message: "installed but not runnable"}
+	}
+	return doctorCheck{Name: "GitHub CLI", Status: "pass", Message: strings.TrimSpace(string(output))}
+}
+
+func checkGithubAuth() doctorCheck {
+	_, host, err := githubCLIAuthStatus(strings.TrimSpace(os.Getenv("GITHUB_API_URL")))
+	if err != nil {
+		return doctorCheck{Name: "GitHub auth", Status: "warn", Message: err.Error()}
+	}
+	if host != "" {
+		return doctorCheck{Name: "GitHub auth", Status: "pass", Message: fmt.Sprintf("authenticated for %s", host)}
+	}
+	return doctorCheck{Name: "GitHub auth", Status: "pass", Message: "authenticated"}
+}
+
+func checkGithubAutomationRepos() doctorCheck {
+	repos, err := listOnboardedGithubRepos()
+	if err != nil {
+		return doctorCheck{Name: "GitHub automation repos", Status: "warn", Message: err.Error()}
+	}
+	eligible := []string{}
+	failures := []string{}
+	for _, repoSlug := range repos {
+		settings, _ := readGithubRepoSettings(githubRepoSettingsPath(repoSlug))
+		if !githubRepoModeAllowsDevelopment(resolvedGithubRepoMode(settings)) || resolvedGithubIssuePickMode(settings) == "manual" {
+			continue
+		}
+		eligible = append(eligible, repoSlug)
+		if err := githubAutomationRepoPreflight(repoSlug, false); err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %s", repoSlug, err.Error()))
+		}
+	}
+	if len(eligible) == 0 {
+		return doctorCheck{Name: "GitHub automation repos", Status: "pass", Message: "not configured"}
+	}
+	if len(failures) > 0 {
+		sort.Strings(failures)
+		return doctorCheck{Name: "GitHub automation repos", Status: "warn", Message: strings.Join(failures, "; ")}
+	}
+	return doctorCheck{Name: "GitHub automation repos", Status: "pass", Message: fmt.Sprintf("%d repo(s) ready", len(eligible))}
+}
+
+func checkRepoGitDrift(cwd string, repoRoot string) doctorCheck {
+	root, err := resolveDoctorRepoGitRoot(cwd, repoRoot)
+	if err != nil {
+		return doctorCheck{Name: "Repo drift", Status: "pass", Message: "skipped - not in a git repo"}
+	}
+	upstream, err := githubGitOutput(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+	if err != nil {
+		return doctorCheck{Name: "Repo drift", Status: "pass", Message: "skipped - no upstream tracking branch"}
+	}
+	upstream = strings.TrimSpace(upstream)
+	parts := strings.SplitN(upstream, "/", 2)
+	if len(parts) == 2 && strings.TrimSpace(parts[0]) != "" {
+		if err := githubRunGit(root, "fetch", "--quiet", "--prune", strings.TrimSpace(parts[0])); err != nil {
+			return doctorCheck{Name: "Repo drift", Status: "warn", Message: fmt.Sprintf("fetch-failed upstream=%s: %v", upstream, err)}
+		}
+	}
+	branch, branchErr := githubGitOutput(root, "rev-parse", "--abbrev-ref", "HEAD")
+	if branchErr != nil {
+		branch = "HEAD"
+	}
+	statusOutput, err := githubGitOutput(root, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return doctorCheck{Name: "Repo drift", Status: "warn", Message: err.Error()}
+	}
+	countsOutput, err := githubGitOutput(root, "rev-list", "--left-right", "--count", "HEAD..."+upstream)
+	if err != nil {
+		return doctorCheck{Name: "Repo drift", Status: "warn", Message: err.Error()}
+	}
+	countFields := strings.Fields(strings.TrimSpace(countsOutput))
+	if len(countFields) != 2 {
+		return doctorCheck{Name: "Repo drift", Status: "warn", Message: fmt.Sprintf("unexpected divergence output: %s", strings.TrimSpace(countsOutput))}
+	}
+	ahead, err := strconv.Atoi(countFields[0])
+	if err != nil {
+		return doctorCheck{Name: "Repo drift", Status: "warn", Message: fmt.Sprintf("invalid ahead count: %s", countFields[0])}
+	}
+	behind, err := strconv.Atoi(countFields[1])
+	if err != nil {
+		return doctorCheck{Name: "Repo drift", Status: "warn", Message: fmt.Sprintf("invalid behind count: %s", countFields[1])}
+	}
+	dirty := strings.TrimSpace(statusOutput) != ""
+	branch = strings.TrimSpace(branch)
+	switch {
+	case behind > 0 && ahead > 0 && dirty:
+		return doctorCheck{Name: "Repo drift", Status: "warn", Message: fmt.Sprintf("diverged-dirty branch=%s upstream=%s ahead=%d behind=%d", branch, upstream, ahead, behind)}
+	case behind > 0 && ahead > 0:
+		return doctorCheck{Name: "Repo drift", Status: "warn", Message: fmt.Sprintf("diverged-clean branch=%s upstream=%s ahead=%d behind=%d", branch, upstream, ahead, behind)}
+	case behind > 0 && dirty:
+		return doctorCheck{Name: "Repo drift", Status: "warn", Message: fmt.Sprintf("behind-dirty branch=%s upstream=%s behind=%d", branch, upstream, behind)}
+	case behind > 0:
+		return doctorCheck{Name: "Repo drift", Status: "warn", Message: fmt.Sprintf("behind-clean branch=%s upstream=%s behind=%d", branch, upstream, behind)}
+	case ahead > 0:
+		return doctorCheck{Name: "Repo drift", Status: "pass", Message: fmt.Sprintf("ahead branch=%s upstream=%s ahead=%d", branch, upstream, ahead)}
+	default:
+		return doctorCheck{Name: "Repo drift", Status: "pass", Message: fmt.Sprintf("current branch=%s upstream=%s", branch, upstream)}
+	}
+}
+
+func resolveDoctorRepoGitRoot(cwd string, repoRoot string) (string, error) {
+	target := strings.TrimSpace(repoRoot)
+	if target == "" {
+		target = strings.TrimSpace(cwd)
+	}
+	root, err := githubGitOutput(target, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(root), nil
+}
+
 func checkExploreHarness(repoRoot string) doctorCheck {
 	override := strings.TrimSpace(os.Getenv("NANA_EXPLORE_BIN"))
 	if override != "" {
@@ -286,12 +332,7 @@ func checkExploreHarness(repoRoot string) doctorCheck {
 				return doctorCheck{Name: "Explore Harness", Status: "pass", Message: fmt.Sprintf("NANA_EXPLORE_BIN configured (%s)", override)}
 			}
 		}
-		return doctorCheck{
-			Name:        "Explore Harness",
-			Status:      "warn",
-			Message:     fmt.Sprintf("NANA_EXPLORE_BIN is set but path was not found (%s)", override),
-			Remediation: "Run: unset NANA_EXPLORE_BIN, or set NANA_EXPLORE_BIN to an existing nana-explore-harness binary",
-		}
+		return doctorCheck{Name: "Explore Harness", Status: "warn", Message: fmt.Sprintf("NANA_EXPLORE_BIN is set but path was not found (%s)", override)}
 	}
 
 	if repoRoot != "" {
@@ -307,23 +348,14 @@ func checkExploreHarness(repoRoot string) doctorCheck {
 	if _, err := exec.LookPath("go"); err == nil {
 		return doctorCheck{Name: "Explore Harness", Status: "pass", Message: "ready (go available)"}
 	}
-	return doctorCheck{
-		Name:        "Explore Harness",
-		Status:      "warn",
-		Message:     "Go harness sources are packaged, but no compatible packaged prebuilt or go toolchain was found",
-		Remediation: "Install Go, then run: go run ./cmd/nana-build build-go-cli; or set NANA_EXPLORE_BIN to an existing nana-explore-harness binary",
-	}
+	return doctorCheck{Name: "Explore Harness", Status: "warn", Message: "Go harness sources are packaged, but no compatible packaged prebuilt or go toolchain was found (install Go or set NANA_EXPLORE_BIN for nana explore)"}
 }
 
 func checkDirectory(name string, path string) doctorCheck {
-	return checkDirectoryWithRemediation(name, path, "")
-}
-
-func checkDirectoryWithRemediation(name string, path string, remediation string) doctorCheck {
 	if _, err := os.Stat(path); err == nil {
 		return doctorCheck{Name: name, Status: "pass", Message: path}
 	}
-	return doctorCheck{Name: name, Status: "warn", Message: fmt.Sprintf("%s (not created yet)", path), Remediation: remediation}
+	return doctorCheck{Name: name, Status: "warn", Message: fmt.Sprintf("%s (not created yet)", path)}
 }
 
 func checkManagedAccounts(codexHomeDir string) doctorCheck {
@@ -384,32 +416,18 @@ func checkManagedAccounts(codexHomeDir string) doctorCheck {
 }
 
 func checkConfig(configPath string) doctorCheck {
-	return checkConfigForScope(configPath, "user")
-}
-
-func checkConfigForScope(configPath string, scope string) doctorCheck {
 	content, err := os.ReadFile(configPath)
 	if err != nil {
-		return doctorCheck{Name: "Config", Status: "warn", Message: "config.toml not found", Remediation: doctorRunCommand(doctorSetupCommand(scope))}
+		return doctorCheck{Name: "Config", Status: "warn", Message: "config.toml not found"}
 	}
 	text := string(content)
 	if countTopLevelTable(text, "[tui]") > 1 {
-		return doctorCheck{
-			Name:        "Config",
-			Status:      "fail",
-			Message:     "invalid config.toml (possible duplicate TOML table such as [tui])",
-			Remediation: fmt.Sprintf("Fix duplicate TOML table(s) in %s, then run: %s", configPath, doctorSetupCommand(scope)),
-		}
+		return doctorCheck{Name: "Config", Status: "fail", Message: "invalid config.toml (possible duplicate TOML table such as [tui])"}
 	}
 	if strings.Contains(text, "[mcp_servers.nana_") || strings.Contains(strings.ToLower(text), "managed by nana setup") || strings.Contains(text, "USE_NANA_") {
 		return doctorCheck{Name: "Config", Status: "pass", Message: "config.toml has NANA entries"}
 	}
-	return doctorCheck{
-		Name:        "Config",
-		Status:      "warn",
-		Message:     "config.toml exists but no NANA entries yet (expected before first setup)",
-		Remediation: doctorRunCommand(doctorSetupCommand(scope)),
-	}
+	return doctorCheck{Name: "Config", Status: "warn", Message: "config.toml exists but no NANA entries yet (expected before first setup; run \"nana setup --force\" once)"}
 }
 
 func countTopLevelTable(content string, table string) int {
@@ -423,18 +441,9 @@ func countTopLevelTable(content string, table string) int {
 }
 
 func checkExploreRouting(configPath string) doctorCheck {
-	return checkExploreRoutingForScope(configPath, "user")
-}
-
-func checkExploreRoutingForScope(configPath string, scope string) doctorCheck {
 	envValue := strings.TrimSpace(os.Getenv("USE_NANA_EXPLORE_CMD"))
 	if envValue != "" && !exploreRoutingEnabled(envValue) {
-		return doctorCheck{
-			Name:        "Explore routing",
-			Status:      "warn",
-			Message:     "disabled by environment override",
-			Remediation: "Run: unset USE_NANA_EXPLORE_CMD, or set USE_NANA_EXPLORE_CMD=1 before launching Codex",
-		}
+		return doctorCheck{Name: "Explore routing", Status: "warn", Message: "disabled by environment override; enable with USE_NANA_EXPLORE_CMD=1 (or remove the explicit opt-out)"}
 	}
 	content, err := os.ReadFile(configPath)
 	if err != nil {
@@ -442,12 +451,7 @@ func checkExploreRoutingForScope(configPath string, scope string) doctorCheck {
 	}
 	text := string(content)
 	if strings.Contains(text, `USE_NANA_EXPLORE_CMD = "off"`) || strings.Contains(text, `USE_NANA_EXPLORE_CMD = "0"`) || strings.Contains(text, `USE_NANA_EXPLORE_CMD = "false"`) {
-		return doctorCheck{
-			Name:        "Explore routing",
-			Status:      "warn",
-			Message:     "disabled in config.toml [env]",
-			Remediation: fmt.Sprintf("Edit %s and set USE_NANA_EXPLORE_CMD = \"1\", or run: %s", configPath, doctorSetupCommand(scope)),
-		}
+		return doctorCheck{Name: "Explore routing", Status: "warn", Message: "disabled in config.toml [env]; set USE_NANA_EXPLORE_CMD = \"1\" to restore default explore-first routing"}
 	}
 	return doctorCheck{Name: "Explore routing", Status: "pass", Message: "enabled by default"}
 }
@@ -458,33 +462,25 @@ func exploreRoutingEnabled(value string) bool {
 }
 
 func checkPrompts(dir string) doctorCheck {
-	return checkPromptsForScope(dir, "user")
-}
-
-func checkPromptsForScope(dir string, scope string) doctorCheck {
 	count := countFilesWithExt(dir, ".md")
 	if count == 0 {
-		return doctorCheck{Name: "Prompts", Status: "warn", Message: "prompts directory not found", Remediation: doctorRunCommand(doctorSetupCommand(scope))}
+		return doctorCheck{Name: "Prompts", Status: "warn", Message: "prompts directory not found"}
 	}
 	if count >= 25 {
 		return doctorCheck{Name: "Prompts", Status: "pass", Message: fmt.Sprintf("%d agent prompts installed", count)}
 	}
-	return doctorCheck{Name: "Prompts", Status: "warn", Message: fmt.Sprintf("%d prompts (expected >= 25)", count), Remediation: doctorRunCommand(doctorSetupCommand(scope))}
+	return doctorCheck{Name: "Prompts", Status: "warn", Message: fmt.Sprintf("%d prompts (expected >= 25)", count)}
 }
 
 func checkSkills(dir string) doctorCheck {
-	return checkSkillsForScope(dir, "user")
-}
-
-func checkSkillsForScope(dir string, scope string) doctorCheck {
 	count := countSkillDirs(dir)
 	if count == 0 {
-		return doctorCheck{Name: "Skills", Status: "warn", Message: "skills directory not found", Remediation: doctorRunCommand(doctorSetupCommand(scope))}
+		return doctorCheck{Name: "Skills", Status: "warn", Message: "skills directory not found"}
 	}
 	if count >= 30 {
 		return doctorCheck{Name: "Skills", Status: "pass", Message: fmt.Sprintf("%d skills installed", count)}
 	}
-	return doctorCheck{Name: "Skills", Status: "warn", Message: fmt.Sprintf("%d skills (expected >= 30)", count), Remediation: doctorRunCommand(doctorSetupCommand(scope))}
+	return doctorCheck{Name: "Skills", Status: "warn", Message: fmt.Sprintf("%d skills (expected >= 30)", count)}
 }
 
 func countFilesWithExt(dir string, ext string) int {
@@ -544,30 +540,13 @@ func checkLegacySkillRootOverlap() doctorCheck {
 		}
 	}
 	if overlap == 0 {
-		return doctorCheck{
-			Name:        "Legacy skill roots",
-			Status:      "warn",
-			Message:     fmt.Sprintf("legacy ~/.agents/skills still exists (%d skills) alongside canonical %s", len(legacySkills), canonicalDir),
-			Remediation: legacySkillRootRemediation(),
-		}
+		return doctorCheck{Name: "Legacy skill roots", Status: "warn", Message: fmt.Sprintf("legacy ~/.agents/skills still exists (%d skills) alongside canonical %s; remove or archive it if Codex shows duplicate entries", len(legacySkills), canonicalDir)}
 	}
 	extra := ""
 	if mismatch > 0 {
 		extra = fmt.Sprintf("; %d differ in SKILL.md content", mismatch)
 	}
-	return doctorCheck{
-		Name:        "Legacy skill roots",
-		Status:      "warn",
-		Message:     fmt.Sprintf("%d overlapping skill names between %s and %s%s; Codex Enable/Disable Skills may show duplicates", overlap, canonicalDir, legacyDir, extra),
-		Remediation: legacySkillRootRemediation(),
-	}
-}
-
-func legacySkillRootRemediation() string {
-	if runtime.GOOS == "windows" {
-		return fmt.Sprintf("Review %s for custom skills, then archive or remove it to stop duplicate skill entries", filepath.Join(homeDir(), ".agents", "skills"))
-	}
-	return "Review ~/.agents/skills for custom skills, then archive it: mv ~/.agents/skills ~/.agents/skills.$(date +%Y%m%d%H%M%S).bak"
+	return doctorCheck{Name: "Legacy skill roots", Status: "warn", Message: fmt.Sprintf("%d overlapping skill names between %s and %s%s; Codex Enable/Disable Skills may show duplicates until ~/.agents/skills is cleaned up", overlap, canonicalDir, legacyDir, extra)}
 }
 
 func readSkillHashes(root string) map[string]string {
@@ -593,67 +572,21 @@ func checkAgentsMD(scope string, cwd string, codexHomeDir string) doctorCheck {
 	if scope == "user" {
 		path := filepath.Join(codexHomeDir, "AGENTS.md")
 		if _, err := os.Stat(path); err == nil {
-			if !agentsMDLooksCurrent(path) {
-				return doctorCheck{
-					Name:        "AGENTS.md",
-					Status:      "warn",
-					Message:     fmt.Sprintf("found in %s but missing current NANA guidance markers", path),
-					Remediation: doctorRunCommand(doctorSetupCommand(scope)),
-				}
-			}
 			return doctorCheck{Name: "AGENTS.md", Status: "pass", Message: fmt.Sprintf("found in %s", path)}
 		}
-		return doctorCheck{
-			Name:        "AGENTS.md",
-			Status:      "warn",
-			Message:     fmt.Sprintf("not found in %s", path),
-			Remediation: doctorRunCommand(doctorSetupCommand(scope)),
-		}
+		return doctorCheck{Name: "AGENTS.md", Status: "warn", Message: fmt.Sprintf("not found in %s (run nana setup --scope user)", path)}
 	}
 	path := filepath.Join(cwd, "AGENTS.md")
 	if _, err := os.Stat(path); err == nil {
-		if !agentsMDLooksCurrent(path) {
-			return doctorCheck{
-				Name:        "AGENTS.md",
-				Status:      "warn",
-				Message:     "found in project root but missing current NANA guidance markers",
-				Remediation: "Run: nana agents-init . --force (or nana setup --scope project --force for full project install)",
-			}
-		}
 		return doctorCheck{Name: "AGENTS.md", Status: "pass", Message: "found in project root"}
 	}
-	return doctorCheck{
-		Name:        "AGENTS.md",
-		Status:      "warn",
-		Message:     "not found in project root",
-		Remediation: "Run: nana agents-init . (or nana setup --scope project --force for full project install)",
-	}
-}
-
-func agentsMDLooksCurrent(path string) bool {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	text := string(content)
-	if strings.Contains(text, "<!-- nana:generated:agents-md -->") || strings.Contains(text, managedMarker) {
-		return true
-	}
-	return strings.Contains(text, "nana - Intelligent Multi-Agent Orchestration") &&
-		strings.Contains(text, "<operating_principles>") &&
-		strings.Contains(text, "</operating_principles>") &&
-		strings.Contains(text, "<!-- NANA:GUIDANCE:OPERATING:START -->") &&
-		strings.Contains(text, "<!-- NANA:GUIDANCE:OPERATING:END -->")
+	return doctorCheck{Name: "AGENTS.md", Status: "warn", Message: "not found in project root (run nana agents-init . or nana setup --scope project)"}
 }
 
 func checkMcpServers(configPath string) doctorCheck {
-	return checkMcpServersForScope(configPath, "user")
-}
-
-func checkMcpServersForScope(configPath string, scope string) doctorCheck {
 	content, err := os.ReadFile(configPath)
 	if err != nil {
-		return doctorCheck{Name: "MCP Servers", Status: "warn", Message: "config.toml not found", Remediation: doctorRunCommand(doctorSetupCommand(scope))}
+		return doctorCheck{Name: "MCP Servers", Status: "warn", Message: "config.toml not found"}
 	}
 	text := string(content)
 	mcpCount := strings.Count(text, "[mcp_servers.")
@@ -661,7 +594,7 @@ func checkMcpServersForScope(configPath string, scope string) doctorCheck {
 		if strings.Contains(text, "USE_NANA_") || strings.Contains(text, "[agents]") {
 			return doctorCheck{Name: "MCP Servers", Status: "pass", Message: "no external MCP servers configured (current setup)"}
 		}
-		return doctorCheck{Name: "MCP Servers", Status: "warn", Message: "no MCP servers configured", Remediation: doctorRunCommand(doctorSetupCommand(scope))}
+		return doctorCheck{Name: "MCP Servers", Status: "warn", Message: "no MCP servers configured"}
 	}
 	if strings.Contains(text, "nana_state") || strings.Contains(text, "nana_memory") {
 		return doctorCheck{Name: "MCP Servers", Status: "pass", Message: fmt.Sprintf("%d servers configured (NANA present)", mcpCount)}
@@ -673,23 +606,13 @@ func checkInvestigateConfig(cwd string) doctorCheck {
 	configPath := InvestigateCodexConfigPath(cwd)
 	content, err := os.ReadFile(configPath)
 	if err != nil {
-		return doctorCheck{
-			Name:        "Investigate config",
-			Status:      "warn",
-			Message:     fmt.Sprintf("config.toml not found at %s", configPath),
-			Remediation: "Run: nana investigate onboard",
-		}
+		return doctorCheck{Name: "Investigate config", Status: "warn", Message: fmt.Sprintf("config.toml not found at %s (run `nana investigate onboard`)", configPath)}
 	}
 	text := string(content)
 	if strings.Contains(text, investigateConfigBlockHeader) {
 		return doctorCheck{Name: "Investigate config", Status: "pass", Message: fmt.Sprintf("config present at %s", configPath)}
 	}
-	return doctorCheck{
-		Name:        "Investigate config",
-		Status:      "warn",
-		Message:     fmt.Sprintf("config present at %s but missing the investigate managed block", configPath),
-		Remediation: "Run: nana investigate onboard to add the managed investigate block while preserving existing config",
-	}
+	return doctorCheck{Name: "Investigate config", Status: "warn", Message: fmt.Sprintf("config present at %s but missing the investigate managed block", configPath)}
 }
 
 func checkInvestigateMCPStatus(cwd string) doctorCheck {
@@ -697,19 +620,9 @@ func checkInvestigateMCPStatus(cwd string) doctorCheck {
 	var status investigateMCPStatus
 	if err := readGithubJSON(statusPath, &status); err != nil {
 		if os.IsNotExist(err) {
-			return doctorCheck{
-				Name:        "Investigate MCP status",
-				Status:      "warn",
-				Message:     fmt.Sprintf("no cached investigate MCP status at %s", statusPath),
-				Remediation: "Run: nana investigate doctor",
-			}
+			return doctorCheck{Name: "Investigate MCP status", Status: "warn", Message: fmt.Sprintf("no cached investigate MCP status at %s (run `nana investigate doctor`)", statusPath)}
 		}
-		return doctorCheck{
-			Name:        "Investigate MCP status",
-			Status:      "warn",
-			Message:     fmt.Sprintf("failed to read cached investigate MCP status: %v", err),
-			Remediation: fmt.Sprintf("Run: nana investigate doctor to regenerate %s", statusPath),
-		}
+		return doctorCheck{Name: "Investigate MCP status", Status: "warn", Message: fmt.Sprintf("failed to read cached investigate MCP status: %v", err)}
 	}
 	if len(status.ConfiguredServers) == 0 {
 		return doctorCheck{Name: "Investigate MCP status", Status: "pass", Message: "no MCPs configured for investigate (local-source-only mode)"}
@@ -717,12 +630,7 @@ func checkInvestigateMCPStatus(cwd string) doctorCheck {
 	if status.AllOK {
 		return doctorCheck{Name: "Investigate MCP status", Status: "pass", Message: fmt.Sprintf("%d configured MCP(s) healthy from last probe", len(status.ConfiguredServers))}
 	}
-	return doctorCheck{
-		Name:        "Investigate MCP status",
-		Status:      "warn",
-		Message:     "one or more configured investigate MCPs failed last probe",
-		Remediation: fmt.Sprintf("Fix MCP entries in %s, then run: nana investigate doctor", InvestigateCodexConfigPath(cwd)),
-	}
+	return doctorCheck{Name: "Investigate MCP status", Status: "warn", Message: fmt.Sprintf("one or more configured investigate MCPs failed last probe (run `nana investigate doctor`)")}
 }
 
 func homeDir() string {

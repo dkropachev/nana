@@ -199,22 +199,16 @@ func githubFetchPullRequestTargetContext(target parsedGithubTarget, apiBaseURL s
 }
 
 func generateGithubPullReviewFindings(manifest githubPullReviewManifest, repoPath string) ([]githubPullReviewFinding, error) {
-	changedFilesOutput, err := githubGitOutput(repoPath, "diff", "--name-only", manifest.PRBaseSHA, manifest.PRHeadSHA)
+	context, err := buildReviewPromptContext(repoPath, []string{manifest.PRBaseSHA, manifest.PRHeadSHA}, reviewPromptContextOptions{
+		ChangedFilesLimit: reviewPromptChangedFilesLimit,
+		MaxHunksPerFile:   reviewPromptMaxHunksPerFile,
+		MaxLinesPerFile:   reviewPromptMaxLinesPerFile,
+		MaxCharsPerFile:   reviewPromptMaxCharsPerFile,
+	})
 	if err != nil {
 		return nil, err
 	}
-	changedFiles := []string{}
-	for _, line := range strings.Split(changedFilesOutput, "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			changedFiles = append(changedFiles, line)
-		}
-	}
-	diffOutput, err := githubGitOutput(repoPath, "diff", manifest.PRBaseSHA, manifest.PRHeadSHA)
-	if err != nil {
-		return nil, err
-	}
-	prompt := buildGithubPullReviewPrompt(manifest, changedFiles, diffOutput)
+	prompt := buildGithubPullReviewPrompt(manifest, context)
 	output, err := runGithubReviewCodex(repoPath, prompt)
 	if err != nil {
 		return nil, err
@@ -226,23 +220,36 @@ func generateGithubPullReviewFindings(manifest githubPullReviewManifest, repoPat
 	return findings, nil
 }
 
-func buildGithubPullReviewPrompt(manifest githubPullReviewManifest, changedFiles []string, diff string) string {
-	return strings.Join([]string{
+func buildGithubPullReviewPrompt(manifest githubPullReviewManifest, context reviewPromptContext) string {
+	prompt := strings.Join([]string{
 		"Review this pull request and return JSON only.",
 		`Schema: {"findings":[{"title":"...","severity":"low|medium|high|critical","path":"...","line":123,"summary":"...","detail":"...","fix":"...","rationale":"..."}]}`,
 		"If there are no actionable issues, return {\"findings\":[]}.",
 		fmt.Sprintf("Repo: %s", manifest.RepoSlug),
 		fmt.Sprintf("PR: #%d", manifest.TargetNumber),
-		fmt.Sprintf("Changed files: %s", strings.Join(changedFiles, ", ")),
-		"Diff:",
-		diff,
+		fmt.Sprintf("Changed files: %s", context.ChangedFilesText),
 	}, "\n\n")
+	if context.Shortstat != "" {
+		prompt += "\n\nShortstat:\n" + context.Shortstat
+	}
+	prompt += "\n\nDiff summary:\n" + context.DiffSummary
+	return capPromptChars(prompt, reviewPromptGithubCharLimit)
 }
 
 func runGithubReviewCodex(repoPath string, prompt string) (string, error) {
-	cmd := exec.Command("codex", "exec", "-C", repoPath, prompt)
+	args := []string{"exec", "-C", repoPath}
+	useStdin := promptTransportForSize(prompt, structuredPromptStdinThreshold) == codexPromptTransportStdin
+	if useStdin {
+		args = append(args, "-")
+	} else {
+		args = append(args, prompt)
+	}
+	cmd := exec.Command("codex", args...)
 	cmd.Dir = repoPath
 	cmd.Env = buildGithubCodexEnv(NotifyTempContract{}, "", strings.TrimSpace(os.Getenv("GITHUB_API_URL")))
+	if useStdin {
+		cmd.Stdin = strings.NewReader(prompt)
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout

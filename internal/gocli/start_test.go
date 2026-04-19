@@ -5,100 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
-
-func TestStartHelpShowsExplicitModesAndExamples(t *testing.T) {
-	output, err := captureStdout(t, func() error {
-		return Start(".", []string{"help"})
-	})
-	if err != nil {
-		t.Fatalf("Start(help): %v", err)
-	}
-	for _, needle := range []string{
-		"nana start - Run repo automation or scout startup",
-		"Automation mode (onboarded repos):",
-		"nana start --repo acme/widget --once",
-		"Scout mode (startup scouts):",
-		"nana start --repo . --focus ux --dry-run",
-		"prints [start] Mode: automation or [start] Mode: scout",
-	} {
-		if !strings.Contains(output, needle) {
-			t.Fatalf("expected start help to contain %q, got %q", needle, output)
-		}
-	}
-}
-
-func TestStartPrintsAutomationModeBannerBeforeRunning(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	if err := writeGithubJSON(githubRepoSettingsPath("acme/enabled"), githubRepoSettings{Version: 6, RepoMode: "fork", IssuePickMode: "label", PRForwardMode: "auto", ForkIssuesMode: "labeled", ImplementMode: "labeled", PublishTarget: "fork"}); err != nil {
-		t.Fatalf("write enabled settings: %v", err)
-	}
-	oldRun := startRunRepoCycle
-	runCount := 0
-	startRunRepoCycle = func(cwd string, repoSlug string, options startOptions) error {
-		runCount++
-		return nil
-	}
-	defer func() {
-		startRunRepoCycle = oldRun
-	}()
-
-	output, err := captureStdout(t, func() error {
-		return Start(".", []string{"--repo", "acme/enabled", "--once", "--no-ui"})
-	})
-	if err != nil {
-		t.Fatalf("Start: %v\n%s", err, output)
-	}
-	if runCount != 1 {
-		t.Fatalf("expected one repo cycle, got %d", runCount)
-	}
-	if !strings.HasPrefix(output, startModeBannerAutomation) {
-		t.Fatalf("expected automation mode banner before work, got %q", output)
-	}
-}
-
-func TestStartPrintsScoutModeBannerAndAllowsNoUI(t *testing.T) {
-	repo := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
-		t.Fatalf("mkdir policy dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, ".nana", "improvement-policy.json"), []byte(`{"version":1}`), 0o644); err != nil {
-		t.Fatalf("write policy: %v", err)
-	}
-	oldScout := startRunScoutStart
-	runCount := 0
-	startRunScoutStart = func(cwd string, options ImproveOptions) error {
-		runCount++
-		if cwd != repo {
-			t.Fatalf("unexpected cwd: %s", cwd)
-		}
-		return nil
-	}
-	defer func() {
-		startRunScoutStart = oldScout
-	}()
-
-	output, err := captureStdout(t, func() error {
-		return Start(repo, []string{"--once", "--no-ui"})
-	})
-	if err != nil {
-		t.Fatalf("Start: %v\n%s", err, output)
-	}
-	if runCount != 1 {
-		t.Fatalf("expected one scout startup cycle, got %d", runCount)
-	}
-	if !strings.HasPrefix(output, startModeBannerScout) {
-		t.Fatalf("expected scout mode banner before work, got %q", output)
-	}
-	if strings.Contains(output, "[start-ui]") {
-		t.Fatalf("expected --no-ui to suppress UI in scout mode, got %q", output)
-	}
-}
 
 func TestStartRunsEnabledOnboardedReposAndSkipsManual(t *testing.T) {
 	home := t.TempDir()
@@ -109,18 +21,18 @@ func TestStartRunsEnabledOnboardedReposAndSkipsManual(t *testing.T) {
 	if err := writeGithubJSON(githubRepoSettingsPath("acme/manual"), githubRepoSettings{Version: 6, RepoMode: "local", IssuePickMode: "manual", PRForwardMode: "approve"}); err != nil {
 		t.Fatalf("write manual settings: %v", err)
 	}
-	oldRun := startRunRepoCycle
-	type repoRun struct {
-		repoSlug string
-		options  startOptions
+	oldRun := startRunRepoCyclesBatch
+	type batchRun struct {
+		repos   []string
+		options startOptions
 	}
-	runs := []repoRun{}
-	startRunRepoCycle = func(cwd string, repoSlug string, options startOptions) error {
-		runs = append(runs, repoRun{repoSlug: repoSlug, options: options})
+	runs := []batchRun{}
+	startRunRepoCyclesBatch = func(cwd string, repos []string, options startOptions) error {
+		runs = append(runs, batchRun{repos: append([]string{}, repos...), options: options})
 		return nil
 	}
 	defer func() {
-		startRunRepoCycle = oldRun
+		startRunRepoCyclesBatch = oldRun
 	}()
 
 	output, err := captureStdout(t, func() error {
@@ -129,14 +41,197 @@ func TestStartRunsEnabledOnboardedReposAndSkipsManual(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v\n%s", err, output)
 	}
-	if len(runs) != 1 || runs[0].repoSlug != "acme/enabled" {
+	if len(runs) != 1 || !reflect.DeepEqual(runs[0].repos, []string{"acme/enabled"}) {
 		t.Fatalf("expected one enabled run, got %#v", runs)
 	}
-	if runs[0].options.RepoSlug != "" || runs[0].options.Parallel != 2 || runs[0].options.PerRepoWorkers != startWorkDefaultParallel || runs[0].options.MaxOpenPR != 7 || !reflect.DeepEqual(runs[0].options.CodexArgs, []string{"--model", "gpt-5.4"}) {
+	if runs[0].options.RepoSlug != "" || runs[0].options.Parallel != 2 || runs[0].options.PerRepoWorkers != 2 || runs[0].options.MaxOpenPR != 7 || !reflect.DeepEqual(runs[0].options.CodexArgs, []string{"--model", "gpt-5.4"}) {
 		t.Fatalf("unexpected run options: %#v", runs[0])
 	}
 	if strings.Contains(output, "acme/manual") {
 		t.Fatalf("manual repo should not be selected, output=%q", output)
+	}
+}
+
+func TestStartHelpShowsExplicitModes(t *testing.T) {
+	for _, needle := range []string{
+		"nana start - Run repo automation or scout startup",
+		"Automation mode:",
+		"Scout mode:",
+		"Mode selection:",
+		"automation mode runs onboarded GitHub repo automation",
+		"blocks repo automation early when gh auth or managed-source SSH origin preflight fails",
+		"scout mode runs policy-backed improvement/enhancement/ui scout startup",
+		"nana start --once --repo owner/repo",
+		"nana start --repo . --from-file proposals.json --once",
+	} {
+		if !strings.Contains(StartHelp, needle) {
+			t.Fatalf("expected start help to contain %q:\n%s", needle, StartHelp)
+		}
+	}
+}
+
+func TestRunStartRepoCyclesSharedWorkersPersistsAutomationPreflightFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoSlug := "acme/widget"
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{
+		Version:       6,
+		RepoMode:      "repo",
+		IssuePickMode: "auto",
+		PRForwardMode: "auto",
+		PublishTarget: "repo",
+	}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	oldPreflight := githubAutomationRepoPreflight
+	githubAutomationRepoPreflight = func(repo string, repairOrigin bool) error {
+		if repo != repoSlug {
+			t.Fatalf("unexpected repo slug: %s", repo)
+		}
+		if !repairOrigin {
+			t.Fatalf("expected start preflight to repair origin")
+		}
+		return fmt.Errorf("GitHub auth required. Install `gh` and run `gh auth login`.")
+	}
+	defer func() {
+		githubAutomationRepoPreflight = oldPreflight
+	}()
+
+	output, err := captureStdout(t, func() error {
+		return runStartRepoCyclesSharedWorkers(".", []string{repoSlug}, startOptions{Parallel: 1})
+	})
+	if err != nil {
+		t.Fatalf("runStartRepoCyclesSharedWorkers: %v\n%s", err, output)
+	}
+	state, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("readStartWorkState: %v", err)
+	}
+	task, ok := state.ServiceTasks[startRepoPreflightTaskID()]
+	if !ok {
+		t.Fatalf("expected preflight task in state, got %+v", state.ServiceTasks)
+	}
+	if task.Status != startWorkServiceTaskFailed || !strings.Contains(task.LastError, "gh auth login") {
+		t.Fatalf("unexpected preflight task: %+v", task)
+	}
+	if !strings.Contains(output, "automation preflight blocked") {
+		t.Fatalf("expected blocked preflight output, got %q", output)
+	}
+}
+
+func TestStartPrintsAutomationModeBannerBeforeRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := writeGithubJSON(githubRepoSettingsPath("acme/enabled"), githubRepoSettings{Version: 6, RepoMode: "fork", IssuePickMode: "auto", PRForwardMode: "approve", ForkIssuesMode: "auto", ImplementMode: "auto", PublishTarget: "fork"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	oldRun := startRunRepoCyclesBatch
+	startRunRepoCyclesBatch = func(cwd string, repos []string, options startOptions) error { return nil }
+	defer func() { startRunRepoCyclesBatch = oldRun }()
+
+	output, err := captureStdout(t, func() error {
+		return Start(".", []string{"--once", "--no-ui"})
+	})
+	if err != nil {
+		t.Fatalf("Start: %v\n%s", err, output)
+	}
+	banner := "[start] Mode: automation (onboarded repo automation)."
+	selected := "[start] Repos selected: acme/enabled"
+	if !strings.Contains(output, banner) {
+		t.Fatalf("expected automation mode banner, got %q", output)
+	}
+	selectedIndex := strings.Index(output, selected)
+	if selectedIndex < 0 {
+		t.Fatalf("expected repo execution output %q, got %q", selected, output)
+	}
+	if strings.Index(output, banner) > selectedIndex {
+		t.Fatalf("expected mode banner before repo execution output, got %q", output)
+	}
+}
+
+func TestStartPrintsScoutModeBannerBeforeRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir policy dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".nana", "improvement-policy.json"), []byte(`{"version":1}`), 0o644); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	oldScout := startRunScoutStart
+	startRunScoutStart = func(cwd string, options ImproveOptions) error {
+		fmt.Fprintln(os.Stdout, "[test] scout execution started")
+		return nil
+	}
+	defer func() { startRunScoutStart = oldScout }()
+
+	output, err := captureStdout(t, func() error {
+		return Start(repo, []string{"--once", "--from-file", "proposals.json"})
+	})
+	if err != nil {
+		t.Fatalf("Start: %v\n%s", err, output)
+	}
+	banner := "[start] Mode: scout (policy-backed scout startup)."
+	runLine := "[test] scout execution started"
+	if !strings.Contains(output, banner) {
+		t.Fatalf("expected scout mode banner, got %q", output)
+	}
+	runIndex := strings.Index(output, runLine)
+	if runIndex < 0 {
+		t.Fatalf("expected scout execution output %q, got %q", runLine, output)
+	}
+	if strings.Index(output, banner) > runIndex {
+		t.Fatalf("expected mode banner before scout execution output, got %q", output)
+	}
+}
+
+func TestStartDoesNotAutoSelectScoutModeFromCwdPolicies(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir policy dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".nana", "improvement-policy.json"), []byte(`{"version":1}`), 0o644); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	if err := writeGithubJSON(githubRepoSettingsPath("acme/enabled"), githubRepoSettings{Version: 6, RepoMode: "fork", IssuePickMode: "auto", PRForwardMode: "approve", ForkIssuesMode: "auto", ImplementMode: "auto", PublishTarget: "fork"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	oldRun := startRunRepoCyclesBatch
+	oldScout := startRunScoutStart
+	startRunRepoCyclesBatch = func(cwd string, repos []string, options startOptions) error {
+		for _, repoSlug := range repos {
+			fmt.Fprintf(os.Stdout, "[test] repo automation %s\n", repoSlug)
+		}
+		return nil
+	}
+	startRunScoutStart = func(cwd string, options ImproveOptions) error {
+		fmt.Fprintln(os.Stdout, "[test] scout execution started")
+		return nil
+	}
+	defer func() {
+		startRunRepoCyclesBatch = oldRun
+		startRunScoutStart = oldScout
+	}()
+
+	output, err := captureStdout(t, func() error {
+		return Start(repo, []string{"--once", "--no-ui"})
+	})
+	if err != nil {
+		t.Fatalf("Start: %v\n%s", err, output)
+	}
+	if strings.Contains(output, "[start] Mode: scout") || strings.Contains(output, "[test] scout execution started") {
+		t.Fatalf("expected bare start in cwd repo to stay in automation mode, got %q", output)
+	}
+	if !strings.Contains(output, "[start] Mode: automation (onboarded repo automation).") {
+		t.Fatalf("expected automation mode banner, got %q", output)
+	}
+	if !strings.Contains(output, "[test] repo automation acme/enabled") {
+		t.Fatalf("expected onboarded repo automation to run, got %q", output)
 	}
 }
 
@@ -154,17 +249,19 @@ func TestStartRunsScoutsBetweenIssuePickupPasses(t *testing.T) {
 		t.Fatalf("write policy: %v", err)
 	}
 
-	oldRun := startRunRepoCycle
+	oldRun := startRunRepoCyclesBatch
 	events := []string{}
-	startRunRepoCycle = func(cwd string, repoSlug string, options startOptions) error {
-		events = append(events, "repo:"+repoSlug)
-		if repoSlug != "acme/cycled" || options.Parallel != startDefaultGlobalParallel || options.PerRepoWorkers != startWorkDefaultParallel {
-			t.Fatalf("unexpected repo cycle options: repo=%s options=%#v", repoSlug, options)
+	startRunRepoCyclesBatch = func(cwd string, repos []string, options startOptions) error {
+		for _, repoSlug := range repos {
+			events = append(events, "repo:"+repoSlug)
+		}
+		if !reflect.DeepEqual(repos, []string{"acme/cycled"}) || options.Parallel != startDefaultGlobalParallel || options.PerRepoWorkers != startDefaultGlobalParallel {
+			t.Fatalf("unexpected repo cycle options: repos=%#v options=%#v", repos, options)
 		}
 		return nil
 	}
 	defer func() {
-		startRunRepoCycle = oldRun
+		startRunRepoCyclesBatch = oldRun
 	}()
 
 	output, err := captureStdout(t, func() error {
@@ -185,14 +282,14 @@ func TestStartCyclesRepeatRepoAutomationCycle(t *testing.T) {
 	if err := writeGithubJSON(githubRepoSettingsPath("acme/repeat"), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve", ForkIssuesMode: "auto", ImplementMode: "auto", PublishTarget: "repo"}); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
-	oldRun := startRunRepoCycle
+	oldRun := startRunRepoCyclesBatch
 	runCount := 0
-	startRunRepoCycle = func(cwd string, repoSlug string, options startOptions) error {
+	startRunRepoCyclesBatch = func(cwd string, repos []string, options startOptions) error {
 		runCount++
 		return nil
 	}
 	defer func() {
-		startRunRepoCycle = oldRun
+		startRunRepoCyclesBatch = oldRun
 	}()
 
 	output, err := captureStdout(t, func() error {
@@ -209,55 +306,113 @@ func TestStartCyclesRepeatRepoAutomationCycle(t *testing.T) {
 	}
 }
 
-func TestStartLimitsCrossRepoConcurrency(t *testing.T) {
+func TestRunStartRepoCyclesSharedWorkersLimitsTotalConcurrency(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	for _, repoSlug := range []string{"acme/one", "acme/two", "acme/three"} {
 		if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve", ForkIssuesMode: "auto", ImplementMode: "auto", PublishTarget: "repo"}); err != nil {
 			t.Fatalf("write settings for %s: %v", repoSlug, err)
 		}
+		if err := os.MkdirAll(githubManagedPaths(repoSlug).SourcePath, 0o755); err != nil {
+			t.Fatalf("mkdir source path for %s: %v", repoSlug, err)
+		}
 	}
-	oldRun := startRunRepoCycle
+	oldSync := startSyncRepoState
+	oldLaunch := startWorkRunGithubWork
+	oldReconcile := startRunIssueReconcile
+	defer func() {
+		startSyncRepoState = oldSync
+		startWorkRunGithubWork = oldLaunch
+		startRunIssueReconcile = oldReconcile
+	}()
+
+	stateFor := func(repoSlug string, issueNumber int) *startWorkState {
+		now := time.Now().UTC().Format(time.RFC3339)
+		return &startWorkState{
+			Version:    startWorkStateVersion,
+			SourceRepo: repoSlug,
+			ForkRepo:   "me/" + strings.TrimPrefix(repoSlug, "acme/"),
+			UpdatedAt:  now,
+			Issues: map[string]startWorkIssueState{
+				fmt.Sprintf("%d", issueNumber): {
+					SourceNumber:      issueNumber,
+					ForkNumber:        issueNumber + 100,
+					SourceURL:         fmt.Sprintf("https://github.com/%s/issues/%d", repoSlug, issueNumber),
+					ForkURL:           fmt.Sprintf("https://github.com/me/%s/issues/%d", strings.TrimPrefix(repoSlug, "acme/"), issueNumber+100),
+					State:             "open",
+					Status:            startWorkStatusQueued,
+					Labels:            []string{"nana"},
+					SourceFingerprint: fmt.Sprintf("fp-%s-%d", repoSlug, issueNumber),
+					Priority:          2,
+					PrioritySource:    "manual_label",
+					UpdatedAt:         now,
+				},
+			},
+			ServiceTasks: map[string]startWorkServiceTask{},
+			PlannedItems: map[string]startWorkPlannedItem{},
+		}
+	}
+	states := map[string]*startWorkState{
+		"acme/one":   stateFor("acme/one", 1),
+		"acme/two":   stateFor("acme/two", 2),
+		"acme/three": stateFor("acme/three", 3),
+	}
+	startSyncRepoState = func(options startWorkOptions) (startWorkOptions, *startWorkState, int, bool, error) {
+		state := *states[options.RepoSlug]
+		state.Issues = mapsCloneStartWorkIssues(states[options.RepoSlug].Issues)
+		state.ServiceTasks = mapsCloneStartWorkServiceTasks(states[options.RepoSlug].ServiceTasks)
+		state.PlannedItems = mapsCloneStartWorkPlannedItems(states[options.RepoSlug].PlannedItems)
+		return options, &state, 0, false, nil
+	}
+	oldPreflight := githubAutomationRepoPreflight
+	githubAutomationRepoPreflight = func(repoSlug string, repairOrigin bool) error { return nil }
+	defer func() {
+		githubAutomationRepoPreflight = oldPreflight
+	}()
 	gate := make(chan struct{})
 	entered := make(chan string, 3)
 	var mu sync.Mutex
 	current := 0
 	maxSeen := 0
-	startRunRepoCycle = func(cwd string, repoSlug string, options startOptions) error {
+	startWorkRunGithubWork = func(issueURL string, publishTarget string, codexArgs []string) (startWorkLaunchResult, error) {
 		mu.Lock()
 		current++
 		if current > maxSeen {
 			maxSeen = current
 		}
 		mu.Unlock()
-		entered <- repoSlug
+		entered <- issueURL
 		<-gate
 		mu.Lock()
 		current--
 		mu.Unlock()
-		return nil
+		return startWorkLaunchResult{RunID: issueURL}, nil
 	}
-	defer func() {
-		startRunRepoCycle = oldRun
-	}()
+	startRunIssueReconcile = func(repoSlug string, publishTarget string, issue startWorkIssueState) (startWorkReconcileResult, error) {
+		return startWorkReconcileResult{Status: startWorkStatusCompleted, RunID: issue.SourceURL}, nil
+	}
 
 	done := make(chan error, 1)
 	go func() {
-		done <- Start(".", []string{"--once", "--parallel", "2"})
+		done <- runStartRepoCyclesSharedWorkers(".", []string{"acme/one", "acme/two", "acme/three"}, startOptions{
+			Parallel:       2,
+			PerRepoWorkers: 2,
+			MaxOpenPR:      startWorkDefaultOpenPRCap,
+		})
 	}()
 
 	seen := map[string]bool{}
 	for len(seen) < 2 {
 		select {
-		case repoSlug := <-entered:
-			seen[repoSlug] = true
+		case issueURL := <-entered:
+			seen[issueURL] = true
 		case <-time.After(2 * time.Second):
-			t.Fatal("timed out waiting for active repos")
+			t.Fatal("timed out waiting for active tasks")
 		}
 	}
 	select {
-	case repoSlug := <-entered:
-		t.Fatalf("expected third repo to wait for a global slot, got %s", repoSlug)
+	case issueURL := <-entered:
+		t.Fatalf("expected third task to wait for a shared worker slot, got %s", issueURL)
 	case <-time.After(100 * time.Millisecond):
 	}
 	close(gate)
@@ -270,6 +425,7 @@ func TestStartLimitsCrossRepoConcurrency(t *testing.T) {
 }
 
 func TestStartBareLocalScoutPoliciesLoopsForeverUntilStopped(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	repo := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(repo, ".nana"), 0o755); err != nil {
 		t.Fatalf("mkdir policy dir: %v", err)
@@ -429,9 +585,9 @@ func TestStartLaunchesUIByDefault(t *testing.T) {
 	if err := writeGithubJSON(githubRepoSettingsPath("acme/enabled"), githubRepoSettings{Version: 6, RepoMode: "fork", IssuePickMode: "auto", PRForwardMode: "approve", ForkIssuesMode: "auto", ImplementMode: "auto", PublishTarget: "fork"}); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
-	oldRun := startRunRepoCycle
-	startRunRepoCycle = func(cwd string, repoSlug string, options startOptions) error { return nil }
-	defer func() { startRunRepoCycle = oldRun }()
+	oldRun := startRunRepoCyclesBatch
+	startRunRepoCyclesBatch = func(cwd string, repos []string, options startOptions) error { return nil }
+	defer func() { startRunRepoCyclesBatch = oldRun }()
 
 	output, err := captureStdout(t, func() error {
 		return Start(".", []string{"--once"})
@@ -439,7 +595,7 @@ func TestStartLaunchesUIByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v\n%s", err, output)
 	}
-	if !strings.Contains(output, "[start-ui] API: http://127.0.0.1:") || !strings.Contains(output, "[start-ui] Web: http://127.0.0.1:") {
+	if !strings.Contains(output, "[start-ui] API: http://0.0.0.0:") || !strings.Contains(output, "[start-ui] Web: http://0.0.0.0:") {
 		t.Fatalf("expected UI URLs in output, got %q", output)
 	}
 	var runtime startUIRuntimeState
@@ -457,9 +613,9 @@ func TestStartNoUISkipsUISupervisor(t *testing.T) {
 	if err := writeGithubJSON(githubRepoSettingsPath("acme/enabled"), githubRepoSettings{Version: 6, RepoMode: "fork", IssuePickMode: "auto", PRForwardMode: "approve", ForkIssuesMode: "auto", ImplementMode: "auto", PublishTarget: "fork"}); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
-	oldRun := startRunRepoCycle
-	startRunRepoCycle = func(cwd string, repoSlug string, options startOptions) error { return nil }
-	defer func() { startRunRepoCycle = oldRun }()
+	oldRun := startRunRepoCyclesBatch
+	startRunRepoCyclesBatch = func(cwd string, repos []string, options startOptions) error { return nil }
+	defer func() { startRunRepoCyclesBatch = oldRun }()
 
 	output, err := captureStdout(t, func() error {
 		return Start(".", []string{"--once", "--no-ui"})
@@ -472,6 +628,68 @@ func TestStartNoUISkipsUISupervisor(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, ".nana", "start", "ui", "runtime.json")); !os.IsNotExist(err) {
 		t.Fatalf("expected no runtime.json, got err=%v", err)
+	}
+}
+
+func TestStartUIOperatorGuideDocsAndHelp(t *testing.T) {
+	if !strings.Contains(StartHelp, "docs/start-ui.html") {
+		t.Fatalf("expected start help to link the Start UI guide")
+	}
+
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	expected := map[string][]string{
+		"docs/start-ui.html": {
+			"Nana Assistant Workspace",
+			"127.0.0.1",
+			"nana start",
+			"--no-ui",
+			"/api/v1/overview",
+			"Issues and investigations",
+			"Feedback and approvals",
+		},
+		"docs/work.md": {
+			"Start UI guide",
+			"./start-ui.html",
+			"--ui-api-port",
+			"--ui-web-port",
+		},
+		"docs/getting-started.html": {
+			"Repo Automation Console",
+			"./start-ui.html",
+			"[start-ui] Web",
+		},
+		"docs/index.html": {
+			"./start-ui.html",
+			"Start UI",
+		},
+		"docs/agents.html": {
+			"./start-ui.html",
+			"Start UI",
+		},
+		"docs/skills.html": {
+			"./start-ui.html",
+			"Start UI",
+		},
+		"docs/integrations.html": {
+			"./start-ui.html",
+			"Start UI",
+		},
+	}
+	for rel, needles := range expected {
+		content, err := os.ReadFile(filepath.Join(repoRoot, rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		text := string(content)
+		for _, needle := range needles {
+			if !strings.Contains(text, needle) {
+				t.Fatalf("expected %s to contain %q", rel, needle)
+			}
+		}
 	}
 }
 
@@ -508,6 +726,46 @@ func TestRepoConfigAndExplainAutomationModes(t *testing.T) {
 	}
 }
 
+func TestRepoConfigDisabledObservationMode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	output, err := captureStdout(t, func() error {
+		return Repo(".", []string{"config", "acme/observe", "--repo-mode", "disabled"})
+	})
+	if err != nil {
+		t.Fatalf("Repo(config disabled): %v\n%s", err, output)
+	}
+	settings, err := readGithubRepoSettings(githubRepoSettingsPath("acme/observe"))
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if settings.RepoMode != "disabled" || settings.IssuePickMode != "manual" || settings.PublishTarget != "" {
+		t.Fatalf("unexpected disabled settings: %+v", settings)
+	}
+	repos, err := resolveStartRepos("acme/observe")
+	if err != nil {
+		t.Fatalf("resolveStartRepos: %v", err)
+	}
+	if len(repos) != 0 {
+		t.Fatalf("expected disabled repo to be skipped by start, got %#v", repos)
+	}
+	explain, err := captureStdout(t, func() error { return Repo(".", []string{"explain", "acme/observe"}) })
+	if err != nil {
+		t.Fatalf("Repo(explain disabled): %v", err)
+	}
+	for _, needle := range []string{
+		"repo-mode: disabled",
+		"issue-pick: manual",
+		"publish: (none)",
+		"Start participation: false",
+		"observation only",
+	} {
+		if !strings.Contains(explain, needle) {
+			t.Fatalf("expected explain to contain %q, got %q", needle, explain)
+		}
+	}
+}
+
 func TestRepoDefaultsApplyOnlyToManualGithubOnboard(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -540,4 +798,28 @@ func TestRepoDefaultsApplyOnlyToManualGithubOnboard(t *testing.T) {
 	if autoSettings.RepoMode != "" || autoSettings.IssuePickMode != "" || autoSettings.PRForwardMode != "" || autoSettings.ForkIssuesMode != "" || autoSettings.ImplementMode != "" || autoSettings.PublishTarget != "" {
 		t.Fatalf("automatic settings should stay system default/manual when no manual onboard applied, got %+v", autoSettings)
 	}
+}
+
+func mapsCloneStartWorkIssues(source map[string]startWorkIssueState) map[string]startWorkIssueState {
+	cloned := make(map[string]startWorkIssueState, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func mapsCloneStartWorkServiceTasks(source map[string]startWorkServiceTask) map[string]startWorkServiceTask {
+	cloned := make(map[string]startWorkServiceTask, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func mapsCloneStartWorkPlannedItems(source map[string]startWorkPlannedItem) map[string]startWorkPlannedItem {
+	cloned := make(map[string]startWorkPlannedItem, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,16 +31,17 @@ type githubManagedRepoPaths struct {
 }
 
 type githubManagedRepoMetadata struct {
-	Version       int    `json:"version"`
-	RepoName      string `json:"repo_name"`
-	RepoSlug      string `json:"repo_slug"`
-	RepoOwner     string `json:"repo_owner"`
-	CloneURL      string `json:"clone_url"`
-	DefaultBranch string `json:"default_branch"`
-	HTMLURL       string `json:"html_url"`
-	RepoRoot      string `json:"repo_root"`
-	SourcePath    string `json:"source_path"`
-	UpdatedAt     string `json:"updated_at"`
+	Version            int    `json:"version"`
+	RepoName           string `json:"repo_name"`
+	RepoSlug           string `json:"repo_slug"`
+	RepoOwner          string `json:"repo_owner"`
+	CloneURL           string `json:"clone_url"`
+	CanonicalOriginURL string `json:"canonical_origin_url,omitempty"`
+	DefaultBranch      string `json:"default_branch"`
+	HTMLURL            string `json:"html_url"`
+	RepoRoot           string `json:"repo_root"`
+	SourcePath         string `json:"source_path"`
+	UpdatedAt          string `json:"updated_at"`
 }
 
 type githubRepositoryPayload struct {
@@ -86,6 +88,8 @@ type githubVerificationSourceFile struct {
 type githubConsiderationInference struct {
 	Considerations []string
 }
+
+var githubManagedOriginPreflight = preflightGithubManagedOriginAccess
 
 func githubInvestigateTarget(targetURL string) error {
 	target, err := parseGithubTargetURL(targetURL)
@@ -251,6 +255,7 @@ func githubFetchTargetContext(target parsedGithubTarget, apiBaseURL string, toke
 func ensureGithubManagedRepoMetadata(paths githubManagedRepoPaths, target githubTargetContext, now time.Time) (*githubManagedRepoMetadata, error) {
 	var existing githubManagedRepoMetadata
 	if err := readGithubJSON(paths.RepoMetaPath, &existing); err == nil {
+		normalizeGithubManagedRepoMetadata(&existing)
 		if !strings.EqualFold(strings.TrimSpace(existing.RepoSlug), strings.TrimSpace(target.Repository.FullName)) {
 			return nil, fmt.Errorf("Managed repo path collision at %s: expected %s, found %s.", paths.RepoRoot, target.Repository.FullName, existing.RepoSlug)
 		}
@@ -261,17 +266,19 @@ func ensureGithubManagedRepoMetadata(paths githubManagedRepoPaths, target github
 		repoOwner = parts[0]
 	}
 	metadata := &githubManagedRepoMetadata{
-		Version:       1,
-		RepoName:      target.Repository.Name,
-		RepoSlug:      target.Repository.FullName,
-		RepoOwner:     repoOwner,
-		CloneURL:      target.Repository.CloneURL,
-		DefaultBranch: target.Repository.DefaultBranch,
-		HTMLURL:       target.Repository.HTMLURL,
-		RepoRoot:      paths.RepoRoot,
-		SourcePath:    paths.SourcePath,
-		UpdatedAt:     now.Format(time.RFC3339),
+		Version:            2,
+		RepoName:           target.Repository.Name,
+		RepoSlug:           target.Repository.FullName,
+		RepoOwner:          repoOwner,
+		CloneURL:           target.Repository.CloneURL,
+		CanonicalOriginURL: canonicalGithubSSHRemote(target.Repository.FullName, target.Repository.HTMLURL),
+		DefaultBranch:      target.Repository.DefaultBranch,
+		HTMLURL:            target.Repository.HTMLURL,
+		RepoRoot:           paths.RepoRoot,
+		SourcePath:         paths.SourcePath,
+		UpdatedAt:          now.Format(time.RFC3339),
 	}
+	normalizeGithubManagedRepoMetadata(metadata)
 	if err := writeGithubJSON(paths.RepoMetaPath, metadata); err != nil {
 		return nil, err
 	}
@@ -279,19 +286,124 @@ func ensureGithubManagedRepoMetadata(paths githubManagedRepoPaths, target github
 }
 
 func ensureGithubSourceClone(paths githubManagedRepoPaths, repoMeta *githubManagedRepoMetadata) error {
+	normalizeGithubManagedRepoMetadata(repoMeta)
+	cloneURL := strings.TrimSpace(repoMeta.CloneURL)
+	if cloneURL == "" {
+		cloneURL = githubManagedCanonicalOriginURL(repoMeta)
+	}
 	if _, err := os.Stat(paths.SourcePath); os.IsNotExist(err) {
-		if err := githubRunGit("", "clone", repoMeta.CloneURL, paths.SourcePath); err != nil {
+		if err := githubRunGit("", "clone", cloneURL, paths.SourcePath); err != nil {
 			return err
 		}
-	} else {
-		currentOrigin, err := githubGitOutput(paths.SourcePath, "remote", "get-url", "origin")
-		if err != nil || strings.TrimSpace(currentOrigin) != strings.TrimSpace(repoMeta.CloneURL) {
-			if err := githubRunGit(paths.SourcePath, "remote", "set-url", "origin", repoMeta.CloneURL); err != nil {
-				return err
-			}
-		}
+	}
+	if err := ensureGithubManagedOrigin(paths.SourcePath, repoMeta); err != nil {
+		return err
+	}
+	if err := githubManagedOriginPreflight(paths.SourcePath, repoMeta); err != nil {
+		return err
 	}
 	return githubRunGit(paths.SourcePath, "fetch", "--prune", "origin")
+}
+
+func normalizeGithubManagedRepoMetadata(metadata *githubManagedRepoMetadata) {
+	if metadata == nil {
+		return
+	}
+	if metadata.Version == 0 {
+		metadata.Version = 2
+	}
+	if strings.TrimSpace(metadata.CanonicalOriginURL) == "" && strings.TrimSpace(metadata.RepoSlug) != "" {
+		metadata.CanonicalOriginURL = canonicalGithubSSHRemote(metadata.RepoSlug, metadata.HTMLURL)
+	}
+}
+
+func githubManagedCanonicalOriginURL(metadata *githubManagedRepoMetadata) string {
+	if metadata == nil {
+		return ""
+	}
+	normalizeGithubManagedRepoMetadata(metadata)
+	return strings.TrimSpace(metadata.CanonicalOriginURL)
+}
+
+func canonicalGithubSSHRemote(repoSlug string, htmlURL string) string {
+	repoSlug = strings.TrimSpace(repoSlug)
+	if repoSlug == "" {
+		return ""
+	}
+	host := "github.com"
+	if parsed, err := url.Parse(strings.TrimSpace(htmlURL)); err == nil && strings.TrimSpace(parsed.Host) != "" {
+		host = strings.TrimSpace(parsed.Host)
+	}
+	if strings.Contains(host, ":") {
+		return fmt.Sprintf("ssh://git@%s/%s.git", host, repoSlug)
+	}
+	return fmt.Sprintf("git@%s:%s.git", host, repoSlug)
+}
+
+func ensureGithubManagedOrigin(repoPath string, repoMeta *githubManagedRepoMetadata) error {
+	canonical := githubManagedCanonicalOriginURL(repoMeta)
+	if canonical == "" {
+		return fmt.Errorf("managed source checkout %s is missing a canonical origin", repoPath)
+	}
+	currentOrigin, err := githubGitOutput(repoPath, "remote", "get-url", "origin")
+	if err != nil {
+		if err := githubRunGit(repoPath, "remote", "add", "origin", canonical); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stdout, "[github] Repaired managed source origin for %s to %s.\n", repoPath, canonical)
+		return nil
+	}
+	current := strings.TrimSpace(currentOrigin)
+	if current != canonical {
+		if err := githubRunGit(repoPath, "remote", "set-url", "origin", canonical); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stdout, "[github] Repaired managed source origin for %s to %s.\n", repoPath, canonical)
+	}
+	pushOrigin, pushErr := githubGitOutput(repoPath, "remote", "get-url", "--push", "origin")
+	if pushErr == nil && strings.TrimSpace(pushOrigin) == canonical {
+		return nil
+	}
+	return githubRunGit(repoPath, "remote", "set-url", "--push", "origin", canonical)
+}
+
+func preflightGithubManagedOriginAccess(repoPath string, repoMeta *githubManagedRepoMetadata) error {
+	canonical := githubManagedCanonicalOriginURL(repoMeta)
+	if canonical == "" {
+		return fmt.Errorf("managed source checkout %s is missing a canonical origin", repoPath)
+	}
+	if githubManagedCloneURLIsLocal(repoMeta) {
+		return nil
+	}
+	if _, err := githubGitOutput(repoPath, "ls-remote", "--exit-code", "origin", "HEAD"); err != nil {
+		return fmt.Errorf("managed source checkout %s requires working SSH access to %s; verify GitHub SSH keys/agent on this machine: %w", repoPath, canonical, err)
+	}
+	return nil
+}
+
+func githubManagedCloneURLIsLocal(repoMeta *githubManagedRepoMetadata) bool {
+	if repoMeta == nil {
+		return false
+	}
+	raw := strings.TrimSpace(repoMeta.CloneURL)
+	if raw == "" {
+		return false
+	}
+	if parsed, err := url.Parse(raw); err == nil {
+		switch parsed.Scheme {
+		case "file":
+			return true
+		case "http", "https", "ssh", "git":
+			return false
+		}
+	}
+	if filepath.IsAbs(raw) {
+		return true
+	}
+	if info, err := os.Stat(raw); err == nil && (info.IsDir() || info.Mode().IsRegular()) {
+		return true
+	}
+	return false
 }
 
 func githubRunGit(cwd string, args ...string) error {
