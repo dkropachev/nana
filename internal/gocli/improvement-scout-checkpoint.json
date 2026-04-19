@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "step_key": "improvement-scout",
+  "status": "failed",
+  "prompt_fingerprint": "bf96894ee4b8fd59faa291190b9328addf319a8e3bc50393078d922b89f9d9d5",
+  "resume_strategy": "same_prompt",
+  "last_launch_mode": "fresh",
+  "started_at": "2026-04-19T11:36:29.093150873Z",
+  "updated_at": "2026-04-19T11:36:29.093152567Z",
+  "last_error": "exit status 1"
+}

@@ -428,7 +428,19 @@ func readInvestigateRunManifest(path string) (investigateManifest, error) {
 
 func executeInvestigationRun(manifestPath string, manifest *investigateManifest, codexArgs []string) error {
 	writeFailure := func(status string, runErr error) error {
+		if pauseErr, ok := isCodexRateLimitPauseError(runErr); ok {
+			manifest.Status = "paused"
+			manifest.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
+			manifest.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+			manifest.LastError = codexPauseInfoMessage(pauseErr.Info)
+			manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			manifest.CompletedAt = ""
+			_ = writeGithubJSON(manifestPath, manifest)
+			return runErr
+		}
 		manifest.Status = status
+		manifest.PauseReason = ""
+		manifest.PauseUntil = ""
 		if runErr != nil {
 			manifest.LastError = runErr.Error()
 		}
@@ -481,7 +493,7 @@ func executeInvestigationRun(manifestPath string, manifest *investigateManifest,
 		if err := os.WriteFile(roundState.InvestigatorPrompt, []byte(investigatorPrompt), 0o644); err != nil {
 			return writeFailure(investigateRunStatusFailedExecutor, err)
 		}
-		result, err := runInvestigateCodexPrompt(*manifest, codexArgs, investigatorPrompt, fmt.Sprintf("investigator-round-%d", round), filepath.Join(manifest.RunDir, fmt.Sprintf("round-%d-investigator-checkpoint.json", round)))
+		result, err := runInvestigateCodexPrompt(manifestPath, *manifest, codexArgs, investigatorPrompt, fmt.Sprintf("investigator-round-%d", round), filepath.Join(manifest.RunDir, fmt.Sprintf("round-%d-investigator-checkpoint.json", round)))
 		if err := os.WriteFile(roundState.InvestigatorStdout, []byte(result.Stdout), 0o644); err != nil {
 			return writeFailure(investigateRunStatusFailedExecutor, err)
 		}
@@ -528,7 +540,7 @@ func executeInvestigationRun(manifestPath string, manifest *investigateManifest,
 		if err := os.WriteFile(roundState.ValidatorPrompt, []byte(validatorPrompt), 0o644); err != nil {
 			return writeFailure(investigateRunStatusFailedExecutor, err)
 		}
-		validatorExecResult, err := runInvestigateCodexPrompt(*manifest, codexArgs, validatorPrompt, fmt.Sprintf("investigation-validator-round-%d", round), filepath.Join(manifest.RunDir, fmt.Sprintf("round-%d-validator-checkpoint.json", round)))
+		validatorExecResult, err := runInvestigateCodexPrompt(manifestPath, *manifest, codexArgs, validatorPrompt, fmt.Sprintf("investigation-validator-round-%d", round), filepath.Join(manifest.RunDir, fmt.Sprintf("round-%d-validator-checkpoint.json", round)))
 		if err := os.WriteFile(roundState.ValidatorStdout, []byte(validatorExecResult.Stdout), 0o644); err != nil {
 			return writeFailure(investigateRunStatusFailedExecutor, err)
 		}
@@ -1114,7 +1126,7 @@ You are Investigation Validator. Accept only evidence-backed reports that satisf
 </constraints>
 `
 
-func runInvestigateCodexPrompt(manifest investigateManifest, codexArgs []string, prompt string, codexHomeAlias string, checkpointPath string) (investigateExecutionResult, error) {
+func runInvestigateCodexPrompt(manifestPath string, manifest investigateManifest, codexArgs []string, prompt string, codexHomeAlias string, checkpointPath string) (investigateExecutionResult, error) {
 	scopedCodexHome, err := ensureScopedCodexHome(manifest.CodexHome, filepath.Join(manifest.RunDir, "codex-home", sanitizePathToken(codexHomeAlias)))
 	if err != nil {
 		return investigateExecutionResult{}, err
@@ -1134,6 +1146,23 @@ func runInvestigateCodexPrompt(manifest investigateManifest, codexArgs []string,
 		StepKey:          codexHomeAlias,
 		ResumeStrategy:   codexResumeSamePrompt,
 		Env:              append(buildCodexEnv(NotifyTempContract{}, scopedCodexHome), "NANA_PROJECT_AGENTS_ROOT="+manifest.WorkspaceRoot),
+		OnPause: func(info codexRateLimitPauseInfo) {
+			manifest.Status = "paused"
+			manifest.PauseReason = strings.TrimSpace(info.Reason)
+			manifest.PauseUntil = strings.TrimSpace(info.RetryAfter)
+			manifest.LastError = codexPauseInfoMessage(info)
+			manifest.UpdatedAt = ISOTimeNow()
+			manifest.CompletedAt = ""
+			_ = writeGithubJSON(manifestPath, manifest)
+		},
+		OnResume: func(info codexRateLimitPauseInfo) {
+			manifest.Status = investigateRunStatusRunning
+			manifest.PauseReason = ""
+			manifest.PauseUntil = ""
+			manifest.LastError = ""
+			manifest.UpdatedAt = ISOTimeNow()
+			_ = writeGithubJSON(manifestPath, manifest)
+		},
 	})
 	return investigateExecutionResult{Stdout: result.Stdout, Stderr: result.Stderr}, err
 }
