@@ -510,12 +510,10 @@ func openLocalWorkDB() (*localWorkDBStore, error) {
 	if err := os.MkdirAll(localWorkHomeRoot(), 0o755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", localWorkDBPath())
+	db, err := openLocalWorkSQLite(localWorkDBPath())
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
 	store := &localWorkDBStore{db: db}
 	if err := store.init(); err != nil {
 		_ = db.Close()
@@ -528,21 +526,35 @@ func openLocalWorkReadDB() (*localWorkDBStore, error) {
 	path := localWorkDBPath()
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
-			return openLocalWorkDB()
+			return createLocalWorkEmptyReadStore()
 		}
 		return nil, err
 	}
-	readyStore, err := openLocalWorkDB()
+	db, err := openLocalWorkSQLite(path)
 	if err != nil {
 		return nil, err
 	}
-	_ = readyStore.Close()
-	db, err := sql.Open("sqlite", path)
+	version, hasTables, err := localWorkDBSchemaState(db)
 	if err != nil {
+		_ = db.Close()
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	if !hasTables {
+		_ = db.Close()
+		return createLocalWorkEmptyReadStore()
+	}
+	if version < localWorkDBSchemaVersion {
+		_ = db.Close()
+		return nil, &localWorkDBSchemaError{
+			Path:           path,
+			SchemaVersion:  version,
+			CurrentVersion: localWorkDBSchemaVersion,
+		}
+	}
+	if version > localWorkDBSchemaVersion {
+		_ = db.Close()
+		return nil, fmt.Errorf("local work DB schema at %s is version %d, newer than supported version %d", path, version, localWorkDBSchemaVersion)
+	}
 	store := &localWorkDBStore{db: db}
 	if err := store.prepareReadOnly(); err != nil {
 		_ = db.Close()
@@ -559,206 +571,15 @@ func (s *localWorkDBStore) Close() error {
 }
 
 func (s *localWorkDBStore) init() error {
-	statements := []string{
-		`PRAGMA journal_mode=WAL;`,
-		`PRAGMA foreign_keys=ON;`,
-		`PRAGMA busy_timeout=5000;`,
-		`PRAGMA synchronous=NORMAL;`,
-		`CREATE TABLE IF NOT EXISTS repos (
-			repo_id TEXT PRIMARY KEY,
-			repo_root TEXT NOT NULL UNIQUE,
-			repo_name TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);`,
-		`CREATE TABLE IF NOT EXISTS runs (
-			run_id TEXT PRIMARY KEY,
-			repo_id TEXT NOT NULL,
-			repo_root TEXT NOT NULL,
-			repo_name TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL,
-			completed_at TEXT,
-			status TEXT NOT NULL,
-			current_phase TEXT,
-			current_subphase TEXT,
-			current_iteration INTEGER,
-			current_round INTEGER,
-			sandbox_path TEXT NOT NULL,
-			sandbox_repo_path TEXT NOT NULL,
-			manifest_json TEXT NOT NULL
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_local_runs_repo_updated ON runs(repo_id, updated_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_local_runs_updated ON runs(updated_at DESC);`,
-		`CREATE TABLE IF NOT EXISTS runtime_states (
-			run_id TEXT NOT NULL,
-			iteration INTEGER NOT NULL,
-			state_json TEXT NOT NULL,
-			PRIMARY KEY(run_id, iteration)
-		);`,
-		`CREATE TABLE IF NOT EXISTS finding_history (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			run_id TEXT NOT NULL,
-			event_json TEXT NOT NULL
-		);`,
-		`CREATE TABLE IF NOT EXISTS work_run_index (
-				run_id TEXT PRIMARY KEY,
-				backend TEXT NOT NULL,
-				repo_key TEXT,
-				repo_root TEXT,
-				repo_name TEXT,
-				repo_slug TEXT,
-				manifest_path TEXT,
-				updated_at TEXT NOT NULL,
-				target_kind TEXT
-			);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_run_index_updated ON work_run_index(updated_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_run_index_backend_updated ON work_run_index(backend, updated_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_run_index_repo_updated ON work_run_index(repo_key, updated_at DESC);`,
-		`CREATE TABLE IF NOT EXISTS work_items (
-			id TEXT PRIMARY KEY,
-			dedupe_key TEXT NOT NULL UNIQUE,
-			source TEXT NOT NULL,
-			source_kind TEXT NOT NULL,
-			external_id TEXT NOT NULL,
-			thread_key TEXT,
-			repo_slug TEXT,
-			target_url TEXT,
-			linked_run_id TEXT,
-			subject TEXT NOT NULL,
-			body TEXT,
-			author TEXT,
-			received_at TEXT NOT NULL,
-			status TEXT NOT NULL,
-			priority INTEGER NOT NULL DEFAULT 3,
-			auto_run INTEGER NOT NULL DEFAULT 0,
-			auto_submit INTEGER NOT NULL DEFAULT 0,
-			hidden INTEGER NOT NULL DEFAULT 0,
-			hidden_reason TEXT,
-			submit_profile_json TEXT,
-			metadata_json TEXT,
-			latest_draft_json TEXT,
-			latest_artifact_root TEXT,
-			latest_action_at TEXT,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_items_status_updated ON work_items(status, updated_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_items_repo_updated ON work_items(repo_slug, updated_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_items_hidden_updated ON work_items(hidden, updated_at DESC);`,
-		`CREATE TABLE IF NOT EXISTS work_item_events (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			item_id TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			event_type TEXT NOT NULL,
-			actor TEXT,
-			payload_json TEXT NOT NULL
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_item_events_item_created ON work_item_events(item_id, created_at DESC, id DESC);`,
-		`CREATE TABLE IF NOT EXISTS work_item_links (
-			item_id TEXT NOT NULL,
-			link_type TEXT NOT NULL,
-			target_id TEXT NOT NULL,
-			metadata_json TEXT NOT NULL,
-			PRIMARY KEY(item_id, link_type, target_id)
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_item_links_target ON work_item_links(link_type, target_id);`,
-	}
-	for _, stmt := range statements {
-		if _, err := s.db.Exec(stmt); err != nil {
-			return err
-		}
-	}
-	if err := ensureSQLiteColumn(s.db, "work_run_index", "repo_slug", `ALTER TABLE work_run_index ADD COLUMN repo_slug TEXT`); err != nil {
-		return err
-	}
-	if err := ensureSQLiteColumn(s.db, "work_items", "pause_reason", `ALTER TABLE work_items ADD COLUMN pause_reason TEXT`); err != nil {
-		return err
-	}
-	if err := ensureSQLiteColumn(s.db, "work_items", "pause_until", `ALTER TABLE work_items ADD COLUMN pause_until TEXT`); err != nil {
-		return err
-	}
-	if err := s.normalizeLegacyWorkItemPauseState(); err != nil {
-		return err
-	}
-	return nil
+	return bootstrapLocalWorkDB(s.db)
 }
 
 func (s *localWorkDBStore) normalizeLegacyWorkItemPauseState() error {
-	rows, err := s.db.Query(`SELECT id, metadata_json, pause_reason, pause_until FROM work_items`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	type update struct {
-		id          string
-		pauseReason string
-		pauseUntil  string
-		metadataRaw string
-	}
-	updates := []update{}
-	for rows.Next() {
-		var id string
-		var metadataRaw sql.NullString
-		var pauseReason sql.NullString
-		var pauseUntil sql.NullString
-		if err := rows.Scan(&id, &metadataRaw, &pauseReason, &pauseUntil); err != nil {
-			return err
-		}
-		if strings.TrimSpace(pauseReason.String) != "" || strings.TrimSpace(pauseUntil.String) != "" {
-			continue
-		}
-		if strings.TrimSpace(metadataRaw.String) == "" {
-			continue
-		}
-		metadata := map[string]any{}
-		if err := json.Unmarshal([]byte(metadataRaw.String), &metadata); err != nil {
-			continue
-		}
-		legacyReason := metadataString(metadata, "pause_reason")
-		legacyUntil := metadataString(metadata, "pause_until")
-		if strings.TrimSpace(legacyReason) == "" && strings.TrimSpace(legacyUntil) == "" {
-			continue
-		}
-		metadata = clearWorkItemPauseMetadata(metadata)
-		nextMetadata, err := marshalNullableJSON(metadata)
-		if err != nil {
-			return err
-		}
-		updates = append(updates, update{
-			id:          id,
-			pauseReason: legacyReason,
-			pauseUntil:  legacyUntil,
-			metadataRaw: nextMetadata,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, update := range updates {
-		if _, err := s.db.Exec(`UPDATE work_items SET metadata_json = ?, pause_reason = ?, pause_until = ? WHERE id = ?`,
-			nullableString(update.metadataRaw),
-			nullableString(update.pauseReason),
-			nullableString(update.pauseUntil),
-			update.id,
-		); err != nil {
-			return err
-		}
-	}
-	return nil
+	return normalizeLegacyWorkItemPauseStateDB(s.db)
 }
 
 func (s *localWorkDBStore) prepareReadOnly() error {
-	statements := []string{
-		`PRAGMA busy_timeout=15000;`,
-		`PRAGMA query_only=ON;`,
-	}
-	for _, stmt := range statements {
-		if _, err := s.db.Exec(stmt); err != nil {
-			return err
-		}
-	}
-	return nil
+	return configureLocalWorkReadPragmas(s.db)
 }
 
 func isLocalWorkDBLockError(err error) bool {
@@ -830,6 +651,31 @@ func withLocalWorkWriteRetry(writeFn func() error) error {
 		return nil
 	}
 	return lastErr
+}
+
+func withLocalWorkWriteStore[T any](writeFn func(*localWorkDBStore) (T, error)) (T, error) {
+	var zero T
+	var value T
+	err := withLocalWorkWriteRetry(func() error {
+		store, err := openLocalWorkDB()
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		value, err = writeFn(store)
+		return err
+	})
+	if err != nil {
+		return zero, err
+	}
+	return value, nil
+}
+
+func withLocalWorkWriteStoreErr(writeFn func(*localWorkDBStore) error) error {
+	_, err := withLocalWorkWriteStore(func(store *localWorkDBStore) (struct{}, error) {
+		return struct{}{}, writeFn(store)
+	})
+	return err
 }
 
 func ensureSQLiteColumn(db *sql.DB, table string, column string, alter string) error {
@@ -1130,30 +976,28 @@ func cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot string) (int, []localWork
 	if err != nil {
 		return 0, nil, err
 	}
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return 0, nil, err
-	}
-	defer store.Close()
-	rows, err := store.db.Query(`SELECT manifest_json FROM runs WHERE repo_root = ? AND status = ?`, repoRoot, "running")
-	if err != nil {
-		return 0, nil, err
-	}
-	defer rows.Close()
-	manifests := []localWorkManifest{}
-	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
-			return 0, nil, err
+	manifests, err := withLocalWorkReadStore(func(store *localWorkDBStore) ([]localWorkManifest, error) {
+		rows, err := store.db.Query(`SELECT manifest_json FROM runs WHERE repo_root = ? AND status = ?`, repoRoot, "running")
+		if err != nil {
+			return nil, err
 		}
-		var manifest localWorkManifest
-		if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
-			return 0, nil, err
+		defer rows.Close()
+		manifests := []localWorkManifest{}
+		for rows.Next() {
+			var raw string
+			if err := rows.Scan(&raw); err != nil {
+				return nil, err
+			}
+			var manifest localWorkManifest
+			if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
+				return nil, err
+			}
+			normalizeLocalWorkManifest(&manifest)
+			manifests = append(manifests, manifest)
 		}
-		normalizeLocalWorkManifest(&manifest)
-		manifests = append(manifests, manifest)
-	}
-	if err := rows.Err(); err != nil {
+		return manifests, rows.Err()
+	})
+	if err != nil {
 		return 0, nil, err
 	}
 	now := ISOTimeNow()
@@ -1174,7 +1018,7 @@ func cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot string) (int, []localWork
 			manifest.CompletedAt = now
 		}
 		manifest.LastError = localWorkStaleCleanupError
-		if err := store.writeManifest(manifest); err != nil {
+		if err := writeLocalWorkManifest(manifest); err != nil {
 			return cleaned, cleanedManifests, err
 		}
 		cleaned++
@@ -1239,20 +1083,17 @@ func writeWorkRunIndexTx(tx *sql.Tx, entry workRunIndexEntry) error {
 }
 
 func writeWorkRunIndex(entry workRunIndexEntry) error {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	tx, err := store.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if err := writeWorkRunIndexTx(tx, entry); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+		tx, err := store.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if err := writeWorkRunIndexTx(tx, entry); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
 }
 
 func readWorkRunIndex(runID string) (workRunIndexEntry, error) {
@@ -1340,20 +1181,36 @@ func (s *localWorkDBStore) resolveRunID(cwd string, selection localWorkRunSelect
 }
 
 func resolveLocalWorkRun(cwd string, selection localWorkRunSelection) (localWorkManifest, string, error) {
-	store, err := openLocalWorkDB()
+	result, err := withLocalWorkReadStore(func(store *localWorkDBStore) (struct {
+		manifest localWorkManifest
+		runDir   string
+	}, error) {
+		runID, err := store.resolveRunID(cwd, selection)
+		if err != nil {
+			return struct {
+				manifest localWorkManifest
+				runDir   string
+			}{}, err
+		}
+		manifest, err := store.readManifest(runID)
+		if err != nil {
+			return struct {
+				manifest localWorkManifest
+				runDir   string
+			}{}, err
+		}
+		return struct {
+			manifest localWorkManifest
+			runDir   string
+		}{
+			manifest: manifest,
+			runDir:   localWorkRunDirByID(manifest.RepoID, manifest.RunID),
+		}, nil
+	})
 	if err != nil {
 		return localWorkManifest{}, "", err
 	}
-	defer store.Close()
-	runID, err := store.resolveRunID(cwd, selection)
-	if err != nil {
-		return localWorkManifest{}, "", err
-	}
-	manifest, err := store.readManifest(runID)
-	if err != nil {
-		return localWorkManifest{}, "", err
-	}
-	return manifest, localWorkRunDirByID(manifest.RepoID, manifest.RunID), nil
+	return result.manifest, result.runDir, nil
 }
 
 func nullableString(value string) interface{} {
@@ -2901,11 +2758,11 @@ type localWorkStatusSnapshot struct {
 func localWorkStatus(cwd string, options localWorkStatusOptions) error {
 	manifest, runDir, err := resolveLocalWorkRun(cwd, options.RunSelection)
 	if err != nil {
-		return err
+		return localWorkReadCommandError(err)
 	}
 	snapshot, err := localWorkBuildStatusSnapshot(manifest, runDir)
 	if err != nil {
-		return err
+		return localWorkReadCommandError(err)
 	}
 	if options.JSON {
 		_, err := os.Stdout.Write(mustMarshalJSON(snapshot))
@@ -3117,7 +2974,7 @@ func loadLocalWorkActiveValidationContext(runID string, iteration int, round int
 func localWorkLogs(cwd string, options localWorkLogsOptions) error {
 	manifest, runDir, err := resolveLocalWorkRun(cwd, options.RunSelection)
 	if err != nil {
-		return err
+		return localWorkReadCommandError(err)
 	}
 	iteration := manifest.CurrentIteration
 	if iteration <= 0 && len(manifest.Iterations) > 0 {
@@ -3132,7 +2989,7 @@ func localWorkLogs(cwd string, options localWorkLogsOptions) error {
 	}
 	snapshot, err := localWorkBuildStatusSnapshot(manifest, runDir)
 	if err != nil {
-		return err
+		return localWorkReadCommandError(err)
 	}
 	grouping := localWorkLatestGroupingResult(iterationDir)
 	files, err := localWorkLogFiles(iterationDir)
@@ -3313,11 +3170,11 @@ func localWorkLatestGroupingResult(iterationDir string) localWorkGroupingResult 
 func localWorkRetrospective(cwd string, selection localWorkRunSelection) error {
 	manifest, _, err := resolveLocalWorkRun(cwd, selection)
 	if err != nil {
-		return err
+		return localWorkReadCommandError(err)
 	}
 	content, err := writeLocalWorkRetrospective(manifest)
 	if err != nil {
-		return err
+		return localWorkReadCommandError(err)
 	}
 	fmt.Fprint(os.Stdout, content)
 	return nil
@@ -3453,51 +3310,49 @@ func markSupersededLocalWorkRuns(completed localWorkManifest) error {
 	default:
 		return nil
 	}
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	rows, err := store.db.Query(`SELECT manifest_json FROM runs WHERE repo_root = ? AND updated_at < ? ORDER BY updated_at DESC`, completed.RepoRoot, completed.UpdatedAt)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
 	reason := fmt.Sprintf("newer completed run %s already applied branch %s", completed.RunID, defaultString(strings.TrimSpace(completed.SourceBranch), "HEAD"))
-	updates := []localWorkManifest{}
-	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
-			return err
+	updates, err := withLocalWorkReadStore(func(store *localWorkDBStore) ([]localWorkManifest, error) {
+		rows, err := store.db.Query(`SELECT manifest_json FROM runs WHERE repo_root = ? AND updated_at < ? ORDER BY updated_at DESC`, completed.RepoRoot, completed.UpdatedAt)
+		if err != nil {
+			return nil, err
 		}
-		var candidate localWorkManifest
-		if err := json.Unmarshal([]byte(raw), &candidate); err != nil {
-			return err
+		defer rows.Close()
+		updates := []localWorkManifest{}
+		for rows.Next() {
+			var raw string
+			if err := rows.Scan(&raw); err != nil {
+				return nil, err
+			}
+			var candidate localWorkManifest
+			if err := json.Unmarshal([]byte(raw), &candidate); err != nil {
+				return nil, err
+			}
+			normalizeLocalWorkManifest(&candidate)
+			if strings.TrimSpace(candidate.RunID) == strings.TrimSpace(completed.RunID) {
+				continue
+			}
+			if strings.TrimSpace(candidate.SourceBranch) != strings.TrimSpace(completed.SourceBranch) {
+				continue
+			}
+			if !localWorkHasResolvableBlockedApply(candidate) {
+				continue
+			}
+			if strings.TrimSpace(candidate.SupersededByRunID) == strings.TrimSpace(completed.RunID) &&
+				strings.TrimSpace(candidate.SupersededReason) == reason {
+				continue
+			}
+			candidate.SupersededByRunID = completed.RunID
+			candidate.SupersededAt = defaultString(strings.TrimSpace(completed.CompletedAt), completed.UpdatedAt)
+			candidate.SupersededReason = reason
+			updates = append(updates, candidate)
 		}
-		normalizeLocalWorkManifest(&candidate)
-		if strings.TrimSpace(candidate.RunID) == strings.TrimSpace(completed.RunID) {
-			continue
-		}
-		if strings.TrimSpace(candidate.SourceBranch) != strings.TrimSpace(completed.SourceBranch) {
-			continue
-		}
-		if !localWorkHasResolvableBlockedApply(candidate) {
-			continue
-		}
-		if strings.TrimSpace(candidate.SupersededByRunID) == strings.TrimSpace(completed.RunID) &&
-			strings.TrimSpace(candidate.SupersededReason) == reason {
-			continue
-		}
-		candidate.SupersededByRunID = completed.RunID
-		candidate.SupersededAt = defaultString(strings.TrimSpace(completed.CompletedAt), completed.UpdatedAt)
-		candidate.SupersededReason = reason
-		updates = append(updates, candidate)
-	}
-	if err := rows.Err(); err != nil {
+		return updates, rows.Err()
+	})
+	if err != nil {
 		return err
 	}
 	for _, candidate := range updates {
-		if err := store.writeManifest(candidate); err != nil {
+		if err := writeLocalWorkManifest(candidate); err != nil {
 			return err
 		}
 	}
@@ -4762,12 +4617,7 @@ func readLocalWorkRuntimeState(runID string, iteration int) (localWorkIterationR
 }
 
 func writeLocalWorkRuntimeState(runID string, state localWorkIterationRuntimeState) error {
-	return withLocalWorkWriteRetry(func() error {
-		store, err := openLocalWorkDB()
-		if err != nil {
-			return err
-		}
-		defer store.Close()
+	return withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
 		if state.Version == 0 {
 			state.Version = 1
 		}
@@ -4786,13 +4636,8 @@ func writeLocalWorkRuntimeState(runID string, state localWorkIterationRuntimeSta
 }
 
 func removeLocalWorkRuntimeState(runID string, iteration int) error {
-	return withLocalWorkWriteRetry(func() error {
-		store, err := openLocalWorkDB()
-		if err != nil {
-			return err
-		}
-		defer store.Close()
-		_, err = store.db.Exec(`DELETE FROM runtime_states WHERE run_id = ? AND iteration = ?`, runID, iteration)
+	return withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+		_, err := store.db.Exec(`DELETE FROM runtime_states WHERE run_id = ? AND iteration = ?`, runID, iteration)
 		return err
 	})
 }
@@ -4801,12 +4646,7 @@ func appendLocalWorkFindingHistory(runID string, events []localWorkFindingHistor
 	if len(events) == 0 {
 		return nil
 	}
-	return withLocalWorkWriteRetry(func() error {
-		store, err := openLocalWorkDB()
-		if err != nil {
-			return err
-		}
-		defer store.Close()
+	return withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
 		tx, err := store.db.Begin()
 		if err != nil {
 			return err
@@ -4889,12 +4729,7 @@ func writeLocalWorkActiveState(runDir string, manifest *localWorkManifest, state
 			manifest.CurrentIteration = state.Iteration
 		}
 	}
-	return withLocalWorkWriteRetry(func() error {
-		store, err := openLocalWorkDB()
-		if err != nil {
-			return err
-		}
-		defer store.Close()
+	return withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
 		return store.writeActiveState(*manifest, state)
 	})
 }
@@ -5548,12 +5383,7 @@ func readLocalWorkThreadUsageRow(filePath string) (localWorkThreadUsageRow, bool
 }
 
 func writeLocalWorkManifest(manifest localWorkManifest) error {
-	return withLocalWorkWriteRetry(func() error {
-		store, err := openLocalWorkDB()
-		if err != nil {
-			return err
-		}
-		defer store.Close()
+	return withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
 		return store.writeManifest(manifest)
 	})
 }
@@ -5703,23 +5533,26 @@ func writeLocalWorkRetrospective(manifest localWorkManifest) (string, error) {
 	changedFiles := collectTrimmedLines(changedFilesOutput)
 	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
 	history := []localWorkFindingHistoryEvent{}
-	store, err := openLocalWorkDB()
-	if err == nil {
-		rows, queryErr := store.db.Query(`SELECT event_json FROM finding_history WHERE run_id = ? ORDER BY id`, manifest.RunID)
-		if queryErr == nil {
-			for rows.Next() {
-				var raw string
-				if err := rows.Scan(&raw); err != nil {
-					continue
-				}
-				var event localWorkFindingHistoryEvent
-				if err := json.Unmarshal([]byte(raw), &event); err == nil {
-					history = append(history, event)
-				}
-			}
-			rows.Close()
+	if loaded, err := withLocalWorkReadStore(func(store *localWorkDBStore) ([]localWorkFindingHistoryEvent, error) {
+		rows, err := store.db.Query(`SELECT event_json FROM finding_history WHERE run_id = ? ORDER BY id`, manifest.RunID)
+		if err != nil {
+			return nil, err
 		}
-		store.Close()
+		defer rows.Close()
+		history := []localWorkFindingHistoryEvent{}
+		for rows.Next() {
+			var raw string
+			if err := rows.Scan(&raw); err != nil {
+				return nil, err
+			}
+			var event localWorkFindingHistoryEvent
+			if err := json.Unmarshal([]byte(raw), &event); err == nil {
+				history = append(history, event)
+			}
+		}
+		return history, rows.Err()
+	}); err == nil {
+		history = loaded
 	}
 	lines := []string{
 		"# NANA Work-local Retrospective",

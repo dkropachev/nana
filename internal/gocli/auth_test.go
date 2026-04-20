@@ -2,6 +2,7 @@ package gocli
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -214,8 +215,8 @@ func TestAccountStatusShowsUsageState(t *testing.T) {
 	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
 		Preferred: "primary",
 		Accounts: map[string]managedAccountFixtureEntry{
-			"primary":   {Profile: chatgptProfileJSON("primary-token", "primary-refresh", "primary-acct")},
-			"secondary": {Profile: chatgptProfileJSON("secondary-token", "secondary-refresh", "secondary-acct")},
+			"primary":   {Profile: chatgptProfileJSONWithIdentity("primary-token", "primary-refresh", "primary-acct", "primary@example.com", "primary-login")},
+			"secondary": {Profile: chatgptProfileJSONWithIdentity("secondary-token", "secondary-refresh", "secondary-acct", "", "secondary-login")},
 		},
 		Active:          "primary",
 		PendingActive:   "secondary",
@@ -254,6 +255,33 @@ func TestAccountStatusShowsUsageState(t *testing.T) {
 		"retry_after=2026-04-10T02:00:00Z",
 		"primary_retry_after=2026-04-10T02:00:00Z",
 		"secondary_retry_after=2026-04-17T00:00:00Z",
+		"- primary <primary@example.com> [enabled",
+		"- secondary <secondary-login> [enabled",
+	} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("expected %q in output, got %q", needle, output)
+		}
+	}
+}
+
+func TestAccountListShowsIdentityWhenAvailable(t *testing.T) {
+	codexHome := filepath.Join(t.TempDir(), ".codex")
+	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
+		Preferred: "primary",
+		Accounts: map[string]managedAccountFixtureEntry{
+			"primary":   {Profile: chatgptProfileJSONWithIdentity("primary-token", "primary-refresh", "primary-acct", "primary@example.com", "primary-login")},
+			"secondary": {Profile: chatgptProfileJSONWithIdentity("secondary-token", "secondary-refresh", "secondary-acct", "", "secondary-login")},
+		},
+		Active: "primary",
+	})
+
+	output, err := captureStdout(t, func() error { return listManagedAccounts(codexHome) })
+	if err != nil {
+		t.Fatalf("listManagedAccounts(): %v", err)
+	}
+	for _, needle := range []string{
+		"- primary <primary@example.com> [preferred, active]",
+		"- secondary <secondary-login> [standby]",
 	} {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("expected %q in output, got %q", needle, output)
@@ -1082,13 +1110,28 @@ func writeManagedAccountFixture(t *testing.T, codexHome string, fixture managedA
 }
 
 func chatgptProfileJSON(accessToken string, refreshToken string, accountID string) string {
+	return chatgptProfileJSONWithIdentity(accessToken, refreshToken, accountID, "", "")
+}
+
+func chatgptProfileJSONWithIdentity(accessToken string, refreshToken string, accountID string, email string, login string) string {
+	idToken := "dummy-id-token"
+	if email != "" || login != "" {
+		payload := map[string]any{}
+		if strings.TrimSpace(email) != "" {
+			payload["email"] = strings.TrimSpace(email)
+		}
+		if strings.TrimSpace(login) != "" {
+			payload["preferred_username"] = strings.TrimSpace(login)
+		}
+		idToken = fakeJWT(payload)
+	}
 	payload := map[string]any{
 		"auth_mode": "chatgpt",
 		"tokens": map[string]any{
 			"access_token":  accessToken,
 			"refresh_token": refreshToken,
 			"account_id":    accountID,
-			"id_token":      "dummy-id-token",
+			"id_token":      idToken,
 		},
 	}
 	content, err := json.Marshal(payload)
@@ -1096,6 +1139,19 @@ func chatgptProfileJSON(accessToken string, refreshToken string, accountID strin
 		panic(err)
 	}
 	return string(content)
+}
+
+func fakeJWT(payload map[string]any) string {
+	headerRaw, err := json.Marshal(map[string]any{"alg": "none", "typ": "JWT"})
+	if err != nil {
+		panic(err)
+	}
+	payloadRaw, err := json.Marshal(payload)
+	if err != nil {
+		panic(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(headerRaw) + "." +
+		base64.RawURLEncoding.EncodeToString(payloadRaw) + "."
 }
 
 func nearLimitUsageReply() managedAccountUsageReply {

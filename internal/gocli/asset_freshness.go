@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/dkropachev/nana/internal/gocliassets"
 )
@@ -26,6 +27,12 @@ type managedAssetWarningState struct {
 	Fingerprint string `json:"fingerprint"`
 	WarnedAt    string `json:"warned_at"`
 }
+
+var (
+	managedAssetWarningMemoMu sync.Mutex
+	managedAssetWarningMemo   = map[string]string{}
+	managedAssetWarningSeen   = map[string]bool{}
+)
 
 func evaluateManagedAssetFreshness(scope string, cwd string, codexHomeDir string, repoRoot string) (managedAssetFreshness, error) {
 	agentsPath := resolveManagedAgentsPath(scope, cwd, codexHomeDir)
@@ -467,17 +474,35 @@ func maybeWarnManagedAssetDrift(cwd string, codexHomeDir string, repoRoot string
 	}
 	statePath := assetWarningStatePath(cwd)
 	if freshness.allFresh() {
+		managedAssetWarningMemoMu.Lock()
+		delete(managedAssetWarningMemo, statePath)
+		delete(managedAssetWarningSeen, freshness.Fingerprint)
+		managedAssetWarningMemoMu.Unlock()
 		_ = os.Remove(statePath)
 		return
 	}
+	managedAssetWarningMemoMu.Lock()
+	if managedAssetWarningMemo[statePath] == freshness.Fingerprint || managedAssetWarningSeen[freshness.Fingerprint] {
+		managedAssetWarningMemoMu.Unlock()
+		return
+	}
+	managedAssetWarningMemoMu.Unlock()
 	state, _ := readManagedAssetWarningState(statePath)
 	if state.Fingerprint == freshness.Fingerprint {
+		managedAssetWarningMemoMu.Lock()
+		managedAssetWarningMemo[statePath] = freshness.Fingerprint
+		managedAssetWarningSeen[freshness.Fingerprint] = true
+		managedAssetWarningMemoMu.Unlock()
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
 		return
 	}
 	fmt.Fprint(os.Stderr, managedAssetDriftWarning(scope, freshness))
+	managedAssetWarningMemoMu.Lock()
+	managedAssetWarningMemo[statePath] = freshness.Fingerprint
+	managedAssetWarningSeen[freshness.Fingerprint] = true
+	managedAssetWarningMemoMu.Unlock()
 	_ = writeManagedAssetWarningState(statePath, managedAssetWarningState{
 		Fingerprint: freshness.Fingerprint,
 		WarnedAt:    ISOTimeNow(),

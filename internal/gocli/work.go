@@ -19,6 +19,8 @@ Usage:
   nana work logs [--run-id <id> | --last | --global-last] [--repo <path>] [--tail <n>] [--json]
   nana work retrospective [--run-id <id> | --last | --global-last] [--repo <path>]
   nana work explain [--run-id <id> | --last] [--json]
+  nana work db-check [--json]
+  nana work db-repair [--json]
   nana work verify-refresh [--run-id <id> | --last | --global-last] [--repo <path>]
   nana work sync [--run-id <id> | --last] [--reviewer <login|@me>] [--resume-last] [codex-args...]
   nana work lane-exec --run-id <id>|--last --lane <alias> [--task <text>] [-- codex-args...]
@@ -85,6 +87,8 @@ func Work(cwd string, args []string) error {
 		return workRetrospective(cwd, args[1:])
 	case "verify-refresh":
 		return workVerifyRefresh(cwd, args[1:])
+	case "db-check", "db-repair":
+		return runWorkDBCommand(args)
 	case "items":
 		return workItemsCommand(cwd, args[1:])
 	case "sync", "lane-exec", "defaults", "stats", "explain":

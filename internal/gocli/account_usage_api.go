@@ -3,6 +3,7 @@ package gocli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,6 +83,15 @@ type managedAccountTokenEnvelope struct {
 	RefreshToken string `json:"refresh_token,omitempty"`
 	AccountID    string `json:"account_id,omitempty"`
 	IDToken      string `json:"id_token,omitempty"`
+}
+
+type managedAccountIdentityClaims struct {
+	Email             string `json:"email,omitempty"`
+	PreferredUsername string `json:"preferred_username,omitempty"`
+	Login             string `json:"login,omitempty"`
+	Username          string `json:"username,omitempty"`
+	Nickname          string `json:"nickname,omitempty"`
+	Name              string `json:"name,omitempty"`
 }
 
 type codexUsageResponse struct {
@@ -243,6 +253,49 @@ func readManagedAccountProfile(path string) (managedAccountProfile, error) {
 		return profile, err
 	}
 	return profile, nil
+}
+
+func managedAccountProfileDisplayIdentity(profile managedAccountProfile) string {
+	if profile.Tokens == nil {
+		return ""
+	}
+	claims, ok := parseManagedAccountIDTokenClaims(profile.Tokens.IDToken)
+	if !ok {
+		return ""
+	}
+	for _, candidate := range []string{
+		strings.TrimSpace(claims.Email),
+		strings.TrimSpace(claims.PreferredUsername),
+		strings.TrimSpace(claims.Login),
+		strings.TrimSpace(claims.Username),
+		strings.TrimSpace(claims.Nickname),
+		strings.TrimSpace(claims.Name),
+	} {
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func parseManagedAccountIDTokenClaims(idToken string) (managedAccountIdentityClaims, bool) {
+	idToken = strings.TrimSpace(idToken)
+	if idToken == "" {
+		return managedAccountIdentityClaims{}, false
+	}
+	parts := strings.Split(idToken, ".")
+	if len(parts) < 2 {
+		return managedAccountIdentityClaims{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return managedAccountIdentityClaims{}, false
+	}
+	var claims managedAccountIdentityClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return managedAccountIdentityClaims{}, false
+	}
+	return claims, true
 }
 
 func writeManagedAccountProfile(path string, profile managedAccountProfile) error {

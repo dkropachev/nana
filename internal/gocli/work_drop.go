@@ -35,40 +35,36 @@ func dropLocalWorkRun(entry workRunIndexEntry) error {
 		runDir = localWorkRunDirByID(repoID, entry.RunID)
 	}
 
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-
-	tx, err := store.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	now := ISOTimeNow()
-	if err := detachWorkItemsFromRunTx(tx, entry.RunID, now); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM runtime_states WHERE run_id = ?`, entry.RunID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM finding_history WHERE run_id = ?`, entry.RunID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM runs WHERE run_id = ?`, entry.RunID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM work_run_index WHERE run_id = ?`, entry.RunID); err != nil {
-		return err
-	}
-	if repoID != "" {
-		if _, err := tx.Exec(`DELETE FROM repos WHERE repo_id = ? AND NOT EXISTS (SELECT 1 FROM runs WHERE repo_id = ?)`, repoID, repoID); err != nil {
+	if err := withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+		tx, err := store.db.Begin()
+		if err != nil {
 			return err
 		}
-	}
-	if err := tx.Commit(); err != nil {
+		defer tx.Rollback()
+
+		now := ISOTimeNow()
+		if err := detachWorkItemsFromRunTx(tx, entry.RunID, now); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM runtime_states WHERE run_id = ?`, entry.RunID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM finding_history WHERE run_id = ?`, entry.RunID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM runs WHERE run_id = ?`, entry.RunID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM work_run_index WHERE run_id = ?`, entry.RunID); err != nil {
+			return err
+		}
+		if repoID != "" {
+			if _, err := tx.Exec(`DELETE FROM repos WHERE repo_id = ? AND NOT EXISTS (SELECT 1 FROM runs WHERE repo_id = ?)`, repoID, repoID); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	}); err != nil {
 		return err
 	}
 
@@ -105,26 +101,22 @@ func dropGithubWorkRun(entry workRunIndexEntry) error {
 		repoRoot = filepath.Dir(filepath.Dir(runDir))
 	}
 
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return err
-	}
-	defer store.Close()
+	if err := withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+		tx, err := store.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
 
-	tx, err := store.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	now := ISOTimeNow()
-	if err := detachWorkItemsFromRunTx(tx, entry.RunID, now); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM work_run_index WHERE run_id = ?`, entry.RunID); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
+		now := ISOTimeNow()
+		if err := detachWorkItemsFromRunTx(tx, entry.RunID, now); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM work_run_index WHERE run_id = ?`, entry.RunID); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}); err != nil {
 		return err
 	}
 

@@ -436,6 +436,7 @@ func listManagedAccounts(codexHome string) error {
 
 	fmt.Fprintf(os.Stdout, "Managed accounts (%s)\n", codexHome)
 	for _, account := range registry.orderedAccounts() {
+		identity := managedAccountIdentityForAccount(account)
 		flags := []string{}
 		if registry.Preferred == account.Name {
 			flags = append(flags, "preferred")
@@ -453,7 +454,7 @@ func listManagedAccounts(codexHome string) error {
 		if len(flags) == 0 {
 			flags = append(flags, "standby")
 		}
-		fmt.Fprintf(os.Stdout, "- %s [%s]\n", account.Name, strings.Join(flags, ", "))
+		fmt.Fprintf(os.Stdout, "- %s%s [%s]\n", account.Name, formatManagedAccountIdentitySuffix(identity), strings.Join(flags, ", "))
 	}
 	return nil
 }
@@ -501,6 +502,7 @@ func statusManagedAccounts(codexHome string) error {
 	}
 	fmt.Fprintln(os.Stdout, "Accounts:")
 	for _, account := range registry.orderedAccounts() {
+		identity := managedAccountIdentityForAccount(account)
 		accountState := state.Accounts[account.Name]
 		flags := []string{}
 		if account.Enabled {
@@ -560,9 +562,25 @@ func statusManagedAccounts(codexHome string) error {
 		if strings.TrimSpace(accountState.LastUsageError) != "" {
 			flags = append(flags, "usage_error="+accountState.LastUsageError)
 		}
-		fmt.Fprintf(os.Stdout, "- %s [%s]\n", account.Name, strings.Join(flags, ", "))
+		fmt.Fprintf(os.Stdout, "- %s%s [%s]\n", account.Name, formatManagedAccountIdentitySuffix(identity), strings.Join(flags, ", "))
 	}
 	return nil
+}
+
+func managedAccountIdentityForAccount(account ManagedAuthAccount) string {
+	profile, err := readManagedAccountProfile(account.AuthPath)
+	if err != nil {
+		return ""
+	}
+	return managedAccountProfileDisplayIdentity(profile)
+}
+
+func formatManagedAccountIdentitySuffix(identity string) string {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return ""
+	}
+	return " <" + identity + ">"
 }
 
 func activateManagedAccount(codexHome string, rawName string) error {

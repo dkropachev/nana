@@ -428,7 +428,7 @@ func submitGithubReviewRequestDraft(item workItem) error {
 		}
 	}
 	if strings.TrimSpace(item.LatestArtifactRoot) != "" {
-		return writeGithubJSON(filepath.Join(item.LatestArtifactRoot, "submit-result.json"), response)
+		_ = writeGithubJSON(filepath.Join(item.LatestArtifactRoot, "submit-result.json"), response)
 	}
 	return nil
 }
@@ -459,7 +459,7 @@ func submitGithubThreadCommentDraft(item workItem) error {
 			return err
 		}
 		if strings.TrimSpace(item.LatestArtifactRoot) != "" {
-			return writeGithubJSON(filepath.Join(item.LatestArtifactRoot, "submit-result.json"), response)
+			_ = writeGithubJSON(filepath.Join(item.LatestArtifactRoot, "submit-result.json"), response)
 		}
 		return nil
 	default:
@@ -472,7 +472,7 @@ func submitGithubThreadCommentDraft(item workItem) error {
 			return err
 		}
 		if strings.TrimSpace(item.LatestArtifactRoot) != "" {
-			return writeGithubJSON(filepath.Join(item.LatestArtifactRoot, "submit-result.json"), response)
+			_ = writeGithubJSON(filepath.Join(item.LatestArtifactRoot, "submit-result.json"), response)
 		}
 		return nil
 	}

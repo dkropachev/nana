@@ -211,9 +211,17 @@
       ...options,
       headers,
     }).then(async (response) => {
+      const contentType = response.headers.get("Content-Type") || "";
+      const isJSON = contentType.includes("application/json");
+      const payload = isJSON ? await response.json().catch(() => null) : null;
+      const text = payload === null ? await response.text() : "";
       if (!response.ok) {
-        throw new Error((await response.text()) || response.statusText);
+        const error = new Error((payload && payload.message) || text || response.statusText);
+        if (payload && payload.code) error.code = payload.code;
+        if (payload && payload.repair_command) error.repairCommand = payload.repair_command;
+        throw error;
       }
+      if (payload !== null) return payload;
       return response.json();
     });
   }
@@ -1460,6 +1468,18 @@
 
   function buildInlineNotice(message) {
     return `<div class="inline-notice"><span class="status-pill">${escapeHTML(message)}</span></div>`;
+  }
+
+  function buildMaintenanceNotice(message, repairCommand) {
+    return `
+      <section class="surface empty-surface">
+        <div class="stack gap-sm">
+          <div class="status-pill">Maintenance required</div>
+          <p>${escapeHTML(message)}</p>
+          <code>${escapeHTML(defaultString(repairCommand, "nana work db-repair"))}</code>
+        </div>
+      </section>
+    `;
   }
 
   function buildBreadcrumbs() {
@@ -5962,6 +5982,11 @@
       renderApp();
       return refreshCurrentView({ silent: true });
     }).catch((error) => {
+      if (error && error.code === "work_db_repair_required") {
+        announce(error.message);
+        document.getElementById("page-body").innerHTML = buildMaintenanceNotice(error.message, error.repairCommand);
+        return;
+      }
       toast("danger", "Overview failed", error.message);
       document.getElementById("page-body").innerHTML = `
         <section class="surface empty-surface">

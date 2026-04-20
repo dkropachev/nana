@@ -782,7 +782,7 @@ func (h *startUIAPI) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	overview, err := h.buildOverview()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeStartUIError(w, err, http.StatusInternalServerError)
 		return
 	}
 	writeJSONResponse(w, overview)
@@ -1218,7 +1218,7 @@ func (h *startUIAPI) handleWorkRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	runs, err := loadStartUIWorkRuns(20)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeStartUIError(w, err, http.StatusInternalServerError)
 		return
 	}
 	writeJSONResponse(w, map[string]any{"runs": runs})
@@ -1233,7 +1233,7 @@ func (h *startUIAPI) handleWorkItems(w http.ResponseWriter, r *http.Request) {
 	onlyHidden := r.URL.Query().Get("hidden") == "1"
 	items, err := loadStartUIWorkItems(20, includeHidden, onlyHidden)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeStartUIError(w, err, http.StatusInternalServerError)
 		return
 	}
 	writeJSONResponse(w, map[string]any{"items": items})
@@ -1249,7 +1249,7 @@ func (h *startUIAPI) handleWorkItem(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && tail == "":
 		detail, err := readWorkItemDetail(itemID)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			writeStartUIError(w, err, http.StatusNotFound)
 			return
 		}
 		writeJSONResponse(w, detail)
@@ -1278,7 +1278,7 @@ func (h *startUIAPI) handleWorkItem(w http.ResponseWriter, r *http.Request) {
 		}
 		detail, err := readWorkItemDetail(itemID)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeStartUIError(w, err, http.StatusInternalServerError)
 			return
 		}
 		writeJSONResponse(w, detail)
@@ -1291,7 +1291,7 @@ func (h *startUIAPI) handleWorkItem(w http.ResponseWriter, r *http.Request) {
 		}
 		detail, err := readWorkItemDetail(itemID)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeStartUIError(w, err, http.StatusInternalServerError)
 			return
 		}
 		writeJSONResponse(w, detail)
@@ -4765,10 +4765,27 @@ func parseStartUIWorkItemRoute(path string) (string, string, bool) {
 }
 
 func writeJSONResponse(w http.ResponseWriter, value any) {
+	writeJSONResponseWithStatus(w, http.StatusOK, value)
+}
+
+func writeJSONResponseWithStatus(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(value)
+}
+
+func writeStartUIError(w http.ResponseWriter, err error, defaultStatus int) {
+	if _, ok := asLocalWorkDBSchemaError(err); ok {
+		writeJSONResponseWithStatus(w, http.StatusServiceUnavailable, map[string]any{
+			"code":           "work_db_repair_required",
+			"message":        localWorkReadCommandError(err).Error(),
+			"repair_command": "nana work db-repair",
+		})
+		return
+	}
+	http.Error(w, err.Error(), defaultStatus)
 }
 
 func hashJSON(value any) string {

@@ -468,7 +468,7 @@ func listWorkItemsCommand(options workItemsListCommandOptions) error {
 		OnlyHidden:    options.OnlyHidden,
 	})
 	if err != nil {
-		return err
+		return localWorkReadCommandError(err)
 	}
 	if options.JSON {
 		_, err := os.Stdout.Write(mustMarshalJSON(map[string]any{"items": items}))
@@ -505,7 +505,7 @@ func listWorkItemsCommand(options workItemsListCommandOptions) error {
 func showWorkItemCommand(itemID string, jsonOutput bool) error {
 	detail, err := readWorkItemDetail(itemID)
 	if err != nil {
-		return err
+		return localWorkReadCommandError(err)
 	}
 	if jsonOutput {
 		_, err := os.Stdout.Write(mustMarshalJSON(detail))
@@ -612,21 +612,17 @@ func enqueueWorkItem(input workItemInput, actor string) (workItem, bool, error) 
 	if err != nil {
 		return workItem{}, false, err
 	}
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return workItem{}, false, err
-	}
-	defer store.Close()
-	item, created, err := store.upsertWorkItem(item, actor, map[string]any{
-		"source":      item.Source,
-		"source_kind": item.SourceKind,
-		"external_id": item.ExternalID,
-		"target_url":  item.TargetURL,
+	var created bool
+	item, err = withLocalWorkWriteStore(func(store *localWorkDBStore) (workItem, error) {
+		item, created, err = store.upsertWorkItemWithLinks(item, actor, map[string]any{
+			"source":      item.Source,
+			"source_kind": item.SourceKind,
+			"external_id": item.ExternalID,
+			"target_url":  item.TargetURL,
+		}, buildDefaultWorkItemLinks(item))
+		return item, err
 	})
 	if err != nil {
-		return workItem{}, false, err
-	}
-	if err := store.replaceWorkItemLinks(item.ID, buildDefaultWorkItemLinks(item)); err != nil {
 		return workItem{}, false, err
 	}
 	if err := writeWorkItemSourceSnapshot(item); err != nil {
@@ -706,12 +702,9 @@ func resolveWorkItemLinkedRunID(item workItem) string {
 	if strings.TrimSpace(item.TargetURL) == "" && strings.TrimSpace(item.RepoSlug) == "" {
 		return ""
 	}
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return ""
-	}
-	defer store.Close()
-	runID, err := store.findLinkedRunID(item.RepoSlug, item.TargetURL)
+	runID, err := withLocalWorkReadStore(func(store *localWorkDBStore) (string, error) {
+		return store.findLinkedRunID(item.RepoSlug, item.TargetURL)
+	})
 	if err != nil {
 		return ""
 	}
@@ -825,13 +818,19 @@ func writeWorkItemDraftArtifacts(item workItem, attemptDir string, rawOutput str
 	return nil
 }
 
-func runWorkItemByID(cwd string, itemID string, codexArgs []string, background bool) (workItemExecutionResult, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return workItemExecutionResult{}, err
+var workItemWriteDraftArtifacts = writeWorkItemDraftArtifacts
+
+func writeOptionalWorkItemArtifact(path string, content []byte) {
+	if strings.TrimSpace(path) == "" {
+		return
 	}
-	defer store.Close()
-	item, err := store.readWorkItem(itemID)
+	_ = os.WriteFile(path, content, 0o644)
+}
+
+func runWorkItemByID(cwd string, itemID string, codexArgs []string, background bool) (workItemExecutionResult, error) {
+	item, err := withLocalWorkReadStore(func(store *localWorkDBStore) (workItem, error) {
+		return store.readWorkItem(itemID)
+	})
 	if err != nil {
 		return workItemExecutionResult{}, err
 	}
@@ -839,16 +838,10 @@ func runWorkItemByID(cwd string, itemID string, codexArgs []string, background b
 	if err != nil {
 		return workItemExecutionResult{}, err
 	}
-	item.Status = workItemStatusRunning
-	item.Hidden = false
-	item.HiddenReason = ""
-	item.LatestArtifactRoot = attemptDir
-	item.LatestActionAt = ISOTimeNow()
-	item.UpdatedAt = item.LatestActionAt
-	if err := store.updateWorkItem(item); err != nil {
-		return workItemExecutionResult{}, err
-	}
-	if err := store.appendWorkItemEvent(item.ID, "run_started", ternaryString(background, "auto", "user"), map[string]any{"attempt_dir": attemptDir}); err != nil {
+	item, err = withLocalWorkWriteStore(func(store *localWorkDBStore) (workItem, error) {
+		return store.startWorkItemAttempt(itemID, attemptDir, ternaryString(background, "auto", "user"))
+	})
+	if err != nil {
 		return workItemExecutionResult{}, err
 	}
 	result, rawOutput, err := executeWorkItem(cwd, item, attemptDir, codexArgs)
@@ -858,26 +851,44 @@ func runWorkItemByID(cwd string, itemID string, codexArgs []string, background b
 			item.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
 			item.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
 			item.Metadata = clearWorkItemPauseMetadata(item.Metadata)
+			item.LatestArtifactRoot = attemptDir
 			item.UpdatedAt = ISOTimeNow()
 			item.LatestActionAt = item.UpdatedAt
-			_ = store.updateWorkItem(item)
-			_ = store.appendWorkItemEvent(item.ID, "run_paused", "system", map[string]any{
-				"reason":      pauseErr.Info.Reason,
-				"retry_after": pauseErr.Info.RetryAfter,
-				"attempt_dir": attemptDir,
-			})
-			_ = writeWorkItemDraftArtifacts(item, attemptDir, rawOutput)
+			if artifactErr := workItemWriteDraftArtifacts(item, attemptDir, rawOutput); artifactErr != nil {
+				return workItemExecutionResult{}, artifactErr
+			}
+			if _, persistErr := withLocalWorkWriteStore(func(store *localWorkDBStore) (workItem, error) {
+				if err := store.updateWorkItemWithEvent(item, "run_paused", "system", map[string]any{
+					"reason":      pauseErr.Info.Reason,
+					"retry_after": pauseErr.Info.RetryAfter,
+					"attempt_dir": attemptDir,
+				}); err != nil {
+					return workItem{}, err
+				}
+				return item, nil
+			}); persistErr != nil {
+				return workItemExecutionResult{}, persistErr
+			}
 			return workItemExecutionResult{Item: item, Draft: item.LatestDraft, Links: buildDefaultWorkItemLinks(item)}, nil
 		}
 		item.Status = workItemStatusFailed
 		item.PauseReason = ""
 		item.PauseUntil = ""
 		item.Metadata = clearWorkItemPauseMetadata(item.Metadata)
+		item.LatestArtifactRoot = attemptDir
 		item.UpdatedAt = ISOTimeNow()
 		item.LatestActionAt = item.UpdatedAt
-		_ = store.updateWorkItem(item)
-		_ = store.appendWorkItemEvent(item.ID, "run_failed", "system", map[string]any{"error": err.Error(), "attempt_dir": attemptDir})
-		_ = writeWorkItemDraftArtifacts(item, attemptDir, rawOutput)
+		if artifactErr := workItemWriteDraftArtifacts(item, attemptDir, rawOutput); artifactErr != nil {
+			return workItemExecutionResult{}, artifactErr
+		}
+		if _, persistErr := withLocalWorkWriteStore(func(store *localWorkDBStore) (workItem, error) {
+			if err := store.updateWorkItemWithEvent(item, "run_failed", "system", map[string]any{"error": err.Error(), "attempt_dir": attemptDir}); err != nil {
+				return workItem{}, err
+			}
+			return item, nil
+		}); persistErr != nil {
+			return workItemExecutionResult{}, persistErr
+		}
 		return workItemExecutionResult{}, err
 	}
 	item = result.Item
@@ -900,27 +911,24 @@ func runWorkItemByID(cwd string, itemID string, codexArgs []string, background b
 	if item.Status == "" {
 		item.Status = workItemStatusDraftReady
 	}
-	if err := store.updateWorkItem(item); err != nil {
-		return workItemExecutionResult{}, err
-	}
-	if len(result.Links) > 0 {
-		if err := store.replaceWorkItemLinks(item.ID, result.Links); err != nil {
-			return workItemExecutionResult{}, err
-		}
-	}
-	if err := writeWorkItemDraftArtifacts(item, attemptDir, rawOutput); err != nil {
-		return workItemExecutionResult{}, err
-	}
 	eventType := "draft_ready"
 	if item.Status == workItemStatusSilenced {
 		eventType = "silenced"
 	}
-	if err := store.appendWorkItemEvent(item.ID, eventType, ternaryString(background, "auto", "user"), map[string]any{
-		"status":      item.Status,
-		"attempt_dir": attemptDir,
-		"draft_kind":  valueOrEmptyDraftKind(item.LatestDraft),
-	}); err != nil {
+	if err := workItemWriteDraftArtifacts(item, attemptDir, rawOutput); err != nil {
 		return workItemExecutionResult{}, err
+	}
+	if _, persistErr := withLocalWorkWriteStore(func(store *localWorkDBStore) (workItem, error) {
+		if err := store.updateWorkItemWithLinksAndEvent(item, result.Links, eventType, ternaryString(background, "auto", "user"), map[string]any{
+			"status":      item.Status,
+			"attempt_dir": attemptDir,
+			"draft_kind":  valueOrEmptyDraftKind(item.LatestDraft),
+		}); err != nil {
+			return workItem{}, err
+		}
+		return item, nil
+	}); persistErr != nil {
+		return workItemExecutionResult{}, persistErr
 	}
 	if item.AutoSubmit && !item.Hidden && item.Status == workItemStatusDraftReady {
 		submitted, err := submitWorkItemByID(item.ID, "auto")
@@ -1191,12 +1199,9 @@ func workItemCodexTargetForItem(cwd string, item workItem) (workItemCodexTarget,
 }
 
 func submitWorkItemByID(itemID string, actor string) (workItem, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return workItem{}, err
-	}
-	defer store.Close()
-	item, err := store.readWorkItem(itemID)
+	item, err := withLocalWorkReadStore(func(store *localWorkDBStore) (workItem, error) {
+		return store.readWorkItem(itemID)
+	})
 	if err != nil {
 		return workItem{}, err
 	}
@@ -1222,11 +1227,13 @@ func submitWorkItemByID(itemID string, actor string) (workItem, error) {
 	item.HiddenReason = ""
 	item.UpdatedAt = ISOTimeNow()
 	item.LatestActionAt = item.UpdatedAt
-	if err := store.updateWorkItem(item); err != nil {
-		return workItem{}, err
-	}
-	if err := store.appendWorkItemEvent(item.ID, "submitted", actor, map[string]any{
-		"draft_kind": valueOrEmptyDraftKind(item.LatestDraft),
+	if _, err := withLocalWorkWriteStore(func(store *localWorkDBStore) (workItem, error) {
+		if err := store.updateWorkItemWithEvent(item, "submitted", actor, map[string]any{
+			"draft_kind": valueOrEmptyDraftKind(item.LatestDraft),
+		}); err != nil {
+			return workItem{}, err
+		}
+		return item, nil
 	}); err != nil {
 		return workItem{}, err
 	}
@@ -1234,12 +1241,9 @@ func submitWorkItemByID(itemID string, actor string) (workItem, error) {
 }
 
 func fixWorkItemByID(cwd string, options workItemFixCommandOptions) (workItem, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return workItem{}, err
-	}
-	defer store.Close()
-	item, err := store.readWorkItem(options.ItemID)
+	item, err := withLocalWorkReadStore(func(store *localWorkDBStore) (workItem, error) {
+		return store.readWorkItem(options.ItemID)
+	})
 	if err != nil {
 		return workItem{}, err
 	}
@@ -1257,18 +1261,34 @@ func fixWorkItemByID(cwd string, options workItemFixCommandOptions) (workItem, e
 			item.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
 			item.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
 			item.Metadata = clearWorkItemPauseMetadata(item.Metadata)
+			item.LatestArtifactRoot = attemptDir
 			item.UpdatedAt = ISOTimeNow()
-			_ = store.updateWorkItem(item)
-			_ = writeWorkItemDraftArtifacts(item, attemptDir, rawOutput)
+			item.LatestActionAt = item.UpdatedAt
+			if artifactErr := workItemWriteDraftArtifacts(item, attemptDir, rawOutput); artifactErr != nil {
+				return workItem{}, artifactErr
+			}
+			if _, persistErr := withLocalWorkWriteStore(func(store *localWorkDBStore) (workItem, error) {
+				return item, store.updateWorkItem(item)
+			}); persistErr != nil {
+				return workItem{}, persistErr
+			}
 			return item, nil
 		}
 		item.Status = workItemStatusFailed
 		item.PauseReason = ""
 		item.PauseUntil = ""
 		item.Metadata = clearWorkItemPauseMetadata(item.Metadata)
+		item.LatestArtifactRoot = attemptDir
 		item.UpdatedAt = ISOTimeNow()
-		_ = store.updateWorkItem(item)
-		_ = writeWorkItemDraftArtifacts(item, attemptDir, rawOutput)
+		item.LatestActionAt = item.UpdatedAt
+		if artifactErr := workItemWriteDraftArtifacts(item, attemptDir, rawOutput); artifactErr != nil {
+			return workItem{}, artifactErr
+		}
+		if _, persistErr := withLocalWorkWriteStore(func(store *localWorkDBStore) (workItem, error) {
+			return item, store.updateWorkItem(item)
+		}); persistErr != nil {
+			return workItem{}, persistErr
+		}
 		return workItem{}, err
 	}
 	item.LatestDraft = draft
@@ -1286,15 +1306,17 @@ func fixWorkItemByID(cwd string, options workItemFixCommandOptions) (workItem, e
 		item.Hidden = true
 		item.HiddenReason = defaultString(item.HiddenReason, "ai_ignore_high_confidence")
 	}
-	if err := store.updateWorkItem(item); err != nil {
+	if err := workItemWriteDraftArtifacts(item, attemptDir, rawOutput); err != nil {
 		return workItem{}, err
 	}
-	if err := writeWorkItemDraftArtifacts(item, attemptDir, rawOutput); err != nil {
-		return workItem{}, err
-	}
-	if err := store.appendWorkItemEvent(item.ID, "draft_fixed", "user", map[string]any{
-		"instruction": options.Instruction,
-		"attempt_dir": attemptDir,
+	if _, err := withLocalWorkWriteStore(func(store *localWorkDBStore) (workItem, error) {
+		if err := store.updateWorkItemWithEvent(item, "draft_fixed", "user", map[string]any{
+			"instruction": options.Instruction,
+			"attempt_dir": attemptDir,
+		}); err != nil {
+			return workItem{}, err
+		}
+		return item, nil
 	}); err != nil {
 		return workItem{}, err
 	}
@@ -1302,64 +1324,49 @@ func fixWorkItemByID(cwd string, options workItemFixCommandOptions) (workItem, e
 }
 
 func dropWorkItemByID(itemID string, actor string) error {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	item, err := store.readWorkItem(itemID)
-	if err != nil {
-		return err
-	}
-	item.UpdatedAt = ISOTimeNow()
-	item.LatestActionAt = item.UpdatedAt
-	if shouldSilenceWorkItem(item) {
-		item.Status = workItemStatusSilenced
-		item.Hidden = true
-		item.HiddenReason = defaultString(item.HiddenReason, "ai_ignore_high_confidence")
-	} else {
-		item.Status = workItemStatusDropped
-		item.Hidden = false
-		item.HiddenReason = ""
-	}
-	if err := store.updateWorkItem(item); err != nil {
-		return err
-	}
-	return store.appendWorkItemEvent(item.ID, "dropped", actor, map[string]any{"status": item.Status})
+	return withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+		item, err := store.readWorkItem(itemID)
+		if err != nil {
+			return err
+		}
+		item.UpdatedAt = ISOTimeNow()
+		item.LatestActionAt = item.UpdatedAt
+		if shouldSilenceWorkItem(item) {
+			item.Status = workItemStatusSilenced
+			item.Hidden = true
+			item.HiddenReason = defaultString(item.HiddenReason, "ai_ignore_high_confidence")
+		} else {
+			item.Status = workItemStatusDropped
+			item.Hidden = false
+			item.HiddenReason = ""
+		}
+		return store.updateWorkItemWithEvent(item, "dropped", actor, map[string]any{"status": item.Status})
+	})
 }
 
 func restoreWorkItemByID(itemID string, actor string) error {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	item, err := store.readWorkItem(itemID)
-	if err != nil {
-		return err
-	}
-	item.Hidden = false
-	item.HiddenReason = ""
-	if item.LatestDraft != nil {
-		item.Status = workItemStatusDraftReady
-	} else {
-		item.Status = workItemStatusQueued
-	}
-	item.UpdatedAt = ISOTimeNow()
-	item.LatestActionAt = item.UpdatedAt
-	if err := store.updateWorkItem(item); err != nil {
-		return err
-	}
-	return store.appendWorkItemEvent(item.ID, "restored", actor, map[string]any{"status": item.Status})
+	return withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+		item, err := store.readWorkItem(itemID)
+		if err != nil {
+			return err
+		}
+		item.Hidden = false
+		item.HiddenReason = ""
+		if item.LatestDraft != nil {
+			item.Status = workItemStatusDraftReady
+		} else {
+			item.Status = workItemStatusQueued
+		}
+		item.UpdatedAt = ISOTimeNow()
+		item.LatestActionAt = item.UpdatedAt
+		return store.updateWorkItemWithEvent(item, "restored", actor, map[string]any{"status": item.Status})
+	})
 }
 
 func dispatchQueuedWorkItems(repoSlug string, codexArgs []string) (int, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return 0, err
-	}
-	defer store.Close()
-	items, err := store.listAutoRunnableWorkItems(repoSlug, 10)
+	items, err := withLocalWorkReadStore(func(store *localWorkDBStore) ([]workItem, error) {
+		return store.listAutoRunnableWorkItems(repoSlug, 10)
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -1430,7 +1437,7 @@ func submitWorkItemViaShell(item workItem) error {
 		return fmt.Errorf("%v\n%s%s", err, stdout.String(), stderr.String())
 	}
 	if strings.TrimSpace(item.LatestArtifactRoot) != "" {
-		_ = os.WriteFile(filepath.Join(item.LatestArtifactRoot, "submit-shell.stdout.log"), stdout.Bytes(), 0o644)
+		writeOptionalWorkItemArtifact(filepath.Join(item.LatestArtifactRoot, "submit-shell.stdout.log"), stdout.Bytes())
 	}
 	return nil
 }
@@ -1538,7 +1545,7 @@ func (s *localWorkDBStore) readWorkItem(itemID string) (workItem, error) {
 }
 
 func (s *localWorkDBStore) findLinkedRunID(repoSlug string, targetURL string) (string, error) {
-	rows, err := s.db.Query(`SELECT run_id, backend, repo_key, repo_root, repo_name, manifest_path, updated_at, target_kind FROM work_run_index WHERE backend = 'github' AND repo_key = ? ORDER BY updated_at DESC LIMIT 20`, nullableString(repoSlug))
+	rows, err := s.db.Query(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index WHERE backend = 'github' AND repo_key = ? ORDER BY updated_at DESC LIMIT 20`, nullableString(repoSlug))
 	if err != nil {
 		return "", err
 	}
@@ -1568,6 +1575,10 @@ func (s *localWorkDBStore) findLinkedRunID(repoSlug string, targetURL string) (s
 }
 
 func (s *localWorkDBStore) upsertWorkItem(item workItem, actor string, payload map[string]any) (workItem, bool, error) {
+	return s.upsertWorkItemWithLinks(item, actor, payload, nil)
+}
+
+func (s *localWorkDBStore) upsertWorkItemWithLinks(item workItem, actor string, payload map[string]any, links []workItemLink) (workItem, bool, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return workItem{}, false, err
@@ -1581,7 +1592,7 @@ func (s *localWorkDBStore) upsertWorkItem(item workItem, actor string, payload m
 		return workItem{}, false, err
 	}
 	if !created {
-		existing, err := s.readWorkItem(existingID)
+		existing, err := readWorkItemTx(tx, existingID)
 		if err != nil {
 			return workItem{}, false, err
 		}
@@ -1594,11 +1605,19 @@ func (s *localWorkDBStore) upsertWorkItem(item workItem, actor string, payload m
 		item.LatestArtifactRoot = existing.LatestArtifactRoot
 		item.LatestActionAt = existing.LatestActionAt
 	}
+	for index := range links {
+		links[index].ItemID = item.ID
+	}
 	if err := writeWorkItemTx(tx, item); err != nil {
 		return workItem{}, false, err
 	}
 	if err := appendWorkItemEventTx(tx, item.ID, ternaryString(created, "ingested", "refreshed"), actor, payload); err != nil {
 		return workItem{}, false, err
+	}
+	if links != nil {
+		if err := replaceWorkItemLinksTx(tx, item.ID, links); err != nil {
+			return workItem{}, false, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return workItem{}, false, err
@@ -1659,15 +1678,70 @@ func (s *localWorkDBStore) replaceWorkItemLinks(itemID string, links []workItemL
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM work_item_links WHERE item_id = ?`, itemID); err != nil {
+	if err := replaceWorkItemLinksTx(tx, itemID, links); err != nil {
 		return err
 	}
-	for _, link := range links {
-		if err := writeWorkItemLinkTx(tx, link); err != nil {
-			return err
-		}
+	return tx.Commit()
+}
+
+func (s *localWorkDBStore) updateWorkItemWithEvent(item workItem, eventType string, actor string, payload map[string]any) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := writeWorkItemTx(tx, item); err != nil {
+		return err
+	}
+	if err := appendWorkItemEventTx(tx, item.ID, eventType, actor, payload); err != nil {
+		return err
 	}
 	return tx.Commit()
+}
+
+func (s *localWorkDBStore) updateWorkItemWithLinksAndEvent(item workItem, links []workItemLink, eventType string, actor string, payload map[string]any) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := writeWorkItemTx(tx, item); err != nil {
+		return err
+	}
+	if err := replaceWorkItemLinksTx(tx, item.ID, links); err != nil {
+		return err
+	}
+	if err := appendWorkItemEventTx(tx, item.ID, eventType, actor, payload); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *localWorkDBStore) startWorkItemAttempt(itemID string, attemptDir string, actor string) (workItem, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return workItem{}, err
+	}
+	defer tx.Rollback()
+	item, err := readWorkItemTx(tx, itemID)
+	if err != nil {
+		return workItem{}, err
+	}
+	item.Status = workItemStatusRunning
+	item.Hidden = false
+	item.HiddenReason = ""
+	item.LatestActionAt = ISOTimeNow()
+	item.UpdatedAt = item.LatestActionAt
+	if err := writeWorkItemTx(tx, item); err != nil {
+		return workItem{}, err
+	}
+	if err := appendWorkItemEventTx(tx, item.ID, "run_started", actor, map[string]any{"attempt_dir": attemptDir}); err != nil {
+		return workItem{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return workItem{}, err
+	}
+	return item, nil
 }
 
 func (s *localWorkDBStore) readWorkItemLinks(itemID string) ([]workItemLink, error) {
@@ -1799,6 +1873,18 @@ func writeWorkItemLinkTx(tx *sql.Tx, link workItemLink) error {
 	return err
 }
 
+func replaceWorkItemLinksTx(tx *sql.Tx, itemID string, links []workItemLink) error {
+	if _, err := tx.Exec(`DELETE FROM work_item_links WHERE item_id = ?`, itemID); err != nil {
+		return err
+	}
+	for _, link := range links {
+		if err := writeWorkItemLinkTx(tx, link); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func marshalNullableJSON(value any) (string, error) {
 	if value == nil {
 		return "", nil
@@ -1884,6 +1970,18 @@ func scanWorkItem(row workItemScanner) (workItem, error) {
 		}
 	}
 	workItemPauseFields(&item)
+	return item, nil
+}
+
+func readWorkItemTx(tx *sql.Tx, itemID string) (workItem, error) {
+	row := tx.QueryRow(`SELECT id, dedupe_key, source, source_kind, external_id, thread_key, repo_slug, target_url, linked_run_id, subject, body, author, received_at, status, priority, auto_run, auto_submit, hidden, hidden_reason, submit_profile_json, metadata_json, latest_draft_json, latest_artifact_root, latest_action_at, pause_reason, pause_until, created_at, updated_at FROM work_items WHERE id = ?`, itemID)
+	item, err := scanWorkItem(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return workItem{}, fmt.Errorf("work item %s was not found", itemID)
+		}
+		return workItem{}, err
+	}
 	return item, nil
 }
 

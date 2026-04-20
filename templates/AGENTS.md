@@ -28,8 +28,8 @@ NANA coordinates Codex prompts, skills, and runtime state. Role prompts narrow w
 - When routing affects execution, include `routing_decision` in plans, traces, and final reports: `mode`, `role_tier` (tier/roles), `trigger`, `confidence`.
 
 ## Lazy Runtime Skills
-Load detailed skill runtime docs only when invoked. When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md. Explicit `$skill` invocations run left-to-right before implicit keyword matches; keyword matches are case-insensitive; `/prompts:<name>` disables implicit keyword activation unless explicit `$skill` tokens are present. The rest is the task. Sync trigger tests with this list.
-`nana route --explain "<prompt>"` to preview routing.
+Load detailed skill runtime docs only when invoked. When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md. Explicit `$skill`s run left-to-right before keyword matches; keyword matches are case-insensitive; `/prompts:<name>` disables implicit keyword activation unless explicit `$skill` tokens are present. The rest is the task. Sync trigger tests with this list.
+- Use `nana route --explain "<prompt>"` to preview explicit skill and keyword routing before execution when routing is unclear.
 - `$autopilot` (`~/.codex/skills/autopilot/RUNTIME.md`): `autopilot`, `build me`, `I want a`
 - `$ultrawork` (`~/.codex/skills/ultrawork/RUNTIME.md`): `ultrawork`, `ulw`, `parallel`
 - `$analyze` (`~/.codex/skills/analyze/RUNTIME.md`): `analyze`, `investigate`

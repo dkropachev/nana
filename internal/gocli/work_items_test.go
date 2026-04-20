@@ -2,6 +2,8 @@ package gocli
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -233,6 +235,161 @@ func TestSubmitWorkItemViaShellUsesDraftEnv(t *testing.T) {
 	}
 }
 
+func TestSubmitWorkItemViaShellIgnoresOptionalArtifactWriteFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	outputPath := filepath.Join(home, "submit-optional.log")
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "slack-adapter",
+		SourceKind: "task",
+		ExternalID: "slack-optional-artifact",
+		Subject:    "Send a reply",
+		SubmitProfile: &workItemSubmitProfile{
+			Type:    "shell",
+			Command: "printf 'ok\\n' > " + outputPath,
+		},
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+
+	brokenArtifactRoot := filepath.Join(home, "artifact-root-file")
+	if err := os.WriteFile(brokenArtifactRoot, []byte("not a dir"), 0o644); err != nil {
+		t.Fatalf("write broken artifact root: %v", err)
+	}
+
+	store, err := openLocalWorkDB()
+	if err != nil {
+		t.Fatalf("openLocalWorkDB: %v", err)
+	}
+	item.LatestDraft = &workItemDraft{Kind: "reply", Body: "Adapter reply", Summary: "Reply summary"}
+	item.Status = workItemStatusDraftReady
+	item.LatestArtifactRoot = brokenArtifactRoot
+	if err := store.updateWorkItem(item); err != nil {
+		t.Fatalf("updateWorkItem: %v", err)
+	}
+	store.Close()
+
+	submitted, err := submitWorkItemByID(item.ID, "test")
+	if err != nil {
+		t.Fatalf("submitWorkItemByID: %v", err)
+	}
+	if submitted.Status != workItemStatusSubmitted {
+		t.Fatalf("expected submitted status, got %+v", submitted)
+	}
+	if _, err := os.Stat(outputPath); err != nil {
+		t.Fatalf("expected shell submit output despite artifact failure: %v", err)
+	}
+}
+
+func TestRunWorkItemArtifactFailureLeavesPreFinalState(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("HOME", home)
+
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "email",
+		SourceKind: "task",
+		ExternalID: "artifact-fail-run",
+		Subject:    "Draft a reply",
+		Body:       "Need an answer.",
+		Metadata: map[string]any{
+			"task_mode": "reply",
+		},
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+
+	oldRunner := workItemRunManagedPrompt
+	oldArtifacts := workItemWriteDraftArtifacts
+	workItemRunManagedPrompt = func(options codexManagedPromptOptions) (codexManagedPromptResult, error) {
+		return codexManagedPromptResult{
+			Stdout: `{"kind":"reply","body":"Response","summary":"Summary","suggested_disposition":"needs_review","confidence":0.6}`,
+		}, nil
+	}
+	workItemWriteDraftArtifacts = func(item workItem, attemptDir string, rawOutput string) error {
+		return fmt.Errorf("artifact write failed")
+	}
+	defer func() {
+		workItemRunManagedPrompt = oldRunner
+		workItemWriteDraftArtifacts = oldArtifacts
+	}()
+
+	_, err = runWorkItemByID(cwd, item.ID, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "artifact write failed") {
+		t.Fatalf("expected artifact write failure, got %v", err)
+	}
+
+	detail, err := readWorkItemDetail(item.ID)
+	if err != nil {
+		t.Fatalf("readWorkItemDetail: %v", err)
+	}
+	if detail.Item.Status != workItemStatusRunning {
+		t.Fatalf("expected item to remain in pre-final running state, got %+v", detail.Item)
+	}
+	if strings.TrimSpace(detail.Item.LatestArtifactRoot) != "" {
+		t.Fatalf("expected no artifact root to be committed, got %+v", detail.Item)
+	}
+	if len(detail.Events) != 2 {
+		t.Fatalf("expected only ingest and run_started events, got %+v", detail.Events)
+	}
+}
+
+func TestResolveWorkItemLinkedRunIDUsesMatchingRunIndex(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	runID := "gh-linked-resolution"
+	runDir := filepath.Join(githubWorkRepoRoot(repoSlug), "runs", runID)
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	if err := writeGithubJSON(manifestPath, githubWorkManifest{
+		Version:        1,
+		RunID:          runID,
+		RepoSlug:       repoSlug,
+		RepoOwner:      "acme",
+		RepoName:       "widget",
+		TargetURL:      "https://github.com/acme/widget/pull/7",
+		PublishedPRURL: "https://github.com/acme/widget/pull/7",
+		UpdatedAt:      ISOTimeNow(),
+	}); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := writeWorkRunIndex(workRunIndexEntry{
+		RunID:        runID,
+		Backend:      "github",
+		RepoKey:      repoSlug,
+		RepoRoot:     githubWorkRepoRoot(repoSlug),
+		RepoName:     "widget",
+		RepoSlug:     repoSlug,
+		ManifestPath: manifestPath,
+		UpdatedAt:    ISOTimeNow(),
+		TargetKind:   "pull_request",
+	}); err != nil {
+		t.Fatalf("writeWorkRunIndex: %v", err)
+	}
+
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "github",
+		SourceKind: "review_request",
+		ExternalID: "notification-100",
+		RepoSlug:   repoSlug,
+		TargetURL:  "https://github.com/acme/widget/pull/7",
+		Subject:    "Review request",
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+	if item.LinkedRunID != runID {
+		t.Fatalf("expected linked run %s, got %+v", runID, item)
+	}
+}
+
 func TestWorkItemCodexTargetForItemUsesManagedSourceCheckout(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -333,7 +490,7 @@ func TestRunWorkItemCodexPromptBlocksWhenSourceWriteLockHeld(t *testing.T) {
 	}
 }
 
-func TestWorkItemPauseFieldsHydrateFromMetadataAndDelayAutoRun(t *testing.T) {
+func TestRepairLocalWorkDBMigratesLegacyPauseFieldsAndDelayAutoRun(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -367,23 +524,43 @@ func TestWorkItemPauseFieldsHydrateFromMetadataAndDelayAutoRun(t *testing.T) {
 		workItemStatusPaused, string(encoded), item.ID); err != nil {
 		t.Fatalf("seed legacy paused row: %v", err)
 	}
+	if _, err := store.db.Exec(`PRAGMA user_version = 0`); err != nil {
+		t.Fatalf("downgrade schema version: %v", err)
+	}
 	store.Close()
+
+	if _, err := readWorkItemDetail(item.ID); err == nil {
+		t.Fatal("expected readWorkItemDetail to require repair for legacy schema")
+	} else {
+		var schemaErr *localWorkDBSchemaError
+		if !errors.As(err, &schemaErr) {
+			t.Fatalf("expected schema repair error, got %v", err)
+		}
+	}
+
+	report, err := repairLocalWorkDB()
+	if err != nil {
+		t.Fatalf("repairLocalWorkDB: %v", err)
+	}
+	if !report.Changed {
+		t.Fatalf("expected repair to change the DB, got %+v", report)
+	}
 
 	detail, err := readWorkItemDetail(item.ID)
 	if err != nil {
-		t.Fatalf("readWorkItemDetail: %v", err)
+		t.Fatalf("readWorkItemDetail after repair: %v", err)
 	}
 	if detail.Item.PauseReason != "rate limited" || detail.Item.PauseUntil == "" {
-		t.Fatalf("expected hydrated pause fields, got %+v", detail.Item)
+		t.Fatalf("expected hydrated pause fields after repair, got %+v", detail.Item)
 	}
 
 	store, err = openLocalWorkDB()
 	if err != nil {
-		t.Fatalf("openLocalWorkDB (second): %v", err)
+		t.Fatalf("openLocalWorkDB after repair: %v", err)
 	}
 	reloaded, err := store.readWorkItem(item.ID)
 	if err != nil {
-		t.Fatalf("readWorkItem after legacy rewrite: %v", err)
+		t.Fatalf("readWorkItem after repair: %v", err)
 	}
 	if reloaded.Metadata != nil {
 		if _, ok := reloaded.Metadata["pause_reason"]; ok {

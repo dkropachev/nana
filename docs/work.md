@@ -11,6 +11,8 @@ nana work resolve [--run-id <id> | --last | --global-last] [--repo <path>]
 nana work status [--run-id <id> | --last | --global-last] [--repo <path>] [--json]
 nana work logs [--run-id <id> | --last | --global-last] [--repo <path>] [--tail <n>] [--json]
 nana work retrospective [--run-id <id> | --last | --global-last] [--repo <path>]
+nana work db-check [--json]
+nana work db-repair [--json]
 nana work verify-refresh [--run-id <id> | --last | --global-last] [--repo <path>]
 nana work sync [--run-id <id> | --last] [--reviewer <login|@me>] [--resume-last] [-- codex-args...]
 nana work lane-exec --run-id <id>|--last --lane <alias> [--task <text>] [-- codex-args...]
@@ -47,6 +49,11 @@ Layout:
 The source repo should not receive `work` runtime files. For local runs, the verified sandbox diff is committed back to the source checkout after all completion gates pass.
 
 Previous JSON state files such as `manifest.json`, `runtime-state.json`, `finding-history.json`, `repo.json`, `latest-run.json`, and `index/runs.json` are not part of the current runtime state model and are ignored if they still exist on disk.
+
+State DB maintenance:
+
+- `nana work db-check [--json]` reports schema version, integrity state, foreign-key state, and whether repair is required
+- `nana work db-repair [--json]` migrates legacy `state.db` files, rebuilds constrained tables, repairs dangling references, and revalidates the database
 
 ## Rate-Limit Handling
 

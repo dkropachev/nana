@@ -3369,8 +3369,8 @@ func TestStartUIWorkItemSubmitEventWriteFailureInvalidatesOverviewCache(t *testi
 		t.Fatalf("expected submit failure status 400, got %d", response.StatusCode)
 	}
 	updated := startUITestReadWorkItem(t, item.ID)
-	if updated.Status != workItemStatusSubmitted {
-		t.Fatalf("expected submitted work-item side effect before event failure, got %+v", updated)
+	if updated.Status != workItemStatusDraftReady {
+		t.Fatalf("expected submit rollback on event failure, got %+v", updated)
 	}
 	if startUITestOverviewCacheValid(api) {
 		t.Fatalf("expected failed work-item submit side effect to invalidate overview cache")
@@ -3398,8 +3398,8 @@ func TestStartUIWorkItemDropEventWriteFailureInvalidatesOverviewCache(t *testing
 		t.Fatalf("expected drop failure status 400, got %d", response.StatusCode)
 	}
 	updated := startUITestReadWorkItem(t, item.ID)
-	if updated.Status != workItemStatusDropped {
-		t.Fatalf("expected dropped work-item side effect before event failure, got %+v", updated)
+	if updated.Status != workItemStatusQueued {
+		t.Fatalf("expected drop rollback on event failure, got %+v", updated)
 	}
 	if startUITestOverviewCacheValid(api) {
 		t.Fatalf("expected failed work-item drop side effect to invalidate overview cache")
@@ -3430,11 +3430,48 @@ func TestStartUIWorkItemRestoreEventWriteFailureInvalidatesOverviewCache(t *test
 		t.Fatalf("expected restore failure status 400, got %d", response.StatusCode)
 	}
 	updated := startUITestReadWorkItem(t, item.ID)
-	if updated.Status != workItemStatusQueued {
-		t.Fatalf("expected restored work-item side effect before event failure, got %+v", updated)
+	if updated.Status != workItemStatusDropped {
+		t.Fatalf("expected restore rollback on event failure, got %+v", updated)
 	}
 	if startUITestOverviewCacheValid(api) {
 		t.Fatalf("expected failed work-item restore side effect to invalidate overview cache")
+	}
+}
+
+func TestStartUIWorkItemsRepairRequiredReturns503JSON(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	item := startUITestCreateQueuedWorkItem(t, "repair-required")
+	store, err := openLocalWorkDB()
+	if err != nil {
+		t.Fatalf("openLocalWorkDB: %v", err)
+	}
+	if _, err := store.db.Exec(`PRAGMA user_version = 0`); err != nil {
+		t.Fatalf("downgrade schema version: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	api := &startUIAPI{cwd: t.TempDir()}
+	server := httptest.NewServer(api.routes())
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/api/v1/work-items/" + item.ID)
+	if err != nil {
+		t.Fatalf("GET work item detail: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", response.StatusCode)
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload["code"] != "work_db_repair_required" || payload["repair_command"] != "nana work db-repair" {
+		t.Fatalf("unexpected repair payload: %+v", payload)
 	}
 }
 

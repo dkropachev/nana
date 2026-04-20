@@ -338,6 +338,39 @@ func TestCheckRepoGitDriftWarnsWhenBehindDirty(t *testing.T) {
 	}
 }
 
+func TestCheckWorkSQLiteStateWarnsWhenRepairIsRequired(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "email",
+		SourceKind: "task",
+		ExternalID: "doctor-work-db",
+		Subject:    "Doctor DB state",
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+	store, err := openLocalWorkDB()
+	if err != nil {
+		t.Fatalf("openLocalWorkDB: %v", err)
+	}
+	if _, err := store.db.Exec(`UPDATE work_items SET pause_reason = NULL, pause_until = NULL, metadata_json = '{"pause_reason":"rate limited","pause_until":"2026-04-21T00:00:00Z"}' WHERE id = ?`, item.ID); err != nil {
+		t.Fatalf("seed legacy metadata: %v", err)
+	}
+	if _, err := store.db.Exec(`PRAGMA user_version = 0`); err != nil {
+		t.Fatalf("downgrade schema version: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	check := checkWorkSQLiteState()
+	if check.Status != "warn" || !strings.Contains(check.Message, "run `nana work db-repair`") {
+		t.Fatalf("unexpected check: %#v", check)
+	}
+}
+
 func createDoctorTrackedRepo(t *testing.T) (string, string) {
 	t.Helper()
 	remote := filepath.Join(t.TempDir(), "remote.git")

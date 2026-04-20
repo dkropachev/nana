@@ -173,74 +173,70 @@ func repoDrop(repoSlug string) error {
 }
 
 func removeGithubRepoPersistence(repoSlug string, repoRoot string, sourcePath string) ([]string, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return nil, err
-	}
-	defer store.Close()
-	tx, err := store.db.Begin()
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	rows, err := tx.Query(`SELECT run_id, repo_id, sandbox_path FROM runs WHERE repo_root = ?`, sourcePath)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	runIDs := []string{}
 	repoIDs := map[string]bool{}
 	sandboxPaths := []string{}
-	for rows.Next() {
-		var runID string
-		var repoID string
-		var sandboxPath string
-		if err := rows.Scan(&runID, &repoID, &sandboxPath); err != nil {
-			return nil, err
+	if err := withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+		tx, err := store.db.Begin()
+		if err != nil {
+			return err
 		}
-		runIDs = append(runIDs, strings.TrimSpace(runID))
-		if strings.TrimSpace(repoID) != "" {
-			repoIDs[strings.TrimSpace(repoID)] = true
-		}
-		if strings.TrimSpace(sandboxPath) != "" {
-			sandboxPaths = append(sandboxPaths, strings.TrimSpace(sandboxPath))
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
+		defer tx.Rollback()
 
-	if _, err := tx.Exec(`DELETE FROM work_item_events WHERE item_id IN (SELECT id FROM work_items WHERE repo_slug = ?)`, repoSlug); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(`DELETE FROM work_item_links WHERE item_id IN (SELECT id FROM work_items WHERE repo_slug = ?)`, repoSlug); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(`DELETE FROM work_items WHERE repo_slug = ?`, repoSlug); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(`DELETE FROM work_run_index WHERE repo_key = ? OR repo_root = ? OR manifest_path LIKE ?`, repoSlug, sourcePath, filepath.Join(repoRoot, "%")); err != nil {
-		return nil, err
-	}
-	for _, runID := range runIDs {
-		if _, err := tx.Exec(`DELETE FROM runtime_states WHERE run_id = ?`, runID); err != nil {
-			return nil, err
+		rows, err := tx.Query(`SELECT run_id, repo_id, sandbox_path FROM runs WHERE repo_root = ?`, sourcePath)
+		if err != nil {
+			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM finding_history WHERE run_id = ?`, runID); err != nil {
-			return nil, err
+		defer rows.Close()
+		for rows.Next() {
+			var runID string
+			var repoID string
+			var sandboxPath string
+			if err := rows.Scan(&runID, &repoID, &sandboxPath); err != nil {
+				return err
+			}
+			runIDs = append(runIDs, strings.TrimSpace(runID))
+			if strings.TrimSpace(repoID) != "" {
+				repoIDs[strings.TrimSpace(repoID)] = true
+			}
+			if strings.TrimSpace(sandboxPath) != "" {
+				sandboxPaths = append(sandboxPaths, strings.TrimSpace(sandboxPath))
+			}
 		}
-		if _, err := tx.Exec(`DELETE FROM runs WHERE run_id = ?`, runID); err != nil {
-			return nil, err
+		if err := rows.Err(); err != nil {
+			return err
 		}
-	}
-	for repoID := range repoIDs {
-		if _, err := tx.Exec(`DELETE FROM repos WHERE repo_id = ?`, repoID); err != nil {
-			return nil, err
+
+		if _, err := tx.Exec(`DELETE FROM work_item_events WHERE item_id IN (SELECT id FROM work_items WHERE repo_slug = ?)`, repoSlug); err != nil {
+			return err
 		}
-	}
-	if err := tx.Commit(); err != nil {
+		if _, err := tx.Exec(`DELETE FROM work_item_links WHERE item_id IN (SELECT id FROM work_items WHERE repo_slug = ?)`, repoSlug); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM work_items WHERE repo_slug = ?`, repoSlug); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM work_run_index WHERE repo_key = ? OR repo_root = ? OR manifest_path LIKE ?`, repoSlug, sourcePath, filepath.Join(repoRoot, "%")); err != nil {
+			return err
+		}
+		for _, runID := range runIDs {
+			if _, err := tx.Exec(`DELETE FROM runtime_states WHERE run_id = ?`, runID); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`DELETE FROM finding_history WHERE run_id = ?`, runID); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`DELETE FROM runs WHERE run_id = ?`, runID); err != nil {
+				return err
+			}
+		}
+		for repoID := range repoIDs {
+			if _, err := tx.Exec(`DELETE FROM repos WHERE repo_id = ?`, repoID); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	}); err != nil {
 		return nil, err
 	}
 
