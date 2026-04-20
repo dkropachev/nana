@@ -65,6 +65,7 @@ const (
 	localWorkReadRetryAttempts     = 4
 	localWorkWriteRetryAttempts    = 4
 	localWorkStaleRunThreshold     = 5 * time.Minute
+	localWorkStaleCleanupError     = "stale running run cleaned up at start: no active process found"
 )
 
 var localWorkReadRetryDelay = 200 * time.Millisecond
@@ -1072,22 +1073,44 @@ func localWorkManifestLastHeartbeat(manifest localWorkManifest) time.Time {
 	return time.Time{}
 }
 
+func localWorkIsStaleCleanupError(message string) bool {
+	return strings.Contains(strings.TrimSpace(message), localWorkStaleCleanupError)
+}
+
+func localWorkProcessLineHasCandidate(line string, candidates ...string) bool {
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" && strings.Contains(line, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func localWorkProcessLineIsCodexWorker(line string) bool {
+	return strings.Contains(line, "codex exec -C ") || strings.Contains(line, "/codex/codex exec -C ")
+}
+
+func localWorkProcessLineIsDetachedRunner(line string) bool {
+	return strings.Contains(line, " work resume ") && strings.Contains(line, "--run-id")
+}
+
 func localWorkManifestHasLiveProcess(manifest localWorkManifest, snapshot string) bool {
 	for _, line := range strings.Split(snapshot, "\n") {
 		if line == "" {
 			continue
 		}
-		if !strings.Contains(line, "codex exec -C ") && !strings.Contains(line, "/codex/codex exec -C ") {
+		if !localWorkProcessLineIsCodexWorker(line) && !localWorkProcessLineIsDetachedRunner(line) {
 			continue
 		}
-		for _, candidate := range []string{
-			strings.TrimSpace(manifest.RunID),
-			strings.TrimSpace(manifest.SandboxPath),
-			strings.TrimSpace(manifest.SandboxRepoPath),
-		} {
-			if candidate != "" && strings.Contains(line, candidate) {
-				return true
-			}
+		if localWorkProcessLineHasCandidate(
+			line,
+			manifest.RunID,
+			manifest.SandboxPath,
+			manifest.SandboxRepoPath,
+			manifest.RepoRoot,
+		) {
+			return true
 		}
 	}
 	return false
@@ -1150,7 +1173,7 @@ func cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot string) (int, []localWork
 		if strings.TrimSpace(manifest.CompletedAt) == "" {
 			manifest.CompletedAt = now
 		}
-		manifest.LastError = "stale running run cleaned up at start: no active process found"
+		manifest.LastError = localWorkStaleCleanupError
 		if err := store.writeManifest(manifest); err != nil {
 			return cleaned, cleanedManifests, err
 		}
@@ -1966,7 +1989,14 @@ func finalizeResolvedLocalWork(manifest localWorkManifest, applyResult localWork
 	return nil
 }
 
-func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy codexRateLimitPolicy) error {
+func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy codexRateLimitPolicy) (err error) {
+	defer func() {
+		if err == nil {
+			return
+		}
+		_ = persistUnexpectedLocalWorkFailure(runID, err)
+	}()
+
 	manifest, err := readLocalWorkManifestByRunID(runID)
 	if err != nil {
 		return err
@@ -4711,85 +4741,108 @@ func writeLocalWorkJSONAtomically(path string, value interface{}) error {
 }
 
 func readLocalWorkRuntimeState(runID string, iteration int) (localWorkIterationRuntimeState, error) {
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return localWorkIterationRuntimeState{}, err
-	}
-	defer store.Close()
-	row := store.db.QueryRow(`SELECT state_json FROM runtime_states WHERE run_id = ? AND iteration = ?`, runID, iteration)
-	var raw string
-	if err := row.Scan(&raw); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return localWorkIterationRuntimeState{}, os.ErrNotExist
+	return withLocalWorkReadStore(func(store *localWorkDBStore) (localWorkIterationRuntimeState, error) {
+		row := store.db.QueryRow(`SELECT state_json FROM runtime_states WHERE run_id = ? AND iteration = ?`, runID, iteration)
+		var raw string
+		if err := row.Scan(&raw); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return localWorkIterationRuntimeState{}, os.ErrNotExist
+			}
+			return localWorkIterationRuntimeState{}, err
 		}
-		return localWorkIterationRuntimeState{}, err
-	}
-	var state localWorkIterationRuntimeState
-	if err := json.Unmarshal([]byte(raw), &state); err != nil {
-		return localWorkIterationRuntimeState{}, err
-	}
-	if state.Version == 0 {
-		state.Version = 1
-	}
-	return state, nil
+		var state localWorkIterationRuntimeState
+		if err := json.Unmarshal([]byte(raw), &state); err != nil {
+			return localWorkIterationRuntimeState{}, err
+		}
+		if state.Version == 0 {
+			state.Version = 1
+		}
+		return state, nil
+	})
 }
 
 func writeLocalWorkRuntimeState(runID string, state localWorkIterationRuntimeState) error {
-	store, err := openLocalWorkDB()
-	if err != nil {
+	return withLocalWorkWriteRetry(func() error {
+		store, err := openLocalWorkDB()
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		if state.Version == 0 {
+			state.Version = 1
+		}
+		content, err := json.Marshal(state)
+		if err != nil {
+			return err
+		}
+		_, err = store.db.Exec(
+			`INSERT INTO runtime_states(run_id, iteration, state_json)
+			 VALUES(?, ?, ?)
+			 ON CONFLICT(run_id, iteration) DO UPDATE SET state_json=excluded.state_json`,
+			runID, state.Iteration, string(content),
+		)
 		return err
-	}
-	defer store.Close()
-	if state.Version == 0 {
-		state.Version = 1
-	}
-	content, err := json.Marshal(state)
-	if err != nil {
-		return err
-	}
-	_, err = store.db.Exec(
-		`INSERT INTO runtime_states(run_id, iteration, state_json)
-		 VALUES(?, ?, ?)
-		 ON CONFLICT(run_id, iteration) DO UPDATE SET state_json=excluded.state_json`,
-		runID, state.Iteration, string(content),
-	)
-	return err
+	})
 }
 
 func removeLocalWorkRuntimeState(runID string, iteration int) error {
-	store, err := openLocalWorkDB()
-	if err != nil {
+	return withLocalWorkWriteRetry(func() error {
+		store, err := openLocalWorkDB()
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		_, err = store.db.Exec(`DELETE FROM runtime_states WHERE run_id = ? AND iteration = ?`, runID, iteration)
 		return err
-	}
-	defer store.Close()
-	_, err = store.db.Exec(`DELETE FROM runtime_states WHERE run_id = ? AND iteration = ?`, runID, iteration)
-	return err
+	})
 }
 
 func appendLocalWorkFindingHistory(runID string, events []localWorkFindingHistoryEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
-	store, err := openLocalWorkDB()
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	tx, err := store.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, event := range events {
-		content, err := json.Marshal(event)
+	return withLocalWorkWriteRetry(func() error {
+		store, err := openLocalWorkDB()
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO finding_history(run_id, event_json) VALUES(?, ?)`, runID, string(content)); err != nil {
+		defer store.Close()
+		tx, err := store.db.Begin()
+		if err != nil {
 			return err
 		}
+		defer tx.Rollback()
+		for _, event := range events {
+			content, err := json.Marshal(event)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`INSERT INTO finding_history(run_id, event_json) VALUES(?, ?)`, runID, string(content)); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	})
+}
+
+func persistUnexpectedLocalWorkFailure(runID string, cause error) error {
+	if cause == nil {
+		return nil
 	}
-	return tx.Commit()
+	manifest, err := readLocalWorkManifestByRunID(runID)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(strings.TrimSpace(manifest.Status), "running") {
+		return nil
+	}
+	now := ISOTimeNow()
+	manifest.Status = "failed"
+	manifest.LastError = strings.TrimSpace(cause.Error())
+	manifest.CompletedAt = defaultString(strings.TrimSpace(manifest.CompletedAt), now)
+	setLocalWorkProgress(&manifest, nil, "failed", "failed", manifest.CurrentRound)
+	manifest.UpdatedAt = now
+	return writeLocalWorkManifest(manifest)
 }
 
 func findLocalWorkValidationContext(state *localWorkIterationRuntimeState, name string, round int) *localWorkValidationContextState {

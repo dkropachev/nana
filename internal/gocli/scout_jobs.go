@@ -527,8 +527,22 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 	job.UpdatedAt = defaultString(strings.TrimSpace(record.UpdatedAt), job.UpdatedAt)
 }
 
+func startWorkScoutJobShouldReconcileRunState(job *startWorkScoutJob) bool {
+	if job == nil || strings.TrimSpace(job.RunID) == "" {
+		return false
+	}
+	switch strings.TrimSpace(job.Status) {
+	case startScoutJobRunning:
+		return true
+	case startScoutJobFailed:
+		return localWorkIsStaleCleanupError(job.LastError)
+	default:
+		return false
+	}
+}
+
 func reconcileStartWorkScoutJobRunState(job *startWorkScoutJob) {
-	if job == nil || strings.TrimSpace(job.RunID) == "" || strings.TrimSpace(job.Status) != startScoutJobRunning {
+	if !startWorkScoutJobShouldReconcileRunState(job) {
 		return
 	}
 	manifest, err := readLocalWorkManifestByRunID(job.RunID)

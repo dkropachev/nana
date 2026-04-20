@@ -1,6 +1,7 @@
 package gocli
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -60,5 +61,48 @@ func TestCountOutstandingLegacyLocalScoutItemsBlocksWhenSourceWriteLockHeld(t *t
 	_, err = countOutstandingLegacyLocalScoutItems(repo, improvementScoutRole)
 	if err == nil || !strings.Contains(err.Error(), "repo read lock busy") {
 		t.Fatalf("expected repo read lock busy, got %v", err)
+	}
+}
+
+func TestReconcileStartWorkScoutJobRunStateHealsStaleFailureWhenRunCompletes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	repoRoot := createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+	now := time.Now().UTC().Format(time.RFC3339)
+	manifest := localWorkManifest{
+		Version:         1,
+		RunID:           "lw-scout-complete",
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		CompletedAt:     now,
+		Status:          "completed",
+		CurrentPhase:    "completed",
+		RepoRoot:        repoRoot,
+		RepoName:        filepath.Base(repoRoot),
+		RepoID:          localWorkRepoID(repoRoot),
+		SourceBranch:    "main",
+		BaselineSHA:     strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
+		SandboxPath:     filepath.Join(home, "sandboxes", "lw-scout-complete"),
+		SandboxRepoPath: filepath.Join(home, "sandboxes", "lw-scout-complete", "repo"),
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	job := startWorkScoutJob{
+		ID:        "proposal-1",
+		Status:    startScoutJobFailed,
+		RunID:     manifest.RunID,
+		LastError: localWorkStaleCleanupError,
+		UpdatedAt: now,
+	}
+	reconcileStartWorkScoutJobRunState(&job)
+	if job.Status != startScoutJobCompleted {
+		t.Fatalf("expected completed scout job after reconcile, got %+v", job)
+	}
+	if job.LastError != "" {
+		t.Fatalf("expected stale error to be cleared, got %+v", job)
 	}
 }

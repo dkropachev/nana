@@ -332,6 +332,54 @@ func TestCleanupStaleLocalWorkRunsForRepoPreservesLiveRuns(t *testing.T) {
 	}
 }
 
+func TestCleanupStaleLocalWorkRunsForRepoPreservesDetachedResumeProcess(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoRoot := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	oldUpdatedAt := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+
+	manifest := localWorkManifest{
+		Version:         1,
+		RunID:           "lw-detached",
+		CreatedAt:       oldUpdatedAt,
+		UpdatedAt:       oldUpdatedAt,
+		Status:          "running",
+		CurrentPhase:    "verify",
+		RepoRoot:        repoRoot,
+		RepoName:        filepath.Base(repoRoot),
+		RepoID:          localWorkRepoID(repoRoot),
+		SourceBranch:    "main",
+		BaselineSHA:     strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
+		SandboxPath:     filepath.Join(home, "sandboxes", "lw-detached"),
+		SandboxRepoPath: filepath.Join(home, "sandboxes", "lw-detached", "repo"),
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) {
+		return "321 /tmp/nana work resume --run-id " + manifest.RunID + " --repo " + manifest.RepoRoot, nil
+	}
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	cleaned, err := cleanupStaleLocalWorkRunsForRepo(repoRoot)
+	if err != nil {
+		t.Fatalf("cleanupStaleLocalWorkRunsForRepo: %v", err)
+	}
+	if cleaned != 0 {
+		t.Fatalf("expected no cleaned runs, got %d", cleaned)
+	}
+
+	updated, err := readLocalWorkManifestByRunID(manifest.RunID)
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
+	}
+	if updated.Status != "running" {
+		t.Fatalf("expected running status, got %+v", updated)
+	}
+}
+
 func TestCleanupStaleLocalWorkRunsIgnoresNonWorkerProcessMentions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -377,6 +425,49 @@ func TestCleanupStaleLocalWorkRunsIgnoresNonWorkerProcessMentions(t *testing.T) 
 	}
 	if updated.Status != "failed" {
 		t.Fatalf("expected failed status, got %+v", updated)
+	}
+}
+
+func TestPersistUnexpectedLocalWorkFailureMarksRunningRunFailed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoRoot := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	manifest := localWorkManifest{
+		Version:      1,
+		RunID:        "lw-unexpected",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		Status:       "running",
+		CurrentPhase: "review",
+		RepoRoot:     repoRoot,
+		RepoName:     filepath.Base(repoRoot),
+		RepoID:       localWorkRepoID(repoRoot),
+		SourceBranch: "main",
+		BaselineSHA:  strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
+		SandboxPath:  filepath.Join(home, "sandboxes", "lw-unexpected"),
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	if err := persistUnexpectedLocalWorkFailure(manifest.RunID, fmt.Errorf("database is locked")); err != nil {
+		t.Fatalf("persistUnexpectedLocalWorkFailure: %v", err)
+	}
+
+	updated, err := readLocalWorkManifestByRunID(manifest.RunID)
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
+	}
+	if updated.Status != "failed" {
+		t.Fatalf("expected failed status, got %+v", updated)
+	}
+	if updated.LastError != "database is locked" {
+		t.Fatalf("expected last error to be preserved, got %+v", updated)
+	}
+	if updated.CompletedAt == "" {
+		t.Fatalf("expected completed_at to be set, got %+v", updated)
 	}
 }
 
