@@ -2995,13 +2995,20 @@
           if (row.kind === "work_item") {
             return `
               <button class="tx-btn tx-btn-primary tx-btn-sm grid-action-button" type="button" data-work-item-submit="${escapeHTML(row.item_id)}">Approve</button>
+              ${renderApprovalDropButton(row, "tx-btn tx-btn-secondary tx-btn-sm grid-action-button")}
             `;
           }
           if (row.kind === "planned_item") {
-            return `<button class="tx-btn tx-btn-primary tx-btn-sm grid-action-button" type="button" data-approval-launch-planned="${escapeHTML(row.planned_item_id)}">Approve</button>`;
+            return `
+              <button class="tx-btn tx-btn-primary tx-btn-sm grid-action-button" type="button" data-approval-launch-planned="${escapeHTML(row.planned_item_id)}">Approve</button>
+              ${renderApprovalDropButton(row, "tx-btn tx-btn-secondary tx-btn-sm grid-action-button")}
+            `;
           }
           if (row.kind === "scout_job") {
-            return `<button class="tx-btn tx-btn-primary tx-btn-sm grid-action-button" type="button" data-approval-retry-scout="${escapeHTML(row.scout_job_id)}">Retry</button>`;
+            return `
+              <button class="tx-btn tx-btn-primary tx-btn-sm grid-action-button" type="button" data-approval-retry-scout="${escapeHTML(row.scout_job_id)}">Retry</button>
+              ${renderApprovalDropButton(row, "tx-btn tx-btn-secondary tx-btn-sm grid-action-button")}
+            `;
           }
           if (row.kind === "work_run") {
             const actions = [];
@@ -3014,8 +3021,9 @@
             if (row.run_id && row.action_kind === "sync_run") {
               actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-run-sync="${escapeHTML(row.run_id)}">Refresh</button>`);
             }
-            if (row.run_id) {
-              actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-run-drop="${escapeHTML(row.run_id)}">Drop</button>`);
+            const dropButton = renderApprovalDropButton(row, "tx-btn tx-btn-secondary tx-btn-sm grid-action-button");
+            if (dropButton) {
+              actions.push(dropButton);
             }
             return actions.join("");
           }
@@ -3068,47 +3076,167 @@
     `;
   }
 
+  function renderApprovalDropButton(item, className = "tx-btn tx-btn-secondary") {
+    if (!item) return "";
+    let reference = "";
+    switch (item.kind) {
+      case "work_run":
+        reference = item.run_id;
+        break;
+      case "work_item":
+        reference = item.item_id;
+        break;
+      case "planned_item":
+        reference = item.planned_item_id;
+        break;
+      case "scout_job":
+        reference = item.scout_job_id;
+        break;
+      default:
+        return "";
+    }
+    if (!reference) return "";
+    return `<button class="${escapeHTML(className)}" type="button" data-approval-drop-kind="${escapeHTML(item.kind)}" data-approval-drop-id="${escapeHTML(reference)}" data-approval-drop-repo="${escapeHTML(defaultString(item.repo_slug, ""))}" data-approval-drop-subject="${escapeHTML(defaultString(item.subject, ""))}">Drop</button>`;
+  }
+
   function renderApprovalActionButton(item) {
     if (!item) return '<span class="data-value-text">No action</span>';
     if (item.action_kind === "approve_work_item" && item.item_id) {
       return `
         <button class="tx-btn tx-btn-primary" type="button" data-work-item-submit="${escapeHTML(item.item_id)}">Approve Draft</button>
         <button class="tx-btn tx-btn-secondary" type="button" data-work-item-show="${escapeHTML(item.item_id)}">Open Draft</button>
+        ${renderApprovalDropButton(item)}
       `;
     }
     if (item.action_kind === "approve_planned_item" && item.planned_item_id) {
-      return `<button class="tx-btn tx-btn-primary" type="button" data-approval-launch-planned="${escapeHTML(item.planned_item_id)}">Approve Launch</button>`;
+      return `
+        <button class="tx-btn tx-btn-primary" type="button" data-approval-launch-planned="${escapeHTML(item.planned_item_id)}">Approve Launch</button>
+        ${renderApprovalDropButton(item)}
+      `;
     }
     if (item.action_kind === "retry_scout_job" && item.scout_job_id) {
-      return `<button class="tx-btn tx-btn-primary" type="button" data-approval-retry-scout="${escapeHTML(item.scout_job_id)}">Retry Scout Job</button>`;
+      return `
+        <button class="tx-btn tx-btn-primary" type="button" data-approval-retry-scout="${escapeHTML(item.scout_job_id)}">Retry Scout Job</button>
+        ${renderApprovalDropButton(item)}
+      `;
     }
     if (item.action_kind === "review_on_github" && item.external_url) {
       return `
         <button class="tx-btn tx-btn-primary" type="button" data-open-external="${escapeHTML(item.external_url)}">Review on GitHub</button>
         ${item.run_id ? `<button class="tx-btn tx-btn-secondary" type="button" data-run-sync="${escapeHTML(item.run_id)}">Refresh Status</button>` : ""}
-        ${item.run_id ? `<button class="tx-btn tx-btn-secondary" type="button" data-run-drop="${escapeHTML(item.run_id)}">Drop Run</button>` : ""}
+        ${renderApprovalDropButton(item)}
       `;
     }
     if (item.action_kind === "resolve_run" && item.run_id) {
       return `
         <button class="tx-btn tx-btn-primary" type="button" data-run-resolve="${escapeHTML(item.run_id)}">Resolve Run</button>
         <button class="tx-btn tx-btn-secondary" type="button" data-log-run-id="${escapeHTML(item.run_id)}">Open Run</button>
-        <button class="tx-btn tx-btn-secondary" type="button" data-run-drop="${escapeHTML(item.run_id)}">Drop Run</button>
+        ${renderApprovalDropButton(item)}
       `;
     }
     if (item.action_kind === "sync_run" && item.run_id) {
       return `
         <button class="tx-btn tx-btn-primary" type="button" data-run-sync="${escapeHTML(item.run_id)}">Refresh Status</button>
-        <button class="tx-btn tx-btn-secondary" type="button" data-run-drop="${escapeHTML(item.run_id)}">Drop Run</button>
+        ${renderApprovalDropButton(item)}
       `;
     }
     if (item.action_kind === "open_run" && item.run_id) {
       return `
         <button class="tx-btn tx-btn-secondary" type="button" data-log-run-id="${escapeHTML(item.run_id)}">Open Run</button>
-        <button class="tx-btn tx-btn-secondary" type="button" data-run-drop="${escapeHTML(item.run_id)}">Drop Run</button>
+        ${renderApprovalDropButton(item)}
       `;
     }
     return '<span class="data-value-text">No action</span>';
+  }
+
+  function dropApprovalItem(kind, reference, repoSlug, subject) {
+    const approvalLabel = defaultString(subject, reference);
+    switch (kind) {
+      case "work_run":
+        requestConfirmation({
+          title: "Drop approval item?",
+          message: `Remove run ${reference} from the active workspace queue.`,
+          confirmLabel: "Drop",
+          tone: "danger",
+          onConfirm() {
+            api(`/api/v1/work/runs/${encodeURIComponent(reference)}/drop`, {
+              method: "POST",
+            }).then(() => {
+              if (state.logSelection.runID === reference && state.logDrawer) {
+                state.logDrawer.close();
+              }
+              load();
+              loadApprovals({ silent: true });
+              toast("success", "Approval dropped", approvalLabel);
+            }).catch((error) => {
+              toast("danger", "Drop failed", error.message);
+            });
+          },
+        });
+        return;
+      case "work_item":
+        requestConfirmation({
+          title: "Drop approval item?",
+          message: `Hide work item ${reference} from the active queue.`,
+          confirmLabel: "Drop",
+          tone: "danger",
+          onConfirm() {
+            api(`/api/v1/work-items/${encodeURIComponent(reference)}/drop`, {
+              method: "POST",
+            }).then(() => {
+              load();
+              loadApprovals({ silent: true });
+              toast("success", "Approval dropped", approvalLabel);
+            }).catch((error) => {
+              toast("danger", "Drop failed", error.message);
+            });
+          },
+        });
+        return;
+      case "planned_item":
+        requestConfirmation({
+          title: "Drop approval item?",
+          message: `Remove planned item ${approvalLabel} from the approval queue.`,
+          confirmLabel: "Drop",
+          tone: "danger",
+          onConfirm() {
+            api(`/api/v1/planned-items/${encodeURIComponent(reference)}`, {
+              method: "DELETE",
+            }).then((payload) => {
+              if (payload.state) {
+                mergeRepoState(payload.state);
+              }
+              load();
+              loadApprovals({ silent: true });
+              toast("success", "Approval dropped", defaultString(payload.removed_item && payload.removed_item.title, approvalLabel));
+            }).catch((error) => {
+              toast("danger", "Drop failed", error.message);
+            });
+          },
+        });
+        return;
+      case "scout_job":
+        if (!repoSlug) {
+          toast("warning", "Drop unavailable", "Scout job is missing repo context.");
+          return;
+        }
+        requestConfirmation({
+          title: "Drop approval item?",
+          message: `Dismiss scout job ${approvalLabel} from the approval queue.`,
+          confirmLabel: "Drop",
+          tone: "danger",
+          onConfirm() {
+            mutateScoutItem(repoSlug, reference, "dismiss").then(() => {
+              load();
+              loadApprovals({ silent: true });
+              toast("success", "Approval dropped", approvalLabel);
+            }).catch(() => {});
+          },
+        });
+        return;
+      default:
+        toast("warning", "Drop unavailable", `Approval kind ${defaultString(kind, "(unknown)")} cannot be dropped.`);
+    }
   }
 
   function issueRows(repo) {
@@ -5468,6 +5596,17 @@
       if (approvalSelectButton) {
         state.approvals.selectedID = approvalSelectButton.getAttribute("data-approval-select") || "";
         renderApprovalsPage();
+        return;
+      }
+
+      const approvalDropButton = event.target.closest("[data-approval-drop-kind]");
+      if (approvalDropButton) {
+        dropApprovalItem(
+          approvalDropButton.getAttribute("data-approval-drop-kind") || "",
+          approvalDropButton.getAttribute("data-approval-drop-id") || "",
+          approvalDropButton.getAttribute("data-approval-drop-repo") || "",
+          approvalDropButton.getAttribute("data-approval-drop-subject") || "",
+        );
         return;
       }
 

@@ -3089,6 +3089,12 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `data-repo-drop="`) {
 		t.Fatalf("expected repo drop control in app.js, got %s", string(appBody))
 	}
+	if !strings.Contains(string(appBody), `function dropApprovalItem(`) {
+		t.Fatalf("expected approval drop helper in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `data-approval-drop-kind="`) {
+		t.Fatalf("expected approval drop control wiring in app.js, got %s", string(appBody))
+	}
 }
 
 func TestStartUIWebHandlerRewritesWildcardAPIBaseToRequestHost(t *testing.T) {
