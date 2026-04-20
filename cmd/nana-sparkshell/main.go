@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,9 +28,17 @@ const (
 	defaultSummaryMaxBytes  = 8_000
 )
 
+const (
+	telemetryErrorCodexFailed   = "codex_failed"
+	telemetryErrorCodexTimeout  = "codex_timeout"
+	telemetryErrorEmptySummary  = "empty_summary"
+	telemetryErrorSummaryFailed = "summary_failed"
+)
+
 type sparkError struct {
-	message  string
-	exitCode int
+	message       string
+	exitCode      int
+	telemetryKind string
 }
 
 func (e sparkError) Error() string {
@@ -97,6 +106,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer) (int, error) {
 			return 0, err
 		}
 		fmt.Fprintf(stderr, "nana sparkshell: summary unavailable (%v)\n", summaryErr)
+		appendShellTelemetry("shell_output_compaction_failed", executionArgs, output, "", summaryErr)
 		return output.exitCode, nil
 	}
 
@@ -106,6 +116,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer) (int, error) {
 	if _, err := io.WriteString(stdout, summary); err != nil {
 		return 0, sparkError{message: err.Error(), exitCode: 1}
 	}
+	appendShellTelemetry("shell_output_compaction", executionArgs, output, summary, nil)
 	return output.exitCode, nil
 }
 
@@ -264,15 +275,151 @@ func readLineThreshold() int {
 	return defaultMaxVisibleLines
 }
 
-func countVisibleLines(bytes []byte) int {
-	if len(bytes) == 0 {
+func countVisibleLines(data []byte) int {
+	if len(data) == 0 {
 		return 0
 	}
-	return len(strings.Split(strings.TrimSuffix(string(bytes), "\n"), "\n"))
+	lines := 0
+	for _, b := range data {
+		if b == '\n' {
+			lines++
+		}
+	}
+	if data[len(data)-1] != '\n' {
+		lines++
+	}
+	return lines
+}
+
+func countVisibleStringLines(text string) int {
+	if text == "" {
+		return 0
+	}
+	lines := 0
+	for index := 0; index < len(text); index++ {
+		if text[index] == '\n' {
+			lines++
+		}
+	}
+	if text[len(text)-1] != '\n' {
+		lines++
+	}
+	return lines
 }
 
 func combinedVisibleLines(stdout []byte, stderr []byte) int {
 	return countVisibleLines(stdout) + countVisibleLines(stderr)
+}
+
+type shellTelemetryEvent struct {
+	Timestamp     string `json:"timestamp"`
+	RunID         string `json:"run_id,omitempty"`
+	Tool          string `json:"tool"`
+	Event         string `json:"event"`
+	CommandName   string `json:"command_name,omitempty"`
+	ArgumentCount int    `json:"argument_count"`
+	ExitCode      int    `json:"exit_code"`
+	StdoutBytes   int    `json:"stdout_bytes"`
+	StderrBytes   int    `json:"stderr_bytes"`
+	CapturedBytes int    `json:"captured_bytes"`
+	StdoutLines   int    `json:"stdout_lines"`
+	StderrLines   int    `json:"stderr_lines"`
+	SummaryBytes  int    `json:"summary_bytes,omitempty"`
+	SummaryLines  int    `json:"summary_lines,omitempty"`
+	Summarized    bool   `json:"summarized"`
+	Error         string `json:"error,omitempty"`
+}
+
+func shellTelemetryEventFor(event string, command []string, output commandOutput, summary string, summaryErr error) shellTelemetryEvent {
+	telemetry := shellTelemetryEvent{
+		Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
+		RunID:         telemetryRunID(),
+		Tool:          "nana-sparkshell",
+		Event:         event,
+		CommandName:   telemetryCommandName(command),
+		ArgumentCount: telemetryArgumentCount(command),
+		ExitCode:      output.exitCode,
+		StdoutBytes:   len(output.stdout),
+		StderrBytes:   len(output.stderr),
+		CapturedBytes: len(output.stdout) + len(output.stderr),
+		StdoutLines:   countVisibleLines(output.stdout),
+		StderrLines:   countVisibleLines(output.stderr),
+		SummaryBytes:  len(summary),
+		SummaryLines:  countVisibleStringLines(summary),
+		Summarized:    summary != "",
+	}
+	if summaryErr != nil {
+		telemetry.Error = telemetrySummaryErrorKind(summaryErr)
+	}
+	return telemetry
+}
+
+func telemetrySummaryErrorKind(err error) string {
+	if err == nil {
+		return ""
+	}
+	var serr sparkError
+	if errors.As(err, &serr) && serr.telemetryKind != "" {
+		return serr.telemetryKind
+	}
+	return telemetryErrorSummaryFailed
+}
+
+func telemetryCommandName(command []string) string {
+	if len(command) == 0 {
+		return ""
+	}
+	name := strings.TrimSpace(command[0])
+	if name == "" {
+		return ""
+	}
+	return filepath.Base(name)
+}
+
+func telemetryArgumentCount(command []string) int {
+	if len(command) <= 1 {
+		return 0
+	}
+	return len(command) - 1
+}
+
+func appendShellTelemetry(event string, command []string, output commandOutput, summary string, summaryErr error) {
+	appendShellTelemetryIfEnabled(func() shellTelemetryEvent {
+		return shellTelemetryEventFor(event, command, output, summary, summaryErr)
+	})
+}
+
+func appendShellTelemetryIfEnabled(buildEvent func() shellTelemetryEvent) {
+	if telemetryDisabled() {
+		return
+	}
+	path := strings.TrimSpace(os.Getenv("NANA_CONTEXT_TELEMETRY_LOG"))
+	if path == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_ = json.NewEncoder(file).Encode(buildEvent())
+}
+
+func telemetryDisabled() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("NANA_CONTEXT_TELEMETRY")))
+	return value == "0" || value == "false" || value == "off"
+}
+
+func telemetryRunID() string {
+	for _, key := range []string{"NANA_CONTEXT_TELEMETRY_RUN_ID", "NANA_WORK_RUN_ID", "NANA_RUN_ID", "NANA_SESSION_ID"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func summarizeOutput(command []string, output commandOutput) (string, error) {
@@ -300,11 +447,11 @@ func summarizeOutput(command []string, output commandOutput) (string, error) {
 				if fallbackMessage == "" {
 					fallbackMessage = "codex exec exited unsuccessfully"
 				}
-				return "", sparkError{message: fmt.Sprintf("codex exec failed for primary model `%s` (%s) and fallback model `%s` (%s)", model, primaryMessage, fallbackModel, fallbackMessage), exitCode: 1}
+				return "", sparkError{message: fmt.Sprintf("codex exec failed for primary model `%s` (%s) and fallback model `%s` (%s)", model, primaryMessage, fallbackModel, fallbackMessage), exitCode: 1, telemetryKind: telemetryErrorCodexFailed}
 			}
 			summary := normalizeSummary(fallbackStdout)
 			if summary == "" {
-				return "", sparkError{message: "codex exec fallback returned no valid summary sections", exitCode: 1}
+				return "", sparkError{message: "codex exec fallback returned no valid summary sections", exitCode: 1, telemetryKind: telemetryErrorEmptySummary}
 			}
 			return summary, nil
 		}
@@ -314,12 +461,12 @@ func summarizeOutput(command []string, output commandOutput) (string, error) {
 		} else {
 			message = "codex exec exited unsuccessfully: " + message
 		}
-		return "", sparkError{message: message, exitCode: 1}
+		return "", sparkError{message: message, exitCode: 1, telemetryKind: telemetryErrorCodexFailed}
 	}
 
 	summary := normalizeSummary(stdout)
 	if summary == "" {
-		return "", sparkError{message: "codex exec returned no valid summary sections", exitCode: 1}
+		return "", sparkError{message: "codex exec returned no valid summary sections", exitCode: 1, telemetryKind: telemetryErrorEmptySummary}
 	}
 	return summary, nil
 }
@@ -373,7 +520,7 @@ func runCodexExec(prompt string, model string, timeoutMS int) (string, string, b
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
-		return "", "", false, sparkError{message: fmt.Sprintf("codex summary timed out after %dms", timeoutMS), exitCode: 1}
+		return "", "", false, sparkError{message: fmt.Sprintf("codex summary timed out after %dms", timeoutMS), exitCode: 1, telemetryKind: telemetryErrorCodexTimeout}
 	}
 	if err == nil {
 		return stdout.String(), stderr.String(), true, nil
@@ -382,7 +529,7 @@ func runCodexExec(prompt string, model string, timeoutMS int) (string, string, b
 	if errors.As(err, &exitErr) {
 		return stdout.String(), stderr.String(), false, nil
 	}
-	return "", "", false, sparkError{message: err.Error(), exitCode: 1}
+	return "", "", false, sparkError{message: err.Error(), exitCode: 1, telemetryKind: telemetryErrorCodexFailed}
 }
 
 func normalizeSummary(raw string) string {

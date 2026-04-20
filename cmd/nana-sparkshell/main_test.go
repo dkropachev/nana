@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -75,6 +77,86 @@ func writeExecutable(t *testing.T, path string, body string) {
 	}
 }
 
+func TestAppendShellTelemetrySkipsEventConstructionWhenDisabledOrMissingLog(t *testing.T) {
+	cases := []struct {
+		name      string
+		telemetry string
+		logPath   string
+	}{
+		{
+			name:      "disabled",
+			telemetry: "off",
+			logPath:   filepath.Join(t.TempDir(), "context-telemetry.ndjson"),
+		},
+		{
+			name:      "missing log path",
+			telemetry: "1",
+			logPath:   "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("NANA_CONTEXT_TELEMETRY", tc.telemetry)
+			t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", tc.logPath)
+			called := false
+
+			appendShellTelemetryIfEnabled(func() shellTelemetryEvent {
+				called = true
+				return shellTelemetryEvent{Event: "should-not-be-built"}
+			})
+
+			if called {
+				t.Fatalf("telemetry event builder ran despite telemetry=%q logPath=%q", tc.telemetry, tc.logPath)
+			}
+			if tc.logPath != "" {
+				if content, err := os.ReadFile(tc.logPath); err == nil {
+					t.Fatalf("telemetry log should not be created, got %q", content)
+				} else if !os.IsNotExist(err) {
+					t.Fatalf("read telemetry log: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestCountVisibleLinesMatchesShellOutputLineContract(t *testing.T) {
+	cases := map[string]struct {
+		input string
+		want  int
+	}{
+		"empty":                  {"", 0},
+		"single unterminated":    {"alpha", 1},
+		"single terminated":      {"alpha\n", 1},
+		"multiple unterminated":  {"alpha\nbeta", 2},
+		"multiple terminated":    {"alpha\nbeta\n", 2},
+		"trailing blank visible": {"alpha\n\n", 2},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := countVisibleLines([]byte(tc.input)); got != tc.want {
+				t.Fatalf("countVisibleLines(%q) = %d, want %d", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCountVisibleLinesDoesNotAllocateForLargeOutput(t *testing.T) {
+	output := bytes.Repeat([]byte("x\n"), 64*1024)
+	if got := countVisibleLines(output); got != 64*1024 {
+		t.Fatalf("countVisibleLines() = %d, want %d", got, 64*1024)
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		_ = countVisibleLines(output)
+	})
+
+	if allocs != 0 {
+		t.Fatalf("countVisibleLines allocated %.2f times per run; want 0", allocs)
+	}
+}
+
 func TestRawModePreservesStdoutAndStderr(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell snippets use POSIX sh")
@@ -88,6 +170,31 @@ func TestRawModePreservesStdoutAndStderr(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "alpha\n") || !strings.Contains(string(output), "warn\n") {
 		t.Fatalf("unexpected raw output: %q", output)
+	}
+}
+
+func TestRawModeDoesNotWriteContextTelemetry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell snippets use POSIX sh")
+	}
+	binaryPath := buildBinary(t)
+	logPath := filepath.Join(t.TempDir(), ".nana", "logs", "context-telemetry.ndjson")
+	cmd := runCommand(t, binaryPath, "sh", "-c", "printf 'small\\n'")
+	cmd.Env = append(os.Environ(),
+		"NANA_SPARKSHELL_LINES=5",
+		"NANA_CONTEXT_TELEMETRY_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("raw mode failed: %v\n%s", err, output)
+	}
+	if string(output) != "small\n" {
+		t.Fatalf("unexpected raw output: %q", output)
+	}
+	if content, err := os.ReadFile(logPath); err == nil {
+		t.Fatalf("raw mode should not create telemetry log, got %q", content)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat telemetry log: %v", err)
 	}
 }
 
@@ -131,6 +238,59 @@ func TestSummaryModeUsesCodexExecAndModelOverride(t *testing.T) {
 	}
 }
 
+func TestSummaryModeWritesCompactionTelemetry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell snippets use POSIX sh")
+	}
+	binaryPath := buildBinary(t)
+	cwd := t.TempDir()
+	writeExecutable(t, filepath.Join(cwd, "codex"), "#!/bin/sh\nprintf '%s\n' '- summary: command produced long output'\n")
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	cmd := runCommand(t, binaryPath, "sh", "-c", "printf 'one\\ntwo\\n'; : secret-token-should-not-leak")
+	cmd.Env = append(os.Environ(),
+		"PATH="+cwd+":"+os.Getenv("PATH"),
+		"NANA_SPARKSHELL_LINES=1",
+		"NANA_CONTEXT_TELEMETRY=1",
+		"NANA_CONTEXT_TELEMETRY_LOG="+logPath,
+		"NANA_CONTEXT_TELEMETRY_RUN_ID=run-123",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("summary mode failed: %v\n%s", err, output)
+	}
+
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read telemetry log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected one telemetry event, got %d: %q", len(lines), content)
+	}
+	var event map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &event); err != nil {
+		t.Fatalf("unmarshal telemetry event: %v\n%s", err, lines[0])
+	}
+	if event["event"] != "shell_output_compaction" || event["tool"] != "nana-sparkshell" || event["run_id"] != "run-123" {
+		t.Fatalf("unexpected telemetry identity fields: %#v", event)
+	}
+	if event["captured_bytes"] != float64(len("one\ntwo\n")) || event["summary_bytes"] == float64(0) || event["summarized"] != true {
+		t.Fatalf("unexpected telemetry byte fields: %#v", event)
+	}
+	if event["stdout_lines"] != float64(2) || event["stderr_lines"] != float64(0) {
+		t.Fatalf("unexpected telemetry line fields: %#v", event)
+	}
+	if _, ok := event["command"]; ok {
+		t.Fatalf("telemetry must not persist full command arguments: %#v", event)
+	}
+	if event["command_name"] != "sh" || event["argument_count"] != float64(2) {
+		t.Fatalf("unexpected telemetry command shape: %#v", event)
+	}
+	if strings.Contains(string(content), "secret-token-should-not-leak") || strings.Contains(string(content), "printf") {
+		t.Fatalf("telemetry leaked command arguments: %q", content)
+	}
+}
+
 func TestSummaryFailureFallsBackToRawOutputWithNotice(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell snippets use POSIX sh")
@@ -147,6 +307,57 @@ func TestSummaryFailureFallsBackToRawOutputWithNotice(t *testing.T) {
 	rendered := string(output)
 	if !strings.Contains(rendered, "one\ntwo\n") || !strings.Contains(rendered, "child-err") || !strings.Contains(rendered, "summary unavailable") {
 		t.Fatalf("unexpected fallback output: %q", output)
+	}
+}
+
+func TestSummaryFailureTelemetryStoresOnlySanitizedErrorKind(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell snippets use POSIX sh")
+	}
+	binaryPath := buildBinary(t)
+	cwd := t.TempDir()
+	writeExecutable(t, filepath.Join(cwd, "codex"), "#!/bin/sh\ncat >&2\nexit 9\n")
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	cmd := runCommand(t, binaryPath, "sh", "-c", "printf 'line-one\\nsecret-output-should-not-leak\\n'; : secret-arg-should-not-leak")
+	cmd.Env = append(os.Environ(),
+		"PATH="+cwd+":"+os.Getenv("PATH"),
+		"NANA_SPARKSHELL_LINES=1",
+		"NANA_CONTEXT_TELEMETRY=1",
+		"NANA_CONTEXT_TELEMETRY_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("summary fallback failed: %v\n%s", err, output)
+	}
+
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read telemetry log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected one telemetry event, got %d: %q", len(lines), content)
+	}
+	var event map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &event); err != nil {
+		t.Fatalf("unmarshal telemetry event: %v\n%s", err, lines[0])
+	}
+	if event["event"] != "shell_output_compaction_failed" || event["error"] != telemetryErrorCodexFailed {
+		t.Fatalf("unexpected failure telemetry fields: %#v", event)
+	}
+	if event["command_name"] != "sh" || event["argument_count"] != float64(2) || event["summarized"] != false {
+		t.Fatalf("unexpected telemetry shape: %#v", event)
+	}
+	for _, leaked := range []string{
+		"secret-arg-should-not-leak",
+		"secret-output-should-not-leak",
+		"Command:",
+		"STDOUT:",
+		"printf",
+	} {
+		if strings.Contains(string(content), leaked) {
+			t.Fatalf("telemetry leaked %q in %q", leaked, content)
+		}
 	}
 }
 

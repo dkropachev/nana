@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 const SparkShellUsage = "Usage: nana sparkshell <command> [args...]\n   or: nana sparkshell --tmux-pane <pane-id> [--tail-lines <100-1000>]"
@@ -28,8 +29,66 @@ func SparkShell(repoRoot string, cwd string, args []string) error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
+	cmd.Env = withSparkShellTelemetryEnv(os.Environ(), cwd)
 	return cmd.Run()
+}
+
+func withSparkShellTelemetryEnv(base []string, cwd string) []string {
+	logPath := resolveContextTelemetryLogPath(cwd)
+	if strings.TrimSpace(logPath) == "" {
+		return base
+	}
+	return withSparkShellEnvOverride(base, "NANA_CONTEXT_TELEMETRY_LOG", logPath)
+}
+
+func resolveContextTelemetryLogPath(cwd string) string {
+	if explicit := strings.TrimSpace(os.Getenv("NANA_CONTEXT_TELEMETRY_LOG")); explicit != "" {
+		return explicit
+	}
+	root := resolveContextTelemetryRoot(cwd)
+	if strings.TrimSpace(root) == "" {
+		return ""
+	}
+	return filepath.Join(root, ".nana", "logs", "context-telemetry.ndjson")
+}
+
+func resolveContextTelemetryRoot(cwd string) string {
+	if strings.TrimSpace(cwd) == "" {
+		return ""
+	}
+	dir, err := filepath.Abs(cwd)
+	if err != nil {
+		dir = filepath.Clean(cwd)
+	}
+	for {
+		if info, err := os.Stat(filepath.Join(dir, ".nana")); err == nil && info.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return cwd
+}
+
+func withSparkShellEnvOverride(base []string, key string, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(base)+1)
+	replaced := false
+	for _, item := range base {
+		if strings.HasPrefix(item, prefix) {
+			out = append(out, prefix+value)
+			replaced = true
+			continue
+		}
+		out = append(out, item)
+	}
+	if !replaced {
+		out = append(out, prefix+value)
+	}
+	return out
 }
 
 func resolveSparkShellPath(repoRoot string) (string, error) {
