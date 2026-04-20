@@ -73,6 +73,7 @@ Local tools and support:
   nana reflect | nana explore  Run read-only repo reflection/search helpers
   nana sparkshell              Run noisy shell commands with compact summaries
   nana session                 Search prior local session history
+  nana trace                   Report child-agent telemetry and concurrency budget pressure
   nana hooks                   Manage NANA hook integration
   nana hud                     Show or watch the local NANA HUD
   nana uninstall               Remove installed NANA components
@@ -314,6 +315,11 @@ func main() {
 			exitWithError(err)
 		}
 		return
+	case "trace":
+		if err := gocli.Trace(mustGetwd(), args[1:]); err != nil {
+			exitWithError(err)
+		}
+		return
 	case "hooks":
 		repoRoot := legacyshim.ResolveRepoRoot(os.Getenv(legacyshim.RepoRootEnv), os.Args[0])
 		if err := gocli.Hooks(mustGetwd(), repoRoot, args[1:]); err != nil {
@@ -465,6 +471,9 @@ func handleNestedHelp(args []string) bool {
 		return true
 	case "session":
 		mustHandleHelp(gocli.Session([]string{"--help"}))
+		return true
+	case "trace":
+		mustHandleHelp(gocli.Trace(cwd, []string{"--help"}))
 		return true
 	case "hooks":
 		mustHandleHelp(gocli.Hooks(cwd, repoRoot, []string{"help"}))
