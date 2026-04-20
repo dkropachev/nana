@@ -30,8 +30,8 @@ Role prompts under `prompts/*.md` narrow the work, but they do not override this
 - Reuse existing utilities and patterns before adding abstractions.
 - No new dependencies without explicit request.
 - Keep diffs small, reviewable, and reversible.
-- Run lint, typecheck, tests, and static analysis after changes.
-- Final reports must include changed files, simplifications made, and remaining risks.
+- Use the smallest profile that proves the change; escalate on failures or broad/risky/deps/build/CI/API/security/perf edits.
+- Final reports include changed files, profile/rationale, simplifications, and risks.
 
 ## Lore Commits
 When committing, use a why-first subject and optional git trailers such as `Constraint:`, `Rejected:`, `Directive:`, `Confidence:`, `Scope-risk:`, `Tested:`, and `Not-tested:` when they add decision value.
@@ -91,6 +91,7 @@ Rules:
 
 <verification>
 Verify before claiming completion.
+- Profiles: `docs-only`=docs/text diff + any markdown/link checks; `prompt-only`=AGENTS/prompts/skills consistency + asset tests if templates/assets change; `scoped-code`=touched-package format/lint/typecheck/tests/static; `full`=repo-wide lint/typecheck/tests/static analysis for broad/risky/deps/build/CI/API/security/perf edits, review findings, or failed scoped checks.
 <!-- NANA:GUIDANCE:VERIFYSEQ:START -->
 - Identify what proves the claim, run the verification, read the output, then report with evidence.
 - Run dependent tasks sequentially.
@@ -105,13 +106,9 @@ Mode selection:
 - Otherwise execute directly.
 
 Command routing:
-| Example task | Use |
-|---|---|
-| Find a file/symbol/policy by name, read-only | `nana explore --prompt "find where review state is written"` |
-| Summarize noisy read-only output or a tmux pane | `nana sparkshell git status`; `nana sparkshell --tmux-pane %12 --tail-lines 400` |
-| Run bounded verification when a compact PASS/FAIL summary is enough | `nana sparkshell go test ./internal/gocliassets` |
-| Edit files, need exact stdout/stderr, debug failing diagnostics/tests, or investigate ambiguity | normal shell/tools |
-- If `sparkshell` is incomplete or hides needed details, retry on the normal path.
+- Prefer `nana explore` for simple read-only repository lookups.
+- Use `nana sparkshell` for noisy read-only shell output, bounded verification runs, and tmux-pane summaries.
+- Keep edits, tests, diagnostics, and ambiguous investigations on the richer normal path.
 
 Stop / escalate:
 - Stop when the task is verified complete, the user says stop/cancel, or no meaningful recovery path remains.
