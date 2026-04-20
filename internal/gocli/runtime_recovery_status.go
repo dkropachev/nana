@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -24,6 +25,7 @@ type RuntimeRecoveryStatus struct {
 	StateFile      string              `json:"state_file,omitempty"`
 	StateScope     string              `json:"state_scope,omitempty"`
 	LatestArtifact string              `json:"latest_artifact,omitempty"`
+	InspectPaths   []string            `json:"inspect_paths,omitempty"`
 	CancelHint     string              `json:"cancel_hint,omitempty"`
 	RecoveryHint   string              `json:"recovery_hint,omitempty"`
 }
@@ -89,14 +91,17 @@ func BuildRuntimeRecoveryStatus(cwd string) (*RuntimeRecoveryStatus, error) {
 	})
 
 	primary := activeModes[0]
+	latestArtifact := latestRuntimeArtifactPath(cwd)
+	inspectPaths := runtimeRecoveryInspectPaths(activeModes, latestArtifact)
 	return &RuntimeRecoveryStatus{
 		ActiveMode:     primary.Mode,
 		ActiveModes:    activeModes,
 		StateFile:      primary.StateFile,
 		StateScope:     primary.Scope,
-		LatestArtifact: latestRuntimeArtifactPath(cwd),
+		LatestArtifact: latestArtifact,
+		InspectPaths:   inspectPaths,
 		CancelHint:     nanaCancelCommandHint,
-		RecoveryHint:   "Run " + nanaCancelCommandHint + " to stop active NANA state safely; inspect details with `nana hud --json`.",
+		RecoveryHint:   "Run " + nanaCancelCommandHint + " to stop active NANA state safely; inspect listed state/log paths before retrying; details: `nana hud --json`.",
 	}, nil
 }
 
@@ -105,6 +110,47 @@ func runtimeModePriority(mode string) int {
 		return priority
 	}
 	return len(runtimeModeDisplayPriority) + 1
+}
+
+func runtimeRecoveryInspectPaths(activeModes []RuntimeModeStatus, latestArtifact string) []string {
+	seen := map[string]bool{}
+	paths := make([]string, 0, len(activeModes)+1)
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" || seen[path] {
+			return
+		}
+		seen[path] = true
+		paths = append(paths, path)
+	}
+	for _, mode := range activeModes {
+		add(mode.StateFile)
+	}
+	add(latestArtifact)
+	return paths
+}
+
+func runtimeRecoveryInspectPathSummary(paths []string) string {
+	cleaned := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path != "" {
+			cleaned = append(cleaned, path)
+		}
+	}
+	if len(cleaned) == 0 {
+		return ""
+	}
+	const limit = 4
+	display := cleaned
+	if len(display) > limit {
+		display = display[:limit]
+	}
+	summary := strings.Join(display, ", ")
+	if remaining := len(cleaned) - len(display); remaining > 0 {
+		summary += " (+" + strconv.Itoa(remaining) + " more)"
+	}
+	return summary
 }
 
 func RecordRuntimeArtifact(cwd string, artifactPath string) error {

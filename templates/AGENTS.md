@@ -7,7 +7,7 @@ USE CODEX NATIVE SUBAGENTS FOR INDEPENDENT PARALLEL SUBTASKS WHEN THAT IMPROVES 
 
 # nana - Compact Runtime Policy
 
-NANA coordinates Codex prompts, skills, and runtime state. Role prompts narrow work but never override this file.
+NANA coordinates Codex prompts, skills, and optional team/runtime state. Role prompts under `prompts/*.md` narrow work but never override this file.
 
 ## Always-on Policy
 <!-- NANA:GUIDANCE:OPERATING:START -->
@@ -15,7 +15,7 @@ NANA coordinates Codex prompts, skills, and runtime state. Role prompts narrow w
 - Prefer repo/tool evidence over assumption; keep using retrieval, diagnostics, tests, or inspection when correctness depends on them.
 - Keep responses compact and concrete; treat newer user task updates as local overrides while preserving non-conflicting prior instructions.
 <!-- NANA:GUIDANCE:OPERATING:END -->
-- Keep diffs small/reversible, reuse existing patterns, add no dependency unless explicitly requested, and prefer deletion over addition.
+- Keep diffs small/reversible; reuse patterns; add no dependency unless requested; prefer deletion.
 - For cleanup/refactor/deslop work: write a cleanup plan first and lock behavior with tests when not already protected.
 - Verify before completion; final-report checklist: changed files, verification evidence, simplifications made, remaining risks.
 - Commits should use a why-first subject; optional trailers: `Constraint:`, `Rejected:`, `Directive:`, `Confidence:`, `Scope-risk:`, `Tested:`, `Not-tested:`.
@@ -28,7 +28,7 @@ NANA coordinates Codex prompts, skills, and runtime state. Role prompts narrow w
 - When routing affects execution, include `routing_decision` in plans, traces, and final reports: `mode`, `role_tier` (tier/roles), `trigger`, `confidence`.
 
 ## Lazy Runtime Skills
-Load runtime docs only when invoked. When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md. Note: keyword matches are case-insensitive. Explicit `$skill` invocations run left-to-right before implicit keyword matches; `/prompts:<name>` disables implicit keyword activation unless explicit `$skill` tokens are present. Sync trigger tests with this list.
+Load detailed skill runtime docs only when invoked. Explicit `$skill` invocations run left-to-right before implicit keyword matches; keyword matches are case-insensitive. When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md. `/prompts:<name>` disables implicit keyword activation unless explicit `$skill` tokens are present. Use `nana route --explain "<prompt>"` to preview routing. Sync trigger tests with this list.
 - `$autopilot` (`~/.codex/skills/autopilot/RUNTIME.md`): `autopilot`, `build me`, `I want a`
 - `$ultrawork` (`~/.codex/skills/ultrawork/RUNTIME.md`): `ultrawork`, `ulw`, `parallel`
 - `$analyze` (`~/.codex/skills/analyze/RUNTIME.md`): `analyze`, `investigate`
@@ -45,8 +45,8 @@ Load runtime docs only when invoked. When a listed keyword matches, invoke that 
 
 ## Execution and Verification
 - Prefer `nana explore` for simple read-only lookups and `nana sparkshell` for noisy read-only output/checks; keep edits and ambiguous investigations on the normal path.
-- Prefer `nana verify --json` when `nana-verify.json` exists; otherwise use documented repo verification commands. Missing/invalid preflight: search/fallback/profile example.
-- Run independent work in parallel and dependent checks sequentially. Use background execution for long builds/tests when helpful.
+- Prefer `nana verify --json` when `nana-verify.json` exists; otherwise use documented repo verification commands.
+- Run independent work in parallel; dependent checks sequentially. Background long checks when helpful.
 - Stop only when the task is verified complete, the user says stop/cancel, or no meaningful recovery path remains; escalate only for destructive, irreversible, materially branching, or authority-blocked decisions.
 <verification>
 <!-- NANA:GUIDANCE:VERIFYSEQ:START -->

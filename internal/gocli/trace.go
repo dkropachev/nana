@@ -396,8 +396,11 @@ func appendChildAgentTraceEvent(cwd string, at time.Time, event childAgentTraceE
 		return err
 	}
 	defer file.Close()
-	_, err = file.Write(payload)
-	return err
+	if _, err := file.Write(payload); err != nil {
+		return err
+	}
+	recordRuntimeArtifactWrite(path)
+	return nil
 }
 
 func childAgentTraceLogPath(cwd string, at time.Time) string {

@@ -107,7 +107,9 @@ func TestStatusAndCancel(t *testing.T) {
 		"Active mode: team",
 		"State file: " + filepath.Join(".nana", "state", "sessions", "sess-1", "team-state.json"),
 		"Latest artifact: " + filepath.Join(".nana", "logs", "hooks-2026-04-08.jsonl"),
+		"Inspect: " + filepath.Join(".nana", "state", "sessions", "sess-1", "team-state.json") + ", " + filepath.Join(".nana", "logs", "hooks-2026-04-08.jsonl"),
 		"Recovery: Run $cancel",
+		"listed state/log paths before retrying",
 	} {
 		if !strings.Contains(statusOutput, needle) {
 			t.Fatalf("expected status output to contain %q, got %q", needle, statusOutput)
@@ -537,8 +539,11 @@ func TestRouteRulesStayInSyncWithAgentsTemplate(t *testing.T) {
 		t.Fatalf("read template AGENTS.md: %v", err)
 	}
 	template := string(content)
+	if !strings.Contains(template, "Sync trigger tests with this list") {
+		t.Fatalf("template AGENTS.md missing trigger synchronization guidance")
+	}
 	if !strings.Contains(template, "`nana route --explain \"<prompt>\"` to preview routing") {
-		t.Fatalf("template AGENTS.md should document route preview guidance")
+		t.Fatalf("template AGENTS.md missing route preview guidance")
 	}
 	for _, rule := range routeRules {
 		if !strings.Contains(template, "- `$"+rule.Skill+"`") {

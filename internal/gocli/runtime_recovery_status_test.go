@@ -3,6 +3,7 @@ package gocli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -69,6 +70,49 @@ func TestBuildRuntimeRecoveryStatusUsesRecordedLatestArtifact(t *testing.T) {
 	want := filepath.Join(".nana", "logs", "hooks-2026-04-08.jsonl")
 	if status.LatestArtifact != want {
 		t.Fatalf("LatestArtifact = %q, want %q (status=%+v)", status.LatestArtifact, want, status)
+	}
+}
+
+func TestBuildRuntimeRecoveryStatusIncludesInspectPathsForActiveModesAndArtifact(t *testing.T) {
+	cwd := t.TempDir()
+	sessionStateDir := writeCurrentRuntimeSession(t, cwd, "sess-recovery")
+	for _, mode := range []string{"team", "ultrawork", "verify-loop"} {
+		writeActiveRuntimeModeStateFile(t, sessionStateDir, mode)
+	}
+	logPath := filepath.Join(cwd, ".nana", "logs", "child-agents-2026-04-20.jsonl")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+	if err := os.WriteFile(logPath, []byte(`{"event":"start"}`), 0o644); err != nil {
+		t.Fatalf("write trace log: %v", err)
+	}
+	if err := RecordRuntimeArtifact(cwd, logPath); err != nil {
+		t.Fatalf("RecordRuntimeArtifact: %v", err)
+	}
+
+	status, err := BuildRuntimeRecoveryStatus(cwd)
+	if err != nil {
+		t.Fatalf("BuildRuntimeRecoveryStatus: %v", err)
+	}
+	if status == nil {
+		t.Fatalf("expected active runtime status")
+	}
+	if status.ActiveMode != "verify-loop" {
+		t.Fatalf("ActiveMode = %q, want verify-loop (status=%+v)", status.ActiveMode, status)
+	}
+	wantPaths := []string{
+		filepath.Join(".nana", "state", "sessions", "sess-recovery", "verify-loop-state.json"),
+		filepath.Join(".nana", "state", "sessions", "sess-recovery", "ultrawork-state.json"),
+		filepath.Join(".nana", "state", "sessions", "sess-recovery", "team-state.json"),
+		filepath.Join(".nana", "logs", "child-agents-2026-04-20.jsonl"),
+	}
+	if strings.Join(status.InspectPaths, "\n") != strings.Join(wantPaths, "\n") {
+		t.Fatalf("InspectPaths = %#v, want %#v", status.InspectPaths, wantPaths)
+	}
+	for _, needle := range []string{"$cancel", "state/log paths", "nana hud --json"} {
+		if !strings.Contains(status.RecoveryHint, needle) {
+			t.Fatalf("RecoveryHint missing %q: %q", needle, status.RecoveryHint)
+		}
 	}
 }
 

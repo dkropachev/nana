@@ -75,6 +75,9 @@ func Status(cwd string) error {
 		if strings.TrimSpace(runtimeRecovery.LatestArtifact) != "" {
 			fmt.Fprintf(os.Stdout, "Latest artifact: %s\n", runtimeRecovery.LatestArtifact)
 		}
+		if inspect := runtimeRecoveryInspectPathSummary(runtimeRecovery.InspectPaths); inspect != "" {
+			fmt.Fprintf(os.Stdout, "Inspect: %s\n", inspect)
+		}
 		if strings.TrimSpace(runtimeRecovery.RecoveryHint) != "" {
 			fmt.Fprintf(os.Stdout, "Recovery: %s\n", runtimeRecovery.RecoveryHint)
 		}

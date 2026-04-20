@@ -55,6 +55,32 @@ func TestTraceChildAgentTelemetryLogsAndSummarizes(t *testing.T) {
 	}
 }
 
+func TestTraceChildAgentTelemetryRecordsLatestRuntimeArtifact(t *testing.T) {
+	cwd := t.TempDir()
+	writeActiveRuntimeModeState(t, cwd, "ultrawork")
+
+	if _, err := captureStdout(t, func() error {
+		return Trace(cwd, []string{"child-agent", "start", "--agent", "agent-1", "--role", "executor", "--at", "2026-04-20T00:00:00Z"})
+	}); err != nil {
+		t.Fatalf("Trace(start): %v", err)
+	}
+
+	want := filepath.Join(".nana", "logs", "child-agents-2026-04-20.jsonl")
+	if got := latestRuntimeArtifactPath(cwd); got != want {
+		t.Fatalf("latestRuntimeArtifactPath() = %q, want %q", got, want)
+	}
+	status, err := BuildRuntimeRecoveryStatus(cwd)
+	if err != nil {
+		t.Fatalf("BuildRuntimeRecoveryStatus: %v", err)
+	}
+	if status == nil || status.LatestArtifact != want {
+		t.Fatalf("expected trace log in runtime recovery status, got %+v", status)
+	}
+	if !strings.Contains(strings.Join(status.InspectPaths, "\n"), want) {
+		t.Fatalf("InspectPaths missing trace log %q: %#v", want, status.InspectPaths)
+	}
+}
+
 func TestTraceChildAgentSummaryReportsExplicitCurrentQueueDepth(t *testing.T) {
 	cwd := t.TempDir()
 	if _, err := captureStdout(t, func() error {
