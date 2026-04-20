@@ -155,6 +155,40 @@ func BenchmarkDetectGithubVerificationPlan(b *testing.B) {
 	}
 }
 
+func BenchmarkSetupProjectColdWarm(b *testing.B) {
+	b.Run("cold", func(b *testing.B) {
+		b.ReportAllocs()
+		withBenchmarkStdoutDiscarded(b, func() {
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				cwd, repoRoot, home := setupBenchmarkFixture(b)
+				setBenchmarkSetupEnv(b, home)
+				b.StartTimer()
+				if err := Setup(repoRoot, cwd, []string{"--scope", "project"}); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	})
+
+	b.Run("warm", func(b *testing.B) {
+		cwd, repoRoot, home := setupBenchmarkFixture(b)
+		setBenchmarkSetupEnv(b, home)
+		withBenchmarkStdoutDiscarded(b, func() {
+			if err := Setup(repoRoot, cwd, []string{"--scope", "project"}); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := Setup(repoRoot, cwd, []string{"--scope", "project"}); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	})
+}
+
 func seedWorkRunIndex(b *testing.B, backend string, count int) {
 	b.Helper()
 	store, err := openLocalWorkDB()
@@ -197,4 +231,39 @@ func writeBenchmarkRepoFile(b *testing.B, repo string, name string, content stri
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		b.Fatalf("write %s: %v", name, err)
 	}
+}
+
+func setupBenchmarkFixture(b *testing.B) (string, string, string) {
+	b.Helper()
+	cwd := b.TempDir()
+	repoRoot := cwd
+	writeBenchmarkRepoFile(b, repoRoot, "prompts/executor.md", "# executor\n")
+	writeBenchmarkRepoFile(b, repoRoot, "skills/nana-setup/SKILL.md", "# skill\n")
+	writeBenchmarkRepoFile(b, repoRoot, "templates/AGENTS.md", "template ~/.codex\n")
+	return cwd, repoRoot, filepath.Join(cwd, "home")
+}
+
+func setBenchmarkSetupEnv(b *testing.B, home string) {
+	b.Helper()
+	if err := os.Setenv("HOME", home); err != nil {
+		b.Fatalf("set HOME: %v", err)
+	}
+	if err := os.Setenv("CODEX_HOME", filepath.Join(home, ".codex")); err != nil {
+		b.Fatalf("set CODEX_HOME: %v", err)
+	}
+}
+
+func withBenchmarkStdoutDiscarded(b *testing.B, fn func()) {
+	b.Helper()
+	oldStdout := os.Stdout
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		b.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	os.Stdout = devNull
+	defer func() {
+		os.Stdout = oldStdout
+		_ = devNull.Close()
+	}()
+	fn()
 }

@@ -1,12 +1,16 @@
 package gocli
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/dkropachev/nana/internal/gocliassets"
 )
@@ -16,6 +20,36 @@ type SetupOptions struct {
 	DryRun  bool
 	Force   bool
 	Verbose bool
+
+	writeCache *setupWriteCache
+	timer      *setupPhaseTimer
+}
+
+const setupWriteCacheVersion = 1
+
+type setupWriteCache struct {
+	Version int                        `json:"version"`
+	Entries map[string]setupCacheEntry `json:"entries"`
+
+	path  string
+	dirty bool
+}
+
+type setupCacheEntry struct {
+	Checksum        string `json:"checksum"`
+	Size            int64  `json:"size"`
+	ModTimeUnixNano int64  `json:"mod_time_unix_nano"`
+}
+
+type setupPhaseTimer struct {
+	enabled bool
+	phases  []setupPhaseTiming
+	started time.Time
+}
+
+type setupPhaseTiming struct {
+	Name     string
+	Duration time.Duration
 }
 
 func Setup(repoRoot string, cwd string, args []string) error {
@@ -41,42 +75,69 @@ func Setup(repoRoot string, cwd string, args []string) error {
 	}
 	fmt.Fprintln(os.Stdout)
 
+	options.timer = newSetupPhaseTimer(options.Verbose)
+	if !options.DryRun {
+		options.writeCache = loadSetupWriteCache(setupWriteCachePath(cwd))
+	}
 	scopeDirs := resolveSetupScopeDirectories(cwd, options.Scope)
 	if options.Scope == "user" {
 		fmt.Fprintln(os.Stdout, "User scope leaves project AGENTS.md unchanged.")
 	}
 
-	if err := installPrompts(repoRoot, scopeDirs.promptsDir, options); err != nil {
+	if err := runSetupPhase(options, "install prompts", func() error {
+		return installPrompts(repoRoot, scopeDirs.promptsDir, options)
+	}); err != nil {
 		return err
 	}
-	if err := installSkills(repoRoot, scopeDirs.skillsDir, options); err != nil {
+	if err := runSetupPhase(options, "install skills", func() error {
+		return installSkills(repoRoot, scopeDirs.skillsDir, options)
+	}); err != nil {
 		return err
 	}
-	if err := installAgents(scopeDirs.nativeAgentsDir, options); err != nil {
+	if err := runSetupPhase(options, "install native agents", func() error {
+		return installAgents(scopeDirs.nativeAgentsDir, options)
+	}); err != nil {
 		return err
 	}
-	if err := ensureNanaDirectories(cwd, options); err != nil {
+	if err := runSetupPhase(options, "ensure nana dirs", func() error {
+		return ensureNanaDirectories(cwd, options)
+	}); err != nil {
 		return err
 	}
-	if err := writeSetupConfig(scopeDirs.codexConfigFile, options); err != nil {
+	if err := runSetupPhase(options, "write config", func() error {
+		return writeSetupConfig(scopeDirs.codexConfigFile, options)
+	}); err != nil {
 		return err
 	}
-	if err := writeSetupAgentsMd(repoRoot, cwd, scopeDirs.codexHomeDir, options); err != nil {
+	if err := runSetupPhase(options, "write AGENTS.md", func() error {
+		return writeSetupAgentsMd(repoRoot, cwd, scopeDirs.codexHomeDir, options)
+	}); err != nil {
 		return err
 	}
-	if err := installInvestigateCodexHome(repoRoot, cwd, options.Scope, options, scopeDirs.codexHomeDir); err != nil {
+	if err := runSetupPhase(options, "install investigate home", func() error {
+		return installInvestigateCodexHome(repoRoot, cwd, options.Scope, options, scopeDirs.codexHomeDir)
+	}); err != nil {
 		return err
 	}
-	if !options.DryRun {
+	if err := runSetupPhase(options, "persist setup scope", func() error {
+		if options.DryRun {
+			return nil
+		}
 		if err := os.MkdirAll(filepath.Join(cwd, ".nana"), 0o755); err != nil {
 			return err
 		}
 		scopePath := filepath.Join(cwd, ".nana", "setup-scope.json")
 		payload, _ := json.Marshal(map[string]string{"scope": options.Scope})
-		if err := os.WriteFile(scopePath, payload, 0o644); err != nil {
-			return err
-		}
+		return writeBytesIfChanged(scopePath, payload, options)
+	}); err != nil {
+		return err
 	}
+	if err := runSetupPhase(options, "persist setup cache", func() error {
+		return options.writeCache.save()
+	}); err != nil {
+		return err
+	}
+	options.timer.printSummary(os.Stdout)
 	return nil
 }
 
@@ -388,13 +449,13 @@ func writeSetupConfig(configPath string, options SetupOptions) error {
 
 func writeSetupAgentsMd(repoRoot string, cwd string, codexHomeDir string, options SetupOptions) error {
 	targetPath := resolveManagedAgentsPath(resolveScopeForAgentsTarget(cwd, codexHomeDir), cwd, codexHomeDir)
-	content, err := renderManagedAgentsContent(repoRoot, cwd, codexHomeDir, targetPath)
-	if err != nil {
-		return err
-	}
 	if filepath.Clean(targetPath) == filepath.Clean(filepath.Join(cwd, "AGENTS.md")) && fileExists(targetPath) && !options.Force {
 		fmt.Fprintln(os.Stdout, "Skipped AGENTS.md overwrite")
 		return nil
+	}
+	content, err := renderManagedAgentsContent(repoRoot, cwd, codexHomeDir, targetPath)
+	if err != nil {
+		return err
 	}
 	return writeFileIfChanged(targetPath, content, options)
 }
@@ -435,18 +496,46 @@ func writeFileIfChanged(path string, content string, options SetupOptions) error
 }
 
 func writeBytesIfChanged(path string, content []byte, options SetupOptions) error {
+	return writeBytesWithChecksumGuard(path, content, 0o644, options.DryRun, options.writeCache)
+}
+
+func writeRuntimeBytesIfChanged(path string, content []byte) error {
+	return writeBytesWithChecksumGuard(path, content, 0o644, false, nil)
+}
+
+func writeBytesWithChecksumGuard(path string, content []byte, mode os.FileMode, dryRun bool, cache *setupWriteCache) error {
+	checksum := sha256BytesHex(content)
+	if cache != nil && cache.matches(path, checksum) {
+		return nil
+	}
 	if existing, err := os.ReadFile(path); err == nil {
-		if string(existing) == string(content) {
+		if sha256BytesHex(existing) == checksum {
+			if cache != nil && !dryRun {
+				cache.update(path, checksum)
+			}
 			return nil
 		}
+	} else if !os.IsNotExist(err) {
+		return err
 	}
-	if options.DryRun {
+	if dryRun {
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, content, 0o644)
+	if err := os.WriteFile(path, content, mode); err != nil {
+		return err
+	}
+	if cache != nil {
+		cache.update(path, checksum)
+	}
+	return nil
+}
+
+func sha256BytesHex(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
 }
 
 func copyDirIfChanged(srcDir string, dstDir string, options SetupOptions) error {
@@ -474,4 +563,145 @@ func copyDirIfChanged(srcDir string, dstDir string, options SetupOptions) error 
 		}
 	}
 	return nil
+}
+
+func setupWriteCachePath(cwd string) string {
+	return filepath.Join(cwd, ".nana", "state", "setup-cache.json")
+}
+
+func loadSetupWriteCache(path string) *setupWriteCache {
+	cache := &setupWriteCache{
+		Version: setupWriteCacheVersion,
+		Entries: map[string]setupCacheEntry{},
+		path:    path,
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return cache
+	}
+	var persisted setupWriteCache
+	if err := json.Unmarshal(content, &persisted); err != nil || persisted.Version != setupWriteCacheVersion {
+		return cache
+	}
+	cache.Entries = persisted.Entries
+	if cache.Entries == nil {
+		cache.Entries = map[string]setupCacheEntry{}
+	}
+	return cache
+}
+
+func (c *setupWriteCache) matches(path string, checksum string) bool {
+	if c == nil {
+		return false
+	}
+	entry, ok := c.Entries[setupCacheKey(path)]
+	if !ok || entry.Checksum != checksum {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	if info.Size() != entry.Size || info.ModTime().UnixNano() != entry.ModTimeUnixNano {
+		return false
+	}
+	// Size and mtime only make the cache entry plausible; content remains
+	// authoritative because archive/sync tools can restore both metadata values.
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return sha256BytesHex(content) == checksum
+}
+
+func (c *setupWriteCache) update(path string, checksum string) {
+	if c == nil {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return
+	}
+	key := setupCacheKey(path)
+	entry := setupCacheEntry{
+		Checksum:        checksum,
+		Size:            info.Size(),
+		ModTimeUnixNano: info.ModTime().UnixNano(),
+	}
+	if c.Entries == nil {
+		c.Entries = map[string]setupCacheEntry{}
+	}
+	if existing, ok := c.Entries[key]; ok && existing == entry {
+		return
+	}
+	c.Entries[key] = entry
+	c.dirty = true
+}
+
+func (c *setupWriteCache) save() error {
+	if c == nil || !c.dirty {
+		return nil
+	}
+	c.Version = setupWriteCacheVersion
+	if c.Entries == nil {
+		c.Entries = map[string]setupCacheEntry{}
+	}
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if existing, err := os.ReadFile(c.path); err == nil && bytes.Equal(existing, data) {
+		c.dirty = false
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(c.path, data, 0o644); err != nil {
+		return err
+	}
+	c.dirty = false
+	return nil
+}
+
+func setupCacheKey(path string) string {
+	return filepath.Clean(path)
+}
+
+func newSetupPhaseTimer(enabled bool) *setupPhaseTimer {
+	return &setupPhaseTimer{enabled: enabled, started: time.Now()}
+}
+
+func runSetupPhase(options SetupOptions, name string, fn func() error) error {
+	if options.timer == nil || !options.timer.enabled {
+		return fn()
+	}
+	start := time.Now()
+	err := fn()
+	options.timer.phases = append(options.timer.phases, setupPhaseTiming{
+		Name:     name,
+		Duration: time.Since(start),
+	})
+	return err
+}
+
+func (t *setupPhaseTimer) printSummary(out *os.File) {
+	if t == nil || !t.enabled {
+		return
+	}
+	total := time.Since(t.started)
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Setup timings:")
+	for _, phase := range t.phases {
+		fmt.Fprintf(out, "  %-24s %s\n", phase.Name+":", formatSetupDuration(phase.Duration))
+	}
+	fmt.Fprintf(out, "  %-24s %s\n", "total:", formatSetupDuration(total))
+}
+
+func formatSetupDuration(duration time.Duration) string {
+	if duration < time.Millisecond {
+		return duration.String()
+	}
+	return duration.Round(time.Millisecond).String()
 }

@@ -585,7 +585,7 @@ func writeSessionModelInstructions(cwd string, sessionID string, codexHome strin
 	if content != "" {
 		content += "\n"
 	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := writeRuntimeBytesIfChanged(path, []byte(content)); err != nil {
 		return "", err
 	}
 	return path, nil
