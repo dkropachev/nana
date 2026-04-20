@@ -41,8 +41,52 @@ func TestSetupProjectDryRunDoesNotPersistScope(t *testing.T) {
 	if !strings.Contains(output, "Using setup scope: project") {
 		t.Fatalf("unexpected setup output: %q", output)
 	}
+	for _, needle := range []string{
+		"Setup target:",
+		"  scope: project",
+		"  destination: " + filepath.Join(cwd, "AGENTS.md"),
+		"  will_overwrite: false",
+		"  verify_with: nana doctor",
+	} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("setup output missing %q: %q", needle, output)
+		}
+	}
 	if fileExists(filepath.Join(cwd, ".nana", "setup-scope.json")) {
 		t.Fatalf("setup-scope.json should not be written during dry-run")
+	}
+}
+
+func TestSetupProjectDryRunForceReportsAgentsOverwriteIntent(t *testing.T) {
+	cwd, repoRoot := setupTestFixture(t)
+	home := filepath.Join(cwd, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("# existing policy\n"), 0o644); err != nil {
+		t.Fatalf("write existing AGENTS.md: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error { return Setup(repoRoot, cwd, []string{"--scope", "project", "--dry-run", "--force"}) })
+	if err != nil {
+		t.Fatalf("Setup(): %v", err)
+	}
+	for _, needle := range []string{
+		"Setup target:",
+		"  scope: project",
+		"  destination: " + filepath.Join(cwd, "AGENTS.md"),
+		"  will_overwrite: true",
+		"  verify_with: nana doctor",
+	} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("setup output missing %q: %q", needle, output)
+		}
+	}
+	content, err := os.ReadFile(filepath.Join(cwd, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read existing AGENTS.md: %v", err)
+	}
+	if string(content) != "# existing policy\n" {
+		t.Fatalf("dry-run force should not rewrite AGENTS.md, got %q", content)
 	}
 }
 

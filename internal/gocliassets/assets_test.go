@@ -248,8 +248,8 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 		{name: "templates/AGENTS.md", content: string(diskContent)},
 		{name: "root AGENTS.md", content: string(rootAgents)},
 	} {
-		if strings.Contains(source.content, "nana route --explain") {
-			t.Fatalf("%s should not require route preview CLI guidance", source.name)
+		if !strings.Contains(source.content, "`nana route --explain \"<prompt>\"` to preview routing") {
+			t.Fatalf("%s should document route preview CLI guidance", source.name)
 		}
 	}
 	for _, needle := range []string{

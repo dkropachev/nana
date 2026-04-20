@@ -149,7 +149,7 @@ func ExplainPromptRoute(prompt string) routePreview {
 }
 
 func ExplainPromptRouteForCWD(cwd string, prompt string) routePreview {
-	return ExplainPromptRouteForCWDAndCodexHome(cwd, "", prompt)
+	return explainPromptRoute(prompt, routeDocResolver(cwd), routeExplicitSkillValidator(cwd))
 }
 
 func ExplainPromptRouteForCWDAndCodexHome(cwd string, codexHome string, prompt string) routePreview {
@@ -452,26 +452,15 @@ func routeDocResolverForBase(base routeDocBase) func(string) routeDoc {
 				return doc
 			}
 		}
-		actualPath := filepath.Join(base.actualSkillsDir, skill, "RUNTIME.md")
 		return routeDoc{
 			Path:       base.displayDocPath(skill, "RUNTIME.md"),
-			ActualPath: actualPath,
+			ActualPath: filepath.Join(base.actualSkillsDir, skill, "RUNTIME.md"),
 			Label:      routeDocLabelRuntime,
 		}
 	}
 }
 
 func routeDocBaseForCWD(cwd string) routeDocBase {
-	return routeDocBaseForCWDAndCodexHome(cwd, "")
-}
-
-func routeDocBaseForCWDAndCodexHome(cwd string, codexHome string) routeDocBase {
-	if codexHome := strings.TrimSpace(codexHome); codexHome != "" {
-		return routeDocBase{
-			actualSkillsDir:  filepath.Join(codexHome, "skills"),
-			displaySkillsDir: filepath.Join(codexHome, "skills"),
-		}
-	}
 	if codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); codexHome != "" {
 		return routeDocBase{
 			actualSkillsDir:  filepath.Join(codexHome, "skills"),
@@ -497,6 +486,16 @@ func routeDocBaseForCWDAndCodexHome(cwd string, codexHome string) routeDocBase {
 	}
 }
 
+func routeDocBaseForCWDAndCodexHome(cwd string, codexHome string) routeDocBase {
+	if codexHome = strings.TrimSpace(codexHome); codexHome != "" {
+		return routeDocBase{
+			actualSkillsDir:  filepath.Join(codexHome, "skills"),
+			displaySkillsDir: filepath.Join(codexHome, "skills"),
+		}
+	}
+	return routeDocBaseForCWD(cwd)
+}
+
 func (base routeDocBase) displayDocPath(skill string, filename string) string {
 	displayPath := filepath.Join(base.displaySkillsDir, skill, filename)
 	if base.displayDotRelative {
@@ -519,10 +518,6 @@ func FormatRoutePreview(preview routePreview) string {
 		for index, activation := range preview.Activations {
 			fmt.Fprintf(&builder, "  %d. $%s\n", index+1, activation.Skill)
 			fmt.Fprintf(&builder, "     source: %s %q\n", activation.Source, activation.Trigger)
-			fmt.Fprintf(&builder, "     decision: matched_keyword=%q activation_mode=%s source_rule=%q implicit_suppressed=%t\n", activation.Trigger, routeActivationMode(activation), routeActivationWhy(activation), preview.ImplicitSuppressedBy != "")
-			if preview.ImplicitSuppressedBy != "" {
-				fmt.Fprintf(&builder, "     implicit_suppressed_by: %s\n", preview.ImplicitSuppressedBy)
-			}
 			fmt.Fprintf(&builder, "     why: %s\n", routeActivationWhy(activation))
 			docLabel := activation.DocLabel
 			if docLabel == "" {
@@ -561,16 +556,5 @@ func routeActivationWhy(activation routeActivation) string {
 		return "case-insensitive keyword match anywhere in the prompt on token boundaries"
 	default:
 		return activation.Source
-	}
-}
-
-func routeActivationMode(activation routeActivation) string {
-	switch activation.Source {
-	case routeSourceExplicitInvocation:
-		return "explicit"
-	case routeSourceImplicitKeyword:
-		return "implicit"
-	default:
-		return strings.TrimSpace(activation.Source)
 	}
 }

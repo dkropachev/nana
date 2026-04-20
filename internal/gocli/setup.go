@@ -89,6 +89,7 @@ func Setup(repoRoot string, cwd string, args []string) error {
 		options.writeCache = loadSetupWriteCache(setupWriteCachePath(cwd))
 	}
 	scopeDirs := resolveSetupScopeDirectories(cwd, options.Scope)
+	printSetupTargetSummary(os.Stdout, repoRoot, cwd, scopeDirs.codexHomeDir, options)
 	if options.Scope == "user" {
 		fmt.Fprintln(os.Stdout, "User scope leaves project AGENTS.md unchanged.")
 	}
@@ -241,6 +242,32 @@ func resolveInvestigateScopeDirectories(cwd string, scope string) setupScopeDire
 		promptsDir:      filepath.Join(codexHomeDir, "prompts"),
 		skillsDir:       filepath.Join(codexHomeDir, "skills"),
 	}
+}
+
+func printSetupTargetSummary(out *os.File, repoRoot string, cwd string, codexHomeDir string, options SetupOptions) {
+	targetScope := resolveScopeForAgentsTarget(cwd, codexHomeDir)
+	destination := resolveManagedAgentsPath(targetScope, cwd, codexHomeDir)
+	fmt.Fprintln(out, "Setup target:")
+	fmt.Fprintf(out, "  scope: %s\n", options.Scope)
+	fmt.Fprintf(out, "  destination: %s\n", destination)
+	fmt.Fprintf(out, "  will_overwrite: %t\n", setupWillOverwriteAgentsTarget(repoRoot, cwd, codexHomeDir, destination, targetScope, options))
+	fmt.Fprintln(out, "  verify_with: nana doctor")
+	fmt.Fprintln(out)
+}
+
+func setupWillOverwriteAgentsTarget(repoRoot string, cwd string, codexHomeDir string, targetPath string, targetScope string, options SetupOptions) bool {
+	if targetScope == "project" && filepath.Clean(targetPath) == filepath.Clean(filepath.Join(cwd, "AGENTS.md")) && !options.Force {
+		return false
+	}
+	existing, err := os.ReadFile(targetPath)
+	if err != nil {
+		return false
+	}
+	expected, err := renderManagedAgentsContent(repoRoot, cwd, codexHomeDir, targetPath)
+	if err != nil {
+		return true
+	}
+	return sha256BytesHex(existing) != sha256BytesHex([]byte(expected))
 }
 
 func installInvestigateCodexHome(repoRoot string, cwd string, scope string, options SetupOptions, sourceCodexHome string) error {
