@@ -3,7 +3,6 @@ package gocli
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -113,10 +112,6 @@ func launchStartPlannedLocalWork(repoSlug string, item startWorkPlannedItem, cod
 	if err != nil {
 		return startPlannedLaunchResult{}, err
 	}
-	executablePath, err := os.Executable()
-	if err != nil {
-		return startPlannedLaunchResult{}, err
-	}
 	args := []string{"work", "start", "--repo", repoPath, "--task", startPlannedLocalWorkTask(item)}
 	if len(codexArgs) > 0 {
 		args = append(args, "--")
@@ -130,11 +125,15 @@ func launchStartPlannedLocalWork(repoSlug string, item startWorkPlannedItem, cod
 	if err != nil {
 		return startPlannedLaunchResult{}, err
 	}
-	cmd := exec.Command(executablePath, args...)
+	cmd, err := startManagedNanaCommand(args...)
+	if err != nil {
+		_ = logFile.Close()
+		return startPlannedLaunchResult{}, err
+	}
 	cmd.Dir = repoPath
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
+	if err := startManagedNanaStart(cmd); err != nil {
 		_ = logFile.Close()
 		return startPlannedLaunchResult{}, err
 	}
@@ -176,10 +175,6 @@ func launchStartPlannedTrackedIssue(repoSlug string, item startWorkPlannedItem) 
 	if err != nil {
 		return startPlannedLaunchResult{}, err
 	}
-	executablePath, err := os.Executable()
-	if err != nil {
-		return startPlannedLaunchResult{}, err
-	}
 	logPath := filepath.Join(githubManagedPaths(repoSlug).PlannedRunsDir, item.ID+".log")
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return startPlannedLaunchResult{}, err
@@ -188,11 +183,15 @@ func launchStartPlannedTrackedIssue(repoSlug string, item startWorkPlannedItem) 
 	if err != nil {
 		return startPlannedLaunchResult{}, err
 	}
-	cmd := exec.Command(executablePath, "work", "start", targetURL)
+	cmd, err := startManagedNanaCommand("work", "start", targetURL)
+	if err != nil {
+		_ = logFile.Close()
+		return startPlannedLaunchResult{}, err
+	}
 	cmd.Dir = repoPath
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
+	if err := startManagedNanaStart(cmd); err != nil {
 		_ = logFile.Close()
 		return startPlannedLaunchResult{}, err
 	}

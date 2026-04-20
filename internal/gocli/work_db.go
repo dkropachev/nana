@@ -57,12 +57,41 @@ func (e *localWorkDBSchemaError) Error() string {
 }
 
 func openLocalWorkSQLite(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+	return openLocalWorkSQLiteWithProxy(path, true)
+}
+
+func openLocalWorkSQLiteDirect(path string) (*sql.DB, error) {
+	return openLocalWorkSQLiteWithProxy(path, false)
+}
+
+func openLocalWorkSQLiteWithProxy(path string, allowProxy bool) (*sql.DB, error) {
+	if !allowProxy || strings.TrimSpace(activeStartLocalWorkDBProxySocket()) != "" {
+		return openLocalWorkSQLiteDriver("sqlite", path, false)
+	}
+	socketPath := localWorkDBProxySocketPath()
+	present, err := localWorkDBProxySocketPresent(socketPath)
+	if err != nil {
+		return nil, err
+	}
+	if !present {
+		return openLocalWorkSQLiteDriver("sqlite", path, false)
+	}
+	return openLocalWorkSQLiteDriver(localWorkDBProxyDriverName, socketPath, true)
+}
+
+func openLocalWorkSQLiteDriver(driverName string, dsn string, ping bool) (*sql.DB, error) {
+	db, err := sql.Open(driverName, dsn)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	if ping {
+		if err := db.Ping(); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("DB proxy socket present at %s, but connection failed: %w", dsn, err)
+		}
+	}
 	return db, nil
 }
 

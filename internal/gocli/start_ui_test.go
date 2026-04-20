@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,34 @@ func startUITestSetOriginRemote(t *testing.T, repo string, remote string) {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git remote add origin failed: %v\n%s", err, output)
+	}
+}
+
+func TestStartUISpawnBackgroundNanaInheritsDBProxyEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix sockets are not available on windows")
+	}
+	_ = setLocalWorkDBProxyTestHome(t)
+
+	workdir := t.TempDir()
+	supervisor, err := launchLocalWorkDBProxySupervisor()
+	if err != nil {
+		t.Fatalf("launchLocalWorkDBProxySupervisor: %v", err)
+	}
+	defer supervisor.Close()
+	logPath := filepath.Join(t.TempDir(), "start-ui.log")
+	started := false
+	setStartManagedNanaStartForTest(t, func(cmd *exec.Cmd) error {
+		started = true
+		assertStartManagedNanaLaunchUsesSocketPresence(t, cmd)
+		return nil
+	})
+
+	if err := startUISpawnBackgroundNana(workdir, logPath, []string{"investigate", "test"}); err != nil {
+		t.Fatalf("startUISpawnBackgroundNana: %v", err)
+	}
+	if !started {
+		t.Fatalf("expected managed child launch to start")
 	}
 }
 

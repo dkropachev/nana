@@ -12,6 +12,34 @@ import (
 	"time"
 )
 
+func TestLaunchLocalWorkDetachedRunnerInheritsDBProxyEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix sockets are not available on windows")
+	}
+	_ = setLocalWorkDBProxyTestHome(t)
+
+	repoRoot := t.TempDir()
+	supervisor, err := launchLocalWorkDBProxySupervisor()
+	if err != nil {
+		t.Fatalf("launchLocalWorkDBProxySupervisor: %v", err)
+	}
+	defer supervisor.Close()
+	logPath := filepath.Join(t.TempDir(), "runtime.log")
+	started := false
+	setStartManagedNanaStartForTest(t, func(cmd *exec.Cmd) error {
+		started = true
+		assertStartManagedNanaLaunchUsesSocketPresence(t, cmd)
+		return nil
+	})
+
+	if err := launchLocalWorkDetachedRunner(repoRoot, "run-1", nil, logPath); err != nil {
+		t.Fatalf("launchLocalWorkDetachedRunner: %v", err)
+	}
+	if !started {
+		t.Fatalf("expected managed child launch to start")
+	}
+}
+
 func TestDetectGithubVerificationPlanForGoUsesCheckOnlyLint(t *testing.T) {
 	repo := t.TempDir()
 	writeFile := func(path string, content string) {

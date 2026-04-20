@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -2665,10 +2664,6 @@ func startUITrackedIssuePlannedItemDescription(issue startWorkIssueState) string
 }
 
 func startUISpawnBackgroundNana(workdir string, logPath string, args []string) error {
-	executablePath, err := os.Executable()
-	if err != nil {
-		return err
-	}
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return err
 	}
@@ -2676,11 +2671,15 @@ func startUISpawnBackgroundNana(workdir string, logPath string, args []string) e
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(executablePath, args...)
+	cmd, err := startManagedNanaCommand(args...)
+	if err != nil {
+		_ = logFile.Close()
+		return err
+	}
 	cmd.Dir = workdir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
+	if err := startManagedNanaStart(cmd); err != nil {
 		_ = logFile.Close()
 		return err
 	}

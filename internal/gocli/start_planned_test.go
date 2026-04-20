@@ -2,13 +2,14 @@ package gocli
 
 import (
 	"os"
+	"os/exec"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
 func TestLaunchStartPlannedItemScheduledRunsLocalWorkInline(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	_ = setLocalWorkDBProxyTestHome(t)
 
 	repoSlug := "acme/widget"
 	repoPath := githubManagedPaths(repoSlug).SourcePath
@@ -62,8 +63,7 @@ func TestLaunchStartPlannedItemScheduledRunsLocalWorkInline(t *testing.T) {
 }
 
 func TestLaunchStartPlannedItemScheduledRunsTrackedIssueInline(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	_ = setLocalWorkDBProxyTestHome(t)
 
 	repoSlug := "acme/widget"
 	repoPath := githubManagedPaths(repoSlug).SourcePath
@@ -110,5 +110,87 @@ func TestLaunchStartPlannedItemScheduledRunsTrackedIssueInline(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("unexpected args: got %#v want %#v", gotArgs, wantArgs)
+	}
+}
+
+func TestLaunchStartPlannedLocalWorkChildInheritsDBProxyEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix sockets are not available on windows")
+	}
+	_ = setLocalWorkDBProxyTestHome(t)
+
+	repoSlug := "acme/widget"
+	repoPath := githubManagedPaths(repoSlug).SourcePath
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo path: %v", err)
+	}
+	supervisor, err := launchLocalWorkDBProxySupervisor()
+	if err != nil {
+		t.Fatalf("launchLocalWorkDBProxySupervisor: %v", err)
+	}
+	defer supervisor.Close()
+	started := false
+	setStartManagedNanaStartForTest(t, func(cmd *exec.Cmd) error {
+		started = true
+		assertStartManagedNanaLaunchUsesSocketPresence(t, cmd)
+		return nil
+	})
+
+	result, err := launchStartPlannedLocalWork(repoSlug, startWorkPlannedItem{
+		ID:          "planned-local",
+		RepoSlug:    repoSlug,
+		Title:       "Nightly cleanup",
+		Description: "Tighten scheduler defaults",
+		LaunchKind:  "local_work",
+	}, nil)
+	if err != nil {
+		t.Fatalf("launchStartPlannedLocalWork: %v", err)
+	}
+	if result.Status != "spawned" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if !started {
+		t.Fatalf("expected managed child launch to start")
+	}
+}
+
+func TestLaunchStartPlannedTrackedIssueChildInheritsDBProxyEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix sockets are not available on windows")
+	}
+	_ = setLocalWorkDBProxyTestHome(t)
+
+	repoSlug := "acme/widget"
+	repoPath := githubManagedPaths(repoSlug).SourcePath
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo path: %v", err)
+	}
+	supervisor, err := launchLocalWorkDBProxySupervisor()
+	if err != nil {
+		t.Fatalf("launchLocalWorkDBProxySupervisor: %v", err)
+	}
+	defer supervisor.Close()
+	started := false
+	setStartManagedNanaStartForTest(t, func(cmd *exec.Cmd) error {
+		started = true
+		assertStartManagedNanaLaunchUsesSocketPresence(t, cmd)
+		return nil
+	})
+
+	result, err := launchStartPlannedTrackedIssue(repoSlug, startWorkPlannedItem{
+		ID:         "planned-tracked",
+		RepoSlug:   repoSlug,
+		Title:      "Implement tracked issue",
+		LaunchKind: "tracked_issue",
+		TargetURL:  "https://github.com/acme/widget/issues/42",
+	})
+	if err != nil {
+		t.Fatalf("launchStartPlannedTrackedIssue: %v", err)
+	}
+	if result.Status != "spawned" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if !started {
+		t.Fatalf("expected managed child launch to start")
 	}
 }

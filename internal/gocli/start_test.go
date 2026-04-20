@@ -186,6 +186,101 @@ func TestStartPrintsScoutModeBannerBeforeRun(t *testing.T) {
 	}
 }
 
+func TestStartLaunchesAndCleansLocalWorkDBProxySupervisor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix sockets are not available on windows")
+	}
+	home := setLocalWorkDBProxyTestHome(t)
+	if err := writeGithubJSON(githubRepoSettingsPath("acme/enabled"), githubRepoSettings{Version: 6, RepoMode: "fork", IssuePickMode: "auto", PRForwardMode: "approve", ForkIssuesMode: "auto", ImplementMode: "auto", PublishTarget: "fork"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	oldRun := startRunRepoCyclesBatch
+	var socketPath string
+	var runtimePath string
+	runID := "start-parent-proxy-run"
+	repoRoot := filepath.Join(home, "repo")
+	startRunRepoCyclesBatch = func(cwd string, repos []string, options startOptions) error {
+		socketPath = activeStartLocalWorkDBProxySocket()
+		if strings.TrimSpace(socketPath) == "" {
+			t.Fatalf("expected active DB proxy socket during start run")
+		}
+		if _, err := os.Stat(socketPath); err != nil {
+			t.Fatalf("expected live DB proxy socket at %q: %v", socketPath, err)
+		}
+		runtimePath = localWorkDBProxyRuntimePath()
+		var runtimeState localWorkDBProxyRuntimeState
+		if err := readGithubJSON(runtimePath, &runtimeState); err != nil {
+			t.Fatalf("read runtime state: %v", err)
+		}
+		if runtimeState.Status != localWorkDBProxyActiveState || runtimeState.SocketPath != socketPath || runtimeState.StoppedAt != "" {
+			t.Fatalf("unexpected active runtime state: %+v", runtimeState)
+		}
+		store, err := openLocalWorkDB()
+		if err != nil {
+			t.Fatalf("openLocalWorkDB during start: %v", err)
+		}
+		manifest := localWorkManifest{
+			RunID:           runID,
+			RepoRoot:        repoRoot,
+			RepoName:        "repo",
+			RepoID:          "repo-start",
+			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+			UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
+			Status:          "running",
+			SandboxPath:     filepath.Join(home, "sandbox"),
+			SandboxRepoPath: filepath.Join(home, "sandbox", "repo"),
+		}
+		if err := store.writeManifest(manifest); err != nil {
+			_ = store.Close()
+			t.Fatalf("writeManifest during start: %v", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("close store during start: %v", err)
+		}
+		return nil
+	}
+	defer func() { startRunRepoCyclesBatch = oldRun }()
+
+	output, err := captureStdout(t, func() error {
+		return Start(".", []string{"--once", "--no-ui"})
+	})
+	if err != nil {
+		t.Fatalf("Start: %v\n%s", err, output)
+	}
+	if strings.TrimSpace(socketPath) == "" {
+		t.Fatalf("expected run hook to observe DB proxy socket")
+	}
+	if strings.TrimSpace(runtimePath) == "" {
+		t.Fatalf("expected runtime path to be observed during start run")
+	}
+	if activeStartLocalWorkDBProxySocket() != "" {
+		t.Fatalf("expected DB proxy socket to be cleared after start exits, got %q", activeStartLocalWorkDBProxySocket())
+	}
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Fatalf("expected DB proxy socket to be removed after start exits, got err=%v", err)
+	}
+	var runtimeState localWorkDBProxyRuntimeState
+	if err := readGithubJSON(runtimePath, &runtimeState); err != nil {
+		t.Fatalf("read stopped runtime state: %v", err)
+	}
+	if runtimeState.Status != localWorkDBProxyStoppedState || runtimeState.SocketPath != socketPath || runtimeState.StoppedAt == "" {
+		t.Fatalf("unexpected stopped runtime state: %+v", runtimeState)
+	}
+	store, err := openLocalWorkReadDB()
+	if err != nil {
+		t.Fatalf("openLocalWorkReadDB after start: %v", err)
+	}
+	defer store.Close()
+	manifest, err := store.readManifest(runID)
+	if err != nil {
+		t.Fatalf("readManifest after start: %v", err)
+	}
+	if manifest.RunID != runID || manifest.RepoRoot != repoRoot {
+		t.Fatalf("unexpected manifest after start: %+v", manifest)
+	}
+}
+
 func TestStartDoesNotAutoSelectScoutModeFromCwdPolicies(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

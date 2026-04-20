@@ -507,10 +507,18 @@ func localWorkDBPath() string {
 }
 
 func openLocalWorkDB() (*localWorkDBStore, error) {
+	return openLocalWorkDBWithOpenFunc(openLocalWorkSQLite)
+}
+
+func openLocalWorkDBDirect() (*localWorkDBStore, error) {
+	return openLocalWorkDBWithOpenFunc(openLocalWorkSQLiteDirect)
+}
+
+func openLocalWorkDBWithOpenFunc(openFunc func(string) (*sql.DB, error)) (*localWorkDBStore, error) {
 	if err := os.MkdirAll(localWorkHomeRoot(), 0o755); err != nil {
 		return nil, err
 	}
-	db, err := openLocalWorkSQLite(localWorkDBPath())
+	db, err := openFunc(localWorkDBPath())
 	if err != nil {
 		return nil, err
 	}
@@ -1635,7 +1643,7 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 }
 
 func launchLocalWorkDetachedRunner(repoRoot string, runID string, codexArgs []string, logPath string) error {
-	executablePath, err := os.Executable()
+	cmd, err := startManagedNanaCommand("work", "resume", "--run-id", runID, "--repo", repoRoot)
 	if err != nil {
 		return err
 	}
@@ -1646,17 +1654,14 @@ func launchLocalWorkDetachedRunner(repoRoot string, runID string, codexArgs []st
 	if err != nil {
 		return err
 	}
-	args := []string{"work", "resume", "--run-id", runID, "--repo", repoRoot}
 	if len(codexArgs) > 0 {
-		args = append(args, "--")
-		args = append(args, codexArgs...)
+		cmd.Args = append(cmd.Args, "--")
+		cmd.Args = append(cmd.Args, codexArgs...)
 	}
-	cmd := exec.Command(executablePath, args...)
 	cmd.Dir = repoRoot
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.Env = append([]string{}, os.Environ()...)
-	if err := cmd.Start(); err != nil {
+	if err := startManagedNanaStart(cmd); err != nil {
 		_ = logFile.Close()
 		return err
 	}

@@ -84,6 +84,7 @@ var startRunScoutStart = runScoutStart
 var startRunLocalScoutPickup = runLocalScoutDiscoveredItems
 var startRunRepoCycle = runStartRepoCycle
 var startRunRepoCyclesBatch = runStartRepoCyclesSharedWorkers
+var startLaunchLocalWorkDBProxySupervisor = launchLocalWorkDBProxySupervisor
 var startLoopNow = time.Now
 var startLoopSleep = time.Sleep
 var startLoopContinue = func() bool { return true }
@@ -146,6 +147,11 @@ func Start(cwd string, args []string) error {
 		}
 	}
 	printStartModeBanner(mode)
+	dbProxy, err := startLaunchLocalWorkDBProxySupervisor()
+	if err != nil {
+		return err
+	}
+	defer dbProxy.Close()
 	var ui *startUISupervisor
 	if !uiOptions.NoUI {
 		ui, err = launchStartUISupervisor(cwd, uiOptions)
