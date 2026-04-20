@@ -219,6 +219,7 @@ Most users should think of NANA as **better task routing + better workflow + bet
 | --- | --- |
 | `nana help workflows` | discovering modes, trigger phrases, safe entry commands, and common utility skills |
 | `nana next` | showing the top item that needs attention and the next command to run |
+| `nana route --explain "..."` | previewing which explicit skill or implicit trigger would activate, including the runtime doc path |
 | `$deep-interview "..."` | clarifying intent, boundaries, and non-goals |
 | `$ralplan "..."` | approving the implementation plan and tradeoffs |
 | `nana investigate "..."` | source-backed investigation with proof-linked JSON reports and validator enforcement |

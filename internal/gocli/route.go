@@ -18,6 +18,7 @@ Usage:
 Behavior:
   - reports explicit $skill invocations before implicit keyword matches
   - matches implicit keywords case-insensitively and anywhere on token boundaries
+  - prints the matched trigger, precedence source, and runtime/skill doc path
   - honors /prompts:<name> suppression of implicit keyword routing
 `
 

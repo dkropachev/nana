@@ -62,6 +62,7 @@ Local tools and support:
   nana next                    Print the highest-priority next step and command
   nana status                  Show current local NANA runtime status
   nana verify [--json]         Run the repo-native verification profile
+  nana route --explain "..."   Preview which skill trigger would activate
   nana usage                   Report token spend across NANA-managed sessions
   nana cancel                  Cancel active NANA runtime modes
   nana config                  Show or update persisted NANA defaults
@@ -110,6 +111,7 @@ Safest CLI entry points:
   nana sparkshell <command>     Summarize noisy shell output or bounded verification
   nana next                     Show the next operator action
   nana status                   Show active modes
+  nana route --explain "..."    Preview skill routing and loaded runtime docs
   nana cancel                   Cancel active runtime modes when stuck
 
 Core modes:
@@ -167,6 +169,7 @@ Safe in-session utilities:
 Routing rules:
   - Explicit $skill names run before trigger phrases.
   - Trigger phrases are case-insensitive and can appear anywhere.
+  - Use nana route --explain "prompt text" to see the matched trigger and RUNTIME.md path.
   - Prefer nana explore for simple read-only repo lookups.
   - Prefer nana sparkshell for noisy read-only command output or bounded verification.
   - Keep edits, diagnostics, and ambiguous investigations on the normal Codex path.
@@ -237,6 +240,11 @@ func main() {
 		return
 	case "next":
 		if err := gocli.Next(mustGetwd(), args[1:]); err != nil {
+			exitWithError(err)
+		}
+		return
+	case "route":
+		if err := gocli.Route(mustGetwd(), args[1:]); err != nil {
 			exitWithError(err)
 		}
 		return
@@ -454,6 +462,9 @@ func handleNestedHelp(args []string) bool {
 		return true
 	case "next":
 		mustHandleHelp(gocli.Next(cwd, []string{"--help"}))
+		return true
+	case "route":
+		mustHandleHelp(gocli.Route(cwd, []string{"--help"}))
 		return true
 	case "verify":
 		mustHandleHelp(gocli.Verify(cwd, []string{"--help"}))
