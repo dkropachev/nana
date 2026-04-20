@@ -107,6 +107,35 @@ func TestCheckAgentsRuntimeSectionsPassesForGeneratedAgents(t *testing.T) {
 	}
 }
 
+func TestCheckAgentsRuntimeSectionsRequiresStandaloneGeneratedMarker(t *testing.T) {
+	cwd := t.TempDir()
+	content := strings.Join([]string{
+		"<!-- NANA:GUIDANCE:OPERATING:START -->",
+		"guidance",
+		"<!-- NANA:GUIDANCE:OPERATING:END -->",
+		"<!-- NANA:GUIDANCE:VERIFYSEQ:START -->",
+		"verify",
+		"<!-- NANA:GUIDANCE:VERIFYSEQ:END -->",
+		"## Runtime State and Setup",
+		"- NANA state: `.nana/state/`, `.nana/notepad.md`, `.nana/project-memory.json`, `.nana/plans/`, `.nana/logs/`.",
+		"- Health: expect `" + generatedAgentsMarker + "` plus runtime/model marker pairs above.",
+		"- Keep the runtime overlay markers stable:",
+		"- `<!-- NANA:RUNTIME:START --> ... <!-- NANA:RUNTIME:END -->`",
+		"- `<!-- NANA:TEAM:WORKER:START --> ... <!-- NANA:TEAM:WORKER:END -->`",
+		"<!-- NANA:MODELS:START -->",
+		"<!-- NANA:MODELS:END -->",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	check := checkAgentsRuntimeSections("project", cwd, filepath.Join(cwd, ".codex"))
+	if check.Status != "warn" || !strings.Contains(check.Message, "missing generated AGENTS marker") {
+		t.Fatalf("expected missing generated marker warning, got %#v", check)
+	}
+}
+
 func TestCheckAgentsRuntimeSectionsFailsBrokenOverlayMarker(t *testing.T) {
 	cwd := t.TempDir()
 	content := strings.Join([]string{

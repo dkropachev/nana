@@ -237,6 +237,71 @@ func TestSetupProjectFallsBackToEmbeddedAssets(t *testing.T) {
 	}
 }
 
+func TestWriteSetupAgentsMdInsertsStandaloneGeneratedMarkerWhenTemplateMentionsMarkerInProse(t *testing.T) {
+	cwd := t.TempDir()
+	repoRoot := cwd
+	if err := os.MkdirAll(filepath.Join(repoRoot, "templates"), 0o755); err != nil {
+		t.Fatalf("mkdir templates: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoRoot, "prompts"), 0o755); err != nil {
+		t.Fatalf("mkdir prompts: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoRoot, "skills", "plan"), 0o755); err != nil {
+		t.Fatalf("mkdir plan skill: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "prompts", "executor.md"), []byte("# executor\n"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "skills", "plan", "SKILL.md"), []byte("# plan\n"), 0o644); err != nil {
+		t.Fatalf("write skill: %v", err)
+	}
+	template := strings.Join([]string{
+		"<!-- AUTONOMY DIRECTIVE — DO NOT REMOVE -->",
+		"YOU ARE AN AUTONOMOUS CODING AGENT.",
+		"<!-- END AUTONOMY DIRECTIVE -->",
+		"",
+		"# nana - Compact Runtime Policy",
+		"",
+		"- Health: expect `" + generatedAgentsMarker + "` plus runtime/model marker pairs above.",
+		"- Skill root: `~/.codex/skills`.",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(repoRoot, "templates", "AGENTS.md"), []byte(template), 0o644); err != nil {
+		t.Fatalf("write template: %v", err)
+	}
+
+	if err := writeSetupAgentsMd(repoRoot, cwd, filepath.Join(cwd, ".codex"), SetupOptions{}); err != nil {
+		t.Fatalf("writeSetupAgentsMd(): %v", err)
+	}
+
+	contentBytes, err := os.ReadFile(filepath.Join(cwd, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	content := string(contentBytes)
+	lines := strings.Split(content, "\n")
+	standaloneMarkerCount := 0
+	markerLine := -1
+	for index, line := range lines {
+		if strings.TrimSpace(line) == generatedAgentsMarker {
+			standaloneMarkerCount++
+			markerLine = index
+		}
+	}
+	if standaloneMarkerCount != 1 {
+		t.Fatalf("generated AGENTS.md should contain exactly one standalone generated marker line, got %d in:\n%s", standaloneMarkerCount, content)
+	}
+	if markerLine != 3 {
+		t.Fatalf("standalone generated marker should be inserted immediately after the autonomy directive near the top, line=%d content:\n%s", markerLine, content)
+	}
+	if !strings.Contains(content, "`"+generatedAgentsMarker+"`") {
+		t.Fatalf("test template should still include prose marker reference, got:\n%s", content)
+	}
+	if strings.Contains(content, "~/.codex") || !strings.Contains(content, "./.codex/skills") {
+		t.Fatalf("project AGENTS.md should rewrite Codex home references, got:\n%s", content)
+	}
+}
+
 func TestSetupProjectExistingAgentsNonForceSkipsWithoutReadingTarget(t *testing.T) {
 	cwd, repoRoot := setupTestFixture(t)
 	agentsPath := filepath.Join(cwd, "AGENTS.md")

@@ -27,6 +27,7 @@ type SetupOptions struct {
 }
 
 const setupWriteCacheVersion = 1
+const generatedAgentsMarker = "<!-- nana:generated:agents-md -->"
 
 type setupWriteCache struct {
 	Version int                        `json:"version"`
@@ -480,7 +481,7 @@ func resolveScopeForAgentsTarget(cwd string, codexHomeDir string) string {
 }
 
 func addGeneratedAgentsMarker(content string) string {
-	if strings.Contains(content, "<!-- nana:generated:agents-md -->") {
+	if hasStandaloneGeneratedAgentsMarker(content) {
 		return content
 	}
 	marker := "<!-- END AUTONOMY DIRECTIVE -->"
@@ -490,9 +491,18 @@ func addGeneratedAgentsMarker(content string) string {
 		if insertAt < len(content) && content[insertAt] == '\n' {
 			insertAt++
 		}
-		return content[:insertAt] + "<!-- nana:generated:agents-md -->\n" + content[insertAt:]
+		return content[:insertAt] + generatedAgentsMarker + "\n" + content[insertAt:]
 	}
-	return "<!-- nana:generated:agents-md -->\n" + content
+	return generatedAgentsMarker + "\n" + content
+}
+
+func hasStandaloneGeneratedAgentsMarker(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		if strings.TrimSpace(line) == generatedAgentsMarker {
+			return true
+		}
+	}
+	return false
 }
 
 func copyFileIfChanged(src string, dst string, options SetupOptions) error {

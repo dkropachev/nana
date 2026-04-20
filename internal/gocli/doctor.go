@@ -605,7 +605,7 @@ func checkAgentsRuntimeSections(scope string, cwd string, codexHomeDir string) d
 	failures := []string{}
 	warnings := []string{}
 
-	if !strings.Contains(content, "<!-- nana:generated:agents-md -->") && !strings.Contains(content, managedMarker) {
+	if !hasStandaloneGeneratedAgentsMarker(content) && !strings.Contains(content, managedMarker) {
 		warnings = append(warnings, "missing generated AGENTS marker")
 	}
 	hasLegacyStateSection := strings.Contains(content, "<state_management>") && strings.Contains(content, "</state_management>")

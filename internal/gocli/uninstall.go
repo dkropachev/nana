@@ -436,7 +436,7 @@ func removeAgentsMd(path string, options UninstallOptions) (bool, error) {
 		return false, err
 	}
 	text := string(content)
-	if !strings.Contains(text, "<!-- nana:generated:agents-md -->") {
+	if !hasStandaloneGeneratedAgentsMarker(text) {
 		if options.Verbose {
 			fmt.Fprintln(os.Stdout, "  AGENTS.md is not NANA-generated, skipping.")
 		}

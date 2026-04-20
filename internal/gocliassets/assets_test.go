@@ -241,6 +241,30 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 	if strings.Contains(string(rootAgents), "`AGENTS.md` under `./.codex`") {
 		t.Fatalf("root AGENTS.md should not point generated AGENTS.md at ./.codex")
 	}
+	for _, source := range []struct {
+		name    string
+		content string
+	}{
+		{name: "templates/AGENTS.md", content: string(diskContent)},
+		{name: "generated template AGENTS.md", content: embedded},
+		{name: "root AGENTS.md", content: string(rootAgents)},
+	} {
+		for _, needle := range []string{
+			"Scope transcript:",
+			"`nana setup --scope user`",
+			"project `AGENTS.md` untouched",
+			"`nana setup --scope project`",
+			"`./AGENTS.md` for project scope",
+			"`<!-- nana:generated:agents-md -->`",
+			"<!-- NANA:RUNTIME:START -->",
+			"<!-- NANA:MODELS:START -->",
+			"run `nana doctor`",
+		} {
+			if !strings.Contains(source.content, needle) {
+				t.Fatalf("%s missing setup transcript/health guidance %q", source.name, needle)
+			}
+		}
+	}
 	for _, needle := range []string{
 		"`~/.codex/skills/autopilot/RUNTIME.md`",
 		"`~/.codex/skills/deep-interview/RUNTIME.md`",

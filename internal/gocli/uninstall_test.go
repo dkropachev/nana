@@ -82,6 +82,38 @@ func TestUninstallConfigCleanup(t *testing.T) {
 	}
 }
 
+func TestRemoveAgentsMdRequiresStandaloneGeneratedMarker(t *testing.T) {
+	cwd := t.TempDir()
+	agentsPath := filepath.Join(cwd, "AGENTS.md")
+	if err := os.WriteFile(agentsPath, []byte("- Health: expect `"+generatedAgentsMarker+"`.\n"), 0o644); err != nil {
+		t.Fatalf("write prose-only AGENTS.md: %v", err)
+	}
+	removed, err := removeAgentsMd(agentsPath, UninstallOptions{})
+	if err != nil {
+		t.Fatalf("removeAgentsMd(prose only): %v", err)
+	}
+	if removed {
+		t.Fatalf("AGENTS.md with marker only in prose should not be removed")
+	}
+	if !fileExists(agentsPath) {
+		t.Fatalf("prose-only AGENTS.md should remain")
+	}
+
+	if err := os.WriteFile(agentsPath, []byte(generatedAgentsMarker+"\n# managed\n"), 0o644); err != nil {
+		t.Fatalf("write managed AGENTS.md: %v", err)
+	}
+	removed, err = removeAgentsMd(agentsPath, UninstallOptions{})
+	if err != nil {
+		t.Fatalf("removeAgentsMd(standalone marker): %v", err)
+	}
+	if !removed {
+		t.Fatalf("AGENTS.md with standalone marker should be removed")
+	}
+	if fileExists(agentsPath) {
+		t.Fatalf("managed AGENTS.md should be removed")
+	}
+}
+
 func TestUninstallPurgeRemovesNanaDir(t *testing.T) {
 	cwd := t.TempDir()
 	repoRoot := cwd
