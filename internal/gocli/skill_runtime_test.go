@@ -51,51 +51,11 @@ func TestSkillRuntimeDocCacheAvoidsRereadForUnchangedSkillInSession(t *testing.T
 	if second[0].Content != "runtime v1\n" || second[0].CacheStatus != "hit" {
 		t.Fatalf("unexpected second doc: %#v", second[0])
 	}
-	if len(cacheEvents) != 1 || cacheEvents[0].CacheStatus != "miss" {
-		t.Fatalf("expected only the cache miss to emit load telemetry, got %#v", cacheEvents)
+	if len(cacheEvents) != 2 || cacheEvents[0].CacheStatus != "miss" || cacheEvents[1].CacheStatus != "hit" {
+		t.Fatalf("expected miss then hit telemetry, got %#v", cacheEvents)
 	}
-}
-
-func TestSkillRuntimeDocCacheDoesNotAppendDuplicateLoadTelemetry(t *testing.T) {
-	cwd := t.TempDir()
-	codexHome := filepath.Join(cwd, "codex-home")
-	runtimePath := filepath.Join(codexHome, "skills", "autopilot", "RUNTIME.md")
-	if err := os.MkdirAll(filepath.Dir(runtimePath), 0o755); err != nil {
-		t.Fatalf("mkdir runtime dir: %v", err)
-	}
-	if err := os.WriteFile(runtimePath, []byte("runtime rules\n"), 0o644); err != nil {
-		t.Fatalf("write runtime: %v", err)
-	}
-	t.Setenv("CODEX_HOME", codexHome)
-	t.Setenv("NANA_CONTEXT_TELEMETRY", "")
-	t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", "")
-	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-skill-runtime-cache-test")
-
-	cache := newSkillRuntimeDocCache()
-	for i := 0; i < 2; i++ {
-		docs, err := loadActivatedSkillRuntimeDocsWithCache(cwd, "$autopilot", cache)
-		if err != nil {
-			t.Fatalf("load %d: %v", i+1, err)
-		}
-		if len(docs) != 1 {
-			t.Fatalf("load %d expected one doc, got %#v", i+1, docs)
-		}
-	}
-
-	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
-	content, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read telemetry log: %v", err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("expected one skill_doc_load event for repeated unchanged loads, got %d:\n%s", len(lines), content)
-	}
-	if !strings.Contains(lines[0], `"event":"skill_doc_load"`) || !strings.Contains(lines[0], `"cache":"miss"`) {
-		t.Fatalf("expected single cache miss load telemetry event, got:\n%s", lines[0])
-	}
-	if strings.Contains(string(content), `"cache":"hit"`) {
-		t.Fatalf("cache hits must not append duplicate skill_doc_load telemetry:\n%s", content)
+	if cacheEvents[0].MatchedKeyword != "$autopilot" || cacheEvents[0].ActivationMode != "explicit" || cacheEvents[0].ActivationSource != routeSourceExplicitInvocation {
+		t.Fatalf("expected explicit activation telemetry, got %#v", cacheEvents[0])
 	}
 }
 
@@ -150,12 +110,16 @@ func TestWriteSessionModelInstructionsIncludesActivatedSkillRuntimeDocs(t *testi
 		t.Fatalf("write AGENTS: %v", err)
 	}
 	path, err := writeSessionModelInstructions(cwd, "session-1", codexHome, loadedSkillRuntimeDoc{
-		Skill:       "autopilot",
-		Label:       routeDocLabelRuntime,
-		DisplayPath: filepath.Join(codexHome, "skills", "autopilot", "RUNTIME.md"),
-		ActualPath:  filepath.Join(codexHome, "skills", "autopilot", "RUNTIME.md"),
-		Content:     "runtime rules\n",
-		CacheStatus: "miss",
+		Skill:            "autopilot",
+		Label:            routeDocLabelRuntime,
+		DisplayPath:      filepath.Join(codexHome, "skills", "autopilot", "RUNTIME.md"),
+		ActualPath:       filepath.Join(codexHome, "skills", "autopilot", "RUNTIME.md"),
+		Content:          "runtime rules\n",
+		CacheStatus:      "miss",
+		MatchedKeyword:   "$autopilot",
+		ActivationSource: routeSourceExplicitInvocation,
+		ActivationMode:   "explicit",
+		SourceRule:       "explicit $name invocations run left-to-right before implicit keyword routing",
 	})
 	if err != nil {
 		t.Fatalf("writeSessionModelInstructions: %v", err)
@@ -168,6 +132,10 @@ func TestWriteSessionModelInstructionsIncludesActivatedSkillRuntimeDocs(t *testi
 	for _, want := range []string{
 		"<!-- NANA:SKILL_RUNTIME_DOCS:START -->",
 		`<skill name="autopilot" doc="runtime"`,
+		`matched_keyword="$autopilot"`,
+		`activation_source="explicit invocation"`,
+		`activation_mode="explicit"`,
+		`implicit_suppressed="false"`,
 		"runtime rules",
 		"<!-- NANA:RUNTIME:START -->",
 	} {
@@ -211,5 +179,89 @@ func TestSkillRuntimeDocLoaderUsesExplicitCodexHome(t *testing.T) {
 	}
 	if docs[0].ActualPath != runtimePath {
 		t.Fatalf("expected runtime actual path %q, got %q", runtimePath, docs[0].ActualPath)
+	}
+}
+
+func TestSkillRuntimeDocLoaderAnnotatesPromptSuppressionDecision(t *testing.T) {
+	cwd := t.TempDir()
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	runtimePath := filepath.Join(codexHome, "skills", "autopilot", "RUNTIME.md")
+	if err := os.MkdirAll(filepath.Dir(runtimePath), 0o755); err != nil {
+		t.Fatalf("mkdir runtime dir: %v", err)
+	}
+	if err := os.WriteFile(runtimePath, []byte("runtime rules\n"), 0o644); err != nil {
+		t.Fatalf("write runtime: %v", err)
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+
+	docs, err := loadActivatedSkillRuntimeDocsWithCache(cwd, "/prompts:executor $autopilot please analyze this", newSkillRuntimeDocCache())
+	if err != nil {
+		t.Fatalf("load activated runtime docs: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("expected one explicit runtime doc, got %#v", docs)
+	}
+	doc := docs[0]
+	if doc.MatchedKeyword != "$autopilot" || doc.ActivationMode != "explicit" || doc.ActivationSource != routeSourceExplicitInvocation {
+		t.Fatalf("expected explicit activation decision, got %#v", doc)
+	}
+	if doc.ImplicitSuppressedBy != "/prompts:executor" {
+		t.Fatalf("expected prompt suppression marker, got %#v", doc)
+	}
+	if !strings.Contains(doc.SourceRule, "explicit $name invocations") {
+		t.Fatalf("expected explicit source rule, got %#v", doc.SourceRule)
+	}
+
+	formatted := formatLoadedSkillRuntimeDocs(docs)
+	for _, want := range []string{
+		`matched_keyword="$autopilot"`,
+		`activation_source="explicit invocation"`,
+		`activation_mode="explicit"`,
+		`implicit_suppressed="true"`,
+		`implicit_suppressed_by="/prompts:executor"`,
+	} {
+		if !strings.Contains(formatted, want) {
+			t.Fatalf("expected formatted runtime docs to contain %q:\n%s", want, formatted)
+		}
+	}
+}
+
+func TestSkillRuntimeDocTelemetryWritesActivationDecisionFields(t *testing.T) {
+	cwd := t.TempDir()
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	runtimePath := filepath.Join(codexHome, "skills", "autopilot", "RUNTIME.md")
+	if err := os.MkdirAll(filepath.Dir(runtimePath), 0o755); err != nil {
+		t.Fatalf("mkdir runtime dir: %v", err)
+	}
+	if err := os.WriteFile(runtimePath, []byte("runtime rules\n"), 0o644); err != nil {
+		t.Fatalf("write runtime: %v", err)
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("NANA_CONTEXT_TELEMETRY", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-route")
+	t.Setenv("NANA_WORK_RUN_ID", "")
+	t.Setenv("NANA_RUN_ID", "")
+	t.Setenv("NANA_SESSION_ID", "")
+
+	if _, err := loadActivatedSkillRuntimeDocsWithCache(cwd, "/prompts:executor $autopilot please analyze this", newSkillRuntimeDocCache()); err != nil {
+		t.Fatalf("load activated runtime docs: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson"))
+	if err != nil {
+		t.Fatalf("read telemetry log: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		`"matched_keyword":"$autopilot"`,
+		`"activation_mode":"explicit"`,
+		`"activation_source":"explicit invocation"`,
+		`"source_rule":"explicit $name invocations run left-to-right before implicit keyword routing"`,
+		`"implicit_suppressed":true`,
+		`"implicit_suppressed_by":"/prompts:executor"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected telemetry log to contain %q:\n%s", want, text)
+		}
 	}
 }

@@ -37,10 +37,7 @@ type routeActivation struct {
 	// RuntimePath is the document path shown by the route preview. It points to
 	// RUNTIME.md for lazy runtime skills and falls back to SKILL.md for regular
 	// installed skills that do not ship a compact runtime document.
-	RuntimePath string
-	// RuntimeActualPath is the filesystem path used by runtime-doc loaders. It
-	// may differ from RuntimePath when project-scoped guidance is displayed with
-	// a dot-relative path.
+	RuntimePath       string
 	RuntimeActualPath string
 	DocLabel          string
 	Start             int
@@ -156,7 +153,8 @@ func ExplainPromptRouteForCWD(cwd string, prompt string) routePreview {
 }
 
 func ExplainPromptRouteForCWDAndCodexHome(cwd string, codexHome string, prompt string) routePreview {
-	return explainPromptRoute(prompt, routeDocResolverForCodexHome(cwd, codexHome), routeExplicitSkillValidatorForCodexHome(cwd, codexHome))
+	base := routeDocBaseForCWDAndCodexHome(cwd, codexHome)
+	return explainPromptRoute(prompt, routeDocResolverForBase(base), routeExplicitSkillValidatorForBase(base))
 }
 
 func explainPromptRoute(prompt string, docPath func(string) routeDoc, validExplicitSkill func(string) bool) routePreview {
@@ -296,11 +294,10 @@ func isKnownRouteSkill(skill string) bool {
 }
 
 func routeExplicitSkillValidator(cwd string) func(string) bool {
-	return routeExplicitSkillValidatorForCodexHome(cwd, "")
+	return routeExplicitSkillValidatorForBase(routeDocBaseForCWD(cwd))
 }
 
-func routeExplicitSkillValidatorForCodexHome(cwd string, codexHome string) func(string) bool {
-	base := routeDocBaseForCodexHome(cwd, codexHome)
+func routeExplicitSkillValidatorForBase(base routeDocBase) func(string) bool {
 	return func(skill string) bool {
 		if isKnownRouteSkill(skill) {
 			return true
@@ -445,11 +442,10 @@ func routeRuntimeDocResolver() func(string) routeDoc {
 }
 
 func routeDocResolver(cwd string) func(string) routeDoc {
-	return routeDocResolverForCodexHome(cwd, "")
+	return routeDocResolverForBase(routeDocBaseForCWD(cwd))
 }
 
-func routeDocResolverForCodexHome(cwd string, codexHome string) func(string) routeDoc {
-	base := routeDocBaseForCodexHome(cwd, codexHome)
+func routeDocResolverForBase(base routeDocBase) func(string) routeDoc {
 	return func(skill string) routeDoc {
 		if !isKnownRouteSkill(skill) {
 			if doc, ok := installedRouteSkillDoc(base, skill); ok {
@@ -466,24 +462,16 @@ func routeDocResolverForCodexHome(cwd string, codexHome string) func(string) rou
 }
 
 func routeDocBaseForCWD(cwd string) routeDocBase {
-	return routeDocBaseForCodexHome(cwd, "")
+	return routeDocBaseForCWDAndCodexHome(cwd, "")
 }
 
-func routeDocBaseForCodexHome(cwd string, codexHome string) routeDocBase {
+func routeDocBaseForCWDAndCodexHome(cwd string, codexHome string) routeDocBase {
 	if codexHome := strings.TrimSpace(codexHome); codexHome != "" {
-		displayCodexHome := codexHome
-		displayDotRelative := false
-		if isProjectScopedCodexHome(cwd, codexHome) {
-			displayCodexHome = ".codex"
-			displayDotRelative = true
-		}
 		return routeDocBase{
-			actualSkillsDir:    filepath.Join(codexHome, "skills"),
-			displaySkillsDir:   filepath.Join(displayCodexHome, "skills"),
-			displayDotRelative: displayDotRelative,
+			actualSkillsDir:  filepath.Join(codexHome, "skills"),
+			displaySkillsDir: filepath.Join(codexHome, "skills"),
 		}
 	}
-
 	if codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); codexHome != "" {
 		return routeDocBase{
 			actualSkillsDir:  filepath.Join(codexHome, "skills"),
@@ -509,26 +497,6 @@ func routeDocBaseForCodexHome(cwd string, codexHome string) routeDocBase {
 	}
 }
 
-func isProjectScopedCodexHome(cwd string, codexHome string) bool {
-	if strings.TrimSpace(cwd) == "" || strings.TrimSpace(codexHome) == "" {
-		return false
-	}
-	expected := filepath.Join(cwd, ".codex")
-	return sameRoutePath(expected, codexHome)
-}
-
-func sameRoutePath(left string, right string) bool {
-	leftClean := filepath.Clean(strings.TrimSpace(left))
-	rightClean := filepath.Clean(strings.TrimSpace(right))
-	leftAbs, leftErr := filepath.Abs(leftClean)
-	rightAbs, rightErr := filepath.Abs(rightClean)
-	if leftErr == nil && rightErr == nil {
-		leftClean = filepath.Clean(leftAbs)
-		rightClean = filepath.Clean(rightAbs)
-	}
-	return leftClean == rightClean
-}
-
 func (base routeDocBase) displayDocPath(skill string, filename string) string {
 	displayPath := filepath.Join(base.displaySkillsDir, skill, filename)
 	if base.displayDotRelative {
@@ -551,6 +519,10 @@ func FormatRoutePreview(preview routePreview) string {
 		for index, activation := range preview.Activations {
 			fmt.Fprintf(&builder, "  %d. $%s\n", index+1, activation.Skill)
 			fmt.Fprintf(&builder, "     source: %s %q\n", activation.Source, activation.Trigger)
+			fmt.Fprintf(&builder, "     decision: matched_keyword=%q activation_mode=%s source_rule=%q implicit_suppressed=%t\n", activation.Trigger, routeActivationMode(activation), routeActivationWhy(activation), preview.ImplicitSuppressedBy != "")
+			if preview.ImplicitSuppressedBy != "" {
+				fmt.Fprintf(&builder, "     implicit_suppressed_by: %s\n", preview.ImplicitSuppressedBy)
+			}
 			fmt.Fprintf(&builder, "     why: %s\n", routeActivationWhy(activation))
 			docLabel := activation.DocLabel
 			if docLabel == "" {
@@ -589,5 +561,16 @@ func routeActivationWhy(activation routeActivation) string {
 		return "case-insensitive keyword match anywhere in the prompt on token boundaries"
 	default:
 		return activation.Source
+	}
+}
+
+func routeActivationMode(activation routeActivation) string {
+	switch activation.Source {
+	case routeSourceExplicitInvocation:
+		return "explicit"
+	case routeSourceImplicitKeyword:
+		return "implicit"
+	default:
+		return strings.TrimSpace(activation.Source)
 	}
 }

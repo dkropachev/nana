@@ -277,8 +277,36 @@ func TestRouteExplainImplicitKeyword(t *testing.T) {
 		"Route preview:",
 		"1. $analyze",
 		`source: implicit keyword "ANALYZE"`,
+		`decision: matched_keyword="ANALYZE" activation_mode=implicit`,
+		`implicit_suppressed=false`,
 		"case-insensitive keyword match anywhere",
 		expectedRuntime,
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected %q in route output, got %q", expected, output)
+		}
+	}
+}
+
+func TestRouteExplainExplicitActivationReportsPromptSuppression(t *testing.T) {
+	preview := ExplainPromptRoute("/prompts:executor $tdd please analyze this")
+	if len(preview.Activations) != 1 {
+		t.Fatalf("expected one explicit activation, got %#v", preview.Activations)
+	}
+	activation := preview.Activations[0]
+	if activation.Skill != "tdd" || activation.Source != "explicit invocation" || activation.Trigger != "$tdd" {
+		t.Fatalf("expected explicit tdd activation, got %#v", activation)
+	}
+	if preview.ImplicitSuppressedBy != "/prompts:executor" {
+		t.Fatalf("expected prompt override suppression, got %#v", preview)
+	}
+
+	output := FormatRoutePreview(preview)
+	for _, expected := range []string{
+		`decision: matched_keyword="$tdd" activation_mode=explicit`,
+		`implicit_suppressed=true`,
+		"implicit_suppressed_by: /prompts:executor",
+		"Implicit keywords: suppressed by /prompts:executor",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected %q in route output, got %q", expected, output)
@@ -653,6 +681,9 @@ func TestRouteRulesStayInSyncWithAgentsTemplate(t *testing.T) {
 		t.Fatalf("read template AGENTS.md: %v", err)
 	}
 	template := string(content)
+	if !strings.Contains(template, "Activation reports must show the matched trigger, source, and any `/prompts:<name>` suppression.") {
+		t.Fatalf("template AGENTS.md should document lazy skill trigger-decision reports")
+	}
 	if !strings.Contains(template, "Sync trigger tests with this list") {
 		t.Fatalf("template AGENTS.md missing trigger synchronization guidance")
 	}

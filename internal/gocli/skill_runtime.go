@@ -11,14 +11,19 @@ import (
 )
 
 type loadedSkillRuntimeDoc struct {
-	Skill       string
-	Label       string
-	DisplayPath string
-	ActualPath  string
-	Content     string
-	CacheStatus string
-	Size        int64
-	ModTime     time.Time
+	Skill                string
+	Label                string
+	DisplayPath          string
+	ActualPath           string
+	Content              string
+	CacheStatus          string
+	ActivationSource     string
+	ActivationMode       string
+	MatchedKeyword       string
+	SourceRule           string
+	ImplicitSuppressedBy string
+	Size                 int64
+	ModTime              time.Time
 }
 
 type skillRuntimeDocCache struct {
@@ -37,12 +42,26 @@ type skillRuntimeDocCacheEntry struct {
 }
 
 type skillRuntimeDocTelemetry struct {
-	Skill       string
-	Path        string
-	Label       string
-	CacheStatus string
-	Size        int64
-	ModTime     time.Time
+	Skill                string
+	Path                 string
+	Label                string
+	CacheStatus          string
+	ActivationSource     string
+	ActivationMode       string
+	MatchedKeyword       string
+	SourceRule           string
+	ImplicitSuppressedBy string
+	ImplicitSuppressed   bool
+	Size                 int64
+	ModTime              time.Time
+}
+
+type skillRuntimeActivationDecision struct {
+	ActivationSource     string
+	ActivationMode       string
+	MatchedKeyword       string
+	SourceRule           string
+	ImplicitSuppressedBy string
 }
 
 var defaultSkillRuntimeDocCache = newSkillRuntimeDocCache()
@@ -80,11 +99,13 @@ func loadActivatedSkillRuntimeDocsWithCache(cwd string, prompt string, cache *sk
 		if actualPath == "" {
 			continue
 		}
-		doc, ok, err := cache.load(cwd, activation.Skill, activation.DocLabel, activation.RuntimePath, actualPath)
+		decision := skillRuntimeActivationDecisionForRoute(activation, preview.ImplicitSuppressedBy)
+		doc, ok, err := cache.load(cwd, activation.Skill, activation.DocLabel, activation.RuntimePath, actualPath, decision)
 		if err != nil {
 			return nil, err
 		}
 		if ok {
+			doc = annotateLoadedSkillRuntimeDoc(doc, decision)
 			docs = append(docs, doc)
 		}
 	}
@@ -98,7 +119,7 @@ func firstString(values ...string) string {
 	return values[0]
 }
 
-func (cache *skillRuntimeDocCache) load(cwd string, skill string, label string, displayPath string, actualPath string) (loadedSkillRuntimeDoc, bool, error) {
+func (cache *skillRuntimeDocCache) load(cwd string, skill string, label string, displayPath string, actualPath string, decision skillRuntimeActivationDecision) (loadedSkillRuntimeDoc, bool, error) {
 	if cache == nil {
 		cache = defaultSkillRuntimeDocCache
 	}
@@ -128,6 +149,20 @@ func (cache *skillRuntimeDocCache) load(cwd string, skill string, label string, 
 			Size:        entry.Size,
 			ModTime:     entry.ModTime,
 		}
+		cache.emitTelemetry(cwd, skillRuntimeDocTelemetry{
+			Skill:                skill,
+			Path:                 cleanPath,
+			Label:                label,
+			CacheStatus:          "hit",
+			ActivationSource:     decision.ActivationSource,
+			ActivationMode:       decision.ActivationMode,
+			MatchedKeyword:       decision.MatchedKeyword,
+			SourceRule:           decision.SourceRule,
+			ImplicitSuppressedBy: decision.ImplicitSuppressedBy,
+			ImplicitSuppressed:   decision.ImplicitSuppressedBy != "",
+			Size:                 entry.Size,
+			ModTime:              entry.ModTime,
+		})
 		return doc, true, nil
 	}
 	cache.mu.Unlock()
@@ -166,14 +201,39 @@ func (cache *skillRuntimeDocCache) load(cwd string, skill string, label string, 
 		ModTime:     entry.ModTime,
 	}
 	cache.emitTelemetry(cwd, skillRuntimeDocTelemetry{
-		Skill:       skill,
-		Path:        cleanPath,
-		Label:       label,
-		CacheStatus: "miss",
-		Size:        entry.Size,
-		ModTime:     entry.ModTime,
+		Skill:                skill,
+		Path:                 cleanPath,
+		Label:                label,
+		CacheStatus:          "miss",
+		ActivationSource:     decision.ActivationSource,
+		ActivationMode:       decision.ActivationMode,
+		MatchedKeyword:       decision.MatchedKeyword,
+		SourceRule:           decision.SourceRule,
+		ImplicitSuppressedBy: decision.ImplicitSuppressedBy,
+		ImplicitSuppressed:   decision.ImplicitSuppressedBy != "",
+		Size:                 entry.Size,
+		ModTime:              entry.ModTime,
 	})
 	return doc, true, nil
+}
+
+func skillRuntimeActivationDecisionForRoute(activation routeActivation, implicitSuppressedBy string) skillRuntimeActivationDecision {
+	return skillRuntimeActivationDecision{
+		ActivationSource:     activation.Source,
+		ActivationMode:       routeActivationMode(activation),
+		MatchedKeyword:       activation.Trigger,
+		SourceRule:           routeActivationWhy(activation),
+		ImplicitSuppressedBy: strings.TrimSpace(implicitSuppressedBy),
+	}
+}
+
+func annotateLoadedSkillRuntimeDoc(doc loadedSkillRuntimeDoc, decision skillRuntimeActivationDecision) loadedSkillRuntimeDoc {
+	doc.ActivationSource = decision.ActivationSource
+	doc.ActivationMode = decision.ActivationMode
+	doc.MatchedKeyword = decision.MatchedKeyword
+	doc.SourceRule = decision.SourceRule
+	doc.ImplicitSuppressedBy = decision.ImplicitSuppressedBy
+	return doc
 }
 
 func cleanSkillRuntimePath(path string) string {
@@ -198,15 +258,21 @@ func (cache *skillRuntimeDocCache) emitTelemetry(cwd string, event skillRuntimeD
 
 func appendSkillRuntimeDocTelemetry(cwd string, event skillRuntimeDocTelemetry) {
 	appendContextTelemetry(cwd, map[string]any{
-		"event":      "skill_doc_load",
-		"skill":      event.Skill,
-		"path":       event.Path,
-		"doc_label":  event.Label,
-		"cache":      event.CacheStatus,
-		"size_bytes": event.Size,
-		"mtime":      event.ModTime.UTC().Format(time.RFC3339Nano),
-		"loader":     "nana_skill_runtime_cache",
-		"schema":     "skill_doc_load.v1",
+		"event":                  "skill_doc_load",
+		"skill":                  event.Skill,
+		"path":                   event.Path,
+		"doc_label":              event.Label,
+		"cache":                  event.CacheStatus,
+		"matched_keyword":        event.MatchedKeyword,
+		"activation_mode":        event.ActivationMode,
+		"activation_source":      event.ActivationSource,
+		"source_rule":            event.SourceRule,
+		"implicit_suppressed":    event.ImplicitSuppressed,
+		"implicit_suppressed_by": event.ImplicitSuppressedBy,
+		"size_bytes":             event.Size,
+		"mtime":                  event.ModTime.UTC().Format(time.RFC3339Nano),
+		"loader":                 "nana_skill_runtime_cache",
+		"schema":                 "skill_doc_load.v1",
 	})
 }
 
@@ -263,8 +329,13 @@ func formatLoadedSkillRuntimeDocs(docs []loadedSkillRuntimeDoc) string {
 		}
 		label := defaultString(strings.TrimSpace(doc.Label), routeDocLabelRuntime)
 		path := defaultString(strings.TrimSpace(doc.DisplayPath), doc.ActualPath)
+		activationSource := defaultString(strings.TrimSpace(doc.ActivationSource), "unknown")
+		activationMode := defaultString(strings.TrimSpace(doc.ActivationMode), "unknown")
+		matchedKeyword := strings.TrimSpace(doc.MatchedKeyword)
+		sourceRule := strings.TrimSpace(doc.SourceRule)
+		implicitSuppressedBy := strings.TrimSpace(doc.ImplicitSuppressedBy)
 		parts = append(parts,
-			fmt.Sprintf("<skill name=%q doc=%q path=%q cache=%q>", doc.Skill, label, path, doc.CacheStatus),
+			fmt.Sprintf("<skill name=%q doc=%q path=%q cache=%q matched_keyword=%q activation_source=%q activation_mode=%q source_rule=%q implicit_suppressed=%q implicit_suppressed_by=%q>", doc.Skill, label, path, doc.CacheStatus, matchedKeyword, activationSource, activationMode, sourceRule, fmt.Sprint(implicitSuppressedBy != ""), implicitSuppressedBy),
 			content,
 			"</skill>",
 		)

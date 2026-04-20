@@ -8,7 +8,7 @@ USE CODEX NATIVE SUBAGENTS FOR INDEPENDENT PARALLEL SUBTASKS WHEN THAT IMPROVES 
 
 # nana - Compact Runtime Policy
 
-NANA coordinates Codex prompts, skills, and optional team/runtime state. Role prompts under `prompts/*.md` narrow work but never override this file.
+NANA coordinates Codex prompts, skills, and runtime state. Role prompts under `prompts/*.md` narrow work but never override this file.
 
 ## Always-on Policy
 <!-- NANA:GUIDANCE:OPERATING:START -->
@@ -16,20 +16,20 @@ NANA coordinates Codex prompts, skills, and optional team/runtime state. Role pr
 - Prefer repo/tool evidence over assumption; keep using retrieval, diagnostics, tests, or inspection when correctness depends on them.
 - Keep responses compact and concrete; treat newer user task updates as local overrides while preserving non-conflicting prior instructions.
 <!-- NANA:GUIDANCE:OPERATING:END -->
-- Keep diffs small/reversible, reuse existing patterns, add no dependency unless explicitly requested, and prefer deletion over addition.
-- For cleanup/refactor/deslop work: write a cleanup plan first and lock behavior with tests when not already protected.
+- Keep diffs small/reversible, reuse patterns, add no dependency unless requested, prefer deletion.
+- For cleanup/refactor/deslop work: plan first and lock behavior with tests when needed.
 - Verify; final-report checklist: changed files, verification evidence, simplifications made, remaining risks.
 - Commits should use a why-first subject; optional trailers: `Constraint:`, `Rejected:`, `Directive:`, `Confidence:`, `Scope-risk:`, `Tested:`, `Not-tested:`.
 
 ## Mode Selection and Delegation
 - Default to solo execution. Use `$deep-interview` for unclear intent or explicit "don't assume"; `$ralplan` for unresolved plan/tradeoff/test-shape review; otherwise execute.
-- Delegate only for quality/speed/safety. Leader scopes and verifies; workers stay scoped and do not re-plan the whole task. Max 6 children.
+- Delegate for quality/speed/safety. Leader scopes/verifies; workers stay scoped and do not re-plan. Max 6 children.
 - Outside active `team`/`swarm`, use `executor` for implementation and reserve `worker` for team runtime. Core roles: `explore`, `planner`, `architect`, `debugger`, `executor`, `verifier`.
 - Routing hints: low complexity `explore`/`style-reviewer`/`writer`; standard `executor`/`debugger`/`test-engineer`; high complexity `architect`/`executor`/`critic`.
 - When routing affects execution, include `routing_decision` in plans, traces, and final reports: `mode`, `role_tier` (tier/roles), `trigger`, `confidence`.
 
 ## Lazy Runtime Skills
-Load detailed skill runtime docs only when invoked. When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md. Explicit `$skill` invocations run left-to-right before implicit keyword matches; keyword matches are case-insensitive; `/prompts:<name>` disables implicit keyword activation unless explicit `$skill` tokens are present. The rest is the task.
+Load skill runtime docs only when invoked. When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md. Explicit `$skill` invocations run left-to-right before implicit keyword matches; keyword matches are case-insensitive; `/prompts:<name>` disables implicit keyword activation unless explicit `$skill` tokens are present. Activation reports must show the matched trigger, source, and any `/prompts:<name>` suppression.
 Sync trigger tests with this list.
 - `$autopilot` (`./.codex/skills/autopilot/RUNTIME.md`): `autopilot`, `build me`, `I want a`
 - `$ultrawork` (`./.codex/skills/ultrawork/RUNTIME.md`): `ultrawork`, `ulw`, `parallel`
