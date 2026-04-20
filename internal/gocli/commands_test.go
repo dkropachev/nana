@@ -65,17 +65,28 @@ func TestStatusAndCancel(t *testing.T) {
 	cwd := t.TempDir()
 	stateDir := filepath.Join(cwd, ".nana", "state", "sessions", "sess-1")
 	logDir := filepath.Join(cwd, ".nana", "logs")
+	plansDir := filepath.Join(cwd, ".nana", "plans")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		t.Fatalf("mkdir logs: %v", err)
 	}
+	if err := os.MkdirAll(plansDir, 0o755); err != nil {
+		t.Fatalf("mkdir plans: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(cwd, ".nana", "state", "session.json"), []byte(`{"session_id":"sess-1"}`), 0o644); err != nil {
 		t.Fatalf("session.json: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(cwd, "nana-verify.json"), []byte(`{"commands":[]}`), 0o644); err != nil {
+		t.Fatalf("nana-verify.json: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(stateDir, "team-state.json"), []byte(`{"active":true,"current_phase":"team-exec"}`), 0o644); err != nil {
 		t.Fatalf("team-state.json: %v", err)
+	}
+	planPath := filepath.Join(plansDir, "prd-recovery.md")
+	if err := os.WriteFile(planPath, []byte("# PRD: Recovery\n"), 0o644); err != nil {
+		t.Fatalf("write plan: %v", err)
 	}
 	hookLog := filepath.Join(logDir, "hooks-2026-04-08.jsonl")
 	if err := os.WriteFile(hookLog, []byte(`{"event":"turn-complete"}`), 0o644); err != nil {
@@ -109,6 +120,24 @@ func TestStatusAndCancel(t *testing.T) {
 	}
 	if !strings.Contains(cancelOutput, "Cancelled: team") {
 		t.Fatalf("unexpected cancel output: %q", cancelOutput)
+	}
+	for _, needle := range []string{
+		"Recovery summary:",
+		"Session: sess-1",
+		"Affected state:",
+		"team (was phase: team-exec): " + filepath.Join(".nana", "state", "sessions", "sess-1", "team-state.json"),
+		"Open artifacts:",
+		filepath.Join(".nana", "logs", "hooks-2026-04-08.jsonl"),
+		"Pending plans:",
+		filepath.Join(".nana", "plans", "prd-recovery.md"),
+		"Safe next commands:",
+		"nana status",
+		"nana doctor",
+		"nana verify --json",
+	} {
+		if !strings.Contains(cancelOutput, needle) {
+			t.Fatalf("expected cancel output to contain %q, got %q", needle, cancelOutput)
+		}
 	}
 	updated, err := os.ReadFile(filepath.Join(stateDir, "team-state.json"))
 	if err != nil {

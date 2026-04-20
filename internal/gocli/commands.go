@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -111,6 +112,7 @@ func Cancel(cwd string) error {
 
 	changed := map[string]bool{}
 	reported := []string{}
+	cancelledSummaries := []cancelRecoveryModeSummary{}
 	cancelMode := func(mode string) {
 		current, ok := states[mode]
 		if !ok {
@@ -120,6 +122,7 @@ func Cancel(cwd string) error {
 		if !active {
 			return
 		}
+		phase, _ := current.state["current_phase"].(string)
 		now := ISOTimeNow()
 		current.state["active"] = false
 		current.state["current_phase"] = "cancelled"
@@ -127,6 +130,11 @@ func Cancel(cwd string) error {
 		current.state["last_turn_at"] = now
 		changed[mode] = true
 		reported = append(reported, mode)
+		cancelledSummaries = append(cancelledSummaries, cancelRecoveryModeSummary{
+			Mode:      mode,
+			Phase:     strings.TrimSpace(phase),
+			StateFile: relativeRuntimePath(cwd, current.ref.Path),
+		})
 	}
 
 	verifyLoop, hasVerifyLoop := states["verify-loop"]
@@ -143,7 +151,19 @@ func Cancel(cwd string) error {
 		}
 	}
 	if !hadActiveVerifyLoop {
+		modes := make([]string, 0, len(states))
 		for mode := range states {
+			modes = append(modes, mode)
+		}
+		sort.SliceStable(modes, func(i, j int) bool {
+			left := runtimeModePriority(modes[i])
+			right := runtimeModePriority(modes[j])
+			if left != right {
+				return left < right
+			}
+			return modes[i] < modes[j]
+		})
+		for _, mode := range modes {
 			cancelMode(mode)
 		}
 	}
@@ -167,6 +187,7 @@ func Cancel(cwd string) error {
 	for _, mode := range reported {
 		fmt.Fprintf(os.Stdout, "Cancelled: %s\n", mode)
 	}
+	fmt.Fprint(os.Stdout, formatCancelRecoverySummary(cwd, cancelledSummaries))
 	return nil
 }
 

@@ -77,6 +77,7 @@ These are internal implementation details. Users should think of `$cancel` as â€
 3. Clear linked helper state when applicable.
 4. Perform best-effort runtime cleanup for leftover internal artifacts.
 5. Report what was cancelled.
+6. Print a compact recovery summary: session id, affected state paths with previous phases, latest open artifact when known, recent pending plan artifacts, and safe next commands.
 
 ## Good Output
 
@@ -86,6 +87,19 @@ Example:
 Cancelled: autopilot
 Cancelled: ultrawork
 Best-effort cleanup: internal runtime artifacts
+Recovery summary:
+  Session: sess-123
+  Affected state:
+    - autopilot (was phase: qa): .nana/state/sessions/sess-123/autopilot-state.json
+    - ultrawork (was phase: running): .nana/state/sessions/sess-123/ultrawork-state.json
+  Open artifacts:
+    - .nana/logs/hooks-2026-04-08.jsonl
+  Pending plans:
+    - .nana/plans/prd-current.md
+  Safe next commands:
+    - nana status
+    - nana doctor
+    - nana verify --json
 ```
 
 ## Notes
