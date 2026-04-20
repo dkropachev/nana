@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const RouteUsage = `nana route - Preview NANA prompt-to-skill routing
@@ -18,6 +20,7 @@ Usage:
 Behavior:
   - reports explicit $skill invocations before implicit keyword matches
   - matches implicit keywords case-insensitively and anywhere on token boundaries
+  - prints matched and ignored triggers with precedence/suppression reasons
   - prints the matched trigger, precedence source, and runtime/skill doc path
   - honors /prompts:<name> suppression of implicit keyword routing
 `
@@ -35,17 +38,22 @@ type routeActivation struct {
 	// RUNTIME.md for lazy runtime skills and falls back to SKILL.md for regular
 	// installed skills that do not ship a compact runtime document.
 	RuntimePath string
-	// RuntimeActualPath is the filesystem path used by runtime-doc loaders. It
-	// may differ from RuntimePath when project-scoped guidance is displayed with
-	// a dot-relative path.
-	RuntimeActualPath string
-	DocLabel          string
-	Start             int
+	DocLabel    string
+	Start       int
+}
+
+type routeIgnoredTrigger struct {
+	Skill   string
+	Source  string
+	Trigger string
+	Reason  string
+	Start   int
 }
 
 type routePreview struct {
 	Prompt               string
 	Activations          []routeActivation
+	IgnoredTriggers      []routeIgnoredTrigger
 	ImplicitSuppressedBy string
 	NoActivationReason   string
 }
@@ -56,9 +64,8 @@ type keywordRouteCandidate struct {
 }
 
 type routeDoc struct {
-	Path       string
-	ActualPath string
-	Label      string
+	Path  string
+	Label string
 }
 
 type routeDocBase struct {
@@ -70,6 +77,9 @@ type routeDocBase struct {
 const (
 	routeDocLabelRuntime = "runtime"
 	routeDocLabelSkill   = "skill"
+
+	routeSourceExplicitInvocation = "explicit invocation"
+	routeSourceImplicitKeyword    = "implicit keyword"
 )
 
 // Keep routeRules synchronized with the Lazy Runtime Skills mapping in
@@ -92,7 +102,7 @@ var routeRules = []routeRule{
 
 var (
 	explicitRouteSkillPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_])\$([A-Za-z][A-Za-z0-9_-]*)`)
-	promptInvocationPattern   = regexp.MustCompile(`(^|\s)(/prompts:[^\s]+)`)
+	promptInvocationPattern   = regexp.MustCompile(`(^|\s)(/prompts:[A-Za-z0-9_.-]+)`)
 )
 
 func Route(cwd string, args []string) error {
@@ -137,11 +147,7 @@ func ExplainPromptRoute(prompt string) routePreview {
 }
 
 func ExplainPromptRouteForCWD(cwd string, prompt string) routePreview {
-	return ExplainPromptRouteForCWDAndCodexHome(cwd, "", prompt)
-}
-
-func ExplainPromptRouteForCWDAndCodexHome(cwd string, codexHome string, prompt string) routePreview {
-	return explainPromptRoute(prompt, routeDocResolverForCodexHome(cwd, codexHome), routeExplicitSkillValidatorForCodexHome(cwd, codexHome))
+	return explainPromptRoute(prompt, routeDocResolver(cwd), routeExplicitSkillValidator(cwd))
 }
 
 func explainPromptRoute(prompt string, docPath func(string) routeDoc, validExplicitSkill func(string) bool) routePreview {
@@ -159,26 +165,50 @@ func explainPromptRoute(prompt string, docPath func(string) routeDoc, validExpli
 		start := fullStart + dollarOffset
 		skill := strings.ToLower(prompt[nameStart:nameEnd])
 		if !validExplicitSkill(skill) {
+			preview.IgnoredTriggers = append(preview.IgnoredTriggers, routeIgnoredTrigger{
+				Source:  routeSourceExplicitInvocation,
+				Trigger: prompt[start:fullEnd],
+				Reason:  fmt.Sprintf("unknown skill %q; not listed in lazy runtime skills and no installed skill doc was found", skill),
+				Start:   start,
+			})
 			continue
 		}
 		if seenSkills[skill] {
+			preview.IgnoredTriggers = append(preview.IgnoredTriggers, routeIgnoredTrigger{
+				Skill:   skill,
+				Source:  routeSourceExplicitInvocation,
+				Trigger: prompt[start:fullEnd],
+				Reason:  fmt.Sprintf("duplicate explicit invocation; first $%s activation already wins", skill),
+				Start:   start,
+			})
 			continue
 		}
 		seenSkills[skill] = true
 		doc := docPath(skill)
 		preview.Activations = append(preview.Activations, routeActivation{
-			Skill:             skill,
-			Source:            "explicit invocation",
-			Trigger:           prompt[start:fullEnd],
-			RuntimePath:       doc.Path,
-			RuntimeActualPath: doc.ActualPath,
-			DocLabel:          doc.Label,
-			Start:             start,
+			Skill:       skill,
+			Source:      routeSourceExplicitInvocation,
+			Trigger:     prompt[start:fullEnd],
+			RuntimePath: doc.Path,
+			DocLabel:    doc.Label,
+			Start:       start,
 		})
 	}
 
 	if promptInvocation := firstPromptInvocation(prompt); promptInvocation != "" {
 		preview.ImplicitSuppressedBy = promptInvocation
+		for _, rule := range routeRules {
+			for _, match := range keywordMatches(prompt, rule.Keywords) {
+				preview.IgnoredTriggers = append(preview.IgnoredTriggers, routeIgnoredTrigger{
+					Skill:   rule.Skill,
+					Source:  routeSourceImplicitKeyword,
+					Trigger: match.trigger,
+					Reason:  fmt.Sprintf("suppressed by %s because /prompts:<name> disables implicit keyword routing", promptInvocation),
+					Start:   match.start,
+				})
+			}
+		}
+		sortIgnoredTriggers(preview.IgnoredTriggers)
 		if len(preview.Activations) == 0 {
 			preview.NoActivationReason = fmt.Sprintf("%s suppresses implicit keyword routing; add an explicit $skill token to activate a skill.", promptInvocation)
 		}
@@ -187,26 +217,44 @@ func explainPromptRoute(prompt string, docPath func(string) routeDoc, validExpli
 
 	keywordCandidates := []keywordRouteCandidate{}
 	for ruleOrder, rule := range routeRules {
+		matches := keywordMatches(prompt, rule.Keywords)
+		if len(matches) == 0 {
+			continue
+		}
 		if seenSkills[rule.Skill] {
+			for _, match := range matches {
+				preview.IgnoredTriggers = append(preview.IgnoredTriggers, routeIgnoredTrigger{
+					Skill:   rule.Skill,
+					Source:  routeSourceImplicitKeyword,
+					Trigger: match.trigger,
+					Reason:  fmt.Sprintf("ignored because explicit $%s activation takes precedence for the same skill", rule.Skill),
+					Start:   match.start,
+				})
+			}
 			continue
 		}
-		match, ok := bestKeywordMatch(prompt, rule.Keywords)
-		if !ok {
-			continue
-		}
+		match := matches[0]
 		doc := docPath(rule.Skill)
 		keywordCandidates = append(keywordCandidates, keywordRouteCandidate{
 			Activation: routeActivation{
-				Skill:             rule.Skill,
-				Source:            "implicit keyword",
-				Trigger:           match.trigger,
-				RuntimePath:       doc.Path,
-				RuntimeActualPath: doc.ActualPath,
-				DocLabel:          doc.Label,
-				Start:             match.start,
+				Skill:       rule.Skill,
+				Source:      routeSourceImplicitKeyword,
+				Trigger:     match.trigger,
+				RuntimePath: doc.Path,
+				DocLabel:    doc.Label,
+				Start:       match.start,
 			},
 			RuleOrder: ruleOrder,
 		})
+		for _, ignored := range matches[1:] {
+			preview.IgnoredTriggers = append(preview.IgnoredTriggers, routeIgnoredTrigger{
+				Skill:   rule.Skill,
+				Source:  routeSourceImplicitKeyword,
+				Trigger: ignored.trigger,
+				Reason:  fmt.Sprintf("ignored because implicit keyword %q already activates $%s; one activation per skill", match.trigger, rule.Skill),
+				Start:   ignored.start,
+			})
+		}
 	}
 	sort.SliceStable(keywordCandidates, func(i, j int) bool {
 		left := keywordCandidates[i]
@@ -219,6 +267,7 @@ func explainPromptRoute(prompt string, docPath func(string) routeDoc, validExpli
 	for _, candidate := range keywordCandidates {
 		preview.Activations = append(preview.Activations, candidate.Activation)
 	}
+	sortIgnoredTriggers(preview.IgnoredTriggers)
 
 	if len(preview.Activations) == 0 {
 		preview.NoActivationReason = "No explicit $skill invocation or mapped keyword matched."
@@ -236,11 +285,7 @@ func isKnownRouteSkill(skill string) bool {
 }
 
 func routeExplicitSkillValidator(cwd string) func(string) bool {
-	return routeExplicitSkillValidatorForCodexHome(cwd, "")
-}
-
-func routeExplicitSkillValidatorForCodexHome(cwd string, codexHome string) func(string) bool {
-	base := routeDocBaseForCodexHome(cwd, codexHome)
+	base := routeDocBaseForCWD(cwd)
 	return func(skill string) bool {
 		if isKnownRouteSkill(skill) {
 			return true
@@ -269,9 +314,8 @@ func installedRouteSkillDoc(base routeDocBase, skill string) (routeDoc, bool) {
 			continue
 		}
 		return routeDoc{
-			Path:       base.displayDocPath(skill, candidate.filename),
-			ActualPath: actualPath,
-			Label:      candidate.label,
+			Path:  base.displayDocPath(skill, candidate.filename),
+			Label: candidate.label,
 		}, true
 	}
 	return routeDoc{}, false
@@ -284,31 +328,69 @@ type routeKeywordMatch struct {
 }
 
 func bestKeywordMatch(prompt string, keywords []string) (routeKeywordMatch, bool) {
-	best := routeKeywordMatch{start: len(prompt) + 1}
+	matches := keywordMatches(prompt, keywords)
+	if len(matches) == 0 {
+		return routeKeywordMatch{}, false
+	}
+	return matches[0], true
+}
+
+func keywordMatches(prompt string, keywords []string) []routeKeywordMatch {
+	matches := []routeKeywordMatch{}
 	for _, keyword := range keywords {
-		pattern, err := keywordBoundaryPattern(keyword)
+		pattern, err := keywordPattern(keyword)
 		if err != nil {
 			continue
 		}
-		indexes := pattern.FindStringSubmatchIndex(prompt)
-		if len(indexes) < 6 || indexes[4] < 0 || indexes[5] < 0 {
-			continue
-		}
-		start, end := indexes[4], indexes[5]
-		if start < best.start || (start == best.start && end-start > best.end-best.start) {
-			best = routeKeywordMatch{start: start, end: end, trigger: prompt[start:end]}
+		for _, indexes := range pattern.FindAllStringIndex(prompt, -1) {
+			if len(indexes) < 2 {
+				continue
+			}
+			start, end := indexes[0], indexes[1]
+			if !hasKeywordBoundaries(prompt, start, end) {
+				continue
+			}
+			if start > 0 && prompt[start-1] == '$' {
+				continue
+			}
+			matches = append(matches, routeKeywordMatch{start: start, end: end, trigger: prompt[start:end]})
 		}
 	}
-	if best.start > len(prompt) {
-		return routeKeywordMatch{}, false
-	}
-	return best, true
+	sort.SliceStable(matches, func(i, j int) bool {
+		left := matches[i]
+		right := matches[j]
+		if left.start != right.start {
+			return left.start < right.start
+		}
+		return left.end-left.start > right.end-right.start
+	})
+	return matches
 }
 
-func keywordBoundaryPattern(keyword string) (*regexp.Regexp, error) {
-	// Capture only the keyword while allowing punctuation/whitespace delimiters
-	// around it. Unicode letters/numbers/underscore are treated as token chars.
-	return regexp.Compile(`(?i)(^|[^\pL\pN_])(` + regexp.QuoteMeta(keyword) + `)([^\pL\pN_]|$)`)
+func keywordPattern(keyword string) (*regexp.Regexp, error) {
+	return regexp.Compile(`(?i)` + regexp.QuoteMeta(keyword))
+}
+
+func hasKeywordBoundaries(prompt string, start int, end int) bool {
+	// Check delimiters without consuming them so adjacent matches that share a
+	// delimiter, such as "tdd tdd", are still reported independently.
+	if start > 0 {
+		r, _ := utf8.DecodeLastRuneInString(prompt[:start])
+		if isRouteTokenRune(r) {
+			return false
+		}
+	}
+	if end < len(prompt) {
+		r, _ := utf8.DecodeRuneInString(prompt[end:])
+		if isRouteTokenRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isRouteTokenRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsNumber(r)
 }
 
 func firstPromptInvocation(prompt string) string {
@@ -319,61 +401,47 @@ func firstPromptInvocation(prompt string) string {
 	return prompt[match[4]:match[5]]
 }
 
+func sortIgnoredTriggers(ignored []routeIgnoredTrigger) {
+	sort.SliceStable(ignored, func(i, j int) bool {
+		if ignored[i].Start != ignored[j].Start {
+			return ignored[i].Start < ignored[j].Start
+		}
+		if ignored[i].Skill != ignored[j].Skill {
+			return ignored[i].Skill < ignored[j].Skill
+		}
+		return ignored[i].Trigger < ignored[j].Trigger
+	})
+}
+
 func routeRuntimePath(skill string) string {
 	return filepath.Join(CodexHome(), "skills", skill, "RUNTIME.md")
 }
 
 func routeRuntimeDocResolver() func(string) routeDoc {
 	return func(skill string) routeDoc {
-		path := routeRuntimePath(skill)
 		return routeDoc{
-			Path:       path,
-			ActualPath: path,
-			Label:      routeDocLabelRuntime,
+			Path:  routeRuntimePath(skill),
+			Label: routeDocLabelRuntime,
 		}
 	}
 }
 
 func routeDocResolver(cwd string) func(string) routeDoc {
-	return routeDocResolverForCodexHome(cwd, "")
-}
-
-func routeDocResolverForCodexHome(cwd string, codexHome string) func(string) routeDoc {
-	base := routeDocBaseForCodexHome(cwd, codexHome)
+	base := routeDocBaseForCWD(cwd)
 	return func(skill string) routeDoc {
 		if !isKnownRouteSkill(skill) {
 			if doc, ok := installedRouteSkillDoc(base, skill); ok {
 				return doc
 			}
 		}
-		actualPath := filepath.Join(base.actualSkillsDir, skill, "RUNTIME.md")
 		return routeDoc{
-			Path:       base.displayDocPath(skill, "RUNTIME.md"),
-			ActualPath: actualPath,
-			Label:      routeDocLabelRuntime,
+			Path:  base.displayDocPath(skill, "RUNTIME.md"),
+			Label: routeDocLabelRuntime,
 		}
 	}
 }
 
 func routeDocBaseForCWD(cwd string) routeDocBase {
-	return routeDocBaseForCodexHome(cwd, "")
-}
-
-func routeDocBaseForCodexHome(cwd string, codexHome string) routeDocBase {
-	if codexHome := strings.TrimSpace(codexHome); codexHome != "" {
-		displayCodexHome := codexHome
-		displayDotRelative := false
-		if isProjectScopedCodexHome(cwd, codexHome) {
-			displayCodexHome = ".codex"
-			displayDotRelative = true
-		}
-		return routeDocBase{
-			actualSkillsDir:    filepath.Join(codexHome, "skills"),
-			displaySkillsDir:   filepath.Join(displayCodexHome, "skills"),
-			displayDotRelative: displayDotRelative,
-		}
-	}
-
 	if codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); codexHome != "" {
 		return routeDocBase{
 			actualSkillsDir:  filepath.Join(codexHome, "skills"),
@@ -397,26 +465,6 @@ func routeDocBaseForCodexHome(cwd string, codexHome string) routeDocBase {
 		displaySkillsDir:   filepath.Join(displayCodexHome, "skills"),
 		displayDotRelative: displayDotRelative,
 	}
-}
-
-func isProjectScopedCodexHome(cwd string, codexHome string) bool {
-	if strings.TrimSpace(cwd) == "" || strings.TrimSpace(codexHome) == "" {
-		return false
-	}
-	expected := filepath.Join(cwd, ".codex")
-	return sameRoutePath(expected, codexHome)
-}
-
-func sameRoutePath(left string, right string) bool {
-	leftClean := filepath.Clean(strings.TrimSpace(left))
-	rightClean := filepath.Clean(strings.TrimSpace(right))
-	leftAbs, leftErr := filepath.Abs(leftClean)
-	rightAbs, rightErr := filepath.Abs(rightClean)
-	if leftErr == nil && rightErr == nil {
-		leftClean = filepath.Clean(leftAbs)
-		rightClean = filepath.Clean(rightAbs)
-	}
-	return leftClean == rightClean
 }
 
 func (base routeDocBase) displayDocPath(skill string, filename string) string {
@@ -452,6 +500,18 @@ func FormatRoutePreview(preview routePreview) string {
 			}
 		}
 	}
+	if len(preview.IgnoredTriggers) > 0 {
+		fmt.Fprintln(&builder, "Ignored triggers:")
+		for index, ignored := range preview.IgnoredTriggers {
+			if ignored.Skill == "" {
+				fmt.Fprintf(&builder, "  %d. %s %q\n", index+1, ignored.Source, ignored.Trigger)
+			} else {
+				fmt.Fprintf(&builder, "  %d. $%s\n", index+1, ignored.Skill)
+				fmt.Fprintf(&builder, "     source: %s %q\n", ignored.Source, ignored.Trigger)
+			}
+			fmt.Fprintf(&builder, "     why: %s\n", ignored.Reason)
+		}
+	}
 	if preview.ImplicitSuppressedBy != "" {
 		fmt.Fprintf(&builder, "Implicit keywords: suppressed by %s\n", preview.ImplicitSuppressedBy)
 	}
@@ -461,9 +521,9 @@ func FormatRoutePreview(preview routePreview) string {
 
 func routeActivationWhy(activation routeActivation) string {
 	switch activation.Source {
-	case "explicit invocation":
+	case routeSourceExplicitInvocation:
 		return "explicit $name invocations run left-to-right before implicit keyword routing"
-	case "implicit keyword":
+	case routeSourceImplicitKeyword:
 		return "case-insensitive keyword match anywhere in the prompt on token boundaries"
 	default:
 		return activation.Source
