@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "name": "nana-go",
+  "description": "Canonical repository verification profile for local completion evidence.",
+  "stages": [
+    {
+      "name": "lint",
+      "description": "Check Go formatting without modifying files.",
+      "command": "make lint"
+    },
+    {
+      "name": "typecheck",
+      "description": "Compile Go packages and tests without running test bodies.",
+      "command": "make typecheck"
+    },
+    {
+      "name": "test",
+      "description": "Run the Go test suite.",
+      "command": "make test"
+    },
+    {
+      "name": "static-analysis",
+      "description": "Run Go static analysis checks.",
+      "command": "make static-analysis"
+    }
+  ]
+}

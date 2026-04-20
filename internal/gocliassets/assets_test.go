@@ -258,6 +258,85 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 	}
 }
 
+func TestGeneratedAgentsVerifyGuidanceRequiresRepoProfileOrDocumentedFallback(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	templates, err := Templates()
+	if err != nil {
+		t.Fatalf("Templates(): %v", err)
+	}
+	diskContent, err := os.ReadFile(filepath.Join(repoRoot, "templates", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read template AGENTS.md: %v", err)
+	}
+	rootAgents, err := os.ReadFile(filepath.Join(repoRoot, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read root AGENTS.md: %v", err)
+	}
+	requiredNeedles := []string{
+		"Prefer `nana verify --json` when `nana-verify.json` exists",
+		"otherwise use documented repo verification commands",
+	}
+	forbiddenNeedles := []string{
+		"its profile runs lint, typecheck, tests, and static analysis",
+	}
+	for _, source := range []struct {
+		name    string
+		content string
+	}{
+		{name: "templates/AGENTS.md", content: string(diskContent)},
+		{name: "generated template AGENTS.md", content: templates["AGENTS.md"]},
+		{name: "root AGENTS.md", content: string(rootAgents)},
+	} {
+		for _, needle := range requiredNeedles {
+			if !strings.Contains(source.content, needle) {
+				t.Fatalf("%s missing conditional verify guidance %q", source.name, needle)
+			}
+		}
+		for _, needle := range forbiddenNeedles {
+			if strings.Contains(source.content, needle) {
+				t.Fatalf("%s should not unconditionally claim nana verify profile behavior %q", source.name, needle)
+			}
+		}
+	}
+}
+
+func TestGeneratedAgentsSkillTriggerGuidancePreservesCaseInsensitiveContract(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	templates, err := Templates()
+	if err != nil {
+		t.Fatalf("Templates(): %v", err)
+	}
+	diskContent, err := os.ReadFile(filepath.Join(repoRoot, "templates", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read template AGENTS.md: %v", err)
+	}
+	rootAgents, err := os.ReadFile(filepath.Join(repoRoot, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read root AGENTS.md: %v", err)
+	}
+	needle := "keyword matches are case-insensitive"
+	for _, source := range []struct {
+		name    string
+		content string
+	}{
+		{name: "templates/AGENTS.md", content: string(diskContent)},
+		{name: "generated template AGENTS.md", content: templates["AGENTS.md"]},
+		{name: "root AGENTS.md", content: string(rootAgents)},
+	} {
+		if !strings.Contains(source.content, needle) {
+			t.Fatalf("%s must preserve case-insensitive skill trigger guidance", source.name)
+		}
+	}
+}
+
 func TestRoutingDecisionGuidanceIsEmbeddedForReportSurfaces(t *testing.T) {
 	prompts, err := Prompts()
 	if err != nil {

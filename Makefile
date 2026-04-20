@@ -8,7 +8,7 @@ NANA_BIN ?= $(BINDIR)/nana
 REPO_ROOT := $(abspath .)
 NANA_ENTRY := $(REPO_ROOT)/bin/nana
 
-.PHONY: all help build test benchmark fmt vet verify install install-local uninstall run setup doctor clean release-assets
+.PHONY: all help build lint typecheck test benchmark fmt vet static-analysis verify install install-local uninstall run setup doctor clean release-assets
 
 all: build
 
@@ -16,11 +16,14 @@ help:
 	@printf '%s\n' \
 		'Targets:' \
 		'  build       Build native binaries to bin/' \
+		'  lint        Check Go formatting without modifying files' \
+		'  typecheck   Compile Go packages/tests without running tests' \
 		'  test        Run the Go test suite' \
 		'  benchmark   Run Go benchmarks with allocation counts' \
 		'  fmt         Run gofmt on Go sources' \
 		'  vet         Run go vet ./...' \
-		'  verify      Run fmt + vet + test' \
+		'  static-analysis  Run static-analysis checks' \
+		'  verify      Run the repo verification profile' \
 		'  release-assets  Build native release assets for the current platform' \
 		'  install     Install the built nana binary to $(NANA_BIN)' \
 		'  install-local  Alias for install (~/.local/bin/nana by default)' \
@@ -33,19 +36,31 @@ help:
 build:
 	go run ./cmd/nana-build build-go-cli
 
+lint:
+	@out="$$(gofmt -l cmd internal)"; \
+	status="$$?"; \
+	if [ "$$status" -ne 0 ]; then exit "$$status"; fi; \
+	if [ -n "$$out" ]; then printf '%s\n' "$$out"; exit 1; fi
+
+typecheck:
+	GOFLAGS= go test -run '^$$' ./...
+
 test:
-	go test ./...
+	GOFLAGS= go test ./...
 
 benchmark:
-	go test -run=^$$ -bench=. -benchmem ./...
+	GOFLAGS= go test -run=^$$ -bench=. -benchmem ./...
 
 fmt:
 	gofmt -w $$(find cmd internal -type f -name '*.go')
 
 vet:
-	go vet ./...
+	GOFLAGS= go vet ./...
 
-verify: fmt vet test
+static-analysis: vet
+
+verify:
+	MAKEFLAGS= MFLAGS= GNUMAKEFLAGS= MAKEFILES= GOFLAGS= go run ./cmd/nana verify
 
 release-assets:
 	mkdir -p release-assets
