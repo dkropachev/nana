@@ -323,7 +323,11 @@ func runCodexSession(cwd string, codexArgs []string, notifyContract NotifyTempCo
 	}
 	defer removeLaunchSessionState(cwd)
 
-	sessionInstructionsPath, err := writeSessionModelInstructions(cwd, sessionID, codexHome)
+	activatedDocs, err := loadActivatedSkillRuntimeDocs(cwd, promptFromCodexArgs(codexArgs), codexHome)
+	if err != nil {
+		return err
+	}
+	sessionInstructionsPath, err := writeSessionModelInstructions(cwd, sessionID, codexHome, activatedDocs...)
 	if err != nil {
 		return err
 	}
@@ -550,7 +554,7 @@ func removeSessionInstructionsFile(cwd string, sessionID string) {
 	_ = os.Remove(sessionInstructionsPath(cwd, sessionID))
 }
 
-func writeSessionModelInstructions(cwd string, sessionID string, codexHome string) (string, error) {
+func writeSessionModelInstructions(cwd string, sessionID string, codexHome string, activatedDocs ...loadedSkillRuntimeDoc) (string, error) {
 	path := sessionInstructionsPath(cwd, sessionID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
@@ -573,6 +577,9 @@ func writeSessionModelInstructions(cwd string, sessionID string, codexHome strin
 			documents = append(documents, trimmed)
 		}
 	}
+	if formattedDocs := formatLoadedSkillRuntimeDocs(activatedDocs); strings.TrimSpace(formattedDocs) != "" {
+		documents = append(documents, formattedDocs)
+	}
 
 	overlay := strings.Join([]string{
 		"<!-- NANA:RUNTIME:START -->",
@@ -593,6 +600,18 @@ func writeSessionModelInstructions(cwd string, sessionID string, codexHome strin
 		return "", err
 	}
 	return path, nil
+}
+
+func promptFromCodexArgs(args []string) string {
+	promptIndex := findCodexPromptArgIndex(args)
+	if promptIndex < 0 || promptIndex >= len(args) {
+		return ""
+	}
+	prompt := strings.TrimSpace(args[promptIndex])
+	if prompt == "-" {
+		return ""
+	}
+	return prompt
 }
 
 func injectModelInstructionsArgs(args []string, instructionsPath string) []string {

@@ -517,6 +517,76 @@ func TestLaunchUsesProjectCodexHomeWhenPersistedScopeIsProject(t *testing.T) {
 	}
 }
 
+func TestRunCodexSessionLoadsSkillRuntimeDocsFromScopedCodexHome(t *testing.T) {
+	cwd := t.TempDir()
+	home := filepath.Join(t.TempDir(), "home")
+	scopedCodexHome := filepath.Join(t.TempDir(), "scoped-codex-home")
+	fakeBin := filepath.Join(t.TempDir(), "bin")
+	fakeCodexPath := filepath.Join(fakeBin, "codex")
+	logPath := filepath.Join(t.TempDir(), "session-instructions.log")
+	runtimePath := filepath.Join(scopedCodexHome, "skills", "autopilot", "RUNTIME.md")
+
+	if err := os.MkdirAll(filepath.Dir(runtimePath), 0o755); err != nil {
+		t.Fatalf("mkdir scoped runtime dir: %v", err)
+	}
+	if err := os.WriteFile(runtimePath, []byte("scoped launch runtime rules\n"), 0o644); err != nil {
+		t.Fatalf("write scoped runtime: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scopedCodexHome, "AGENTS.md"), []byte("# Scoped Launch Home\n"), 0o644); err != nil {
+		t.Fatalf("write scoped AGENTS: %v", err)
+	}
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		"for arg in \"$@\"; do",
+		"  case \"$arg\" in",
+		"    model_instructions_file=*)",
+		"      file=${arg#model_instructions_file=\\\"}",
+		"      file=${file%\\\"}",
+		"      cat \"$file\" > \"$FAKE_CODEX_INSTRUCTIONS_LOG\"",
+		"      ;;",
+		"  esac",
+		"done",
+		"printf 'ok\\n'",
+	}, "\n")
+	if err := os.WriteFile(fakeCodexPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_INSTRUCTIONS_LOG", logPath)
+
+	output, err := captureStdout(t, func() error {
+		return runCodexSession(cwd, []string{"exec", "$autopilot harden launch"}, NotifyTempContract{}, scopedCodexHome)
+	})
+	if err != nil {
+		t.Fatalf("runCodexSession: %v\n%s", err, output)
+	}
+	if strings.TrimSpace(output) != "ok" {
+		t.Fatalf("expected fake codex output, got %q", output)
+	}
+
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read session instructions log: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"# Scoped Launch Home",
+		"<!-- NANA:SKILL_RUNTIME_DOCS:START -->",
+		"scoped launch runtime rules",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected session instructions to contain %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestRunCodexSessionSwitchesManagedAccountAfterRateLimit(t *testing.T) {
 	cwd := t.TempDir()
 	home := filepath.Join(cwd, "home")

@@ -28,9 +28,7 @@ By default, nana uses .nana/logs/context-telemetry.ndjson and filters to the
 current run id when NANA_CONTEXT_TELEMETRY_RUN_ID, NANA_WORK_RUN_ID,
 NANA_RUN_ID, or NANA_SESSION_ID is set. The summary reports event counts,
 safe skill/reference identifiers, and shell compaction frequency without
-emitting raw command arguments or shell output. Telemetry writers cap the
-active log at 1 MiB by default and retain one .1 rotated copy; set
-NANA_CONTEXT_TELEMETRY_MAX_BYTES to override the active-log byte cap.
+emitting raw command arguments or shell output.
 `
 
 var telemetrySummaryEvents = map[string]bool{
@@ -71,6 +69,8 @@ type telemetrySkillSummary struct {
 	Count          int    `json:"count"`
 	DocLoads       int    `json:"doc_loads"`
 	ReferenceLoads int    `json:"reference_loads"`
+	CacheHits      int    `json:"cache_hits,omitempty"`
+	CacheMisses    int    `json:"cache_misses,omitempty"`
 }
 
 type telemetryCommandSummary struct {
@@ -303,6 +303,12 @@ func (acc *telemetryAccumulator) recordSkillEvent(eventName string, event map[st
 	row.Count++
 	if eventName == "skill_doc_load" {
 		row.DocLoads++
+		switch strings.ToLower(safeTelemetryLabel(firstTelemetryString(event, "cache", "cache_status"))) {
+		case "hit":
+			row.CacheHits++
+		case "miss":
+			row.CacheMisses++
+		}
 	} else {
 		row.ReferenceLoads++
 	}
@@ -436,7 +442,11 @@ func formatTelemetrySummaryReport(report telemetrySummaryReport) string {
 			if row.Path != "" {
 				label += " @ " + row.Path
 			}
-			lines = append(lines, fmt.Sprintf("  %s: %d (doc=%d reference=%d)", label, row.Count, row.DocLoads, row.ReferenceLoads))
+			line := fmt.Sprintf("  %s: %d (doc=%d reference=%d)", label, row.Count, row.DocLoads, row.ReferenceLoads)
+			if row.CacheHits > 0 || row.CacheMisses > 0 {
+				line += fmt.Sprintf(" cache(hit=%d miss=%d)", row.CacheHits, row.CacheMisses)
+			}
+			lines = append(lines, line)
 		}
 	}
 

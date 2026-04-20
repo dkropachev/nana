@@ -98,6 +98,29 @@ func TestTelemetrySummaryJSONAllRuns(t *testing.T) {
 	}
 }
 
+func TestTelemetrySummaryReportsSkillRuntimeCacheStatus(t *testing.T) {
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T11:00:00Z","run_id":"run-current","event":"skill_doc_load","skill":"autopilot","path":"skills/autopilot/RUNTIME.md","cache":"miss"}`,
+		`{"timestamp":"2026-04-20T11:00:01Z","run_id":"run-current","event":"skill_doc_load","skill":"autopilot","path":"skills/autopilot/RUNTIME.md","cache":"hit"}`,
+	})
+
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-current")
+	t.Setenv("NANA_WORK_RUN_ID", "")
+	t.Setenv("NANA_RUN_ID", "")
+	t.Setenv("NANA_SESSION_ID", "")
+
+	output, err := captureStdout(t, func() error { return Telemetry(cwd, []string{"summary"}) })
+	if err != nil {
+		t.Fatalf("Telemetry(summary): %v", err)
+	}
+	want := "autopilot @ skills/autopilot/RUNTIME.md: 2 (doc=2 reference=0) cache(hit=1 miss=1)"
+	if !strings.Contains(output, want) {
+		t.Fatalf("expected cache status %q in output:\n%s", want, output)
+	}
+}
+
 func TestSafeTelemetryPathOmitsUnsafeAbsolutePaths(t *testing.T) {
 	if got := safeTelemetryPath("/tmp/private/reference.md"); got != "" {
 		t.Fatalf("expected unsafe absolute path to be omitted, got %q", got)

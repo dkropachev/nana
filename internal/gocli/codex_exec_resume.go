@@ -164,11 +164,23 @@ func executeManagedCodexPrompt(options codexManagedPromptOptions, sessionID stri
 
 	nanaSessionID := fmt.Sprintf("%s-%d", sanitizePathToken(options.StepKey), time.Now().UnixNano())
 	if strings.TrimSpace(options.CodexHome) != "" {
-		sessionInstructionsPath, err := writeSessionModelInstructions(options.InstructionsRoot, nanaSessionID, options.CodexHome)
+		instructionsRoot := options.InstructionsRoot
+		if strings.TrimSpace(instructionsRoot) == "" {
+			instructionsRoot = options.CommandDir
+		}
+		activatedDocs := []loadedSkillRuntimeDoc(nil)
+		if !resumed {
+			var loadErr error
+			activatedDocs, loadErr = loadActivatedSkillRuntimeDocs(defaultString(strings.TrimSpace(options.CommandDir), instructionsRoot), prompt, options.CodexHome)
+			if loadErr != nil {
+				return codexManagedPromptResult{}, loadErr
+			}
+		}
+		sessionInstructionsPath, err := writeSessionModelInstructions(instructionsRoot, nanaSessionID, options.CodexHome, activatedDocs...)
 		if err != nil {
 			return codexManagedPromptResult{}, err
 		}
-		defer removeSessionInstructionsFile(options.InstructionsRoot, nanaSessionID)
+		defer removeSessionInstructionsFile(instructionsRoot, nanaSessionID)
 		args = injectModelInstructionsArgs(args, sessionInstructionsPath)
 	}
 
