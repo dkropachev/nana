@@ -1088,6 +1088,18 @@ func TestLocalWorkStartStatusRetrospectiveAndGlobalRunLookup(t *testing.T) {
 	if !strings.Contains(retroOutput, "# NANA Work-local Retrospective") {
 		t.Fatalf("unexpected retrospective output: %q", retroOutput)
 	}
+	for _, needle := range []string{
+		"## Changed files",
+		"## Verification evidence",
+		"## Simplifications made",
+		"## Remaining risks",
+		"## routing_decision",
+		"## Report quality checklist",
+	} {
+		if !strings.Contains(retroOutput, needle) {
+			t.Fatalf("retrospective missing report-quality section %q:\n%s", needle, retroOutput)
+		}
+	}
 	if _, err := os.Stat(filepath.Join(runDir, "retrospective.md")); err != nil {
 		t.Fatalf("expected retrospective artifact: %v", err)
 	}
@@ -2889,6 +2901,99 @@ func TestLocalWorkValidationFailurePersistsRuntimeStateAndFailureDetails(t *test
 	}
 	if !strings.Contains(retroOutput, "failing group: readme-validation") || !strings.Contains(retroOutput, "attempts exhausted: 3") {
 		t.Fatalf("expected validation failure details in retrospective: %q", retroOutput)
+	}
+	if strings.Contains(retroOutput, "- (not run)") {
+		t.Fatalf("retrospective falsely reported verification as not run: %q", retroOutput)
+	}
+	for _, needle := range []string{"verification passed (lint, compile, unit)", "verification.json"} {
+		if !strings.Contains(retroOutput, needle) {
+			t.Fatalf("expected verification artifact evidence %q in retrospective: %q", needle, retroOutput)
+		}
+	}
+}
+
+func TestLocalWorkRetrospectiveCompletedIterationUsesLegacyVerificationArtifact(t *testing.T) {
+	runDir := t.TempDir()
+	iterationDir := localWorkIterationDir(runDir, 1)
+	if err := os.MkdirAll(iterationDir, 0o755); err != nil {
+		t.Fatalf("mkdir iteration dir: %v", err)
+	}
+	legacyArtifact := filepath.Join(iterationDir, "verification.json")
+	if err := os.WriteFile(legacyArtifact, mustMarshalJSON(localWorkVerificationReport{
+		GeneratedAt:         ISOTimeNow(),
+		IntegrationIncluded: false,
+		Passed:              true,
+	}), 0o644); err != nil {
+		t.Fatalf("write legacy verification artifact: %v", err)
+	}
+
+	lines := localWorkRetrospectiveVerificationLines(localWorkManifest{
+		Iterations: []localWorkIterationSummary{{
+			Iteration:           1,
+			Status:              "completed",
+			ReviewRoundsUsed:    0,
+			VerificationSummary: "verification passed (lint, compile, unit)",
+		}},
+	}, runDir)
+	content := strings.Join(lines, "\n")
+	if !strings.Contains(content, "artifact="+legacyArtifact) {
+		t.Fatalf("expected completed iteration to cite legacy verification artifact %q, got:\n%s", legacyArtifact, content)
+	}
+	if strings.Contains(content, "verification-round-0-post-hardening.json") {
+		t.Fatalf("completed iteration cited missing zero-round artifact instead of legacy verification.json:\n%s", content)
+	}
+}
+
+func TestLocalWorkRetrospectiveRisksOmitResolvedIterationFailuresForCompletedRun(t *testing.T) {
+	lines := localWorkRetrospectiveRiskLines(localWorkManifest{
+		Status: "completed",
+		Iterations: []localWorkIterationSummary{
+			{
+				Iteration:                1,
+				Status:                   "retrying",
+				VerificationFailedStages: []string{"unit"},
+				ReviewFindings:           2,
+			},
+			{
+				Iteration:          2,
+				Status:             "completed",
+				VerificationPassed: true,
+				ReviewFindings:     0,
+			},
+		},
+	})
+	content := strings.Join(lines, "\n")
+	if strings.Contains(content, "Iteration 1 verification failed stages") || strings.Contains(content, "Iteration 1 remaining review findings") {
+		t.Fatalf("completed retrospective should not list resolved iteration failures as remaining risks:\n%s", content)
+	}
+}
+
+func TestLocalWorkRetrospectiveRisksUseLatestUnresolvedIteration(t *testing.T) {
+	lines := localWorkRetrospectiveRiskLines(localWorkManifest{
+		Status: "failed",
+		Iterations: []localWorkIterationSummary{
+			{
+				Iteration:                1,
+				Status:                   "retrying",
+				VerificationFailedStages: []string{"unit"},
+				ReviewFindings:           2,
+			},
+			{
+				Iteration:                2,
+				Status:                   "retrying",
+				VerificationFailedStages: []string{"lint"},
+				ReviewFindings:           1,
+			},
+		},
+	})
+	content := strings.Join(lines, "\n")
+	if strings.Contains(content, "Iteration 1") {
+		t.Fatalf("remaining risks should focus on the latest unresolved iteration, got:\n%s", content)
+	}
+	for _, needle := range []string{"Iteration 2 verification failed stages: lint", "Iteration 2 remaining review findings: 1"} {
+		if !strings.Contains(content, needle) {
+			t.Fatalf("remaining risks missing %q:\n%s", needle, content)
+		}
 	}
 }
 

@@ -5699,6 +5699,8 @@ func mustMarshalJSON(value interface{}) []byte {
 
 func writeLocalWorkRetrospective(manifest localWorkManifest) (string, error) {
 	diffShortstat, _ := githubGitOutput(manifest.SandboxRepoPath, "diff", "--shortstat", manifest.BaselineSHA)
+	changedFilesOutput, _ := githubGitOutput(manifest.SandboxRepoPath, "diff", "--name-only", manifest.BaselineSHA)
+	changedFiles := collectTrimmedLines(changedFilesOutput)
 	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
 	history := []localWorkFindingHistoryEvent{}
 	store, err := openLocalWorkDB()
@@ -5739,8 +5741,50 @@ func writeLocalWorkRetrospective(manifest localWorkManifest) (string, error) {
 		fmt.Sprintf("- Finding history events: %d", len(history)),
 		fmt.Sprintf("- Final diff: %s", defaultString(strings.TrimSpace(diffShortstat), "(no diff)")),
 		"",
-		"## Iterations",
+		"## Changed files",
 	}
+	if len(changedFiles) == 0 {
+		lines = append(lines, "- (none)")
+	} else {
+		for _, path := range changedFiles {
+			lines = append(lines, "- "+path)
+		}
+	}
+	lines = append(lines,
+		"",
+		"## Verification evidence",
+	)
+	lines = append(lines, localWorkRetrospectiveVerificationLines(manifest, runDir)...)
+	lines = append(lines,
+		"",
+		"## Simplifications made",
+		"- Runtime summary: no explicit simplification notes were recorded by the work runtime; review the changed-files list and implementation logs for any agent-authored simplification narrative.",
+		"",
+		"## Remaining risks",
+	)
+	riskLines := localWorkRetrospectiveRiskLines(manifest)
+	if len(riskLines) == 0 {
+		lines = append(lines, "- No runtime-detected remaining risks.")
+	} else {
+		lines = append(lines, riskLines...)
+	}
+	lines = append(lines,
+		"",
+		"## routing_decision",
+		"- mode: work-local",
+		"- role_tier: standard executor with runtime verification and final review gates",
+		"- trigger: nana work local orchestration selected an executor/reviewer completion loop",
+		"- confidence: high",
+		"",
+		"## Report quality checklist",
+		"- [x] Changed files",
+		"- [x] Verification evidence",
+		"- [x] Simplifications made",
+		"- [x] Remaining risks",
+		"- [x] routing_decision",
+		"",
+		"## Iterations",
+	)
 	for _, iteration := range manifest.Iterations {
 		lines = append(lines, fmt.Sprintf("- %d: %s; initial review=%d; validated=%d; confirmed=%d; rejected=%d; preexisting=%d; modified=%d; final review=%d; groups=%d; policy=%s; integration=%t",
 			iteration.Iteration,
@@ -5819,9 +5863,194 @@ func writeLocalWorkRetrospective(manifest localWorkManifest) (string, error) {
 		}
 	}
 	content := strings.Join(lines, "\n") + "\n"
+	if issues := lintFinalReportQuality(content, finalReportQualityLintOptions{RequireRoutingDecision: true}); len(issues) > 0 {
+		return "", fmt.Errorf("retrospective report quality lint failed: %s", formatFinalReportQualityIssues(issues))
+	}
 	retrospectivePath := filepath.Join(runDir, "retrospective.md")
 	if err := os.WriteFile(retrospectivePath, []byte(content), 0o644); err != nil {
 		return "", err
 	}
 	return content, nil
+}
+
+func localWorkRetrospectiveVerificationLines(manifest localWorkManifest, runDir string) []string {
+	lines := []string{}
+	completedIterations := map[int]bool{}
+	for _, iteration := range manifest.Iterations {
+		completedIterations[iteration.Iteration] = true
+		artifact := localWorkCompletedIterationVerificationArtifact(localWorkIterationDir(runDir, iteration.Iteration), iteration.ReviewRoundsUsed)
+		lines = append(lines, fmt.Sprintf("- Iteration %d: %s; artifact=%s", iteration.Iteration, defaultString(iteration.VerificationSummary, "(none)"), defaultString(artifact, "(not found)")))
+		if len(iteration.VerificationFailedStages) > 0 {
+			lines = append(lines, "  - failed stages: "+strings.Join(iteration.VerificationFailedStages, ", "))
+		}
+	}
+	for _, evidence := range localWorkRetrospectiveArtifactVerificationEvidence(manifest, runDir, completedIterations) {
+		lines = append(lines, fmt.Sprintf("- Iteration %d: %s; artifact=%s", evidence.Iteration, evidence.Summary, evidence.Artifact))
+		if len(evidence.FailedStages) > 0 {
+			lines = append(lines, "  - failed stages: "+strings.Join(evidence.FailedStages, ", "))
+		}
+	}
+	if len(lines) == 0 {
+		return []string{"- (not run)"}
+	}
+	return lines
+}
+
+func localWorkCompletedIterationVerificationArtifact(iterationDir string, reviewRoundsUsed int) string {
+	preferred := filepath.Join(iterationDir, fmt.Sprintf("verification-round-%d-post-hardening.json", reviewRoundsUsed))
+	if fileExists(preferred) {
+		return preferred
+	}
+	initial := filepath.Join(iterationDir, "verification.json")
+	latestRound := localWorkLatestVerificationRoundArtifact(iterationDir)
+	if reviewRoundsUsed <= 0 {
+		if fileExists(initial) {
+			return initial
+		}
+		return latestRound
+	}
+	if latestRound != "" {
+		return latestRound
+	}
+	if fileExists(initial) {
+		return initial
+	}
+	return ""
+}
+
+func localWorkLatestVerificationRoundArtifact(iterationDir string) string {
+	rounds, _ := filepath.Glob(filepath.Join(iterationDir, "verification-round-*-post-hardening.json"))
+	if len(rounds) == 0 {
+		return ""
+	}
+	sort.SliceStable(rounds, func(i, j int) bool {
+		left := localWorkVerificationRoundArtifactNumber(rounds[i])
+		right := localWorkVerificationRoundArtifactNumber(rounds[j])
+		if left == right {
+			return rounds[i] < rounds[j]
+		}
+		return left < right
+	})
+	return rounds[len(rounds)-1]
+}
+
+func localWorkVerificationRoundArtifactNumber(path string) int {
+	name := filepath.Base(path)
+	name = strings.TrimPrefix(name, "verification-round-")
+	name = strings.TrimSuffix(name, "-post-hardening.json")
+	round, err := strconv.Atoi(name)
+	if err != nil {
+		return -1
+	}
+	return round
+}
+
+type localWorkRetrospectiveVerificationEvidence struct {
+	Iteration    int
+	Summary      string
+	FailedStages []string
+	Artifact     string
+}
+
+func localWorkRetrospectiveArtifactVerificationEvidence(manifest localWorkManifest, runDir string, completedIterations map[int]bool) []localWorkRetrospectiveVerificationEvidence {
+	iterationDirs, _ := filepath.Glob(filepath.Join(runDir, "iterations", "iter-*"))
+	if len(iterationDirs) == 0 && manifest.CurrentIteration > 0 {
+		iterationDirs = append(iterationDirs, localWorkIterationDir(runDir, manifest.CurrentIteration))
+	}
+	sort.Strings(iterationDirs)
+	evidence := []localWorkRetrospectiveVerificationEvidence{}
+	for _, iterationDir := range iterationDirs {
+		iteration := parseLocalWorkIterationDirNumber(iterationDir)
+		if iteration <= 0 || completedIterations[iteration] {
+			continue
+		}
+		for _, artifact := range localWorkVerificationArtifactPaths(iterationDir) {
+			report := localWorkVerificationReport{}
+			if err := readGithubJSON(artifact, &report); err != nil || localWorkVerificationReportIsEmpty(report) {
+				continue
+			}
+			evidence = append(evidence, localWorkRetrospectiveVerificationEvidence{
+				Iteration:    iteration,
+				Summary:      summarizeLocalVerification(report),
+				FailedStages: append([]string{}, report.FailedStages...),
+				Artifact:     artifact,
+			})
+		}
+	}
+	return evidence
+}
+
+func parseLocalWorkIterationDirNumber(iterationDir string) int {
+	base := filepath.Base(iterationDir)
+	if !strings.HasPrefix(base, "iter-") {
+		return 0
+	}
+	iteration, err := strconv.Atoi(strings.TrimPrefix(base, "iter-"))
+	if err != nil {
+		return 0
+	}
+	return iteration
+}
+
+func localWorkVerificationArtifactPaths(iterationDir string) []string {
+	paths := []string{}
+	initial := filepath.Join(iterationDir, "verification.json")
+	if _, err := os.Stat(initial); err == nil {
+		paths = append(paths, initial)
+	}
+	rounds, _ := filepath.Glob(filepath.Join(iterationDir, "verification-round-*-post-hardening.json"))
+	sort.Strings(rounds)
+	paths = append(paths, rounds...)
+	return paths
+}
+
+func localWorkVerificationReportIsEmpty(report localWorkVerificationReport) bool {
+	return strings.TrimSpace(report.GeneratedAt) == "" &&
+		strings.TrimSpace(report.PlanFingerprint) == "" &&
+		len(report.FailedStages) == 0 &&
+		len(report.Stages) == 0 &&
+		!report.IntegrationIncluded &&
+		!report.Passed
+}
+
+func localWorkRetrospectiveRiskLines(manifest localWorkManifest) []string {
+	lines := []string{}
+	if strings.TrimSpace(manifest.LastError) != "" {
+		lines = append(lines, "- Failure: "+strings.TrimSpace(manifest.LastError))
+	}
+	if strings.TrimSpace(manifest.FinalApplyError) != "" {
+		lines = append(lines, "- Final source apply: "+strings.TrimSpace(manifest.FinalApplyError))
+	}
+	if strings.TrimSpace(manifest.CandidateAuditStatus) != "" && manifest.CandidateAuditStatus != "passed" && manifest.CandidateAuditStatus != "no-op" {
+		lines = append(lines, "- Candidate audit: "+manifest.CandidateAuditStatus)
+	}
+	if len(manifest.CandidateBlockedPaths) > 0 {
+		lines = append(lines, "- Candidate blocked paths: "+strings.Join(manifest.CandidateBlockedPaths, ", "))
+	}
+	if strings.TrimSpace(manifest.FinalGateStatus) != "" && manifest.FinalGateStatus != "passed" && manifest.FinalGateStatus != "no-op" {
+		lines = append(lines, "- Final review gate: "+manifest.FinalGateStatus)
+	}
+	if len(manifest.PreexistingFindings) > 0 {
+		lines = append(lines, fmt.Sprintf("- Pre-existing issues excluded from this run: %d", len(manifest.PreexistingFindings)))
+	}
+	for _, iteration := range localWorkRetrospectiveRiskIterations(manifest) {
+		if len(iteration.VerificationFailedStages) > 0 {
+			lines = append(lines, fmt.Sprintf("- Iteration %d verification failed stages: %s", iteration.Iteration, strings.Join(iteration.VerificationFailedStages, ", ")))
+		}
+		if iteration.ReviewFindings > 0 {
+			lines = append(lines, fmt.Sprintf("- Iteration %d remaining review findings: %d", iteration.Iteration, iteration.ReviewFindings))
+		}
+	}
+	return uniqueStrings(lines)
+}
+
+func localWorkRetrospectiveRiskIterations(manifest localWorkManifest) []localWorkIterationSummary {
+	if len(manifest.Iterations) == 0 || manifest.Status == "completed" {
+		return nil
+	}
+	latest := manifest.Iterations[len(manifest.Iterations)-1]
+	if latest.Status == "completed" {
+		return nil
+	}
+	return []localWorkIterationSummary{latest}
 }

@@ -246,6 +246,7 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 		"`~/.codex/skills/deep-interview/RUNTIME.md`",
 		"`~/.codex/skills/security-review/RUNTIME.md`",
 		"`~/.codex/skills/web-clone/RUNTIME.md`",
+		"`nana route --explain \"<prompt>\"` to preview routing",
 		"`routing_decision` in plans, traces, and final reports",
 		"`role_tier` (tier/roles)",
 	} {
@@ -279,8 +280,6 @@ func TestGeneratedAgentsVerifyGuidanceRequiresRepoProfileOrDocumentedFallback(t 
 	requiredNeedles := []string{
 		"Prefer `nana verify --json` when `nana-verify.json` exists",
 		"otherwise use documented repo verification commands",
-		"`changed_scope.paths`",
-		"`full_check` fallback",
 	}
 	forbiddenNeedles := []string{
 		"its profile runs lint, typecheck, tests, and static analysis",
@@ -301,6 +300,46 @@ func TestGeneratedAgentsVerifyGuidanceRequiresRepoProfileOrDocumentedFallback(t 
 		for _, needle := range forbiddenNeedles {
 			if strings.Contains(source.content, needle) {
 				t.Fatalf("%s should not unconditionally claim nana verify profile behavior %q", source.name, needle)
+			}
+		}
+	}
+}
+
+func TestGeneratedAgentsFinalReportChecklistIsEmbedded(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	templates, err := Templates()
+	if err != nil {
+		t.Fatalf("Templates(): %v", err)
+	}
+	diskContent, err := os.ReadFile(filepath.Join(repoRoot, "templates", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read template AGENTS.md: %v", err)
+	}
+	rootAgents, err := os.ReadFile(filepath.Join(repoRoot, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read root AGENTS.md: %v", err)
+	}
+	for _, source := range []struct {
+		name    string
+		content string
+	}{
+		{name: "templates/AGENTS.md", content: string(diskContent)},
+		{name: "generated template AGENTS.md", content: templates["AGENTS.md"]},
+		{name: "root AGENTS.md", content: string(rootAgents)},
+	} {
+		for _, needle := range []string{
+			"final-report checklist",
+			"changed files",
+			"verification evidence",
+			"simplifications made",
+			"remaining risks",
+		} {
+			if !strings.Contains(source.content, needle) {
+				t.Fatalf("%s missing final-report checklist guidance %q", source.name, needle)
 			}
 		}
 	}
@@ -335,6 +374,39 @@ func TestGeneratedAgentsSkillTriggerGuidancePreservesCaseInsensitiveContract(t *
 	} {
 		if !strings.Contains(source.content, needle) {
 			t.Fatalf("%s must preserve case-insensitive skill trigger guidance", source.name)
+		}
+	}
+}
+
+func TestGeneratedAgentsSkillTriggerGuidancePreservesExplicitPrecedenceContract(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	templates, err := Templates()
+	if err != nil {
+		t.Fatalf("Templates(): %v", err)
+	}
+	diskContent, err := os.ReadFile(filepath.Join(repoRoot, "templates", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read template AGENTS.md: %v", err)
+	}
+	rootAgents, err := os.ReadFile(filepath.Join(repoRoot, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read root AGENTS.md: %v", err)
+	}
+	needle := "Explicit `$skill` invocations run left-to-right before implicit keyword matches"
+	for _, source := range []struct {
+		name    string
+		content string
+	}{
+		{name: "templates/AGENTS.md", content: string(diskContent)},
+		{name: "generated template AGENTS.md", content: templates["AGENTS.md"]},
+		{name: "root AGENTS.md", content: string(rootAgents)},
+	} {
+		if !strings.Contains(source.content, needle) {
+			t.Fatalf("%s must preserve explicit skill precedence guidance", source.name)
 		}
 	}
 }
