@@ -199,17 +199,28 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 	if len(rootAgents) > 8192 {
 		t.Fatalf("root AGENTS.md exceeds budget: %d", len(rootAgents))
 	}
+	if strings.Contains(string(diskContent), "match anywhere") {
+		t.Fatal("template AGENTS.md still allows broad keyword matches")
+	}
+	if strings.Contains(string(rootAgents), "match anywhere") {
+		t.Fatal("root AGENTS.md still allows broad keyword matches")
+	}
 	for _, needle := range []string{
 		"`~/.codex/skills/autopilot/RUNTIME.md`",
 		"`~/.codex/skills/deep-interview/RUNTIME.md`",
 		"`~/.codex/skills/security-review/RUNTIME.md`",
 		"`~/.codex/skills/web-clone/RUNTIME.md`",
+		"phrase-aware",
+		"user-authored command phrases",
+		"fenced code",
+		"quoted AGENTS/policy text",
+		"explicit file excerpts",
 	} {
 		if !strings.Contains(string(diskContent), needle) {
-			t.Fatalf("template AGENTS.md missing runtime skill reference %q", needle)
+			t.Fatalf("template AGENTS.md missing expected keyword guidance %q", needle)
 		}
 		if !strings.Contains(string(rootAgents), strings.ReplaceAll(needle, "~/.codex", "./.codex")) {
-			t.Fatalf("root AGENTS.md missing runtime skill reference %q", needle)
+			t.Fatalf("root AGENTS.md missing expected keyword guidance %q", needle)
 		}
 	}
 }
