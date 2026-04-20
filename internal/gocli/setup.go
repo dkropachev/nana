@@ -337,7 +337,38 @@ func ensureNanaDirectories(cwd string, options SetupOptions) error {
 			return err
 		}
 	}
+	if options.DryRun {
+		return nil
+	}
+	for _, file := range []struct {
+		path    string
+		content string
+	}{
+		{path: filepath.Join(cwd, ".nana", "project-memory.json"), content: "{}\n"},
+		{path: filepath.Join(cwd, ".nana", "notepad.md"), content: "# NANA Notepad\n\n"},
+	} {
+		if err := writeFileIfMissing(file.path, file.content); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func writeFileIfMissing(path string, content string) error {
+	info, err := os.Stat(path)
+	if err == nil {
+		if info.IsDir() {
+			return fmt.Errorf("%s exists and is a directory", path)
+		}
+		return nil
+	}
+	if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
 }
 
 func writeSetupConfig(configPath string, options SetupOptions) error {

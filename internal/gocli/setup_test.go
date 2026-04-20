@@ -93,6 +93,17 @@ func TestSetupProjectWritesLocalAssets(t *testing.T) {
 	if !fileExists(filepath.Join(cwd, ".nana", "codex-home-investigate", "agents", "executor.toml")) {
 		t.Fatalf("project investigate agent config not installed")
 	}
+	for _, path := range []string{
+		filepath.Join(cwd, ".nana", "state"),
+		filepath.Join(cwd, ".nana", "plans"),
+		filepath.Join(cwd, ".nana", "logs"),
+		filepath.Join(cwd, ".nana", "project-memory.json"),
+		filepath.Join(cwd, ".nana", "notepad.md"),
+	} {
+		if !fileExists(path) {
+			t.Fatalf("expected setup to create %s", path)
+		}
+	}
 	config, err := os.ReadFile(filepath.Join(cwd, ".codex", "config.toml"))
 	if err != nil {
 		t.Fatalf("read config: %v", err)

@@ -78,6 +78,163 @@ func TestCheckMcpServersPassesWhenOnlyNonNanaServersConfigured(t *testing.T) {
 	}
 }
 
+func TestCheckAgentsRuntimeSectionsPassesForGeneratedAgents(t *testing.T) {
+	cwd := t.TempDir()
+	content := strings.Join([]string{
+		"<!-- nana:generated:agents-md -->",
+		"<!-- NANA:GUIDANCE:OPERATING:START -->",
+		"guidance",
+		"<!-- NANA:GUIDANCE:OPERATING:END -->",
+		"<!-- NANA:GUIDANCE:VERIFYSEQ:START -->",
+		"verify",
+		"<!-- NANA:GUIDANCE:VERIFYSEQ:END -->",
+		"<state_management>",
+		"NANA runtime state lives under `.nana/`:",
+		"- `.nana/state/`",
+		"- `.nana/notepad.md`",
+		"- `.nana/project-memory.json`",
+		"- `.nana/plans/`",
+		"- `.nana/logs/`",
+		"Keep the runtime overlay markers stable:",
+		"- `<!-- NANA:RUNTIME:START --> ... <!-- NANA:RUNTIME:END -->`",
+		"- `<!-- NANA:TEAM:WORKER:START --> ... <!-- NANA:TEAM:WORKER:END -->`",
+		"</state_management>",
+		"<!-- NANA:MODELS:START -->",
+		"<!-- NANA:MODELS:END -->",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	check := checkAgentsRuntimeSections("project", cwd, filepath.Join(cwd, ".codex"))
+	if check.Status != "pass" {
+		t.Fatalf("expected pass, got %#v", check)
+	}
+}
+
+func TestCheckAgentsRuntimeSectionsFailsBrokenOverlayMarker(t *testing.T) {
+	cwd := t.TempDir()
+	content := strings.Join([]string{
+		"<!-- nana:generated:agents-md -->",
+		"<!-- NANA:GUIDANCE:OPERATING:START -->",
+		"<!-- NANA:GUIDANCE:OPERATING:END -->",
+		"<!-- NANA:GUIDANCE:VERIFYSEQ:START -->",
+		"<!-- NANA:GUIDANCE:VERIFYSEQ:END -->",
+		"<state_management>",
+		"- `.nana/state/`",
+		"- `.nana/notepad.md`",
+		"- `.nana/project-memory.json`",
+		"- `.nana/plans/`",
+		"- `.nana/logs/`",
+		"<!-- NANA:RUNTIME:START -->",
+		"<!-- NANA:TEAM:WORKER:START --> ... <!-- NANA:TEAM:WORKER:END -->",
+		"</state_management>",
+		"<!-- NANA:MODELS:START -->",
+		"<!-- NANA:MODELS:END -->",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	check := checkAgentsRuntimeSections("project", cwd, filepath.Join(cwd, ".codex"))
+	if check.Status != "fail" || !strings.Contains(check.Message, "NANA runtime marker count mismatch") {
+		t.Fatalf("unexpected check: %#v", check)
+	}
+}
+
+func TestCheckAgentsRuntimeSectionsWarnsMissingGeneratedSections(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("# plain project instructions\n"), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	check := checkAgentsRuntimeSections("project", cwd, filepath.Join(cwd, ".codex"))
+	if check.Status != "warn" || !strings.Contains(check.Message, "missing generated AGENTS marker") {
+		t.Fatalf("unexpected check: %#v", check)
+	}
+}
+
+func TestCheckNanaStatePathsPassesWhenRequiredPathsExist(t *testing.T) {
+	cwd := t.TempDir()
+	for _, dir := range []string{
+		filepath.Join(cwd, ".nana", "state"),
+		filepath.Join(cwd, ".nana", "plans"),
+		filepath.Join(cwd, ".nana", "logs"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cwd, ".nana", "project-memory.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write project memory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, ".nana", "notepad.md"), []byte("# notes\n"), 0o644); err != nil {
+		t.Fatalf("write notepad: %v", err)
+	}
+
+	check := checkNanaStatePaths(cwd)
+	if check.Status != "pass" {
+		t.Fatalf("expected pass, got %#v", check)
+	}
+}
+
+func TestCheckNanaStatePathsWarnsMissingProjectMemory(t *testing.T) {
+	cwd := t.TempDir()
+	for _, dir := range []string{
+		filepath.Join(cwd, ".nana", "state"),
+		filepath.Join(cwd, ".nana", "plans"),
+		filepath.Join(cwd, ".nana", "logs"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cwd, ".nana", "notepad.md"), []byte("# notes\n"), 0o644); err != nil {
+		t.Fatalf("write notepad: %v", err)
+	}
+
+	check := checkNanaStatePaths(cwd)
+	if check.Status != "warn" || !strings.Contains(check.Message, ".nana/project-memory.json") {
+		t.Fatalf("unexpected check: %#v", check)
+	}
+}
+
+func TestCheckNanaJSONStateFilesFailsMalformedProjectMemory(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwd, ".nana", "state"), 0o755); err != nil {
+		t.Fatalf("mkdir state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, ".nana", "project-memory.json"), []byte("{bad json"), 0o644); err != nil {
+		t.Fatalf("write project memory: %v", err)
+	}
+
+	check := checkNanaJSONStateFiles(cwd)
+	if check.Status != "fail" || !strings.Contains(check.Message, ".nana/project-memory.json") {
+		t.Fatalf("unexpected check: %#v", check)
+	}
+}
+
+func TestCheckNanaJSONStateFilesPassesValidNestedState(t *testing.T) {
+	cwd := t.TempDir()
+	workerDir := filepath.Join(cwd, ".nana", "state", "team", "alpha", "workers", "one")
+	if err := os.MkdirAll(workerDir, 0o755); err != nil {
+		t.Fatalf("mkdir worker state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, ".nana", "project-memory.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write project memory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workerDir, "status.json"), []byte(`{"state":"working"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+
+	check := checkNanaJSONStateFiles(cwd)
+	if check.Status != "pass" || !strings.Contains(check.Message, "2 JSON state file(s) valid") {
+		t.Fatalf("unexpected check: %#v", check)
+	}
+}
+
 func TestCheckManagedAccountsPassesWhenNotConfigured(t *testing.T) {
 	check := checkManagedAccounts(t.TempDir())
 	if check.Status != "pass" || !strings.Contains(check.Message, "not configured") {

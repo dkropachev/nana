@@ -52,10 +52,13 @@ func Doctor(cwd string, repoRoot string) error {
 	}
 	checks = append(checks,
 		checkAgentsMD(scope, cwd, paths.codexHomeDir),
+		checkAgentsRuntimeSections(scope, cwd, paths.codexHomeDir),
 		checkManagedAgentsFreshness(scope, cwd, paths.codexHomeDir, repoRoot),
 		checkManagedPromptFreshness(scope, cwd, paths.codexHomeDir, repoRoot),
 		checkManagedSkillFreshness(scope, cwd, paths.codexHomeDir, repoRoot),
 		checkDirectory("State dir", BaseStateDir(cwd)),
+		checkNanaStatePaths(cwd),
+		checkNanaJSONStateFiles(cwd),
 		checkMcpServers(paths.configPath),
 		checkDirectory("Investigate Codex home", ResolveInvestigateCodexHome(cwd)),
 		checkInvestigateConfig(cwd),
@@ -581,6 +584,209 @@ func checkAgentsMD(scope string, cwd string, codexHomeDir string) doctorCheck {
 		return doctorCheck{Name: "AGENTS.md", Status: "pass", Message: "found in project root"}
 	}
 	return doctorCheck{Name: "AGENTS.md", Status: "warn", Message: "not found in project root (run nana agents-init . or nana setup --scope project)"}
+}
+
+type doctorMarkerPair struct {
+	label string
+	start string
+	end   string
+}
+
+func checkAgentsRuntimeSections(scope string, cwd string, codexHomeDir string) doctorCheck {
+	path := resolveManagedAgentsPath(scope, cwd, codexHomeDir)
+	contentBytes, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return doctorCheck{Name: "AGENTS runtime guidance", Status: "warn", Message: fmt.Sprintf("%s not found", path)}
+		}
+		return doctorCheck{Name: "AGENTS runtime guidance", Status: "warn", Message: err.Error()}
+	}
+	content := string(contentBytes)
+	failures := []string{}
+	warnings := []string{}
+
+	if !strings.Contains(content, "<!-- nana:generated:agents-md -->") && !strings.Contains(content, managedMarker) {
+		warnings = append(warnings, "missing generated AGENTS marker")
+	}
+	if !strings.Contains(content, "<state_management>") || !strings.Contains(content, "</state_management>") {
+		warnings = append(warnings, "missing state_management section")
+	}
+	for _, literal := range []string{
+		".nana/state/",
+		".nana/notepad.md",
+		".nana/project-memory.json",
+		".nana/plans/",
+		".nana/logs/",
+	} {
+		if !strings.Contains(content, literal) {
+			warnings = append(warnings, fmt.Sprintf("missing %s reference", literal))
+		}
+	}
+
+	for _, pair := range []doctorMarkerPair{
+		{label: "NANA guidance operating", start: "<!-- NANA:GUIDANCE:OPERATING:START -->", end: "<!-- NANA:GUIDANCE:OPERATING:END -->"},
+		{label: "NANA guidance verify", start: "<!-- NANA:GUIDANCE:VERIFYSEQ:START -->", end: "<!-- NANA:GUIDANCE:VERIFYSEQ:END -->"},
+		{label: "NANA models", start: "<!-- NANA:MODELS:START -->", end: "<!-- NANA:MODELS:END -->"},
+		{label: "NANA runtime", start: "<!-- NANA:RUNTIME:START -->", end: "<!-- NANA:RUNTIME:END -->"},
+		{label: "NANA team worker", start: "<!-- NANA:TEAM:WORKER:START -->", end: "<!-- NANA:TEAM:WORKER:END -->"},
+	} {
+		status, detail := validateDoctorMarkerPair(content, pair)
+		switch status {
+		case "missing":
+			warnings = append(warnings, detail)
+		case "broken":
+			failures = append(failures, detail)
+		}
+	}
+
+	if len(failures) > 0 {
+		return doctorCheck{Name: "AGENTS runtime guidance", Status: "fail", Message: strings.Join(limitStrings(failures, 3), "; ")}
+	}
+	if len(warnings) > 0 {
+		return doctorCheck{Name: "AGENTS runtime guidance", Status: "warn", Message: fmt.Sprintf("%s; run nana setup --force --scope %s", strings.Join(limitStrings(warnings, 3), "; "), scope)}
+	}
+	return doctorCheck{Name: "AGENTS runtime guidance", Status: "pass", Message: "generated sections and overlay markers present"}
+}
+
+func validateDoctorMarkerPair(content string, pair doctorMarkerPair) (string, string) {
+	starts := allStringIndexes(content, pair.start)
+	ends := allStringIndexes(content, pair.end)
+	if len(starts) == 0 && len(ends) == 0 {
+		return "missing", fmt.Sprintf("%s markers missing", pair.label)
+	}
+	if len(starts) != len(ends) {
+		return "broken", fmt.Sprintf("%s marker count mismatch (start=%d end=%d)", pair.label, len(starts), len(ends))
+	}
+	lastEnd := -1
+	for index := range starts {
+		if starts[index] < lastEnd {
+			return "broken", fmt.Sprintf("%s markers overlap or are out of order", pair.label)
+		}
+		if ends[index] < starts[index] {
+			return "broken", fmt.Sprintf("%s end marker appears before start marker", pair.label)
+		}
+		lastEnd = ends[index] + len(pair.end)
+	}
+	return "ok", ""
+}
+
+func allStringIndexes(content string, needle string) []int {
+	indexes := []int{}
+	offset := 0
+	for {
+		index := strings.Index(content[offset:], needle)
+		if index < 0 {
+			return indexes
+		}
+		absolute := offset + index
+		indexes = append(indexes, absolute)
+		offset = absolute + len(needle)
+	}
+}
+
+func checkNanaStatePaths(cwd string) doctorCheck {
+	nanaDir := filepath.Join(cwd, ".nana")
+	dirs := []string{
+		nanaDir,
+		filepath.Join(nanaDir, "state"),
+		filepath.Join(nanaDir, "plans"),
+		filepath.Join(nanaDir, "logs"),
+	}
+	files := []string{
+		filepath.Join(nanaDir, "notepad.md"),
+		filepath.Join(nanaDir, "project-memory.json"),
+	}
+	failures := []string{}
+	missing := []string{}
+	for _, dir := range dirs {
+		info, err := os.Stat(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				missing = append(missing, filepath.ToSlash(mustRelative(cwd, dir)))
+				continue
+			}
+			failures = append(failures, fmt.Sprintf("%s: %v", filepath.ToSlash(mustRelative(cwd, dir)), err))
+			continue
+		}
+		if !info.IsDir() {
+			failures = append(failures, fmt.Sprintf("%s is not a directory", filepath.ToSlash(mustRelative(cwd, dir))))
+		}
+	}
+	for _, file := range files {
+		info, err := os.Stat(file)
+		if err != nil {
+			if os.IsNotExist(err) {
+				missing = append(missing, filepath.ToSlash(mustRelative(cwd, file)))
+				continue
+			}
+			failures = append(failures, fmt.Sprintf("%s: %v", filepath.ToSlash(mustRelative(cwd, file)), err))
+			continue
+		}
+		if info.IsDir() {
+			failures = append(failures, fmt.Sprintf("%s is not a file", filepath.ToSlash(mustRelative(cwd, file))))
+		}
+	}
+	if len(failures) > 0 {
+		return doctorCheck{Name: "NANA state paths", Status: "fail", Message: strings.Join(limitStrings(failures, 3), "; ")}
+	}
+	if len(missing) > 0 {
+		return doctorCheck{Name: "NANA state paths", Status: "warn", Message: fmt.Sprintf("missing %s (run nana setup)", strings.Join(limitStrings(missing, 4), ", "))}
+	}
+	return doctorCheck{Name: "NANA state paths", Status: "pass", Message: "required .nana paths present"}
+}
+
+func checkNanaJSONStateFiles(cwd string) doctorCheck {
+	paths := []string{}
+	for _, path := range []string{
+		filepath.Join(cwd, ".nana", "project-memory.json"),
+		filepath.Join(cwd, ".nana", "setup-scope.json"),
+		filepath.Join(cwd, ".nana", "hud-config.json"),
+	} {
+		if fileExists(path) {
+			paths = append(paths, path)
+		}
+	}
+
+	stateDir := BaseStateDir(cwd)
+	if info, err := os.Stat(stateDir); err == nil && info.IsDir() {
+		_ = filepath.WalkDir(stateDir, func(path string, entry os.DirEntry, err error) error {
+			if err != nil || entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+				return nil
+			}
+			paths = append(paths, path)
+			return nil
+		})
+	}
+
+	sort.Strings(paths)
+	invalid := []string{}
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			invalid = append(invalid, fmt.Sprintf("%s: %v", filepath.ToSlash(mustRelative(cwd, path)), err))
+			continue
+		}
+		var parsed any
+		if err := json.Unmarshal(content, &parsed); err != nil {
+			invalid = append(invalid, fmt.Sprintf("%s: %v", filepath.ToSlash(mustRelative(cwd, path)), err))
+		}
+	}
+	if len(invalid) > 0 {
+		return doctorCheck{Name: "NANA JSON state", Status: "fail", Message: strings.Join(limitStrings(invalid, 4), "; ")}
+	}
+	if len(paths) == 0 {
+		return doctorCheck{Name: "NANA JSON state", Status: "pass", Message: "no JSON state files yet"}
+	}
+	return doctorCheck{Name: "NANA JSON state", Status: "pass", Message: fmt.Sprintf("%d JSON state file(s) valid", len(paths))}
+}
+
+func limitStrings(values []string, limit int) []string {
+	if limit <= 0 || len(values) <= limit {
+		return values
+	}
+	limited := append([]string{}, values[:limit]...)
+	limited = append(limited, fmt.Sprintf("+%d more", len(values)-limit))
+	return limited
 }
 
 func checkMcpServers(configPath string) doctorCheck {
