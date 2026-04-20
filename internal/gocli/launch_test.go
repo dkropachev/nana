@@ -30,6 +30,7 @@ func TestResolveCLIInvocation(t *testing.T) {
 		{name: "repo", args: []string{"repo", "onboard"}, wantCmd: "repo", wantLaunch: nil},
 		{name: "start", args: []string{"start", "help"}, wantCmd: "start", wantLaunch: nil},
 		{name: "next", args: []string{"next", "--json"}, wantCmd: "next", wantLaunch: nil},
+		{name: "route", args: []string{"route", "--explain", "fix build"}, wantCmd: "route", wantLaunch: nil},
 		{name: "work", args: []string{"work", "help"}, wantCmd: "work", wantLaunch: nil},
 		{name: "work-on", args: []string{"work-on", "help"}, wantCmd: "work-on", wantLaunch: nil},
 		{name: "work-local", args: []string{"work-local", "help"}, wantCmd: "work-local", wantLaunch: nil},

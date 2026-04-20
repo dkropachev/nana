@@ -96,6 +96,132 @@ func TestVerifyEmitsJSONEvidence(t *testing.T) {
 	}
 }
 
+func TestVerifyDryRunJSONListsPlanWithoutRunningCommands(t *testing.T) {
+	repo := t.TempDir()
+	profile := `{
+  "version": 1,
+  "name": "dry-profile",
+  "description": "dry run profile",
+  "stages": [
+    {
+      "name":"lint",
+      "description":"check formatting",
+      "command":"printf should-not-run > marker.txt",
+      "dependency_group":"static",
+      "expected_artifact":"no gofmt drift",
+      "estimated_cost":"low",
+      "success_criteria":"gofmt reports no changed files"
+    },
+    {
+      "name":"static-analysis",
+      "description":"run vet",
+      "command":"printf also-should-not-run > marker.txt",
+      "dependency_group":"static",
+      "expected_artifact":"go vet is clean",
+      "estimated_cost":"medium"
+    },
+    {
+      "name":"test",
+      "command":"printf default-metadata > marker.txt"
+    }
+  ]
+}
+`
+	if err := os.WriteFile(filepath.Join(repo, VerifyProfileFile), []byte(profile), 0o644); err != nil {
+		t.Fatalf("write profile: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error { return Verify(repo, []string{"--json", "--dry-run"}) })
+	if err != nil {
+		t.Fatalf("Verify(--json --dry-run): %v\n%s", err, output)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "marker.txt")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run executed a stage command; marker stat error=%v", err)
+	}
+	var plan verificationPlan
+	if err := json.Unmarshal([]byte(output), &plan); err != nil {
+		t.Fatalf("unmarshal plan: %v\n%s", err, output)
+	}
+	if !plan.DryRun || plan.RepoRoot != repo || plan.Profile.Name != "dry-profile" {
+		t.Fatalf("unexpected plan header: %#v", plan)
+	}
+	if plan.ExecutionMode != "profile-order" || plan.SuccessCriteria != "all stages exit with status 0" {
+		t.Fatalf("unexpected plan execution metadata: %#v", plan)
+	}
+	if len(plan.Stages) != 3 {
+		t.Fatalf("expected 3 plan stages, got %#v", plan.Stages)
+	}
+	lint := plan.Stages[0]
+	if lint.Name != "lint" || lint.Command != "printf should-not-run > marker.txt" {
+		t.Fatalf("unexpected lint stage: %#v", lint)
+	}
+	if lint.DependencyGroup != "static" || !lint.CanRunInParallel {
+		t.Fatalf("expected lint to be marked parallel-eligible in static group: %#v", lint)
+	}
+	if lint.ExpectedArtifact != "no gofmt drift" || lint.EstimatedCost != "low" {
+		t.Fatalf("unexpected lint artifact/cost metadata: %#v", lint)
+	}
+	if lint.SuccessCriteria != "gofmt reports no changed files" {
+		t.Fatalf("unexpected lint success criteria: %#v", lint)
+	}
+	if !strings.Contains(lint.SelectionReason, "check formatting") {
+		t.Fatalf("expected selection reason to include stage description: %#v", lint)
+	}
+	staticAnalysis := plan.Stages[1]
+	if staticAnalysis.DependencyGroup != "static" || !staticAnalysis.CanRunInParallel {
+		t.Fatalf("expected static-analysis to be marked parallel-eligible in static group: %#v", staticAnalysis)
+	}
+	defaulted := plan.Stages[2]
+	if defaulted.DependencyGroup != "profile-order-3" || defaulted.CanRunInParallel {
+		t.Fatalf("unexpected default dependency group metadata: %#v", defaulted)
+	}
+	if defaulted.SuccessCriteria != "command exits with status 0" {
+		t.Fatalf("unexpected default success criteria: %#v", defaulted)
+	}
+}
+
+func TestVerifyDryRunHumanOutputListsPlanWithoutRunningCommands(t *testing.T) {
+	repo := t.TempDir()
+	profile := `{
+  "version": 1,
+  "name": "human-dry-profile",
+  "stages": [
+    {
+      "name":"lint",
+      "description":"check formatting",
+      "command":"printf should-not-run > marker.txt",
+      "dependency_group":"static",
+      "expected_artifact":"no gofmt drift",
+      "estimated_cost":"low"
+    }
+  ]
+}
+`
+	if err := os.WriteFile(filepath.Join(repo, VerifyProfileFile), []byte(profile), 0o644); err != nil {
+		t.Fatalf("write profile: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error { return Verify(repo, []string{"--dry-run"}) })
+	if err != nil {
+		t.Fatalf("Verify(--dry-run): %v\n%s", err, output)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "marker.txt")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run executed a stage command; marker stat error=%v", err)
+	}
+	for _, needle := range []string{
+		"[verify] dry-run: human-dry-profile",
+		"[verify] execution: profile-order; success: all stages exit with status 0",
+		"[verify] lint: printf should-not-run > marker.txt",
+		"[verify]   dependency_group: static; parallel: no",
+		"[verify]   expected_artifact: no gofmt drift",
+		"[verify]   estimated_cost: low",
+	} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("expected %q in dry-run output:\n%s", needle, output)
+		}
+	}
+}
+
 func TestVerifyJSONEvidenceReportsBoundedOutputMetadata(t *testing.T) {
 	t.Setenv(verifyOutputLimitEnv, "6")
 	repo := t.TempDir()

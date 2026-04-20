@@ -6,22 +6,38 @@
     {
       "name": "lint",
       "description": "Check Go formatting without modifying files.",
-      "command": "make lint"
+      "command": "make lint",
+      "dependency_group": "static",
+      "expected_artifact": "no gofmt drift in cmd/ or internal/",
+      "estimated_cost": "low",
+      "success_criteria": "make lint exits 0 and prints no unformatted Go files"
     },
     {
       "name": "typecheck",
       "description": "Compile Go packages and tests without running test bodies.",
-      "command": "make typecheck"
+      "command": "make typecheck",
+      "dependency_group": "compile",
+      "expected_artifact": "all Go packages and test packages compile",
+      "estimated_cost": "medium",
+      "success_criteria": "make typecheck exits 0"
     },
     {
       "name": "test",
       "description": "Run the Go test suite.",
-      "command": "make test"
+      "command": "make test",
+      "dependency_group": "test",
+      "expected_artifact": "Go test suite passes",
+      "estimated_cost": "medium",
+      "success_criteria": "make test exits 0"
     },
     {
       "name": "static-analysis",
       "description": "Run Go static analysis checks.",
-      "command": "make static-analysis"
+      "command": "make static-analysis",
+      "dependency_group": "static",
+      "expected_artifact": "go vet reports no issues",
+      "estimated_cost": "low",
+      "success_criteria": "make static-analysis exits 0"
     }
   ]
 }

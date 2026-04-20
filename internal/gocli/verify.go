@@ -25,15 +25,16 @@ const (
 const VerifyHelp = `nana verify - Run the repository-native verification profile
 
 Usage:
-  nana verify [--json]
+  nana verify [--json] [--dry-run]
   nana verify --profile [--json]
 
 Options:
   --json       Emit machine-readable JSON evidence.
+  --dry-run    Print the verification plan without running commands.
   --profile    Print the detected verification profile without running commands.
 
 Profile:
-  ` + VerifyProfileFile + ` defines the canonical sequential stages for this repo.
+  ` + VerifyProfileFile + ` defines the canonical profile-order stages for this repo.
   Nana searches the current directory and its parents for the profile file.
 `
 
@@ -45,9 +46,13 @@ type verificationProfile struct {
 }
 
 type verificationStageProfile struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	Command     string `json:"command"`
+	Name             string `json:"name"`
+	Description      string `json:"description,omitempty"`
+	Command          string `json:"command"`
+	DependencyGroup  string `json:"dependency_group,omitempty"`
+	ExpectedArtifact string `json:"expected_artifact,omitempty"`
+	EstimatedCost    string `json:"estimated_cost,omitempty"`
+	SuccessCriteria  string `json:"success_criteria,omitempty"`
 }
 
 type verificationCommandEvidence struct {
@@ -79,8 +84,33 @@ type verificationEvidence struct {
 	Stages         []verificationCommandEvidence `json:"stages"`
 }
 
+type verificationPlan struct {
+	Version         int                     `json:"version"`
+	GeneratedAt     string                  `json:"generated_at"`
+	RepoRoot        string                  `json:"repo_root"`
+	ProfilePath     string                  `json:"profile_path"`
+	Profile         verificationProfile     `json:"profile"`
+	DryRun          bool                    `json:"dry_run"`
+	ExecutionMode   string                  `json:"execution_mode"`
+	SuccessCriteria string                  `json:"success_criteria"`
+	Stages          []verificationPlanStage `json:"stages"`
+}
+
+type verificationPlanStage struct {
+	Name             string `json:"name"`
+	Description      string `json:"description,omitempty"`
+	Command          string `json:"command"`
+	DependencyGroup  string `json:"dependency_group"`
+	SelectionReason  string `json:"selection_reason"`
+	CanRunInParallel bool   `json:"can_run_in_parallel"`
+	ExpectedArtifact string `json:"expected_artifact,omitempty"`
+	EstimatedCost    string `json:"estimated_cost,omitempty"`
+	SuccessCriteria  string `json:"success_criteria"`
+}
+
 type verifyOptions struct {
 	JSON        bool
+	DryRun      bool
 	ProfileOnly bool
 	Help        bool
 }
@@ -105,6 +135,9 @@ func Verify(cwd string, args []string) error {
 	}
 	if options.ProfileOnly {
 		return printVerificationProfile(profilePath, profile, options.JSON)
+	}
+	if options.DryRun {
+		return printVerificationPlan(buildVerificationPlan(repoRoot, profilePath, profile), options.JSON)
 	}
 
 	runOptions := defaultVerificationRunOptions()
@@ -131,6 +164,8 @@ func parseVerifyOptions(args []string) (verifyOptions, error) {
 		switch token {
 		case "--json", "-j":
 			options.JSON = true
+		case "--dry-run", "dry-run", "--explain", "explain":
+			options.DryRun = true
 		case "--profile", "profile", "list":
 			options.ProfileOnly = true
 		case "--help", "-h", "help":
@@ -192,6 +227,10 @@ func normalizeVerificationProfile(profile *verificationProfile) error {
 		stage.Name = strings.TrimSpace(stage.Name)
 		stage.Description = strings.TrimSpace(stage.Description)
 		stage.Command = strings.TrimSpace(stage.Command)
+		stage.DependencyGroup = strings.TrimSpace(stage.DependencyGroup)
+		stage.ExpectedArtifact = strings.TrimSpace(stage.ExpectedArtifact)
+		stage.EstimatedCost = strings.TrimSpace(stage.EstimatedCost)
+		stage.SuccessCriteria = strings.TrimSpace(stage.SuccessCriteria)
 		if stage.Name == "" {
 			return fmt.Errorf("stage %d is missing name", index+1)
 		}
@@ -204,6 +243,57 @@ func normalizeVerificationProfile(profile *verificationProfile) error {
 		seen[stage.Name] = true
 	}
 	return nil
+}
+
+func buildVerificationPlan(repoRoot string, profilePath string, profile verificationProfile) verificationPlan {
+	dependencyGroups := make([]string, len(profile.Stages))
+	dependencyGroupCounts := map[string]int{}
+	for index, stage := range profile.Stages {
+		group := verificationStageDependencyGroup(stage, index)
+		dependencyGroups[index] = group
+		dependencyGroupCounts[group]++
+	}
+
+	plan := verificationPlan{
+		Version:         1,
+		GeneratedAt:     ISOTimeNow(),
+		RepoRoot:        repoRoot,
+		ProfilePath:     profilePath,
+		Profile:         profile,
+		DryRun:          true,
+		ExecutionMode:   "profile-order",
+		SuccessCriteria: "all stages exit with status 0",
+	}
+	for index, stage := range profile.Stages {
+		group := dependencyGroups[index]
+		plan.Stages = append(plan.Stages, verificationPlanStage{
+			Name:             stage.Name,
+			Description:      stage.Description,
+			Command:          stage.Command,
+			DependencyGroup:  group,
+			SelectionReason:  verificationStageSelectionReason(profilePath, profile, stage),
+			CanRunInParallel: dependencyGroupCounts[group] > 1,
+			ExpectedArtifact: stage.ExpectedArtifact,
+			EstimatedCost:    stage.EstimatedCost,
+			SuccessCriteria:  defaultString(stage.SuccessCriteria, "command exits with status 0"),
+		})
+	}
+	return plan
+}
+
+func verificationStageDependencyGroup(stage verificationStageProfile, index int) string {
+	if stage.DependencyGroup != "" {
+		return stage.DependencyGroup
+	}
+	return fmt.Sprintf("profile-order-%d", index+1)
+}
+
+func verificationStageSelectionReason(profilePath string, profile verificationProfile, stage verificationStageProfile) string {
+	profileName := defaultString(profile.Name, filepath.Base(profilePath))
+	if stage.Description != "" {
+		return fmt.Sprintf("selected by %s profile: %s", profileName, stage.Description)
+	}
+	return fmt.Sprintf("selected by %s profile", profileName)
 }
 
 func defaultVerificationRunOptions() verificationRunOptions {
@@ -319,6 +409,31 @@ func printVerificationProfile(profilePath string, profile verificationProfile, j
 	fmt.Fprintf(os.Stdout, "[verify] profile: %s (%s)\n", defaultString(profile.Name, "repository"), profilePath)
 	for _, stage := range profile.Stages {
 		fmt.Fprintf(os.Stdout, "[verify] %s: %s\n", stage.Name, stage.Command)
+	}
+	return nil
+}
+
+func printVerificationPlan(plan verificationPlan, jsonOutput bool) error {
+	if jsonOutput {
+		return writeIndentedJSON(plan)
+	}
+	fmt.Fprintf(os.Stdout, "[verify] dry-run: %s (%s)\n", defaultString(plan.Profile.Name, "repository"), plan.ProfilePath)
+	fmt.Fprintf(os.Stdout, "[verify] execution: %s; success: %s\n", plan.ExecutionMode, plan.SuccessCriteria)
+	for _, stage := range plan.Stages {
+		parallel := "no"
+		if stage.CanRunInParallel {
+			parallel = "yes"
+		}
+		fmt.Fprintf(os.Stdout, "[verify] %s: %s\n", stage.Name, stage.Command)
+		fmt.Fprintf(os.Stdout, "[verify]   dependency_group: %s; parallel: %s\n", stage.DependencyGroup, parallel)
+		fmt.Fprintf(os.Stdout, "[verify]   success: %s\n", stage.SuccessCriteria)
+		fmt.Fprintf(os.Stdout, "[verify]   why: %s\n", stage.SelectionReason)
+		if stage.ExpectedArtifact != "" {
+			fmt.Fprintf(os.Stdout, "[verify]   expected_artifact: %s\n", stage.ExpectedArtifact)
+		}
+		if stage.EstimatedCost != "" {
+			fmt.Fprintf(os.Stdout, "[verify]   estimated_cost: %s\n", stage.EstimatedCost)
+		}
 	}
 	return nil
 }
