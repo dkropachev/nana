@@ -41,52 +41,8 @@ func TestSetupProjectDryRunDoesNotPersistScope(t *testing.T) {
 	if !strings.Contains(output, "Using setup scope: project") {
 		t.Fatalf("unexpected setup output: %q", output)
 	}
-	for _, needle := range []string{
-		"Setup target:",
-		"  scope: project",
-		"  destination: " + filepath.Join(cwd, "AGENTS.md"),
-		"  will_overwrite: false",
-		"  verify_with: nana doctor",
-	} {
-		if !strings.Contains(output, needle) {
-			t.Fatalf("setup output missing %q: %q", needle, output)
-		}
-	}
 	if fileExists(filepath.Join(cwd, ".nana", "setup-scope.json")) {
 		t.Fatalf("setup-scope.json should not be written during dry-run")
-	}
-}
-
-func TestSetupProjectDryRunForceReportsAgentsOverwriteIntent(t *testing.T) {
-	cwd, repoRoot := setupTestFixture(t)
-	home := filepath.Join(cwd, "home")
-	t.Setenv("HOME", home)
-	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
-	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("# existing policy\n"), 0o644); err != nil {
-		t.Fatalf("write existing AGENTS.md: %v", err)
-	}
-
-	output, err := captureStdout(t, func() error { return Setup(repoRoot, cwd, []string{"--scope", "project", "--dry-run", "--force"}) })
-	if err != nil {
-		t.Fatalf("Setup(): %v", err)
-	}
-	for _, needle := range []string{
-		"Setup target:",
-		"  scope: project",
-		"  destination: " + filepath.Join(cwd, "AGENTS.md"),
-		"  will_overwrite: true",
-		"  verify_with: nana doctor",
-	} {
-		if !strings.Contains(output, needle) {
-			t.Fatalf("setup output missing %q: %q", needle, output)
-		}
-	}
-	content, err := os.ReadFile(filepath.Join(cwd, "AGENTS.md"))
-	if err != nil {
-		t.Fatalf("read existing AGENTS.md: %v", err)
-	}
-	if string(content) != "# existing policy\n" {
-		t.Fatalf("dry-run force should not rewrite AGENTS.md, got %q", content)
 	}
 }
 
@@ -371,6 +327,151 @@ func TestSetupProjectExistingAgentsNonForceSkipsWithoutReadingTarget(t *testing.
 	}
 }
 
+func TestSetupUserExistingUnmanagedAgentsNonForcePreservesGlobalInstructions(t *testing.T) {
+	cwd, repoRoot := setupTestFixture(t)
+	home := filepath.Join(cwd, "home")
+	codexHome := filepath.Join(home, ".codex")
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+
+	agentsPath := filepath.Join(codexHome, "AGENTS.md")
+	customAgents := "# custom global instructions\n\nDo not overwrite me.\n"
+	if err := os.MkdirAll(filepath.Dir(agentsPath), 0o755); err != nil {
+		t.Fatalf("mkdir codex home: %v", err)
+	}
+	if err := os.WriteFile(agentsPath, []byte(customAgents), 0o644); err != nil {
+		t.Fatalf("write custom AGENTS.md: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error { return Setup(repoRoot, cwd, []string{"--scope", "user"}) })
+	if err != nil {
+		t.Fatalf("Setup(): %v", err)
+	}
+	if !strings.Contains(output, "Skipped AGENTS.md overwrite") {
+		t.Fatalf("expected setup to skip unmanaged user AGENTS.md, got %q", output)
+	}
+	content, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if string(content) != customAgents {
+		t.Fatalf("setup overwrote unmanaged user AGENTS.md:\n%s", content)
+	}
+	if !fileExists(filepath.Join(codexHome, "config.toml")) {
+		t.Fatalf("setup should still repair missing user config")
+	}
+	if !fileExists(filepath.Join(cwd, ".nana", "state")) {
+		t.Fatalf("setup should still repair missing NANA state dirs")
+	}
+}
+
+func TestSetupUserAgentsPathConflictFailsWithActionableRemediation(t *testing.T) {
+	cwd, repoRoot := setupTestFixture(t)
+	home := filepath.Join(cwd, "home")
+	codexHome := filepath.Join(home, ".codex")
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+
+	agentsPath := filepath.Join(codexHome, "AGENTS.md")
+	if err := os.MkdirAll(agentsPath, 0o755); err != nil {
+		t.Fatalf("create AGENTS.md path conflict: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error { return Setup(repoRoot, cwd, []string{"--scope", "user"}) })
+	if err == nil {
+		t.Fatalf("expected setup failure for user AGENTS.md path conflict")
+	}
+	if strings.Contains(output, "Skipped AGENTS.md overwrite") {
+		t.Fatalf("path conflict should not be silently skipped, got output %q", output)
+	}
+	text := err.Error()
+	for _, want := range []string{
+		`setup phase "write AGENTS.md" failed`,
+		"AGENTS.md exists and is a directory",
+		"affected path: " + agentsPath,
+		"safe automatic fix: no",
+		"manual fallback: inspect the affected path",
+		"nana setup --scope user",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("setup error missing %q in:\n%s", want, text)
+		}
+	}
+}
+
+func TestSetupUserExistingAgentsInitManagedFileNonForcePreservesManualSection(t *testing.T) {
+	cwd, repoRoot := setupTestFixture(t)
+	home := filepath.Join(cwd, "home")
+	codexHome := filepath.Join(home, ".codex")
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+
+	agentsPath := filepath.Join(codexHome, "AGENTS.md")
+	manualAgents := strings.Join([]string{
+		managedMarker,
+		"# Lightweight local file",
+		manualStart,
+		"Keep this manual note.",
+		manualEnd,
+		"",
+	}, "\n")
+	if err := os.MkdirAll(filepath.Dir(agentsPath), 0o755); err != nil {
+		t.Fatalf("mkdir codex home: %v", err)
+	}
+	if err := os.WriteFile(agentsPath, []byte(manualAgents), 0o644); err != nil {
+		t.Fatalf("write agents-init AGENTS.md: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error { return Setup(repoRoot, cwd, []string{"--scope", "user"}) })
+	if err != nil {
+		t.Fatalf("Setup(): %v", err)
+	}
+	if !strings.Contains(output, "Skipped AGENTS.md overwrite") {
+		t.Fatalf("expected setup to skip non-setup-managed user AGENTS.md, got %q", output)
+	}
+	content, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if string(content) != manualAgents {
+		t.Fatalf("setup overwrote user AGENTS.md manual section:\n%s", content)
+	}
+}
+
+func TestSetupUserExistingGeneratedAgentsNonForceRefreshes(t *testing.T) {
+	cwd, repoRoot := setupTestFixture(t)
+	home := filepath.Join(cwd, "home")
+	codexHome := filepath.Join(home, ".codex")
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+
+	agentsPath := filepath.Join(codexHome, "AGENTS.md")
+	if err := os.MkdirAll(filepath.Dir(agentsPath), 0o755); err != nil {
+		t.Fatalf("mkdir codex home: %v", err)
+	}
+	if err := os.WriteFile(agentsPath, []byte("<!-- nana:generated:agents-md -->\nstale ~/.codex\n"), 0o644); err != nil {
+		t.Fatalf("write stale generated AGENTS.md: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error { return Setup(repoRoot, cwd, []string{"--scope", "user"}) })
+	if err != nil {
+		t.Fatalf("Setup(): %v", err)
+	}
+	if strings.Contains(output, "Skipped AGENTS.md overwrite") {
+		t.Fatalf("generated user AGENTS.md should be refreshable without --force, got %q", output)
+	}
+	content, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	text := string(content)
+	if text == "<!-- nana:generated:agents-md -->\nstale ~/.codex\n" ||
+		!strings.Contains(text, "<!-- nana:generated:agents-md -->") ||
+		!strings.Contains(text, "Compact Runtime Policy") {
+		t.Fatalf("expected generated user AGENTS.md refresh, got %q", content)
+	}
+}
+
 func TestSetupWarmRunKeepsGeneratedArtifactsAndCacheUnchanged(t *testing.T) {
 	cwd, repoRoot := setupTestFixture(t)
 	home := filepath.Join(cwd, "home")
@@ -493,6 +594,26 @@ func TestSetupChecksumCacheRefreshesSameSizeChangedGeneratedFileWithPreservedMet
 	}
 	if string(content) != "# executor\n" {
 		t.Fatalf("expected setup to restore prompt from source, got %q", content)
+	}
+}
+
+func TestSetupFailureErrorIncludesActionableRemediation(t *testing.T) {
+	target := filepath.Join(t.TempDir(), ".codex", "config.toml")
+	err := newSetupFailureError("write config", target, "project", os.ErrPermission)
+	if err == nil {
+		t.Fatalf("expected setup failure error")
+	}
+	text := err.Error()
+	for _, want := range []string{
+		`setup phase "write config" failed: permission denied`,
+		"affected path: " + target,
+		"safe automatic fix: no",
+		"manual fallback: inspect the affected path",
+		"nana setup --scope project",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("setup failure missing %q in:\n%s", want, text)
+		}
 	}
 }
 

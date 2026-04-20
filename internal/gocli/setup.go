@@ -89,7 +89,6 @@ func Setup(repoRoot string, cwd string, args []string) error {
 		options.writeCache = loadSetupWriteCache(setupWriteCachePath(cwd))
 	}
 	scopeDirs := resolveSetupScopeDirectories(cwd, options.Scope)
-	printSetupTargetSummary(os.Stdout, repoRoot, cwd, scopeDirs.codexHomeDir, options)
 	if options.Scope == "user" {
 		fmt.Fprintln(os.Stdout, "User scope leaves project AGENTS.md unchanged.")
 	}
@@ -97,37 +96,38 @@ func Setup(repoRoot string, cwd string, args []string) error {
 	if err := runSetupPhase(options, "install prompts", func() error {
 		return installPrompts(repoRoot, scopeDirs.promptsDir, options)
 	}); err != nil {
-		return err
+		return newSetupFailureError("install prompts", scopeDirs.promptsDir, options.Scope, err)
 	}
 	if err := runSetupPhase(options, "install skills", func() error {
 		return installSkills(repoRoot, scopeDirs.skillsDir, options)
 	}); err != nil {
-		return err
+		return newSetupFailureError("install skills", scopeDirs.skillsDir, options.Scope, err)
 	}
 	if err := runSetupPhase(options, "install native agents", func() error {
 		return installAgents(scopeDirs.nativeAgentsDir, options)
 	}); err != nil {
-		return err
+		return newSetupFailureError("install native agents", scopeDirs.nativeAgentsDir, options.Scope, err)
 	}
 	if err := runSetupPhase(options, "ensure nana dirs", func() error {
 		return ensureNanaDirectories(cwd, options)
 	}); err != nil {
-		return err
+		return newSetupFailureError("ensure nana dirs", filepath.Join(cwd, ".nana"), options.Scope, err)
 	}
 	if err := runSetupPhase(options, "write config", func() error {
 		return writeSetupConfig(scopeDirs.codexConfigFile, options)
 	}); err != nil {
-		return err
+		return newSetupFailureError("write config", scopeDirs.codexConfigFile, options.Scope, err)
 	}
 	if err := runSetupPhase(options, "write AGENTS.md", func() error {
 		return writeSetupAgentsMd(repoRoot, cwd, scopeDirs.codexHomeDir, options)
 	}); err != nil {
-		return err
+		agentsPath := resolveManagedAgentsPath(resolveScopeForAgentsTarget(cwd, scopeDirs.codexHomeDir), cwd, scopeDirs.codexHomeDir)
+		return newSetupFailureError("write AGENTS.md", agentsPath, options.Scope, err)
 	}
 	if err := runSetupPhase(options, "install investigate home", func() error {
 		return installInvestigateCodexHome(repoRoot, cwd, options.Scope, options, scopeDirs.codexHomeDir)
 	}); err != nil {
-		return err
+		return newSetupFailureError("install investigate home", resolveInvestigateScopeDirectories(cwd, options.Scope).codexHomeDir, options.Scope, err)
 	}
 	if err := runSetupPhase(options, "persist setup scope", func() error {
 		if !options.DryRun {
@@ -142,12 +142,12 @@ func Setup(repoRoot string, cwd string, args []string) error {
 		}
 		return nil
 	}); err != nil {
-		return err
+		return newSetupFailureError("persist setup scope", filepath.Join(cwd, ".nana", "setup-scope.json"), options.Scope, err)
 	}
 	if err := runSetupPhase(options, "persist setup cache", func() error {
 		return options.writeCache.save()
 	}); err != nil {
-		return err
+		return newSetupFailureError("persist setup cache", setupWriteCachePath(cwd), options.Scope, err)
 	}
 	options.stats.printSummary(os.Stdout, options.DryRun)
 	options.timer.printSummary(os.Stdout)
@@ -242,32 +242,6 @@ func resolveInvestigateScopeDirectories(cwd string, scope string) setupScopeDire
 		promptsDir:      filepath.Join(codexHomeDir, "prompts"),
 		skillsDir:       filepath.Join(codexHomeDir, "skills"),
 	}
-}
-
-func printSetupTargetSummary(out *os.File, repoRoot string, cwd string, codexHomeDir string, options SetupOptions) {
-	targetScope := resolveScopeForAgentsTarget(cwd, codexHomeDir)
-	destination := resolveManagedAgentsPath(targetScope, cwd, codexHomeDir)
-	fmt.Fprintln(out, "Setup target:")
-	fmt.Fprintf(out, "  scope: %s\n", options.Scope)
-	fmt.Fprintf(out, "  destination: %s\n", destination)
-	fmt.Fprintf(out, "  will_overwrite: %t\n", setupWillOverwriteAgentsTarget(repoRoot, cwd, codexHomeDir, destination, targetScope, options))
-	fmt.Fprintln(out, "  verify_with: nana doctor")
-	fmt.Fprintln(out)
-}
-
-func setupWillOverwriteAgentsTarget(repoRoot string, cwd string, codexHomeDir string, targetPath string, targetScope string, options SetupOptions) bool {
-	if targetScope == "project" && filepath.Clean(targetPath) == filepath.Clean(filepath.Join(cwd, "AGENTS.md")) && !options.Force {
-		return false
-	}
-	existing, err := os.ReadFile(targetPath)
-	if err != nil {
-		return false
-	}
-	expected, err := renderManagedAgentsContent(repoRoot, cwd, codexHomeDir, targetPath)
-	if err != nil {
-		return true
-	}
-	return sha256BytesHex(existing) != sha256BytesHex([]byte(expected))
 }
 
 func installInvestigateCodexHome(repoRoot string, cwd string, scope string, options SetupOptions, sourceCodexHome string) error {
@@ -488,8 +462,13 @@ func writeSetupConfig(configPath string, options SetupOptions) error {
 }
 
 func writeSetupAgentsMd(repoRoot string, cwd string, codexHomeDir string, options SetupOptions) error {
-	targetPath := resolveManagedAgentsPath(resolveScopeForAgentsTarget(cwd, codexHomeDir), cwd, codexHomeDir)
-	if filepath.Clean(targetPath) == filepath.Clean(filepath.Join(cwd, "AGENTS.md")) && fileExists(targetPath) && !options.Force {
+	scope := resolveScopeForAgentsTarget(cwd, codexHomeDir)
+	targetPath := resolveManagedAgentsPath(scope, cwd, codexHomeDir)
+	skip, err := shouldSkipSetupAgentsMdOverwrite(targetPath, scope, cwd, options)
+	if err != nil {
+		return err
+	}
+	if skip {
 		fmt.Fprintln(os.Stdout, "Skipped AGENTS.md overwrite")
 		return nil
 	}
@@ -500,6 +479,30 @@ func writeSetupAgentsMd(repoRoot string, cwd string, codexHomeDir string, option
 	return writeFileIfChanged(targetPath, content, options)
 }
 
+func shouldSkipSetupAgentsMdOverwrite(targetPath string, scope string, cwd string, options SetupOptions) (bool, error) {
+	if options.Force {
+		return false, nil
+	}
+	info, err := os.Stat(targetPath)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect existing AGENTS.md at %s: %w", targetPath, err)
+	}
+	if scope == "project" || filepath.Clean(targetPath) == filepath.Clean(filepath.Join(cwd, "AGENTS.md")) {
+		return true, nil
+	}
+	if info.IsDir() {
+		return false, fmt.Errorf("%s exists and is a directory", targetPath)
+	}
+	content, err := os.ReadFile(targetPath)
+	if err != nil {
+		return false, fmt.Errorf("read existing AGENTS.md at %s: %w", targetPath, err)
+	}
+	return !isNanaSetupGeneratedAgentsContent(string(content)), nil
+}
+
 func resolveScopeForAgentsTarget(cwd string, codexHomeDir string) string {
 	if strings.Contains(codexHomeDir, filepath.Join(cwd, ".codex")) {
 		return "project"
@@ -507,8 +510,16 @@ func resolveScopeForAgentsTarget(cwd string, codexHomeDir string) string {
 	return "user"
 }
 
+func isNanaManagedAgentsContent(content string) bool {
+	return isNanaSetupGeneratedAgentsContent(content) || strings.Contains(content, managedMarker)
+}
+
+func isNanaSetupGeneratedAgentsContent(content string) bool {
+	return hasStandaloneGeneratedAgentsMarker(content)
+}
+
 func addGeneratedAgentsMarker(content string) string {
-	if hasStandaloneGeneratedAgentsMarker(content) {
+	if isNanaSetupGeneratedAgentsContent(content) {
 		return content
 	}
 	marker := "<!-- END AUTONOMY DIRECTIVE -->"
@@ -769,6 +780,36 @@ func runSetupPhase(options SetupOptions, name string, fn func() error) error {
 		Duration: time.Since(start),
 	})
 	return err
+}
+
+type setupFailureError struct {
+	Phase string
+	Path  string
+	Scope string
+	Err   error
+}
+
+func newSetupFailureError(phase string, path string, scope string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return setupFailureError{Phase: phase, Path: path, Scope: scope, Err: err}
+}
+
+func (e setupFailureError) Error() string {
+	lines := []string{fmt.Sprintf("setup phase %q failed: %v", e.Phase, e.Err)}
+	if e.Path != "" {
+		lines = append(lines, fmt.Sprintf("affected path: %s", e.Path))
+	}
+	lines = append(lines,
+		"safe automatic fix: no — setup already attempted this write phase",
+		fmt.Sprintf("manual fallback: inspect the affected path, repair permissions or path conflicts, then run `%s`", setupFixCommand(e.Scope)),
+	)
+	return strings.Join(lines, "\n")
+}
+
+func (e setupFailureError) Unwrap() error {
+	return e.Err
 }
 
 func (t *setupPhaseTimer) printSummary(out *os.File) {

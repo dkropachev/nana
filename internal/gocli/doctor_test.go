@@ -78,6 +78,192 @@ func TestCheckMcpServersPassesWhenOnlyNonNanaServersConfigured(t *testing.T) {
 	}
 }
 
+func TestCheckConfigReportsReadConflictAsManualRemediation(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.Mkdir(configPath, 0o755); err != nil {
+		t.Fatalf("mkdir config path: %v", err)
+	}
+
+	check := checkConfig(configPath, "project")
+	if check.Status != "fail" {
+		t.Fatalf("expected fail, got %#v", check)
+	}
+	if strings.Contains(check.Message, "not found") || !strings.Contains(check.Message, "cannot be read") {
+		t.Fatalf("expected read error message, got %q", check.Message)
+	}
+	if check.Remediation == nil {
+		t.Fatalf("expected remediation")
+	}
+	if !strings.HasPrefix(check.Remediation.SafeAutomaticFix, "no") {
+		t.Fatalf("read conflict should not be marked safe, got %#v", check.Remediation)
+	}
+	if !strings.Contains(check.Remediation.ManualFallback, "path conflict") {
+		t.Fatalf("expected path conflict fallback, got %#v", check.Remediation)
+	}
+}
+
+func TestProjectSetupRemediationDoesNotForceOverwriteCustomAgents(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("# custom project instructions\n"), 0o644); err != nil {
+		t.Fatalf("write custom AGENTS.md: %v", err)
+	}
+
+	agentsCheck := checkAgentsMD("project", cwd, filepath.Join(cwd, ".codex"))
+	if agentsCheck.Status != "pass" {
+		t.Fatalf("expected existing AGENTS.md to pass, got %#v", agentsCheck)
+	}
+
+	configCheck := checkConfig(filepath.Join(cwd, ".codex", "config.toml"), "project")
+	if configCheck.Status != "warn" || !strings.Contains(configCheck.Message, "config.toml not found") {
+		t.Fatalf("expected missing config warning, got %#v", configCheck)
+	}
+	stateCheck := checkNanaStatePaths(cwd, "project")
+	if stateCheck.Status != "warn" || !strings.Contains(stateCheck.Message, "missing .nana") {
+		t.Fatalf("expected missing state warning, got %#v", stateCheck)
+	}
+
+	var out strings.Builder
+	printDoctorRemediations(&out, []doctorCheck{configCheck, stateCheck})
+	text := out.String()
+	if strings.Contains(text, "--force") {
+		t.Fatalf("safe setup remediation must not force-overwrite custom AGENTS.md:\n%s", text)
+	}
+	if count := strings.Count(text, "Safe automatic fix: yes — run `nana setup --scope project`"); count != 2 {
+		t.Fatalf("expected safe non-force project setup for both remediations, count=%d output:\n%s", count, text)
+	}
+}
+
+func TestDoctorWithCustomProjectAgentsDoesNotSuggestForceOverwrite(t *testing.T) {
+	cwd := t.TempDir()
+	home := filepath.Join(cwd, "home")
+	fakeBin := filepath.Join(cwd, "bin")
+	repoRoot := filepath.Join("..", "..")
+	if err := os.MkdirAll(filepath.Join(cwd, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir .nana: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, ".nana", "setup-scope.json"), []byte(`{"scope":"project"}`), 0o644); err != nil {
+		t.Fatalf("write setup scope: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("# custom project instructions\n\nKeep local policy.\n"), 0o644); err != nil {
+		t.Fatalf("write custom AGENTS.md: %v", err)
+	}
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex 0.0.0-test'; exit 0; fi\nexit 0\n")
+	writeExecutable(t, filepath.Join(fakeBin, "node"), "#!/bin/sh\necho 'v20.0.0'\n")
+	writeExecutable(t, filepath.Join(fakeBin, "gh"), "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'gh version 2.0.0-test'; exit 0; fi\nif [ \"$1\" = \"auth\" ]; then exit 0; fi\nexit 0\n")
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	stdout, stderr, err := captureOutput(t, func() error {
+		return Doctor(cwd, repoRoot)
+	})
+	if err != nil {
+		t.Fatalf("Doctor(): %v stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got %q", stderr)
+	}
+	if !strings.Contains(stdout, "AGENTS freshness") {
+		t.Fatalf("doctor output should include AGENTS freshness check:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "--force") {
+		t.Fatalf("doctor must not suggest force-overwriting custom AGENTS.md:\n%s", stdout)
+	}
+	for _, want := range []string{
+		"Safe automatic fix: no",
+		"back up and merge custom instructions",
+		"Some warnings require manual remediation",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestDoctorFooterManualOnlyFailureDoesNotTellUserToRunSetup(t *testing.T) {
+	var out strings.Builder
+	checks := []doctorCheck{{
+		Name:    "Config",
+		Status:  "fail",
+		Message: "config.toml cannot be read: is a directory",
+		Remediation: manualDoctorRemediation(
+			"/tmp/nana/config.toml",
+			"move the path conflict aside, then rerun `nana doctor`",
+		),
+	}}
+
+	printDoctorFooter(&out, "project", checks, 0, 1, true)
+	text := out.String()
+	if !strings.Contains(text, "Some failures require manual remediation") {
+		t.Fatalf("expected manual remediation footer, got:\n%s", text)
+	}
+	if strings.Contains(text, "fix installation issues") || strings.Contains(text, "Run \"nana setup") {
+		t.Fatalf("manual-only failure footer must not tell user to run setup:\n%s", text)
+	}
+}
+
+func TestDoctorFooterUsesForceCommandForForceOnlySafeWarnings(t *testing.T) {
+	var out strings.Builder
+	forceCommand := setupForceFixCommand("project")
+	checks := []doctorCheck{{
+		Name:    "AGENTS runtime guidance",
+		Status:  "warn",
+		Message: "missing runtime state section; run " + forceCommand,
+		Remediation: &doctorRemediation{
+			Path:             filepath.Join("/tmp", "repo", "AGENTS.md"),
+			SafeAutomaticFix: fmt.Sprintf("yes — run `%s`", forceCommand),
+			ManualFallback:   fmt.Sprintf("inspect AGENTS.md, then run `%s`", forceCommand),
+		},
+	}}
+
+	printDoctorFooter(&out, "project", checks, 1, 0, true)
+	text := out.String()
+	if !strings.Contains(text, fmt.Sprintf(`run "%s"`, forceCommand)) {
+		t.Fatalf("force-only safe warning footer should use exact force command, got:\n%s", text)
+	}
+	nonForceCommand := setupFixCommand("project")
+	if strings.Contains(text, fmt.Sprintf(`run "%s"`, nonForceCommand)) {
+		t.Fatalf("force-only safe warning footer must not suggest non-force setup, got:\n%s", text)
+	}
+}
+
+func TestDoctorFooterMixedSafeCommandsDefersToRemediationCommands(t *testing.T) {
+	var out strings.Builder
+	forceCommand := setupForceFixCommand("project")
+	checks := []doctorCheck{
+		{
+			Name:    "AGENTS freshness",
+			Status:  "warn",
+			Message: "stale generated AGENTS.md",
+			Remediation: &doctorRemediation{
+				Path:             filepath.Join("/tmp", "repo", "AGENTS.md"),
+				SafeAutomaticFix: fmt.Sprintf("yes — run `%s`", forceCommand),
+				ManualFallback:   fmt.Sprintf("inspect AGENTS.md, then run `%s`", forceCommand),
+			},
+		},
+		{
+			Name:        "Config",
+			Status:      "warn",
+			Message:     "config.toml not found",
+			Remediation: setupDoctorRemediation("project", filepath.Join("/tmp", "repo", ".codex", "config.toml"), ""),
+		},
+	}
+
+	printDoctorFooter(&out, "project", checks, 2, 0, true)
+	text := out.String()
+	if !strings.Contains(text, "safe automatic fix commands shown") {
+		t.Fatalf("mixed safe commands should defer to per-check remediation commands, got:\n%s", text)
+	}
+	for _, command := range []string{forceCommand, setupFixCommand("project")} {
+		if strings.Contains(text, fmt.Sprintf(`run "%s"`, command)) {
+			t.Fatalf("mixed safe command footer should not single out %q, got:\n%s", command, text)
+		}
+	}
+}
+
 func TestCheckAgentsRuntimeSectionsPassesForGeneratedAgents(t *testing.T) {
 	cwd := t.TempDir()
 	content := strings.Join([]string{
@@ -160,6 +346,9 @@ func TestCheckAgentsRuntimeSectionsFailsBrokenOverlayMarker(t *testing.T) {
 	if check.Status != "fail" || !strings.Contains(check.Message, "NANA runtime marker count mismatch") {
 		t.Fatalf("unexpected check: %#v", check)
 	}
+	if check.Remediation == nil || !strings.HasPrefix(check.Remediation.SafeAutomaticFix, "no") {
+		t.Fatalf("broken existing AGENTS.md should require manual remediation, got %#v", check.Remediation)
+	}
 }
 
 func TestCheckAgentsRuntimeSectionsWarnsMissingGeneratedSections(t *testing.T) {
@@ -171,6 +360,74 @@ func TestCheckAgentsRuntimeSectionsWarnsMissingGeneratedSections(t *testing.T) {
 	check := checkAgentsRuntimeSections("project", cwd, filepath.Join(cwd, ".codex"))
 	if check.Status != "warn" || !strings.Contains(check.Message, "missing generated AGENTS marker") {
 		t.Fatalf("unexpected check: %#v", check)
+	}
+	if strings.Contains(check.Message, "run nana setup --force") {
+		t.Fatalf("warning should not present force-overwrite as safe guidance: %q", check.Message)
+	}
+	if check.Remediation == nil {
+		t.Fatalf("expected remediation")
+	}
+	if !strings.HasPrefix(check.Remediation.SafeAutomaticFix, "no") {
+		t.Fatalf("custom AGENTS.md should not be marked safe to overwrite, got %#v", check.Remediation)
+	}
+	if !strings.Contains(check.Remediation.ManualFallback, "back up and merge custom instructions") {
+		t.Fatalf("expected custom-content fallback, got %#v", check.Remediation)
+	}
+}
+
+func TestCheckAgentsRuntimeSectionsSafeRefreshesSetupGeneratedWarnings(t *testing.T) {
+	cwd := t.TempDir()
+	content := strings.Join([]string{
+		"<!-- nana:generated:agents-md -->",
+		"# stale setup-generated project instructions",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	check := checkAgentsRuntimeSections("project", cwd, filepath.Join(cwd, ".codex"))
+	if check.Status != "warn" || !strings.Contains(check.Message, "missing runtime state section") {
+		t.Fatalf("unexpected check: %#v", check)
+	}
+	if strings.Contains(check.Message, "manual merge required") {
+		t.Fatalf("setup-generated AGENTS.md should not be reported as manual-only: %q", check.Message)
+	}
+	if check.Remediation == nil {
+		t.Fatalf("expected remediation")
+	}
+	if !strings.Contains(check.Remediation.SafeAutomaticFix, "nana setup --force --scope project") {
+		t.Fatalf("setup-generated AGENTS.md should use force setup remediation, got %#v", check.Remediation)
+	}
+	if !strings.Contains(check.Remediation.ManualFallback, "refresh setup-generated AGENTS.md content") {
+		t.Fatalf("expected setup-generated fallback, got %#v", check.Remediation)
+	}
+}
+
+func TestDoctorRemediationOutputIncludesActionableFailureDetails(t *testing.T) {
+	var out strings.Builder
+	printDoctorRemediations(&out, []doctorCheck{{
+		Name:    "Config",
+		Status:  "fail",
+		Message: "invalid config.toml (possible duplicate TOML table such as [tui])",
+		Remediation: manualDoctorRemediation(
+			"/tmp/nana/config.toml",
+			"edit /tmp/nana/config.toml, then run `nana setup --force --scope project`",
+		),
+	}})
+
+	text := out.String()
+	for _, want := range []string{
+		"Remediation:",
+		"Config (fail)",
+		"Path: /tmp/nana/config.toml",
+		"Cause: invalid config.toml",
+		"Safe automatic fix: no",
+		"Manual fallback: edit /tmp/nana/config.toml",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("remediation output missing %q in:\n%s", want, text)
+		}
 	}
 }
 
@@ -192,7 +449,7 @@ func TestCheckNanaStatePathsPassesWhenRequiredPathsExist(t *testing.T) {
 		t.Fatalf("write notepad: %v", err)
 	}
 
-	check := checkNanaStatePaths(cwd)
+	check := checkNanaStatePaths(cwd, "project")
 	if check.Status != "pass" {
 		t.Fatalf("expected pass, got %#v", check)
 	}
@@ -213,7 +470,7 @@ func TestCheckNanaStatePathsWarnsMissingProjectMemory(t *testing.T) {
 		t.Fatalf("write notepad: %v", err)
 	}
 
-	check := checkNanaStatePaths(cwd)
+	check := checkNanaStatePaths(cwd, "project")
 	if check.Status != "warn" || !strings.Contains(check.Message, ".nana/project-memory.json") {
 		t.Fatalf("unexpected check: %#v", check)
 	}
@@ -276,6 +533,18 @@ func TestCheckManagedAccountsFailsWhenCredentialMissing(t *testing.T) {
 	check := checkManagedAccounts(codexHome)
 	if check.Status != "fail" || !strings.Contains(check.Message, "credential file missing") {
 		t.Fatalf("unexpected check: %#v", check)
+	}
+	if check.Remediation == nil {
+		t.Fatalf("expected remediation")
+	}
+	if check.Remediation.Path != registry.Accounts[0].AuthPath {
+		t.Fatalf("expected credential path remediation, got %#v", check.Remediation)
+	}
+	if !strings.HasPrefix(check.Remediation.SafeAutomaticFix, "no") {
+		t.Fatalf("credential repair should be manual, got %#v", check.Remediation)
+	}
+	if !strings.Contains(check.Remediation.ManualFallback, "nana account add primary") {
+		t.Fatalf("expected account re-add fallback, got %#v", check.Remediation)
 	}
 }
 
