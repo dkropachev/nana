@@ -70,6 +70,7 @@ func renderManagedAgentsContent(repoRoot string, cwd string, codexHomeDir string
 	if err != nil {
 		return "", err
 	}
+	content = renderAgentsLazySkillTriggers(content)
 	if filepath.Clean(targetPath) == filepath.Clean(filepath.Join(cwd, "AGENTS.md")) {
 		return addGeneratedAgentsMarker(strings.ReplaceAll(content, "~/.codex", "./.codex")), nil
 	}

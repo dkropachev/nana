@@ -84,23 +84,7 @@ const (
 	routeSourceImplicitKeyword    = "implicit keyword"
 )
 
-// Keep routeRules synchronized with the Lazy Runtime Skills mapping in
-// AGENTS.md and templates/AGENTS.md.
-var routeRules = []routeRule{
-	{Skill: "autopilot", Keywords: []string{"autopilot", "build me", "I want a"}},
-	{Skill: "ultrawork", Keywords: []string{"ultrawork", "ulw", "parallel"}},
-	{Skill: "analyze", Keywords: []string{"analyze", "investigate"}},
-	{Skill: "plan", Keywords: []string{"plan this", "plan the", "let's plan"}},
-	{Skill: "deep-interview", Keywords: []string{"interview", "deep interview", "gather requirements", "interview me", "don't assume", "ouroboros"}},
-	{Skill: "ralplan", Keywords: []string{"ralplan", "consensus plan"}},
-	{Skill: "ecomode", Keywords: []string{"ecomode", "eco", "budget"}},
-	{Skill: "cancel", Keywords: []string{"cancel", "stop", "abort"}},
-	{Skill: "tdd", Keywords: []string{"tdd", "test first"}},
-	{Skill: "build-fix", Keywords: []string{"fix build", "type errors"}},
-	{Skill: "code-review", Keywords: []string{"review code", "code review", "code-review"}},
-	{Skill: "security-review", Keywords: []string{"security review"}},
-	{Skill: "web-clone", Keywords: []string{"web-clone", "clone site", "clone website", "copy webpage"}},
-}
+var routeRules = lazySkillTriggerRouteRules()
 
 var (
 	explicitRouteSkillPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_])\$([A-Za-z][A-Za-z0-9_-]*)`)
@@ -432,10 +416,10 @@ func routeRuntimePath(skill string) string {
 
 func routeRuntimeDocResolver() func(string) routeDoc {
 	return func(skill string) routeDoc {
-		path := routeRuntimePath(skill)
+		runtimePath := routeRuntimePath(skill)
 		return routeDoc{
-			Path:       path,
-			ActualPath: path,
+			Path:       runtimePath,
+			ActualPath: runtimePath,
 			Label:      routeDocLabelRuntime,
 		}
 	}
@@ -454,10 +438,20 @@ func routeDocResolverForBase(base routeDocBase) func(string) routeDoc {
 		}
 		return routeDoc{
 			Path:       base.displayDocPath(skill, "RUNTIME.md"),
-			ActualPath: filepath.Join(base.actualSkillsDir, skill, "RUNTIME.md"),
+			ActualPath: base.actualDocPath(skill, "RUNTIME.md"),
 			Label:      routeDocLabelRuntime,
 		}
 	}
+}
+
+func routeDocBaseForCWDAndCodexHome(cwd string, codexHome string) routeDocBase {
+	if strings.TrimSpace(codexHome) != "" {
+		return routeDocBase{
+			actualSkillsDir:  filepath.Join(codexHome, "skills"),
+			displaySkillsDir: filepath.Join(codexHome, "skills"),
+		}
+	}
+	return routeDocBaseForCWD(cwd)
 }
 
 func routeDocBaseForCWD(cwd string) routeDocBase {
@@ -486,22 +480,16 @@ func routeDocBaseForCWD(cwd string) routeDocBase {
 	}
 }
 
-func routeDocBaseForCWDAndCodexHome(cwd string, codexHome string) routeDocBase {
-	if codexHome = strings.TrimSpace(codexHome); codexHome != "" {
-		return routeDocBase{
-			actualSkillsDir:  filepath.Join(codexHome, "skills"),
-			displaySkillsDir: filepath.Join(codexHome, "skills"),
-		}
-	}
-	return routeDocBaseForCWD(cwd)
-}
-
 func (base routeDocBase) displayDocPath(skill string, filename string) string {
 	displayPath := filepath.Join(base.displaySkillsDir, skill, filename)
 	if base.displayDotRelative {
 		return "." + string(os.PathSeparator) + displayPath
 	}
 	return displayPath
+}
+
+func (base routeDocBase) actualDocPath(skill string, filename string) string {
+	return filepath.Join(base.actualSkillsDir, skill, filename)
 }
 
 func FormatRoutePreview(preview routePreview) string {
@@ -524,8 +512,8 @@ func FormatRoutePreview(preview routePreview) string {
 				docLabel = routeDocLabelRuntime
 			}
 			fmt.Fprintf(&builder, "     %s: %s\n", docLabel, activation.RuntimePath)
-			if activation.Skill == "ralplan" {
-				fmt.Fprintln(&builder, "     note: ralplan remains planning-only until .nana/plans/prd-*.md and test-spec-*.md both exist")
+			if note := lazySkillTriggerNote(activation.Skill); note != "" {
+				fmt.Fprintf(&builder, "     note: %s\n", note)
 			}
 		}
 	}

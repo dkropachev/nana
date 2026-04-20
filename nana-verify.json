@@ -48,6 +48,7 @@
         "patterns": [
           "AGENTS.md",
           "templates/AGENTS.md",
+          "internal/gocli/lazy_skill_triggers.json",
           "internal/gocliassets/generated/templates.json"
         ],
         "checks": [

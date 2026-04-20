@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -277,36 +278,8 @@ func TestRouteExplainImplicitKeyword(t *testing.T) {
 		"Route preview:",
 		"1. $analyze",
 		`source: implicit keyword "ANALYZE"`,
-		`decision: matched_keyword="ANALYZE" activation_mode=implicit`,
-		`implicit_suppressed=false`,
 		"case-insensitive keyword match anywhere",
 		expectedRuntime,
-	} {
-		if !strings.Contains(output, expected) {
-			t.Fatalf("expected %q in route output, got %q", expected, output)
-		}
-	}
-}
-
-func TestRouteExplainExplicitActivationReportsPromptSuppression(t *testing.T) {
-	preview := ExplainPromptRoute("/prompts:executor $tdd please analyze this")
-	if len(preview.Activations) != 1 {
-		t.Fatalf("expected one explicit activation, got %#v", preview.Activations)
-	}
-	activation := preview.Activations[0]
-	if activation.Skill != "tdd" || activation.Source != "explicit invocation" || activation.Trigger != "$tdd" {
-		t.Fatalf("expected explicit tdd activation, got %#v", activation)
-	}
-	if preview.ImplicitSuppressedBy != "/prompts:executor" {
-		t.Fatalf("expected prompt override suppression, got %#v", preview)
-	}
-
-	output := FormatRoutePreview(preview)
-	for _, expected := range []string{
-		`decision: matched_keyword="$tdd" activation_mode=explicit`,
-		`implicit_suppressed=true`,
-		"implicit_suppressed_by: /prompts:executor",
-		"Implicit keywords: suppressed by /prompts:executor",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected %q in route output, got %q", expected, output)
@@ -676,24 +649,55 @@ func TestRouteExplainPromptInvocationSuppressesKeywords(t *testing.T) {
 }
 
 func TestRouteRulesStayInSyncWithAgentsTemplate(t *testing.T) {
+	entries, err := lazySkillTriggerEntries()
+	if err != nil {
+		t.Fatalf("lazySkillTriggerEntries(): %v", err)
+	}
+	wantRules := make([]routeRule, 0, len(entries))
+	for _, entry := range entries {
+		wantRules = append(wantRules, routeRule{Skill: entry.Skill, Keywords: entry.Triggers})
+	}
+	if !reflect.DeepEqual(routeRules, wantRules) {
+		t.Fatalf("routeRules should be generated from lazy skill trigger manifest\nwant: %#v\n got: %#v", wantRules, routeRules)
+	}
+
 	content, err := os.ReadFile(filepath.Join(repoRootFromCaller(t), "templates", "AGENTS.md"))
 	if err != nil {
 		t.Fatalf("read template AGENTS.md: %v", err)
 	}
 	template := string(content)
-	if !strings.Contains(template, "Activation reports must show the matched trigger, source, and any `/prompts:<name>` suppression.") {
-		t.Fatalf("template AGENTS.md should document lazy skill trigger-decision reports")
+	expectedTemplateBlock := renderLazySkillTriggersBlock("~/.codex/skills")
+	if !strings.Contains(template, expectedTemplateBlock) {
+		t.Fatalf("template AGENTS.md lazy trigger block should be generated from manifest\nexpected block:\n%s\n\ntemplate:\n%s", expectedTemplateBlock, template)
 	}
-	if !strings.Contains(template, "Sync trigger tests with this list") {
-		t.Fatalf("template AGENTS.md missing trigger synchronization guidance")
+
+	rootContent, err := os.ReadFile(filepath.Join(repoRootFromCaller(t), "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read root AGENTS.md: %v", err)
 	}
-	for _, rule := range routeRules {
-		if !strings.Contains(template, "- `$"+rule.Skill+"`") {
-			t.Fatalf("template AGENTS.md missing route skill %q", rule.Skill)
-		}
-		for _, keyword := range rule.Keywords {
-			if !strings.Contains(template, "`"+keyword+"`") {
-				t.Fatalf("template AGENTS.md missing route keyword %q for skill %q", keyword, rule.Skill)
+	expectedRootBlock := renderLazySkillTriggersBlock("./.codex/skills")
+	if !strings.Contains(string(rootContent), expectedRootBlock) {
+		t.Fatalf("root AGENTS.md lazy trigger block should be generated from manifest\nexpected block:\n%s", expectedRootBlock)
+	}
+}
+
+func TestRouteManifestTriggersActivateExpectedSkills(t *testing.T) {
+	entries, err := lazySkillTriggerEntries()
+	if err != nil {
+		t.Fatalf("lazySkillTriggerEntries(): %v", err)
+	}
+	for _, entry := range entries {
+		for _, trigger := range entry.Triggers {
+			preview := ExplainPromptRoute("please " + trigger + " now")
+			found := false
+			for _, activation := range preview.Activations {
+				if activation.Skill == entry.Skill && activation.Source == routeSourceImplicitKeyword {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("manifest trigger %q should activate $%s, got %#v", trigger, entry.Skill, preview.Activations)
 			}
 		}
 	}

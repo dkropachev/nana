@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "skills": [
+    {
+      "skill": "autopilot",
+      "triggers": ["autopilot", "build me", "I want a"]
+    },
+    {
+      "skill": "ultrawork",
+      "triggers": ["ultrawork", "ulw", "parallel"]
+    },
+    {
+      "skill": "analyze",
+      "triggers": ["analyze", "investigate"]
+    },
+    {
+      "skill": "plan",
+      "triggers": ["plan this", "plan the", "let's plan"]
+    },
+    {
+      "skill": "deep-interview",
+      "triggers": ["interview", "deep interview", "gather requirements", "interview me", "don't assume", "ouroboros"]
+    },
+    {
+      "skill": "ralplan",
+      "triggers": ["ralplan", "consensus plan"],
+      "note": "planning-only until `.nana/plans/prd-*.md` and `.nana/plans/test-spec-*.md` both exist"
+    },
+    {
+      "skill": "ecomode",
+      "triggers": ["ecomode", "eco", "budget"]
+    },
+    {
+      "skill": "cancel",
+      "triggers": ["cancel", "stop", "abort"]
+    },
+    {
+      "skill": "tdd",
+      "triggers": ["tdd", "test first"]
+    },
+    {
+      "skill": "build-fix",
+      "triggers": ["fix build", "type errors"]
+    },
+    {
+      "skill": "code-review",
+      "triggers": ["review code", "code review", "code-review"]
+    },
+    {
+      "skill": "security-review",
+      "triggers": ["security review"]
+    },
+    {
+      "skill": "web-clone",
+      "triggers": ["web-clone", "clone site", "clone website", "copy webpage"]
+    }
+  ]
+}

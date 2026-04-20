@@ -25,12 +25,12 @@ NANA coordinates Codex prompts, skills, and optional team/runtime state. Role pr
 - Default to solo execution. Use `$deep-interview` for unclear intent or explicit "don't assume"; `$ralplan` for unresolved plan/tradeoff/test-shape review; otherwise execute.
 - Delegate only for quality/speed/safety. Leader scopes and verifies; workers stay scoped and do not re-plan the whole task. Max 6 children.
 - Outside active `team`/`swarm`, use `executor` for implementation and reserve `worker` for team runtime. Core roles: `explore`, `planner`, `architect`, `debugger`, `executor`, `verifier`.
-- Routing hints: low `explore`/`style-reviewer`/`writer`; standard `executor`/`debugger`/`test-engineer`; high `architect`/`executor`/`critic`.
+- Routing hints: low complexity `explore`/`style-reviewer`/`writer`; standard `executor`/`debugger`/`test-engineer`; high complexity `architect`/`executor`/`critic`.
 - When routing affects execution, include `routing_decision` in plans, traces, and final reports: `mode`, `role_tier` (tier/roles), `trigger`, `confidence`.
 
 ## Lazy Runtime Skills
-Load detailed skill runtime docs only when invoked. When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md. Explicit `$skill` invocations run left-to-right before implicit keyword matches; keyword matches are case-insensitive; `/prompts:<name>` disables implicit keyword activation unless explicit `$skill` tokens are present.
-`nana route --explain "<prompt>"` to preview routing; Sync trigger tests with this list.
+Load skill runtime docs only when invoked. When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md. Explicit `$skill` invocations run left-to-right before implicit keyword matches; keyword matches are case-insensitive; `/prompts:<name>` disables implicit keyword activation unless explicit `$skill` tokens are present. The rest is the task.
+<!-- NANA:T internal/gocli/lazy_skill_triggers.json -->
 - `$autopilot` (`./.codex/skills/autopilot/RUNTIME.md`): `autopilot`, `build me`, `I want a`
 - `$ultrawork` (`./.codex/skills/ultrawork/RUNTIME.md`): `ultrawork`, `ulw`, `parallel`
 - `$analyze` (`./.codex/skills/analyze/RUNTIME.md`): `analyze`, `investigate`

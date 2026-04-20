@@ -213,7 +213,7 @@ func renderManagedProjectRootAgents(repoRoot string, existingContent string) (st
 		}
 		templateBytes = []byte(content)
 	}
-	template := strings.ReplaceAll(string(templateBytes), "~/.codex", "./.codex")
+	template := strings.ReplaceAll(renderAgentsLazySkillTriggers(string(templateBytes)), "~/.codex", "./.codex")
 	manual := extractManualSection(existingContent, "## Local Notes\n- Add repo-specific architecture notes, workflow conventions, and verification commands here.\n- This block is preserved by `nana agents-init` refreshes.")
 	return wrapManagedContent(template, manual), nil
 }
