@@ -172,6 +172,93 @@ func TestAccountAddAutoNamesAdditionalAccount(t *testing.T) {
 	}
 }
 
+func TestAccountAddRejectsExistingAccountName(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".nana", "codex-home")
+	fakeCodex := installFakeCodexLogin(t)
+	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
+		Preferred: "primary",
+		Accounts: map[string]managedAccountFixtureEntry{
+			"primary":   {Profile: chatgptProfileJSON("primary-token", "primary-refresh", "primary-account")},
+			"secondary": {Profile: chatgptProfileJSON("secondary-token", "secondary-refresh", "secondary-account")},
+		},
+		Active: "primary",
+	})
+
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("FAKE_CODEX_WRITE_AUTH", "1")
+	t.Setenv("FAKE_CODEX_AUTH_CONTENT", chatgptProfileJSON("new-token", "new-refresh", "new-account"))
+
+	_, err := captureStdout(t, func() error { return Account([]string{"add", "secondary"}) })
+	if err == nil {
+		t.Fatal("expected duplicate-name failure")
+	}
+	if !strings.Contains(err.Error(), `managed account "secondary" already exists`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, readErr := os.ReadFile(fakeCodex.ArgsPath); !os.IsNotExist(readErr) {
+		t.Fatalf("expected device login to be skipped, readErr=%v", readErr)
+	}
+
+	profile, readErr := readManagedAccountProfile(managedAuthAccountPathForHome(codexHome, "secondary"))
+	if readErr != nil {
+		t.Fatalf("read secondary profile: %v", readErr)
+	}
+	if profile.Tokens == nil || profile.Tokens.AccessToken != "secondary-token" {
+		t.Fatalf("secondary profile was overwritten: %#v", profile)
+	}
+}
+
+func TestAccountAddSkipsExistingManagedAccountFilesWhenAutoNaming(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".nana", "codex-home")
+	installFakeCodexLogin(t)
+	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
+		Preferred: "primary",
+		Accounts: map[string]managedAccountFixtureEntry{
+			"primary":   {Profile: chatgptProfileJSON("primary-token", "primary-refresh", "primary-account")},
+			"secondary": {Profile: chatgptProfileJSON("secondary-token", "secondary-refresh", "secondary-account")},
+		},
+		Active: "primary",
+	})
+
+	orphanPath := managedAuthAccountPathForHome(codexHome, "account-2")
+	orphanProfile := chatgptProfileJSON("orphan-token", "orphan-refresh", "orphan-account")
+	if err := os.WriteFile(orphanPath, []byte(orphanProfile), 0o644); err != nil {
+		t.Fatalf("write orphan account file: %v", err)
+	}
+
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("FAKE_CODEX_WRITE_AUTH", "1")
+	t.Setenv("FAKE_CODEX_AUTH_CONTENT", chatgptProfileJSON("new-token", "new-refresh", "new-account"))
+
+	output, err := captureStdout(t, func() error { return Account([]string{"add"}) })
+	if err != nil {
+		t.Fatalf("Account(add): %v", err)
+	}
+	if !strings.Contains(output, `Registered Codex credentials as account "account-3"`) {
+		t.Fatalf("unexpected output: %q", output)
+	}
+
+	orphanContent, err := os.ReadFile(orphanPath)
+	if err != nil {
+		t.Fatalf("read orphan account file: %v", err)
+	}
+	if string(orphanContent) != orphanProfile {
+		t.Fatalf("expected account-2 orphan file to stay intact, got %q", string(orphanContent))
+	}
+
+	profile, err := readManagedAccountProfile(managedAuthAccountPathForHome(codexHome, "account-3"))
+	if err != nil {
+		t.Fatalf("read account-3 profile: %v", err)
+	}
+	if profile.Tokens == nil || profile.Tokens.AccessToken != "new-token" {
+		t.Fatalf("unexpected account-3 profile: %#v", profile)
+	}
+}
+
 func TestAccountAddFailsWhenDeviceLoginExitsNonZero(t *testing.T) {
 	home := t.TempDir()
 	codexHome := filepath.Join(home, ".nana", "codex-home")

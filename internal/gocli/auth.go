@@ -230,13 +230,20 @@ func parseAccountImportOptions(args []string) (authImportOptions, error) {
 }
 
 func addManagedAccount(codexHome string, options authImportOptions) error {
-	if strings.TrimSpace(options.Name) == "" {
-		name, err := suggestManagedAuthAccountName(codexHome)
+	name := normalizeManagedAuthName(options.Name)
+	registry, err := loadManagedAuthRegistry(codexHome)
+	if err != nil {
+		return err
+	}
+	if name == "" {
+		name, err = suggestManagedAuthAccountName(codexHome)
 		if err != nil {
 			return err
 		}
-		options.Name = name
+	} else if managedAuthNameReserved(codexHome, registry, name) {
+		return fmt.Errorf("managed account %q already exists; use a different name", name)
 	}
+	options.Name = name
 	if strings.TrimSpace(options.Source) != "" {
 		return importManagedAccount(codexHome, options)
 	}
@@ -323,20 +330,65 @@ func suggestManagedAuthAccountName(codexHome string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(registry.Accounts) == 0 {
+	used, err := managedAuthReservedNames(codexHome, registry)
+	if err != nil {
+		return "", err
+	}
+	if len(used) == 0 {
 		return defaultAuthAccountName, nil
 	}
 
-	used := map[string]bool{}
-	for _, account := range registry.Accounts {
-		used[normalizeManagedAuthName(account.Name)] = true
-	}
 	for index := 2; ; index++ {
 		name := fmt.Sprintf("%s-%d", autoAuthAccountPrefix, index)
 		if !used[name] {
 			return name, nil
 		}
 	}
+}
+
+func managedAuthNameReserved(codexHome string, registry ManagedAuthRegistry, name string) bool {
+	name = normalizeManagedAuthName(name)
+	if name == "" {
+		return false
+	}
+	used, err := managedAuthReservedNames(codexHome, registry)
+	if err != nil {
+		return registry.account(name) != nil
+	}
+	return used[name]
+}
+
+func managedAuthReservedNames(codexHome string, registry ManagedAuthRegistry) (map[string]bool, error) {
+	used := map[string]bool{}
+	for _, account := range registry.Accounts {
+		name := normalizeManagedAuthName(account.Name)
+		if name == "" {
+			continue
+		}
+		used[name] = true
+	}
+
+	entries, err := os.ReadDir(managedAuthAccountsDirForHome(codexHome))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return used, nil
+		}
+		return nil, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		name := normalizeManagedAuthName(strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())))
+		if name == "" {
+			continue
+		}
+		used[name] = true
+	}
+	return used, nil
 }
 
 func importManagedAccount(codexHome string, options authImportOptions) error {
