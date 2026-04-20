@@ -232,6 +232,297 @@ func TestConfigEffort(t *testing.T) {
 	}
 }
 
+func TestRouteExplainImplicitKeyword(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
+
+	output, err := captureStdout(t, func() error {
+		return Route(t.TempDir(), []string{"--explain", "Please", "ANALYZE", "this"})
+	})
+	if err != nil {
+		t.Fatalf("Route(): %v", err)
+	}
+	expectedRuntime := filepath.Join(DefaultUserCodexHome(home), "skills", "analyze", "RUNTIME.md")
+	for _, expected := range []string{
+		"Route preview:",
+		"1. $analyze",
+		`source: implicit keyword "ANALYZE"`,
+		"case-insensitive keyword match anywhere",
+		expectedRuntime,
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected %q in route output, got %q", expected, output)
+		}
+	}
+}
+
+func TestRouteExplainUserScopeRuntimePathHonorsCodexHome(t *testing.T) {
+	codexHome := filepath.Join(t.TempDir(), "custom-codex-home")
+	t.Setenv("CODEX_HOME", codexHome)
+
+	output, err := captureStdout(t, func() error {
+		return Route(t.TempDir(), []string{"--explain", "Please", "ANALYZE", "this"})
+	})
+	if err != nil {
+		t.Fatalf("Route(): %v", err)
+	}
+	expected := filepath.Join(codexHome, "skills", "analyze", "RUNTIME.md")
+	if !strings.Contains(output, expected) {
+		t.Fatalf("expected user runtime path %q in route output, got %q", expected, output)
+	}
+	if strings.Contains(output, "~/.codex/skills/analyze/RUNTIME.md") {
+		t.Fatalf("user route output should not point at legacy runtime path, got %q", output)
+	}
+}
+
+func TestRouteExplainProjectScopeUsesProjectRuntimePath(t *testing.T) {
+	cwd := t.TempDir()
+	t.Setenv("CODEX_HOME", "")
+	if err := os.MkdirAll(filepath.Join(cwd, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir .nana: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, ".nana", "setup-scope.json"), []byte(`{"scope":"project"}`), 0o644); err != nil {
+		t.Fatalf("write setup-scope: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error {
+		return Route(cwd, []string{"--explain", "Please", "ANALYZE", "this"})
+	})
+	if err != nil {
+		t.Fatalf("Route(): %v", err)
+	}
+	expected := "./.codex/skills/analyze/RUNTIME.md"
+	if !strings.Contains(output, expected) {
+		t.Fatalf("expected project runtime path %q in route output, got %q", expected, output)
+	}
+	if strings.Contains(output, "~/.codex/skills/analyze/RUNTIME.md") {
+		t.Fatalf("project route output should not point at user runtime path, got %q", output)
+	}
+}
+
+func TestRouteExplainProjectScopeRuntimePathHonorsExplicitCodexHome(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwd, ".nana"), 0o755); err != nil {
+		t.Fatalf("mkdir .nana: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, ".nana", "setup-scope.json"), []byte(`{"scope":"project"}`), 0o644); err != nil {
+		t.Fatalf("write setup-scope: %v", err)
+	}
+	codexHome := filepath.Join(t.TempDir(), "explicit-codex-home")
+	t.Setenv("CODEX_HOME", codexHome)
+
+	output, err := captureStdout(t, func() error {
+		return Route(cwd, []string{"--explain", "Please", "ANALYZE", "this"})
+	})
+	if err != nil {
+		t.Fatalf("Route(): %v", err)
+	}
+	expected := filepath.Join(codexHome, "skills", "analyze", "RUNTIME.md")
+	if !strings.Contains(output, expected) {
+		t.Fatalf("expected explicit CODEX_HOME runtime path %q in route output, got %q", expected, output)
+	}
+	if strings.Contains(output, "./.codex/skills/analyze/RUNTIME.md") {
+		t.Fatalf("project route output should honor CODEX_HOME instead of project path, got %q", output)
+	}
+}
+
+func TestRouteExplainImplicitKeywordAfterUnicodeCaseExpansion(t *testing.T) {
+	preview := ExplainPromptRoute("Ⱥ ANALYZE this")
+	if len(preview.Activations) != 1 {
+		t.Fatalf("expected one activation, got %#v", preview.Activations)
+	}
+	activation := preview.Activations[0]
+	if activation.Skill != "analyze" || activation.Source != "implicit keyword" {
+		t.Fatalf("expected implicit analyze activation, got %#v", activation)
+	}
+	if activation.Trigger != "ANALYZE" {
+		t.Fatalf("expected trigger to preserve original prompt bytes, got %q", activation.Trigger)
+	}
+	if activation.Start != len("Ⱥ ") {
+		t.Fatalf("expected start index in original prompt, got %d", activation.Start)
+	}
+}
+
+func TestRouteExplainImplicitKeywordsRespectTokenBoundaries(t *testing.T) {
+	for _, prompt := range []string{
+		"Please reconfigure this second step",
+		"I want analysis",
+	} {
+		t.Run(prompt, func(t *testing.T) {
+			preview := ExplainPromptRoute(prompt)
+			if len(preview.Activations) != 0 {
+				t.Fatalf("expected no activations for %q, got %#v", prompt, preview.Activations)
+			}
+			if preview.NoActivationReason == "" {
+				t.Fatalf("expected no-activation reason for %q", prompt)
+			}
+		})
+	}
+}
+
+func TestRouteExplainImplicitKeywordAllowsPunctuationDelimiters(t *testing.T) {
+	prompt := "Please (ANALYZE), this"
+	preview := ExplainPromptRoute(prompt)
+	if len(preview.Activations) != 1 {
+		t.Fatalf("expected one activation, got %#v", preview.Activations)
+	}
+	activation := preview.Activations[0]
+	if activation.Skill != "analyze" || activation.Source != "implicit keyword" {
+		t.Fatalf("expected implicit analyze activation, got %#v", activation)
+	}
+	if activation.Trigger != "ANALYZE" {
+		t.Fatalf("expected trigger to exclude punctuation delimiters, got %q", activation.Trigger)
+	}
+	if activation.Start != strings.Index(prompt, "ANALYZE") {
+		t.Fatalf("expected start index to exclude punctuation delimiters, got %d", activation.Start)
+	}
+}
+
+func TestRouteExplainExplicitBeforeImplicit(t *testing.T) {
+	preview := ExplainPromptRoute("$tdd please analyze the failing test")
+	if len(preview.Activations) != 2 {
+		t.Fatalf("expected two activations, got %#v", preview.Activations)
+	}
+	if preview.Activations[0].Skill != "tdd" || preview.Activations[0].Source != "explicit invocation" {
+		t.Fatalf("expected explicit tdd first, got %#v", preview.Activations[0])
+	}
+	if preview.Activations[1].Skill != "analyze" || preview.Activations[1].Source != "implicit keyword" {
+		t.Fatalf("expected implicit analyze second, got %#v", preview.Activations[1])
+	}
+}
+
+func TestRouteExplainExplicitInvocationAllowsPunctuationDelimiters(t *testing.T) {
+	prompt := "Please run (`$tdd`) then analyze the failing test"
+	preview := ExplainPromptRoute(prompt)
+	if len(preview.Activations) != 2 {
+		t.Fatalf("expected two activations, got %#v", preview.Activations)
+	}
+	explicit := preview.Activations[0]
+	if explicit.Skill != "tdd" || explicit.Source != "explicit invocation" {
+		t.Fatalf("expected punctuation-delimited explicit tdd first, got %#v", explicit)
+	}
+	if explicit.Trigger != "$tdd" {
+		t.Fatalf("expected trigger to exclude punctuation delimiters, got %q", explicit.Trigger)
+	}
+	if explicit.Start != strings.Index(prompt, "$tdd") {
+		t.Fatalf("expected explicit token start index, got %d", explicit.Start)
+	}
+	if preview.Activations[1].Skill != "analyze" || preview.Activations[1].Source != "implicit keyword" {
+		t.Fatalf("expected implicit analyze second, got %#v", preview.Activations[1])
+	}
+}
+
+func TestRouteExplainExplicitInvocationIgnoresUnknownShellVariables(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", "")
+
+	output, err := captureStdout(t, func() error {
+		return Route(t.TempDir(), []string{"--explain", "Why", "is", "$PATH", "empty?"})
+	})
+	if err != nil {
+		t.Fatalf("Route(): %v", err)
+	}
+	if !strings.Contains(output, "Activations: none") {
+		t.Fatalf("expected no activations for shell variable prompt, got %q", output)
+	}
+	if strings.Contains(output, "$path") || strings.Contains(output, "skills/path") {
+		t.Fatalf("shell variable should not be reported as a route activation, got %q", output)
+	}
+}
+
+func TestRouteExplainUnknownExplicitTokenDoesNotSuppressImplicitKeyword(t *testing.T) {
+	preview := ExplainPromptRoute("Why is $PATH empty? analyze this")
+	if len(preview.Activations) != 1 {
+		t.Fatalf("expected only the implicit analyze activation, got %#v", preview.Activations)
+	}
+	activation := preview.Activations[0]
+	if activation.Skill != "analyze" || activation.Source != "implicit keyword" {
+		t.Fatalf("expected implicit analyze activation, got %#v", activation)
+	}
+}
+
+func TestRouteExplainExplicitInvocationAllowsInstalledSkillDocs(t *testing.T) {
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	installedSkillDir := filepath.Join(codexHome, "skills", "pipeline")
+	if err := os.MkdirAll(installedSkillDir, 0o755); err != nil {
+		t.Fatalf("mkdir installed skill dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(installedSkillDir, "SKILL.md"), []byte("---\nname: pipeline\n---\n"), 0o644); err != nil {
+		t.Fatalf("write installed skill doc: %v", err)
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+
+	cwd := t.TempDir()
+	preview := ExplainPromptRouteForCWD(cwd, "$pipeline run this")
+	if len(preview.Activations) != 1 {
+		t.Fatalf("expected installed skill activation, got %#v", preview.Activations)
+	}
+	activation := preview.Activations[0]
+	if activation.Skill != "pipeline" || activation.Source != "explicit invocation" {
+		t.Fatalf("expected explicit pipeline activation, got %#v", activation)
+	}
+	expectedSkillPath := filepath.Join(codexHome, "skills", "pipeline", "SKILL.md")
+	if activation.RuntimePath != expectedSkillPath || activation.DocLabel != routeDocLabelSkill {
+		t.Fatalf("expected skill doc %q, got %#v", expectedSkillPath, activation)
+	}
+
+	output, err := captureStdout(t, func() error {
+		return Route(cwd, []string{"--explain", "$pipeline", "run", "this"})
+	})
+	if err != nil {
+		t.Fatalf("Route(): %v", err)
+	}
+	if !strings.Contains(output, "skill: "+expectedSkillPath) {
+		t.Fatalf("expected installed skill doc path in route output, got %q", output)
+	}
+	if strings.Contains(output, filepath.Join("pipeline", "RUNTIME.md")) {
+		t.Fatalf("route output should not report nonexistent runtime path, got %q", output)
+	}
+}
+
+func TestRouteExplainPromptInvocationSuppressesKeywords(t *testing.T) {
+	output, err := captureStdout(t, func() error {
+		return Route(t.TempDir(), []string{"--explain", "/prompts:executor please analyze this"})
+	})
+	if err != nil {
+		t.Fatalf("Route(): %v", err)
+	}
+	for _, expected := range []string{
+		"Activations: none",
+		"/prompts:executor suppresses implicit keyword routing",
+		"Implicit keywords: suppressed by /prompts:executor",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected %q in route output, got %q", expected, output)
+		}
+	}
+	if strings.Contains(output, "$analyze") {
+		t.Fatalf("suppressed prompt should not activate analyze, got %q", output)
+	}
+}
+
+func TestRouteRulesStayInSyncWithAgentsTemplate(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join(repoRootFromCaller(t), "templates", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read template AGENTS.md: %v", err)
+	}
+	template := string(content)
+	if !strings.Contains(template, "nana route --explain") {
+		t.Fatalf("template AGENTS.md missing route preview guidance")
+	}
+	for _, rule := range routeRules {
+		if !strings.Contains(template, "- `$"+rule.Skill+"`") {
+			t.Fatalf("template AGENTS.md missing route skill %q", rule.Skill)
+		}
+		for _, keyword := range rule.Keywords {
+			if !strings.Contains(template, "`"+keyword+"`") {
+				t.Fatalf("template AGENTS.md missing route keyword %q for skill %q", keyword, rule.Skill)
+			}
+		}
+	}
+}
+
 func TestResolveCodexHomeForLaunch(t *testing.T) {
 	cwd := t.TempDir()
 	home := filepath.Join(cwd, "home")

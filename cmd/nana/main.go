@@ -61,6 +61,7 @@ Repo automation and scouts:
 Local tools and support:
   nana next                    Print the highest-priority next step and command
   nana status                  Show current local NANA runtime status
+  nana route --explain "..."   Preview keyword-triggered skill routing
   nana usage                   Report token spend across NANA-managed sessions
   nana cancel                  Cancel active NANA runtime modes
   nana config                  Show or update persisted NANA defaults
@@ -221,6 +222,11 @@ func main() {
 		os.Exit(1)
 	case "status":
 		if err := gocli.Status(mustGetwd()); err != nil {
+			exitWithError(err)
+		}
+		return
+	case "route":
+		if err := gocli.Route(mustGetwd(), args[1:]); err != nil {
 			exitWithError(err)
 		}
 		return
@@ -445,6 +451,9 @@ func handleNestedHelp(args []string) bool {
 		return true
 	case "config":
 		mustHandleHelp(gocli.Config([]string{"--help"}))
+		return true
+	case "route":
+		mustHandleHelp(gocli.Route(cwd, []string{"--help"}))
 		return true
 	case "next":
 		mustHandleHelp(gocli.Next(cwd, []string{"--help"}))

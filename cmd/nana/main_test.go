@@ -193,6 +193,7 @@ func TestBinaryNestedGithubHelpRoutesLocally(t *testing.T) {
 		{args: []string{"usage", "--help"}, expected: "nana usage - Report token spend across NANA-managed sessions"},
 		{args: []string{"artifacts", "--help"}, expected: "nana artifacts - List repo-local NANA artifacts"},
 		{args: []string{"config", "--help"}, expected: "Usage:\n  nana config show"},
+		{args: []string{"route", "--help"}, expected: "nana route - Preview NANA prompt-to-skill routing"},
 		{args: []string{"hud", "--help"}, expected: "Usage:\n  nana hud"},
 		{args: []string{"work-on", "--help"}, expected: "has been replaced by `nana work`"},
 		{args: []string{"work-local", "--help"}, expected: "has been replaced by `nana work`"},
@@ -251,6 +252,7 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 		"nana repo scout ...",
 		"Local tools and support:",
 		"nana next",
+		`nana route --explain "..."`,
 		"nana config",
 		"nana usage",
 		"nana account <subcommand>",
@@ -318,6 +320,27 @@ func TestBinaryHelpTopicRoutesToWorkflowDiscovery(t *testing.T) {
 	for _, snippet := range expectedSnippets {
 		if !strings.Contains(help, snippet) {
 			t.Fatalf("expected workflow help to contain %q, got %q", snippet, output)
+		}
+	}
+}
+
+func TestBinaryRouteExplainRunsLocally(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cwd := t.TempDir()
+
+	cmd := runCommand(t, binaryPath, "route", "--explain", "Please ANALYZE this")
+	cmd.Dir = cwd
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("binary route explain failed: %v\n%s", err, output)
+	}
+	for _, expected := range []string{
+		"Route preview:",
+		"1. $analyze",
+		`source: implicit keyword "ANALYZE"`,
+	} {
+		if !strings.Contains(string(output), expected) {
+			t.Fatalf("expected %q in route output, got %q", expected, output)
 		}
 	}
 }

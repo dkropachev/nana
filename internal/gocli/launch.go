@@ -97,6 +97,8 @@ func ResolveCLIInvocation(args []string) CLIInvocation {
 		return CLIInvocation{Command: "start", LaunchArgs: nil}
 	case "next":
 		return CLIInvocation{Command: "next", LaunchArgs: nil}
+	case "route":
+		return CLIInvocation{Command: "route", LaunchArgs: nil}
 	case "improve":
 		return CLIInvocation{Command: "improve", LaunchArgs: nil}
 	case "enhance":
