@@ -78,6 +78,7 @@ Local tools and support:
   nana uninstall               Remove installed NANA components
 
 More help:
+  nana help workflows
   nana help work
   nana help investigate
   nana help repo
@@ -88,6 +89,89 @@ More help:
   nana help improve
   nana help enhance
   nana help ui-scout
+`
+
+const workflowsHelpText = `nana help workflows - Modes, skills, triggers, and safe entry commands
+
+Use this when:
+  nana help workflows           Show this compact discovery index
+  /skills                       Browse installed skills inside Codex
+
+Safest CLI entry points:
+  nana setup                    Install or refresh prompts, skills, hooks, and AGENTS guidance
+  nana doctor                   Verify installation health
+  nana help [command]           Show top-level or command-specific help
+  nana hud [--watch]            Show local NANA runtime status
+  nana explore --prompt "..."   Run a read-only repository lookup
+  nana sparkshell <command>     Summarize noisy shell output or bounded verification
+  nana next                     Show the next operator action
+  nana status                   Show active modes
+  nana cancel                   Cancel active runtime modes when stuck
+
+Core modes:
+  direct execution              Default when the request is clear and bounded
+  deep-interview                Clarify unclear intent, boundaries, and non-goals
+  ralplan                       Review plan, tradeoffs, and test shape before execution
+  autopilot                     End-to-end autonomous delivery for concrete build tasks
+  ultrawork                     Parallel/high-throughput execution when safe and well-scoped
+
+Skill index:
+  Planning                      $deep-interview, $plan, $ralplan
+  Execution                     $autopilot, $ultrawork, $ecomode, $pipeline
+  Investigation and repair      $analyze, $deepsearch, $tdd, $build-fix
+  Review and cleanup            $code-review, $security-review, $review, $ai-slop-cleaner
+  UI and visual                 $frontend-ui-ux, $visual-verdict, $web-clone
+  Utility                       $help, $doctor, $hud, $trace, $skill, $note, $cancel, $nana-setup
+  External helpers              $ask-claude, $ask-gemini, $configure-notifications
+
+Common trigger phrases:
+  autopilot | build me | I want a
+      -> $autopilot
+  ultrawork | ulw | parallel
+      -> $ultrawork
+  analyze | investigate
+      -> $analyze
+  plan this | plan the | let's plan
+      -> $plan
+  interview | deep interview | gather requirements | interview me | don't assume | ouroboros
+      -> $deep-interview
+  ralplan | consensus plan
+      -> $ralplan
+  ecomode | eco | budget
+      -> $ecomode
+  cancel | stop | abort
+      -> $cancel
+  tdd | test first
+      -> $tdd
+  fix build | type errors
+      -> $build-fix
+  review code | code review | code-review
+      -> $code-review
+  security review
+      -> $security-review
+  web-clone | clone site | clone website | copy webpage
+      -> $web-clone
+
+Safe in-session utilities:
+  $help                         Guide to the NANA/Codex workflow surface
+  $hud                          Explain HUD/statusline state
+  $trace                        Show agent flow trace timeline and summary
+  $doctor                       Diagnose NANA installation issues
+  $skill                        List or manage local skills
+  $note                         Save durable notes under .nana/notepad.md
+
+Routing rules:
+  - Explicit $skill names run before trigger phrases.
+  - Trigger phrases are case-insensitive and can appear anywhere.
+  - Prefer nana explore for simple read-only repo lookups.
+  - Prefer nana sparkshell for noisy read-only command output or bounded verification.
+  - Keep edits, diagnostics, and ambiguous investigations on the normal Codex path.
+
+More:
+  nana help
+  nana help work
+  nana help investigate
+  nana help repo
 `
 
 func main() {
@@ -337,6 +421,9 @@ func handleNestedHelp(args []string) bool {
 	repoRoot := legacyshim.ResolveRepoRoot(os.Getenv(legacyshim.RepoRootEnv), os.Args[0])
 
 	switch command {
+	case "workflows":
+		fmt.Fprint(os.Stdout, workflowsHelpText)
+		return true
 	case "cleanup":
 		mustHandleHelp(gocli.Cleanup([]string{"--help"}))
 		return true

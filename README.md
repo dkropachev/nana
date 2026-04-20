@@ -113,6 +113,7 @@ Then install Codex CLI and set up NANA:
 ```bash
 npm install -g @openai/codex
 nana setup
+nana help workflows
 ```
 
 Then start the first session separately:
@@ -200,10 +201,11 @@ Most users should think of NANA as **better task routing + better workflow + bet
 ## Start here if you are new
 
 1. Run `nana setup`
-2. Launch with `nana --madmax --high` for thorough work or `nana --fast` to start by issuing Codex `/fast`
-3. Use `$deep-interview "..."` when the request or boundaries are still unclear
-4. Use `$ralplan "..."` to approve the plan and review tradeoffs
-5. Continue with direct implementation, `nana review`, or `nana work`
+2. Run `nana help workflows` for a compact index of modes, trigger phrases, skills, and safe support commands
+3. Launch with `nana --madmax --high` for thorough work or `nana --fast` to start by issuing Codex `/fast`
+4. Use `$deep-interview "..."` when the request or boundaries are still unclear
+5. Use `$ralplan "..."` to approve the plan and review tradeoffs
+6. Continue with direct implementation, `nana review`, or `nana work`
 
 ## Recommended workflow
 
@@ -215,6 +217,7 @@ Most users should think of NANA as **better task routing + better workflow + bet
 
 | Surface | Use it for |
 | --- | --- |
+| `nana help workflows` | discovering modes, trigger phrases, safe entry commands, and common utility skills |
 | `nana next` | showing the top item that needs attention and the next command to run |
 | `$deep-interview "..."` | clarifying intent, boundaries, and non-goals |
 | `$ralplan "..."` | approving the implementation plan and tradeoffs |

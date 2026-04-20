@@ -256,6 +256,7 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 		"nana reflect | nana explore",
 		"nana hud",
 		"More help:",
+		"nana help workflows",
 		"nana help work",
 		"nana help investigate",
 		"nana help repo",
@@ -264,6 +265,56 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 	for _, snippet := range expectedSnippets {
 		if !strings.Contains(help, snippet) {
 			t.Fatalf("expected top-level help to contain %q, got %q", snippet, output)
+		}
+	}
+}
+
+func TestBinaryHelpTopicRoutesToWorkflowDiscovery(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cwd := t.TempDir()
+
+	cmd := runCommand(t, binaryPath, "help", "workflows")
+	cmd.Dir = cwd
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("binary help workflows failed: %v\n%s", err, output)
+	}
+	help := string(output)
+	expectedSnippets := []string{
+		"nana help workflows - Modes, skills, triggers, and safe entry commands",
+		"Safest CLI entry points:",
+		"nana setup",
+		"nana doctor",
+		"nana help [command]",
+		"nana hud [--watch]",
+		`nana explore --prompt "..."`,
+		"nana sparkshell <command>",
+		"Core modes:",
+		"direct execution",
+		"deep-interview",
+		"ralplan",
+		"autopilot",
+		"ultrawork",
+		"Skill index:",
+		"$deep-interview, $plan, $ralplan",
+		"$autopilot, $ultrawork, $ecomode, $pipeline",
+		"$frontend-ui-ux, $visual-verdict, $web-clone",
+		"$help, $doctor, $hud, $trace, $skill, $note, $cancel, $nana-setup",
+		"Common trigger phrases:",
+		"autopilot | build me | I want a",
+		"interview | deep interview | gather requirements | interview me | don't assume | ouroboros",
+		"web-clone | clone site | clone website | copy webpage",
+		"Safe in-session utilities:",
+		"$trace",
+		"$skill",
+		"Routing rules:",
+		"Explicit $skill names run before trigger phrases.",
+		"Prefer nana explore for simple read-only repo lookups.",
+		"Prefer nana sparkshell for noisy read-only command output or bounded verification.",
+	}
+	for _, snippet := range expectedSnippets {
+		if !strings.Contains(help, snippet) {
+			t.Fatalf("expected workflow help to contain %q, got %q", snippet, output)
 		}
 	}
 }
