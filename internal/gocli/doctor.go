@@ -608,8 +608,10 @@ func checkAgentsRuntimeSections(scope string, cwd string, codexHomeDir string) d
 	if !strings.Contains(content, "<!-- nana:generated:agents-md -->") && !strings.Contains(content, managedMarker) {
 		warnings = append(warnings, "missing generated AGENTS marker")
 	}
-	if !strings.Contains(content, "<state_management>") || !strings.Contains(content, "</state_management>") {
-		warnings = append(warnings, "missing state_management section")
+	hasLegacyStateSection := strings.Contains(content, "<state_management>") && strings.Contains(content, "</state_management>")
+	hasCompactStateSection := strings.Contains(content, "## Runtime State and Setup")
+	if !hasLegacyStateSection && !hasCompactStateSection {
+		warnings = append(warnings, "missing runtime state section")
 	}
 	for _, literal := range []string{
 		".nana/state/",

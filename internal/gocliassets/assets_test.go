@@ -190,15 +190,56 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 	if embedded != string(diskContent) {
 		t.Fatalf("embedded template AGENTS.md is out of sync with templates/AGENTS.md")
 	}
-	if len(diskContent) > 8192 {
-		t.Fatalf("template AGENTS.md exceeds budget: %d", len(diskContent))
+	const compactAgentsBudget = 6 * 1024
+	if len(diskContent) > compactAgentsBudget {
+		t.Fatalf("template AGENTS.md exceeds compact budget: %d > %d", len(diskContent), compactAgentsBudget)
+	}
+	if !strings.Contains(string(diskContent), "## Lazy Runtime Skills") {
+		t.Fatalf("template AGENTS.md should route rarely used modes through lazy runtime skills")
+	}
+	activationNeedle := "When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md."
+	if !strings.Contains(string(diskContent), activationNeedle) {
+		t.Fatalf("template AGENTS.md should explicitly activate runtime skills for keyword matches")
+	}
+	setupNeedle := "write generated `AGENTS.md` to the selected AGENTS target"
+	if !strings.Contains(string(diskContent), setupNeedle) {
+		t.Fatalf("template AGENTS.md should describe the AGENTS target without putting AGENTS.md under a Codex home")
+	}
+	for _, staleSetupGuidance := range []string{
+		"`AGENTS.md` under `~/.codex`",
+		"`AGENTS.md` under `./.codex`",
+	} {
+		if strings.Contains(string(diskContent), staleSetupGuidance) {
+			t.Fatalf("template AGENTS.md should not point setup guidance at stale path %q", staleSetupGuidance)
+		}
+	}
+	for _, verboseBlock := range []string{
+		"<keyword_detection>",
+		"<execution_protocols>",
+		"<state_management>",
+		"<delegation_rules>",
+		"<child_agent_protocol>",
+		"<model_routing>",
+	} {
+		if strings.Contains(string(diskContent), verboseBlock) {
+			t.Fatalf("template AGENTS.md still contains verbose generated block %q", verboseBlock)
+		}
 	}
 	rootAgents, err := os.ReadFile(filepath.Join(repoRoot, "AGENTS.md"))
 	if err != nil {
 		t.Fatalf("read root AGENTS.md: %v", err)
 	}
-	if len(rootAgents) > 8192 {
-		t.Fatalf("root AGENTS.md exceeds budget: %d", len(rootAgents))
+	if len(rootAgents) > compactAgentsBudget {
+		t.Fatalf("root AGENTS.md exceeds compact budget: %d > %d", len(rootAgents), compactAgentsBudget)
+	}
+	if !strings.Contains(string(rootAgents), activationNeedle) {
+		t.Fatalf("root AGENTS.md should explicitly activate runtime skills for keyword matches")
+	}
+	if !strings.Contains(string(rootAgents), setupNeedle) || !strings.Contains(string(rootAgents), "`./AGENTS.md` for project scope") {
+		t.Fatalf("root AGENTS.md should point generated project guidance at ./AGENTS.md")
+	}
+	if strings.Contains(string(rootAgents), "`AGENTS.md` under `./.codex`") {
+		t.Fatalf("root AGENTS.md should not point generated AGENTS.md at ./.codex")
 	}
 	for _, needle := range []string{
 		"`~/.codex/skills/autopilot/RUNTIME.md`",
@@ -241,6 +282,48 @@ func TestRoutingDecisionGuidanceIsEmbeddedForReportSurfaces(t *testing.T) {
 	for name, content := range surfaces {
 		if !strings.Contains(content, "routing_decision") {
 			t.Fatalf("%s missing routing_decision guidance", name)
+		}
+	}
+}
+
+func TestCompactAgentsAskGatePreservesIrreversibleAndSideEffectfulActions(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	templates, err := Templates()
+	if err != nil {
+		t.Fatalf("Templates(): %v", err)
+	}
+	embedded, ok := templates["AGENTS.md"]
+	if !ok {
+		t.Fatalf("embedded templates missing AGENTS.md")
+	}
+	diskContent, err := os.ReadFile(filepath.Join(repoRoot, "templates", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read template AGENTS.md: %v", err)
+	}
+	rootAgents, err := os.ReadFile(filepath.Join(repoRoot, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read root AGENTS.md: %v", err)
+	}
+
+	for _, source := range []struct {
+		name    string
+		content string
+	}{
+		{name: "templates/AGENTS.md", content: string(diskContent)},
+		{name: "generated template AGENTS.md", content: embedded},
+		{name: "root AGENTS.md", content: string(rootAgents)},
+	} {
+		for _, needle := range []string{
+			"Proceed automatically on clear, safe, low-risk, reversible tasks",
+			"ask for ambiguous, destructive, irreversible, externally side-effectful, or materially branching choices",
+		} {
+			if !strings.Contains(source.content, needle) {
+				t.Fatalf("%s ask gate must retain safety boundary %q", source.name, needle)
+			}
 		}
 	}
 }
