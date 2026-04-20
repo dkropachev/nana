@@ -17,15 +17,16 @@ import (
 )
 
 const (
-	defaultTmuxTailLines    = 200
-	minTmuxTailLines        = 100
-	maxTmuxTailLines        = 1000
-	defaultMaxVisibleLines  = 40
-	defaultSummaryTimeoutMS = 60_000
-	defaultSparkModel       = "gpt-5.3-codex-spark"
-	defaultFrontierModel    = "gpt-5.4"
-	defaultSummaryMaxLines  = 150
-	defaultSummaryMaxBytes  = 8_000
+	defaultTmuxTailLines     = 200
+	minTmuxTailLines         = 100
+	maxTmuxTailLines         = 1000
+	defaultMaxVisibleLines   = 40
+	defaultSummaryTimeoutMS  = 60_000
+	defaultSparkModel        = "gpt-5.3-codex-spark"
+	defaultFrontierModel     = "gpt-5.4"
+	defaultSummaryMaxLines   = 150
+	defaultSummaryMaxBytes   = 8_000
+	defaultTelemetryMaxBytes = 1 << 20
 )
 
 const (
@@ -400,12 +401,49 @@ func appendShellTelemetryIfEnabled(buildEvent func() shellTelemetryEvent) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return
 	}
+	line, err := json.Marshal(buildEvent())
+	if err != nil {
+		return
+	}
+	line = append(line, '\n')
+	rotateTelemetryLogIfNeeded(path, telemetryMaxBytes(), int64(len(line)))
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
 	}
 	defer file.Close()
-	_ = json.NewEncoder(file).Encode(buildEvent())
+	_, _ = file.Write(line)
+}
+
+func telemetryMaxBytes() int64 {
+	raw := strings.TrimSpace(os.Getenv("NANA_CONTEXT_TELEMETRY_MAX_BYTES"))
+	if raw == "" {
+		return defaultTelemetryMaxBytes
+	}
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || parsed <= 0 {
+		return defaultTelemetryMaxBytes
+	}
+	return parsed
+}
+
+func rotateTelemetryLogIfNeeded(path string, maxBytes int64, incomingBytes int64) {
+	if maxBytes <= 0 {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size()+incomingBytes <= maxBytes {
+		return
+	}
+	rotatedPath := path + ".1"
+	if err := os.Rename(path, rotatedPath); err == nil {
+		return
+	}
+	if _, err := os.Stat(rotatedPath); err == nil {
+		if err := os.Remove(rotatedPath); err == nil {
+			_ = os.Rename(path, rotatedPath)
+		}
+	}
 }
 
 func telemetryDisabled() bool {

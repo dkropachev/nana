@@ -120,6 +120,65 @@ func TestAppendShellTelemetrySkipsEventConstructionWhenDisabledOrMissingLog(t *t
 	}
 }
 
+func TestAppendShellTelemetryRotatesLogWhenMaxBytesWouldBeExceeded(t *testing.T) {
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	rotatedPath := logPath + ".1"
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatalf("mkdir telemetry dir: %v", err)
+	}
+	oldContent := "old-telemetry-event " + strings.Repeat("x", 220) + "\n"
+	if err := os.WriteFile(logPath, []byte(oldContent), 0o644); err != nil {
+		t.Fatalf("seed active telemetry log: %v", err)
+	}
+	if err := os.WriteFile(rotatedPath, []byte("stale rotated telemetry\n"), 0o644); err != nil {
+		t.Fatalf("seed rotated telemetry log: %v", err)
+	}
+
+	t.Setenv("NANA_CONTEXT_TELEMETRY", "1")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", logPath)
+	t.Setenv("NANA_CONTEXT_TELEMETRY_MAX_BYTES", "260")
+
+	appendShellTelemetryIfEnabled(func() shellTelemetryEvent {
+		return shellTelemetryEvent{
+			Timestamp:   "2026-04-20T10:00:00Z",
+			Tool:        "nana-sparkshell",
+			Event:       "shell_output_compaction",
+			CommandName: "go",
+			Summarized:  true,
+		}
+	})
+
+	activeContent, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read active telemetry log: %v", err)
+	}
+	if strings.Contains(string(activeContent), "old-telemetry-event") {
+		t.Fatalf("active telemetry log kept pre-rotation content: %q", activeContent)
+	}
+	if !strings.Contains(string(activeContent), `"event":"shell_output_compaction"`) {
+		t.Fatalf("active telemetry log missing new event: %q", activeContent)
+	}
+	if len(activeContent) > 260 {
+		t.Fatalf("active telemetry log exceeded configured cap: %d bytes", len(activeContent))
+	}
+	var event map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(activeContent), &event); err != nil {
+		t.Fatalf("active telemetry line should remain JSONL: %v\n%s", err, activeContent)
+	}
+
+	rotatedContent, err := os.ReadFile(rotatedPath)
+	if err != nil {
+		t.Fatalf("read rotated telemetry log: %v", err)
+	}
+	if string(rotatedContent) != oldContent {
+		t.Fatalf("rotated telemetry log mismatch:\nwant %q\ngot  %q", oldContent, rotatedContent)
+	}
+	if strings.Contains(string(rotatedContent), "stale rotated telemetry") {
+		t.Fatalf("rotated telemetry log was not replaced: %q", rotatedContent)
+	}
+}
+
 func TestCountVisibleLinesMatchesShellOutputLineContract(t *testing.T) {
 	cases := map[string]struct {
 		input string

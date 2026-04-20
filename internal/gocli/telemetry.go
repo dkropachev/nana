@@ -28,7 +28,9 @@ By default, nana uses .nana/logs/context-telemetry.ndjson and filters to the
 current run id when NANA_CONTEXT_TELEMETRY_RUN_ID, NANA_WORK_RUN_ID,
 NANA_RUN_ID, or NANA_SESSION_ID is set. The summary reports event counts,
 safe skill/reference identifiers, and shell compaction frequency without
-emitting raw command arguments or shell output.
+emitting raw command arguments or shell output. Telemetry writers cap the
+active log at 1 MiB by default and retain one .1 rotated copy; set
+NANA_CONTEXT_TELEMETRY_MAX_BYTES to override the active-log byte cap.
 `
 
 var telemetrySummaryEvents = map[string]bool{
