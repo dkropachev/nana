@@ -3,7 +3,6 @@ package gocli
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,16 +14,9 @@ import (
 )
 
 type doctorCheck struct {
-	Name        string
-	Status      string
-	Message     string
-	Remediation *doctorRemediation
-}
-
-type doctorRemediation struct {
-	Path             string
-	SafeAutomaticFix string
-	ManualFallback   string
+	Name    string
+	Status  string
+	Message string
 }
 
 func Doctor(cwd string, repoRoot string) error {
@@ -50,7 +42,7 @@ func Doctor(cwd string, repoRoot string) error {
 		checkExploreHarness(repoRoot),
 		checkDirectory("Codex home", paths.codexHomeDir),
 		checkManagedAccounts(paths.codexHomeDir),
-		checkConfig(paths.configPath, scope),
+		checkConfig(paths.configPath),
 		checkExploreRouting(paths.configPath),
 		checkPrompts(paths.promptsDir),
 		checkSkills(paths.skillsDir),
@@ -65,8 +57,9 @@ func Doctor(cwd string, repoRoot string) error {
 		checkManagedPromptFreshness(scope, cwd, paths.codexHomeDir, repoRoot),
 		checkManagedSkillFreshness(scope, cwd, paths.codexHomeDir, repoRoot),
 		checkDirectory("State dir", BaseStateDir(cwd)),
-		checkNanaStatePaths(cwd, scope),
+		checkNanaStatePaths(cwd),
 		checkNanaJSONStateFiles(cwd),
+		checkNanaStateSchemas(cwd),
 		checkMcpServers(paths.configPath),
 		checkDirectory("Investigate Codex home", ResolveInvestigateCodexHome(cwd)),
 		checkInvestigateConfig(cwd),
@@ -90,208 +83,14 @@ func Doctor(cwd string, repoRoot string) error {
 	}
 
 	fmt.Fprintf(os.Stdout, "\nResults: %d passed, %d warnings, %d failed\n", passCount, warnCount, failCount)
-	remediationsPrinted := false
-	if warnCount+failCount > 0 {
-		remediationsPrinted = printDoctorRemediations(os.Stdout, checks)
-	}
-	printDoctorFooter(os.Stdout, scope, checks, warnCount, failCount, remediationsPrinted)
-	return nil
-}
-
-func printDoctorFooter(out io.Writer, scope string, checks []doctorCheck, warnCount int, failCount int, remediationsPrinted bool) {
 	if failCount > 0 {
-		unsafeOrUnknownFailures := hasUnsafeOrUnknownDoctorChecks(checks, "fail")
-		safeFailures := hasSafeAutomaticDoctorChecks(checks, "fail")
-		switch {
-		case unsafeOrUnknownFailures && safeFailures:
-			if command, ok := singleSafeAutomaticDoctorCommand(checks, "fail"); ok {
-				fmt.Fprintf(out, "\nSome failures require manual remediation; review the remediation section above. Run \"%s\" only for failures marked as safe automatic fixes.\n", command)
-			} else {
-				fmt.Fprintln(out, "\nSome failures require manual remediation; review the remediation section above. Run only the safe automatic fix commands shown above for failures marked safe.")
-			}
-		case unsafeOrUnknownFailures:
-			fmt.Fprintln(out, "\nSome failures require manual remediation; review the remediation section above.")
-		case safeFailures:
-			if command, ok := singleSafeAutomaticDoctorCommand(checks, "fail"); ok {
-				fmt.Fprintf(out, "\nRun \"%s\" to fix failures marked as safe automatic fixes.\n", command)
-			} else {
-				fmt.Fprintln(out, "\nRun the safe automatic fix commands shown above to fix failures marked safe.")
-			}
-		default:
-			fmt.Fprintln(out, "\nReview failures above.")
-		}
-		return
+		fmt.Fprintln(os.Stdout, "\nRun \"nana setup\" to fix installation issues.")
+	} else if warnCount > 0 {
+		fmt.Fprintln(os.Stdout, "\nRun \"nana setup --force\" to refresh all components.")
+	} else {
+		fmt.Fprintln(os.Stdout, "\nAll checks passed! nana is ready.")
 	}
-	if warnCount > 0 {
-		manualWarnings := hasManualOnlyDoctorChecks(checks, "warn")
-		safeWarnings := hasSafeAutomaticDoctorChecks(checks, "warn")
-		switch {
-		case manualWarnings && safeWarnings:
-			if command, ok := singleSafeAutomaticDoctorCommand(checks, "warn"); ok {
-				fmt.Fprintf(out, "\nSome warnings require manual remediation; review the remediation section above. Run \"%s\" only for warnings marked as safe automatic fixes.\n", command)
-			} else {
-				fmt.Fprintln(out, "\nSome warnings require manual remediation; review the remediation section above. Run only the safe automatic fix commands shown above for warnings marked safe.")
-			}
-		case manualWarnings:
-			fmt.Fprintln(out, "\nSome warnings require manual remediation; review the remediation section above.")
-		case remediationsPrinted:
-			if command, ok := singleSafeAutomaticDoctorCommand(checks, "warn"); ok {
-				fmt.Fprintf(out, "\nReview remediation above, or run \"%s\" for safe setup remediations.\n", command)
-			} else {
-				fmt.Fprintln(out, "\nReview remediation above and run the safe automatic fix commands shown there.")
-			}
-		default:
-			fmt.Fprintf(out, "\nReview warnings above, or run \"%s\" to refresh setup-managed components.\n", setupFixCommand(scope))
-		}
-		return
-	}
-	fmt.Fprintln(out, "\nAll checks passed! nana is ready.")
-}
-
-func hasUnsafeOrUnknownDoctorChecks(checks []doctorCheck, status string) bool {
-	for _, check := range checks {
-		if check.Status != status {
-			continue
-		}
-		if !isSafeAutomaticDoctorRemediation(check.Remediation) {
-			return true
-		}
-	}
-	return false
-}
-
-func hasManualOnlyDoctorChecks(checks []doctorCheck, status string) bool {
-	for _, check := range checks {
-		if check.Status == status && isManualOnlyDoctorRemediation(check.Remediation) {
-			return true
-		}
-	}
-	return false
-}
-
-func hasSafeAutomaticDoctorChecks(checks []doctorCheck, status string) bool {
-	for _, check := range checks {
-		if check.Status == status && isSafeAutomaticDoctorRemediation(check.Remediation) {
-			return true
-		}
-	}
-	return false
-}
-
-func singleSafeAutomaticDoctorCommand(checks []doctorCheck, status string) (string, bool) {
-	commands := []string{}
-	seen := map[string]bool{}
-	for _, check := range checks {
-		if check.Status != status || !isSafeAutomaticDoctorRemediation(check.Remediation) {
-			continue
-		}
-		command := safeAutomaticDoctorCommand(check.Remediation)
-		if command == "" || seen[command] {
-			continue
-		}
-		seen[command] = true
-		commands = append(commands, command)
-	}
-	if len(commands) != 1 {
-		return "", false
-	}
-	return commands[0], true
-}
-
-func safeAutomaticDoctorCommand(remediation *doctorRemediation) string {
-	if !isSafeAutomaticDoctorRemediation(remediation) {
-		return ""
-	}
-	text := strings.TrimSpace(remediation.SafeAutomaticFix)
-	start := strings.Index(text, "`")
-	if start < 0 {
-		return ""
-	}
-	remainder := text[start+1:]
-	end := strings.Index(remainder, "`")
-	if end < 0 {
-		return ""
-	}
-	return strings.TrimSpace(remainder[:end])
-}
-
-func isSafeAutomaticDoctorRemediation(remediation *doctorRemediation) bool {
-	if remediation == nil {
-		return false
-	}
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(remediation.SafeAutomaticFix)), "yes")
-}
-
-func isManualOnlyDoctorRemediation(remediation *doctorRemediation) bool {
-	if remediation == nil {
-		return false
-	}
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(remediation.SafeAutomaticFix)), "no")
-}
-
-func printDoctorRemediations(out io.Writer, checks []doctorCheck) bool {
-	printed := false
-	for _, check := range checks {
-		if check.Status == "pass" || check.Remediation == nil {
-			continue
-		}
-		if !printed {
-			fmt.Fprintln(out, "\nRemediation:")
-			printed = true
-		}
-		fmt.Fprintf(out, "  - %s (%s)\n", check.Name, check.Status)
-		if check.Remediation.Path != "" {
-			fmt.Fprintf(out, "    Path: %s\n", check.Remediation.Path)
-		}
-		fmt.Fprintf(out, "    Cause: %s\n", check.Message)
-		if check.Remediation.SafeAutomaticFix != "" {
-			fmt.Fprintf(out, "    Safe automatic fix: %s\n", check.Remediation.SafeAutomaticFix)
-		}
-		if check.Remediation.ManualFallback != "" {
-			fmt.Fprintf(out, "    Manual fallback: %s\n", check.Remediation.ManualFallback)
-		}
-	}
-	return printed
-}
-
-func setupFixCommand(scope string) string {
-	return setupCommand(scope, false)
-}
-
-func setupForceFixCommand(scope string) string {
-	return setupCommand(scope, true)
-}
-
-func setupCommand(scope string, force bool) string {
-	scope = strings.TrimSpace(scope)
-	parts := []string{"nana", "setup"}
-	if force {
-		parts = append(parts, "--force")
-	}
-	if scope == "" {
-		return strings.Join(parts, " ")
-	}
-	parts = append(parts, "--scope", scope)
-	return strings.Join(parts, " ")
-}
-
-func setupDoctorRemediation(scope string, path string, manualFallback string) *doctorRemediation {
-	if manualFallback == "" {
-		manualFallback = fmt.Sprintf("inspect %s, then run `%s`", path, setupFixCommand(scope))
-	}
-	return &doctorRemediation{
-		Path:             path,
-		SafeAutomaticFix: fmt.Sprintf("yes — run `%s`", setupFixCommand(scope)),
-		ManualFallback:   manualFallback,
-	}
-}
-
-func manualDoctorRemediation(path string, manualFallback string) *doctorRemediation {
-	return &doctorRemediation{
-		Path:             path,
-		SafeAutomaticFix: "no — manual review required",
-		ManualFallback:   manualFallback,
-	}
+	return nil
 }
 
 type teamDoctorIssue struct {
@@ -384,15 +183,7 @@ func resolveDoctorPaths(cwd string, scope string) doctorPaths {
 func checkCodexCLI() doctorCheck {
 	output, err := exec.Command("codex", "--version").CombinedOutput()
 	if err != nil {
-		return doctorCheck{
-			Name:    "Codex CLI",
-			Status:  "fail",
-			Message: "not found - install from https://github.com/openai/codex",
-			Remediation: manualDoctorRemediation(
-				"PATH",
-				"install Codex CLI from https://github.com/openai/codex, then rerun `nana doctor`",
-			),
-		}
+		return doctorCheck{Name: "Codex CLI", Status: "fail", Message: "not found - install from https://github.com/openai/codex"}
 	}
 	return doctorCheck{Name: "Codex CLI", Status: "pass", Message: fmt.Sprintf("installed (%s)", strings.TrimSpace(string(output)))}
 }
@@ -572,78 +363,40 @@ func checkDirectory(name string, path string) doctorCheck {
 }
 
 func checkManagedAccounts(codexHomeDir string) doctorCheck {
-	registryPath := managedAuthRegistryPathForHome(codexHomeDir)
-	statePath := managedAuthRuntimeStatePathForHome(codexHomeDir)
 	registry, err := loadManagedAuthRegistry(codexHomeDir)
 	if err != nil {
-		return failedAccountsCheck(
-			fmt.Sprintf("invalid account registry: %v", err),
-			registryPath,
-			fmt.Sprintf("repair or remove %s, then rerun `nana doctor`; if removed, re-add profiles with `nana account pull` or `nana account add`", registryPath),
-		)
+		return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("invalid account registry: %v", err)}
 	}
 	if len(registry.Accounts) == 0 {
 		return doctorCheck{Name: "Accounts", Status: "pass", Message: "not configured"}
 	}
 	state, err := loadManagedAuthRuntimeState(codexHomeDir)
 	if err != nil {
-		return failedAccountsCheck(
-			fmt.Sprintf("invalid account runtime state: %v", err),
-			statePath,
-			fmt.Sprintf("repair or remove %s, then rerun `nana doctor`; runtime state will be recreated as accounts are used", statePath),
-		)
+		return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("invalid account runtime state: %v", err)}
 	}
 	for _, account := range registry.Accounts {
 		if strings.TrimSpace(account.AuthPath) == "" {
-			return failedAccountsCheck(
-				fmt.Sprintf("account %s has no credential path", account.Name),
-				registryPath,
-				fmt.Sprintf("edit %s to set auth_path for account %s, or remove and re-add it with `nana account remove %s` then `nana account add %s`", registryPath, account.Name, account.Name, account.Name),
-			)
+			return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("account %s has no credential path", account.Name)}
 		}
 		if _, err := os.Stat(account.AuthPath); err != nil {
-			return failedAccountsCheck(
-				fmt.Sprintf("account %s credential file missing (%s)", account.Name, account.AuthPath),
-				account.AuthPath,
-				fmt.Sprintf("restore %s, or remove and re-add account %s with `nana account remove %s` then `nana account add %s`", account.AuthPath, account.Name, account.Name, account.Name),
-			)
+			return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("account %s credential file missing (%s)", account.Name, account.AuthPath)}
 		}
 		profile, err := readManagedAccountProfile(account.AuthPath)
 		if err != nil {
-			return failedAccountsCheck(
-				fmt.Sprintf("account %s credentials unreadable: %v", account.Name, err),
-				account.AuthPath,
-				fmt.Sprintf("fix permissions or JSON at %s, or refresh account %s with `nana account add %s`", account.AuthPath, account.Name, account.Name),
-			)
+			return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("account %s credentials unreadable: %v", account.Name, err)}
 		}
 		if !isChatGPTBackedAuthMode(profile.AuthMode) {
-			return failedAccountsCheck(
-				fmt.Sprintf("account %s uses unsupported auth mode %q", account.Name, profile.AuthMode),
-				account.AuthPath,
-				fmt.Sprintf("refresh account %s with ChatGPT-backed credentials using `nana account add %s` or `nana account pull %s`", account.Name, account.Name, account.Name),
-			)
+			return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("account %s uses unsupported auth mode %q", account.Name, profile.AuthMode)}
 		}
 		if profile.Tokens == nil || strings.TrimSpace(profile.Tokens.AccessToken) == "" || strings.TrimSpace(profile.Tokens.RefreshToken) == "" || strings.TrimSpace(profile.Tokens.AccountID) == "" {
-			return failedAccountsCheck(
-				fmt.Sprintf("account %s is missing ChatGPT token fields required for usage API checks", account.Name),
-				account.AuthPath,
-				fmt.Sprintf("refresh account %s with `nana account add %s` or import a complete auth.json with `nana account pull %s --from <path>`", account.Name, account.Name, account.Name),
-			)
+			return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("account %s is missing ChatGPT token fields required for usage API checks", account.Name)}
 		}
 	}
 	if active := strings.TrimSpace(state.Active); active != "" && registry.account(active) == nil {
-		return failedAccountsCheck(
-			fmt.Sprintf("active account %s not present in registry", active),
-			statePath,
-			fmt.Sprintf("edit or remove %s, then activate a configured account with `nana account activate <name>`", statePath),
-		)
+		return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("active account %s not present in registry", active)}
 	}
 	if pending := strings.TrimSpace(state.PendingActive); pending != "" && registry.account(pending) == nil {
-		return failedAccountsCheck(
-			fmt.Sprintf("pending account %s not present in registry", pending),
-			statePath,
-			fmt.Sprintf("edit or remove %s, then queue a configured account with `nana account activate <name>`", statePath),
-		)
+		return doctorCheck{Name: "Accounts", Status: "fail", Message: fmt.Sprintf("pending account %s not present in registry", pending)}
 	}
 	message := fmt.Sprintf("%d configured (preferred=%s, active=%s)", len(registry.Accounts), displayOrFallback(registry.Preferred, "(none)"), displayOrFallback(state.Active, "(none)"))
 	if state.Degraded {
@@ -655,11 +408,7 @@ func checkManagedAccounts(codexHomeDir string) doctorCheck {
 		case accountUsageResultStale:
 			return doctorCheck{Name: "Accounts", Status: "warn", Message: message + fmt.Sprintf(", account %s usage telemetry stale", account.Name)}
 		case accountUsageResultPermanent:
-			return failedAccountsCheck(
-				message+fmt.Sprintf(", account %s usage auth failed: %s", account.Name, displayOrFallback(accountState.LastUsageError, "unknown")),
-				account.AuthPath,
-				fmt.Sprintf("refresh credentials for account %s with `nana account add %s`, then rerun `nana doctor`", account.Name, account.Name),
-			)
+			return doctorCheck{Name: "Accounts", Status: "fail", Message: message + fmt.Sprintf(", account %s usage auth failed: %s", account.Name, displayOrFallback(accountState.LastUsageError, "unknown"))}
 		case accountUsageResultTransient:
 			return doctorCheck{Name: "Accounts", Status: "warn", Message: message + fmt.Sprintf(", account %s usage API unavailable", account.Name)}
 		}
@@ -670,49 +419,19 @@ func checkManagedAccounts(codexHomeDir string) doctorCheck {
 	return doctorCheck{Name: "Accounts", Status: "pass", Message: message}
 }
 
-func failedAccountsCheck(message string, path string, manualFallback string) doctorCheck {
-	return doctorCheck{
-		Name:        "Accounts",
-		Status:      "fail",
-		Message:     message,
-		Remediation: manualDoctorRemediation(path, manualFallback),
-	}
-}
-
-func checkConfig(configPath string, scope string) doctorCheck {
+func checkConfig(configPath string) doctorCheck {
 	content, err := os.ReadFile(configPath)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return doctorCheck{
-				Name:    "Config",
-				Status:  "fail",
-				Message: fmt.Sprintf("config.toml cannot be read: %v", err),
-				Remediation: manualDoctorRemediation(
-					configPath,
-					fmt.Sprintf("fix permissions or move the path conflict at %s, then run `%s`", configPath, setupFixCommand(scope)),
-				),
-			}
-		}
-		return doctorCheck{
-			Name:        "Config",
-			Status:      "warn",
-			Message:     "config.toml not found",
-			Remediation: setupDoctorRemediation(scope, configPath, fmt.Sprintf("create the parent directory with `mkdir -p %s`, then run `%s`", filepath.Dir(configPath), setupFixCommand(scope))),
-		}
+		return doctorCheck{Name: "Config", Status: "warn", Message: "config.toml not found"}
 	}
 	text := string(content)
 	if countTopLevelTable(text, "[tui]") > 1 {
-		return doctorCheck{
-			Name:        "Config",
-			Status:      "fail",
-			Message:     "invalid config.toml (possible duplicate TOML table such as [tui])",
-			Remediation: manualDoctorRemediation(configPath, fmt.Sprintf("edit %s to remove duplicate top-level tables, then run `%s`", configPath, setupFixCommand(scope))),
-		}
+		return doctorCheck{Name: "Config", Status: "fail", Message: "invalid config.toml (possible duplicate TOML table such as [tui])"}
 	}
 	if strings.Contains(text, "[mcp_servers.nana_") || strings.Contains(strings.ToLower(text), "managed by nana setup") || strings.Contains(text, "USE_NANA_") {
 		return doctorCheck{Name: "Config", Status: "pass", Message: "config.toml has NANA entries"}
 	}
-	return doctorCheck{Name: "Config", Status: "warn", Message: fmt.Sprintf("config.toml exists but no NANA entries yet (expected before first setup; run %q once)", setupFixCommand(scope))}
+	return doctorCheck{Name: "Config", Status: "warn", Message: "config.toml exists but no NANA entries yet (expected before first setup; run \"nana setup --force\" once)"}
 }
 
 func countTopLevelTable(content string, table string) int {
@@ -859,23 +578,13 @@ func checkAgentsMD(scope string, cwd string, codexHomeDir string) doctorCheck {
 		if _, err := os.Stat(path); err == nil {
 			return doctorCheck{Name: "AGENTS.md", Status: "pass", Message: fmt.Sprintf("found in %s", path)}
 		}
-		return doctorCheck{
-			Name:        "AGENTS.md",
-			Status:      "warn",
-			Message:     fmt.Sprintf("not found in %s (run nana setup --scope user)", path),
-			Remediation: setupDoctorRemediation(scope, path, fmt.Sprintf("create %s from templates/AGENTS.md or run `%s`", path, setupFixCommand(scope))),
-		}
+		return doctorCheck{Name: "AGENTS.md", Status: "warn", Message: fmt.Sprintf("not found in %s (run nana setup --scope user)", path)}
 	}
 	path := filepath.Join(cwd, "AGENTS.md")
 	if _, err := os.Stat(path); err == nil {
 		return doctorCheck{Name: "AGENTS.md", Status: "pass", Message: "found in project root"}
 	}
-	return doctorCheck{
-		Name:        "AGENTS.md",
-		Status:      "warn",
-		Message:     "not found in project root (run nana agents-init . or nana setup --scope project)",
-		Remediation: setupDoctorRemediation(scope, path, "run `nana agents-init .` for lightweight guidance, or `nana setup --scope project` for full setup without forcing an overwrite"),
-	}
+	return doctorCheck{Name: "AGENTS.md", Status: "warn", Message: "not found in project root (run nana agents-init . or nana setup --scope project)"}
 }
 
 type doctorMarkerPair struct {
@@ -889,25 +598,15 @@ func checkAgentsRuntimeSections(scope string, cwd string, codexHomeDir string) d
 	contentBytes, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return doctorCheck{
-				Name:        "AGENTS runtime guidance",
-				Status:      "warn",
-				Message:     fmt.Sprintf("%s not found", path),
-				Remediation: setupDoctorRemediation(scope, path, fmt.Sprintf("create %s from templates/AGENTS.md or run `%s`", path, setupFixCommand(scope))),
-			}
+			return doctorCheck{Name: "AGENTS runtime guidance", Status: "warn", Message: fmt.Sprintf("%s not found", path)}
 		}
-		return doctorCheck{
-			Name:        "AGENTS runtime guidance",
-			Status:      "warn",
-			Message:     err.Error(),
-			Remediation: manualDoctorRemediation(path, fmt.Sprintf("fix permissions for %s, then run `%s`", path, setupFixCommand(scope))),
-		}
+		return doctorCheck{Name: "AGENTS runtime guidance", Status: "warn", Message: err.Error()}
 	}
 	content := string(contentBytes)
 	failures := []string{}
 	warnings := []string{}
 
-	if !isNanaManagedAgentsContent(content) {
+	if !hasStandaloneGeneratedAgentsMarker(content) && !strings.Contains(content, managedMarker) {
 		warnings = append(warnings, "missing generated AGENTS marker")
 	}
 	hasLegacyStateSection := strings.Contains(content, "<state_management>") && strings.Contains(content, "</state_management>")
@@ -944,38 +643,10 @@ func checkAgentsRuntimeSections(scope string, cwd string, codexHomeDir string) d
 	}
 
 	if len(failures) > 0 {
-		return doctorCheck{
-			Name:    "AGENTS runtime guidance",
-			Status:  "fail",
-			Message: strings.Join(limitStrings(failures, 3), "; "),
-			Remediation: manualDoctorRemediation(
-				path,
-				fmt.Sprintf("restore balanced NANA marker pairs in %s, or back up and merge custom instructions before any force refresh", path),
-			),
-		}
+		return doctorCheck{Name: "AGENTS runtime guidance", Status: "fail", Message: strings.Join(limitStrings(failures, 3), "; ")}
 	}
 	if len(warnings) > 0 {
-		if isNanaSetupGeneratedAgentsContent(content) {
-			return doctorCheck{
-				Name:    "AGENTS runtime guidance",
-				Status:  "warn",
-				Message: fmt.Sprintf("%s; run %s", strings.Join(limitStrings(warnings, 3), "; "), setupForceFixCommand(scope)),
-				Remediation: &doctorRemediation{
-					Path:             path,
-					SafeAutomaticFix: fmt.Sprintf("yes — run `%s`", setupForceFixCommand(scope)),
-					ManualFallback:   fmt.Sprintf("inspect %s, then run `%s` to refresh setup-generated AGENTS.md content", path, setupForceFixCommand(scope)),
-				},
-			}
-		}
-		return doctorCheck{
-			Name:    "AGENTS runtime guidance",
-			Status:  "warn",
-			Message: fmt.Sprintf("%s; manual merge required before force-refreshing %s", strings.Join(limitStrings(warnings, 3), "; "), path),
-			Remediation: manualDoctorRemediation(
-				path,
-				fmt.Sprintf("copy missing generated guidance from templates/AGENTS.md into %s, or back up and merge custom instructions before any force refresh", path),
-			),
-		}
+		return doctorCheck{Name: "AGENTS runtime guidance", Status: "warn", Message: fmt.Sprintf("%s; run nana setup --force --scope %s", strings.Join(limitStrings(warnings, 3), "; "), scope)}
 	}
 	return doctorCheck{Name: "AGENTS runtime guidance", Status: "pass", Message: "generated sections and overlay markers present"}
 }
@@ -1016,7 +687,7 @@ func allStringIndexes(content string, needle string) []int {
 	}
 }
 
-func checkNanaStatePaths(cwd string, scope string) doctorCheck {
+func checkNanaStatePaths(cwd string) doctorCheck {
 	nanaDir := filepath.Join(cwd, ".nana")
 	dirs := []string{
 		nanaDir,
@@ -1059,20 +730,10 @@ func checkNanaStatePaths(cwd string, scope string) doctorCheck {
 		}
 	}
 	if len(failures) > 0 {
-		return doctorCheck{
-			Name:        "NANA state paths",
-			Status:      "fail",
-			Message:     strings.Join(limitStrings(failures, 3), "; "),
-			Remediation: manualDoctorRemediation(nanaDir, fmt.Sprintf("move the conflicting path aside, then run `%s`", setupFixCommand(scope))),
-		}
+		return doctorCheck{Name: "NANA state paths", Status: "fail", Message: strings.Join(limitStrings(failures, 3), "; ")}
 	}
 	if len(missing) > 0 {
-		return doctorCheck{
-			Name:        "NANA state paths",
-			Status:      "warn",
-			Message:     fmt.Sprintf("missing %s (run nana setup)", strings.Join(limitStrings(missing, 4), ", ")),
-			Remediation: setupDoctorRemediation(scope, nanaDir, fmt.Sprintf("run `mkdir -p %s %s %s`, then `%s`", filepath.Join(nanaDir, "state"), filepath.Join(nanaDir, "plans"), filepath.Join(nanaDir, "logs"), setupFixCommand(scope))),
-		}
+		return doctorCheck{Name: "NANA state paths", Status: "warn", Message: fmt.Sprintf("missing %s (run nana setup)", strings.Join(limitStrings(missing, 4), ", "))}
 	}
 	return doctorCheck{Name: "NANA state paths", Status: "pass", Message: "required .nana paths present"}
 }
@@ -1114,12 +775,7 @@ func checkNanaJSONStateFiles(cwd string) doctorCheck {
 		}
 	}
 	if len(invalid) > 0 {
-		return doctorCheck{
-			Name:        "NANA JSON state",
-			Status:      "fail",
-			Message:     strings.Join(limitStrings(invalid, 4), "; "),
-			Remediation: manualDoctorRemediation(filepath.Join(cwd, ".nana"), "repair the malformed JSON shown above, or move the corrupt file aside and rerun `nana doctor`"),
-		}
+		return doctorCheck{Name: "NANA JSON state", Status: "fail", Message: strings.Join(limitStrings(invalid, 4), "; ")}
 	}
 	if len(paths) == 0 {
 		return doctorCheck{Name: "NANA JSON state", Status: "pass", Message: "no JSON state files yet"}

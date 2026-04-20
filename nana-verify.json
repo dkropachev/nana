@@ -1,4 +1,5 @@
 {
+  "$schema": "docs/schemas/nana-verify.schema.json",
   "version": 1,
   "name": "nana-go",
   "description": "Canonical repository verification profile for local completion evidence.",
@@ -48,7 +49,6 @@
         "patterns": [
           "AGENTS.md",
           "templates/AGENTS.md",
-          "internal/gocli/lazy_skill_triggers.json",
           "internal/gocliassets/generated/templates.json"
         ],
         "checks": [

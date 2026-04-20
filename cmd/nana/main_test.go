@@ -188,6 +188,7 @@ func TestBinaryNestedGithubHelpRoutesLocally(t *testing.T) {
 		{args: []string{"repo", "--help"}, expected: "nana repo - Repository onboarding and verification-plan inspection"},
 		{args: []string{"start", "--help"}, expected: "nana start - Run repo automation or scout startup"},
 		{args: []string{"next", "--help"}, expected: "nana next - Show the highest-priority item that needs operator attention"},
+		{args: []string{"route", "--help"}, expected: "nana route - Preview NANA prompt-to-skill routing"},
 		{args: []string{"verify", "--help"}, expected: "nana verify - Run the repository-native verification profile"},
 		{args: []string{"ui-scout", "--help"}, expected: "nana ui-scout - Audit UI pages and flows with issue-style findings"},
 		{args: []string{"work", "--help"}, expected: "nana work - Unified local and GitHub-backed implementation runtime"},
@@ -254,6 +255,7 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 		"nana repo scout ...",
 		"Local tools and support:",
 		"nana next",
+		`nana route --explain "..."`,
 		"nana verify [--json]",
 		"nana config",
 		"nana usage",
@@ -275,6 +277,38 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 		if !strings.Contains(help, snippet) {
 			t.Fatalf("expected top-level help to contain %q, got %q", snippet, output)
 		}
+	}
+}
+
+func TestBinaryRouteExplainDispatchesToRoutePreview(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cwd := t.TempDir()
+	home := filepath.Join(cwd, "home")
+
+	cmd := runCommand(t, binaryPath, "route", "--explain", "build me api")
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"CODEX_HOME=",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("binary route --explain failed: %v\n%s", err, output)
+	}
+	routePreview := string(output)
+	for _, expected := range []string{
+		"Route preview:",
+		"Prompt: build me api",
+		"1. $autopilot",
+		`source: implicit keyword "build me"`,
+		filepath.Join(home, ".nana", "codex-home", "skills", "autopilot", "RUNTIME.md"),
+	} {
+		if !strings.Contains(routePreview, expected) {
+			t.Fatalf("expected route preview to contain %q, got %q", expected, output)
+		}
+	}
+	if strings.Contains(routePreview, "unknown command: route") {
+		t.Fatalf("route command should be wired into CLI dispatch, got %q", output)
 	}
 }
 

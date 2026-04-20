@@ -60,6 +60,7 @@ Repo automation and scouts:
 
 Local tools and support:
   nana next                    Print the highest-priority next step and command
+  nana route --explain "..."   Preview prompt-to-skill routing
   nana status                  Show current local NANA runtime status
   nana verify [--json]         Run the repo-native verification profile
   nana usage                   Report token spend across NANA-managed sessions
@@ -466,6 +467,9 @@ func handleNestedHelp(args []string) bool {
 		return true
 	case "next":
 		mustHandleHelp(gocli.Next(cwd, []string{"--help"}))
+		return true
+	case "route":
+		mustHandleHelp(gocli.Route(cwd, []string{"--help"}))
 		return true
 	case "verify":
 		mustHandleHelp(gocli.Verify(cwd, []string{"--help"}))

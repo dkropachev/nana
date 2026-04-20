@@ -194,7 +194,7 @@ It adds a better working layer around it:
 - **Codex** does the actual agent work
 - **NANA role keywords** make useful roles reusable
 - **NANA skills** make common workflows reusable
-- **`.nana/`** stores plans, logs, memory, and runtime state
+- **`.nana/`** stores plans, logs, memory, and runtime state; see [`docs/reference/nana-state-files.md`](docs/reference/nana-state-files.md) for schemas and examples
 
 Most users should think of NANA as **better task routing + better workflow + better runtime**, not as a command surface to operate manually all day.
 

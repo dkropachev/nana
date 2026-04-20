@@ -52,6 +52,56 @@ func TestLoadVerificationProfileSearchesParents(t *testing.T) {
 	}
 }
 
+func TestLoadVerificationProfileDefaultsOmittedVersion(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, VerifyProfileFile), []byte(`{
+  "name": "implicit-version-profile",
+  "stages": [{"name":"lint","command":"printf ok"}]
+}
+`), 0o644); err != nil {
+		t.Fatalf("write profile: %v", err)
+	}
+
+	_, _, profile, err := loadVerificationProfile(repo)
+	if err != nil {
+		t.Fatalf("loadVerificationProfile(): %v", err)
+	}
+	if profile.Version != 1 {
+		t.Fatalf("omitted version should default to 1, got %#v", profile)
+	}
+}
+
+func TestVerifyProfileRejectsExplicitNonPositiveVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		version int
+	}{
+		{name: "zero", version: 0},
+		{name: "negative", version: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			profile := fmt.Sprintf(`{"version":%d,"stages":[{"name":"noop","command":"true"}]}`+"\n", tc.version)
+			if err := os.WriteFile(filepath.Join(repo, VerifyProfileFile), []byte(profile), 0o644); err != nil {
+				t.Fatalf("write profile: %v", err)
+			}
+
+			stdout, stderr, err := captureOutput(t, func() error { return Verify(repo, []string{"--profile"}) })
+			if err == nil {
+				t.Fatalf("Verify(--profile) accepted explicit version %d", tc.version)
+			}
+			if strings.TrimSpace(stdout) != "" {
+				t.Fatalf("invalid profile should not write profile output, got %q", stdout)
+			}
+			for _, got := range []string{err.Error(), stderr} {
+				if !strings.Contains(got, "version must be >= 1") {
+					t.Fatalf("expected version validation error for version %d, got err=%v stderr=%q", tc.version, err, stderr)
+				}
+			}
+		})
+	}
+}
+
 func TestLoadVerificationProfileIncludesChangedScopeGuidance(t *testing.T) {
 	repo := t.TempDir()
 	profilePath := filepath.Join(repo, VerifyProfileFile)
@@ -206,68 +256,23 @@ func TestVerifyJSONPreflightReportsMissingProfileRecovery(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected missing profile error")
 	}
-	if strings.TrimSpace(stderr) != "" {
-		t.Fatalf("missing-profile JSON recovery should not emit text preflight on stderr, got %q", stderr)
+	if strings.TrimSpace(stdout) != "" {
+		t.Fatalf("missing-profile preflight should not corrupt JSON stdout, got %q", stdout)
 	}
-	var recovery verificationProfileRecoveryEvidence
-	if err := json.Unmarshal([]byte(stdout), &recovery); err != nil {
-		t.Fatalf("unmarshal recovery: %v\n%s", err, stdout)
-	}
-	if recovery.ConfigFound || recovery.ConfigValid || recovery.Status != "missing" {
-		t.Fatalf("unexpected missing-profile recovery status: %#v", recovery)
-	}
-	if !strings.Contains(recovery.Explanation, VerifyProfileFile) || !strings.Contains(recovery.Suggestion, "suggested fallback commands") {
-		t.Fatalf("recovery should explain the missing config and next step: %#v", recovery)
-	}
-	if !containsString(recovery.SearchedPaths, filepath.Join(repo, VerifyProfileFile)) {
-		t.Fatalf("searched paths missing repo profile path: %#v", recovery.SearchedPaths)
-	}
-	if recovery.RepoRoot != repo || recovery.FallbackSource != "makefile" {
-		t.Fatalf("unexpected fallback source/root: %#v", recovery)
-	}
-	wantCommands := map[string]string{
-		"lint":    "make lint",
-		"compile": "make build",
-		"unit":    "make test",
-	}
-	for _, command := range recovery.SuggestedFallbackCommands {
-		if wantCommands[command.Stage] == command.Command {
-			delete(wantCommands, command.Stage)
+	for _, needle := range []string{
+		"[verify] preflight: nana-verify.json was not found.",
+		"[verify] searched for nana-verify.json",
+		filepath.Join(repo, VerifyProfileFile),
+		"[verify] fallback: detected repo-native checks from makefile",
+		"lint: make lint",
+		"compile: make build",
+		"unit: make test",
+		"[verify] define: add nana-verify.json at the repo root",
+		`{"version":1,"stages":[{"name":"test","command":"make test"}]}`,
+	} {
+		if !strings.Contains(stderr, needle) {
+			t.Fatalf("missing-profile recovery missing %q; stderr:\n%s", needle, stderr)
 		}
-	}
-	if len(wantCommands) > 0 {
-		t.Fatalf("missing suggested fallback commands %v in %#v", wantCommands, recovery.SuggestedFallbackCommands)
-	}
-	if recovery.ProfileExample != `{"version":1,"stages":[{"name":"test","command":"make test"}]}` {
-		t.Fatalf("unexpected profile example: %q", recovery.ProfileExample)
-	}
-}
-
-func TestVerifyJSONPreflightSuggestsDocumentedFallbackWhenNoCommandsDetected(t *testing.T) {
-	repo := t.TempDir()
-
-	stdout, stderr, err := captureOutput(t, func() error { return Verify(repo, []string{"--json"}) })
-	if err == nil {
-		t.Fatalf("expected missing profile error")
-	}
-	if strings.TrimSpace(stderr) != "" {
-		t.Fatalf("missing-profile JSON recovery should not emit text preflight on stderr, got %q", stderr)
-	}
-	var recovery verificationProfileRecoveryEvidence
-	if err := json.Unmarshal([]byte(stdout), &recovery); err != nil {
-		t.Fatalf("unmarshal recovery: %v\n%s", err, stdout)
-	}
-	if recovery.ConfigFound || recovery.Status != "missing" {
-		t.Fatalf("unexpected missing-profile recovery status: %#v", recovery)
-	}
-	if len(recovery.SuggestedFallbackCommands) != 0 {
-		t.Fatalf("expected no automatic fallback commands, got %#v", recovery.SuggestedFallbackCommands)
-	}
-	if !strings.Contains(stdout, `"suggested_fallback_commands": []`) {
-		t.Fatalf("expected JSON recovery to include an empty suggested_fallback_commands array, got %s", stdout)
-	}
-	if !strings.Contains(recovery.Suggestion, "documented verification commands") {
-		t.Fatalf("expected documented-command fallback suggestion, got %q", recovery.Suggestion)
 	}
 }
 
@@ -285,26 +290,20 @@ func TestVerifyJSONPreflightReportsInvalidProfileRecovery(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected invalid profile error")
 	}
-	if strings.TrimSpace(stderr) != "" {
-		t.Fatalf("invalid-profile JSON recovery should not emit text preflight on stderr, got %q", stderr)
+	if strings.TrimSpace(stdout) != "" {
+		t.Fatalf("invalid-profile preflight should not corrupt JSON stdout, got %q", stdout)
 	}
-	var recovery verificationProfileRecoveryEvidence
-	if err := json.Unmarshal([]byte(stdout), &recovery); err != nil {
-		t.Fatalf("unmarshal recovery: %v\n%s", err, stdout)
-	}
-	if !recovery.ConfigFound || recovery.ConfigValid || recovery.Status != "invalid" {
-		t.Fatalf("unexpected invalid-profile recovery status: %#v", recovery)
-	}
-	if recovery.ProfilePath != profilePath || !strings.Contains(recovery.Error, "at least one stage is required") {
-		t.Fatalf("unexpected invalid-profile error evidence: %#v", recovery)
-	}
-	if !containsString(recovery.SearchedPaths, profilePath) {
-		t.Fatalf("searched paths missing invalid profile path: %#v", recovery.SearchedPaths)
-	}
-	if len(recovery.SuggestedFallbackCommands) != 1 ||
-		recovery.SuggestedFallbackCommands[0].Stage != "unit" ||
-		recovery.SuggestedFallbackCommands[0].Command != "make test" {
-		t.Fatalf("unexpected invalid-profile fallback commands: %#v", recovery.SuggestedFallbackCommands)
+	for _, needle := range []string{
+		"[verify] preflight: cannot use " + profilePath,
+		"at least one stage is required",
+		"[verify] searched for nana-verify.json",
+		"[verify] fallback: detected repo-native checks from makefile",
+		"unit: make test",
+		"[verify] define: add nana-verify.json at the repo root",
+	} {
+		if !strings.Contains(stderr, needle) {
+			t.Fatalf("invalid-profile recovery missing %q; stderr:\n%s", needle, stderr)
+		}
 	}
 }
 
@@ -623,13 +622,4 @@ func TestVerificationRunsTestBodies(t *testing.T) {
 	if !strings.Contains(result.Output, "intentional failure proves the test body ran") {
 		t.Fatalf("expected output to show the failing test body ran, got %q", result.Output)
 	}
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }

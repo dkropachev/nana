@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dkropachev.github.io/nana/schemas/nana-verify.schema.json",
+  "title": "NANA verification profile",
+  "description": "Repository-native verification profile consumed by `nana verify` from nana-verify.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["stages"],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1
+    },
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "changed_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["full_check"],
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "full_check": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["command"],
+          "properties": {
+            "description": {
+              "type": "string"
+            },
+            "command": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            }
+          }
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "patterns"],
+            "anyOf": [
+              {
+                "required": ["stages"],
+                "properties": {
+                  "stages": {
+                    "type": "array",
+                    "contains": {
+                      "type": "string",
+                      "pattern": "\\S"
+                    },
+                    "minContains": 1
+                  }
+                }
+              },
+              {
+                "required": ["checks"],
+                "properties": {
+                  "checks": {
+                    "type": "array",
+                    "contains": {
+                      "type": "string",
+                      "pattern": "\\S"
+                    },
+                    "minContains": 1
+                  }
+                }
+              }
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "description": {
+                "type": "string"
+              },
+              "patterns": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string"
+                },
+                "contains": {
+                  "type": "string",
+                  "pattern": "\\S"
+                },
+                "minContains": 1
+              },
+              "stages": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "checks": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "command"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "description": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          }
+        }
+      }
+    }
+  }
+}

@@ -39,7 +39,6 @@ Profile:
   Nana searches the current directory and its parents for the profile file.
   If the profile is missing or invalid, preflight output reports searched paths,
   detected fallback commands, and a minimal profile example.
-  With --json, that recovery output is structured and includes config_found.
 `
 
 type verificationProfile struct {
@@ -133,27 +132,8 @@ type verificationFallbackSummary struct {
 }
 
 type verificationFallbackCommand struct {
-	Stage   string `json:"stage"`
-	Command string `json:"command"`
-}
-
-type verificationProfileRecoveryEvidence struct {
-	Version                   int                           `json:"version"`
-	GeneratedAt               string                        `json:"generated_at"`
-	Status                    string                        `json:"status"`
-	ConfigFound               bool                          `json:"config_found"`
-	ConfigValid               bool                          `json:"config_valid"`
-	Explanation               string                        `json:"explanation"`
-	Error                     string                        `json:"error,omitempty"`
-	StartDir                  string                        `json:"start_dir"`
-	SearchedPaths             []string                      `json:"searched_paths"`
-	ProfilePath               string                        `json:"profile_path,omitempty"`
-	RepoRoot                  string                        `json:"repo_root,omitempty"`
-	FallbackSource            string                        `json:"fallback_source,omitempty"`
-	SuggestedFallbackCommands []verificationFallbackCommand `json:"suggested_fallback_commands"`
-	Warnings                  []string                      `json:"warnings,omitempty"`
-	Suggestion                string                        `json:"suggestion"`
-	ProfileExample            string                        `json:"profile_example"`
+	Stage   string
+	Command string
 }
 
 func Verify(cwd string, args []string) error {
@@ -166,9 +146,7 @@ func Verify(cwd string, args []string) error {
 	}
 	repoRoot, profilePath, profile, preflight, err := loadVerificationProfileWithPreflight(cwd)
 	if err != nil {
-		if printErr := printVerificationProfileRecovery(preflight, options.JSON); printErr != nil {
-			return printErr
-		}
+		printVerificationProfileRecovery(preflight)
 		return err
 	}
 	if options.ProfileOnly {
@@ -232,8 +210,8 @@ func loadVerificationProfileWithPreflight(cwd string) (string, string, verificat
 		preflight.Error = err.Error()
 		return "", "", verificationProfile{}, preflight, err
 	}
-	var profile verificationProfile
-	if err := readGithubJSON(profilePath, &profile); err != nil {
+	content, err := os.ReadFile(profilePath)
+	if err != nil {
 		profileErr := err
 		err := fmt.Errorf("invalid %s: %w", profilePath, profileErr)
 		preflight.Status = "invalid"
@@ -241,7 +219,8 @@ func loadVerificationProfileWithPreflight(cwd string) (string, string, verificat
 		preflight.Fallback = buildVerificationFallbackSummary(cwd, profilePath)
 		return "", "", verificationProfile{}, preflight, err
 	}
-	if err := normalizeVerificationProfile(&profile); err != nil {
+	profile, err := decodeVerificationProfile(content)
+	if err != nil {
 		profileErr := err
 		err := fmt.Errorf("invalid %s: %w", profilePath, profileErr)
 		preflight.Status = "invalid"
@@ -250,6 +229,39 @@ func loadVerificationProfileWithPreflight(cwd string) (string, string, verificat
 		return "", "", verificationProfile{}, preflight, err
 	}
 	return repoRoot, profilePath, profile, preflight, nil
+}
+
+func decodeVerificationProfile(content []byte) (verificationProfile, error) {
+	fields, err := parseJSONObject(content)
+	if err != nil {
+		return verificationProfile{}, err
+	}
+	if err := validateVerificationProfileVersionField(fields); err != nil {
+		return verificationProfile{}, err
+	}
+	var profile verificationProfile
+	if err := json.Unmarshal(content, &profile); err != nil {
+		return verificationProfile{}, err
+	}
+	if err := normalizeVerificationProfile(&profile); err != nil {
+		return verificationProfile{}, err
+	}
+	return profile, nil
+}
+
+func validateVerificationProfileVersionField(fields map[string]json.RawMessage) error {
+	raw, ok := fields["version"]
+	if !ok {
+		return nil
+	}
+	value, err := requiredInteger(raw, "version")
+	if err != nil {
+		return err
+	}
+	if value < 1 {
+		return fmt.Errorf("version must be >= 1")
+	}
+	return nil
 }
 
 func findVerificationProfile(cwd string) (string, string, bool) {
@@ -325,62 +337,12 @@ func flattenVerificationFallbackCommands(plan githubVerificationPlan) []verifica
 	return commands
 }
 
-func printVerificationProfileRecovery(preflight verificationProfilePreflight, jsonOutput bool) error {
-	if jsonOutput {
-		evidence, ok := verificationProfileRecovery(preflight)
-		if !ok {
-			return nil
-		}
-		return writeIndentedJSON(evidence)
-	}
+func printVerificationProfileRecovery(preflight verificationProfilePreflight) {
 	message := formatVerificationProfileRecovery(preflight)
 	if strings.TrimSpace(message) == "" {
-		return nil
+		return
 	}
 	fmt.Fprint(os.Stderr, message)
-	return nil
-}
-
-func verificationProfileRecovery(preflight verificationProfilePreflight) (verificationProfileRecoveryEvidence, bool) {
-	switch preflight.Status {
-	case "missing", "invalid":
-	default:
-		return verificationProfileRecoveryEvidence{}, false
-	}
-
-	fallback := preflight.Fallback
-	return verificationProfileRecoveryEvidence{
-		Version:                   1,
-		GeneratedAt:               ISOTimeNow(),
-		Status:                    preflight.Status,
-		ConfigFound:               preflight.Status != "missing",
-		ConfigValid:               false,
-		Explanation:               verificationProfileRecoveryExplanation(preflight),
-		Error:                     preflight.Error,
-		StartDir:                  preflight.StartDir,
-		SearchedPaths:             append([]string{}, preflight.SearchedPaths...),
-		ProfilePath:               preflight.ProfilePath,
-		RepoRoot:                  fallback.RepoRoot,
-		FallbackSource:            fallback.Source,
-		SuggestedFallbackCommands: append([]verificationFallbackCommand{}, fallback.Commands...),
-		Warnings:                  append([]string{}, fallback.Warnings...),
-		Suggestion:                verificationProfileRecoverySuggestion(fallback),
-		ProfileExample:            `{"version":1,"stages":[{"name":"test","command":"make test"}]}`,
-	}, true
-}
-
-func verificationProfileRecoveryExplanation(preflight verificationProfilePreflight) string {
-	if preflight.Status == "missing" {
-		return fmt.Sprintf("%s was not found from %s or its parents.", VerifyProfileFile, defaultString(preflight.StartDir, "."))
-	}
-	return fmt.Sprintf("%s was found but could not be used: %s", defaultString(preflight.ProfilePath, VerifyProfileFile), defaultString(preflight.Error, "invalid profile"))
-}
-
-func verificationProfileRecoverySuggestion(fallback verificationFallbackSummary) string {
-	if len(fallback.Commands) == 0 {
-		return fmt.Sprintf("No automatic fallback commands were detected at %s; use this repo's documented verification commands or add %s.", defaultString(fallback.RepoRoot, "."), VerifyProfileFile)
-	}
-	return fmt.Sprintf("Run the suggested fallback commands in order, or add %s at the repo root to define the canonical verification profile.", VerifyProfileFile)
 }
 
 func formatVerificationProfileRecovery(preflight verificationProfilePreflight) string {
@@ -424,6 +386,8 @@ func formatVerificationProfileRecovery(preflight verificationProfilePreflight) s
 func normalizeVerificationProfile(profile *verificationProfile) error {
 	if profile.Version == 0 {
 		profile.Version = 1
+	} else if profile.Version < 1 {
+		return fmt.Errorf("version must be >= 1")
 	}
 	profile.Name = strings.TrimSpace(profile.Name)
 	profile.Description = strings.TrimSpace(profile.Description)

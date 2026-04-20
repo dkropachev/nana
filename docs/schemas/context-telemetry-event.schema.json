@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dkropachev.github.io/nana/schemas/context-telemetry-event.schema.json",
+  "title": "NANA context telemetry event",
+  "description": "One JSON object line in .nana/logs/context-telemetry.ndjson. Events record metadata only; raw commands, arguments, stdout, stderr, and output are intentionally excluded.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "timestamp",
+    "event"
+  ],
+  "properties": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "tool": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional producer identifier. Some skill/reference telemetry emitted before tool tagging omits this field."
+    },
+    "event": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$",
+      "description": "Known events include skill_doc_load, skill_reference_load, shell_output_compaction, and shell_output_compaction_failed."
+    },
+    "skill": {
+      "type": "string"
+    },
+    "command_name": {
+      "type": "string"
+    },
+    "argument_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "exit_code": {
+      "type": "integer",
+      "minimum": -1
+    },
+    "stdout_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "stderr_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "captured_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "stdout_lines": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "stderr_lines": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "summary_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "summary_lines": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "summarized": {
+      "type": "boolean"
+    },
+    "error": {
+      "type": "string"
+    }
+  },
+  "not": {
+    "anyOf": [
+      {
+        "required": [
+          "args"
+        ]
+      },
+      {
+        "required": [
+          "arguments"
+        ]
+      },
+      {
+        "required": [
+          "argv"
+        ]
+      },
+      {
+        "required": [
+          "command"
+        ]
+      },
+      {
+        "required": [
+          "output"
+        ]
+      },
+      {
+        "required": [
+          "raw_args"
+        ]
+      },
+      {
+        "required": [
+          "raw_output"
+        ]
+      },
+      {
+        "required": [
+          "stderr"
+        ]
+      },
+      {
+        "required": [
+          "stdout"
+        ]
+      }
+    ]
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "shell_output_compaction"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "required": [
+          "argument_count",
+          "captured_bytes",
+          "exit_code",
+          "stderr_bytes",
+          "stderr_lines",
+          "stdout_bytes",
+          "stdout_lines",
+          "summarized"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "shell_output_compaction_failed"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "required": [
+          "argument_count",
+          "captured_bytes",
+          "error",
+          "exit_code",
+          "stderr_bytes",
+          "stderr_lines",
+          "stdout_bytes",
+          "stdout_lines",
+          "summarized"
+        ]
+      }
+    }
+  ]
+}

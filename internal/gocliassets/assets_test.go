@@ -248,8 +248,11 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 		{name: "templates/AGENTS.md", content: string(diskContent)},
 		{name: "root AGENTS.md", content: string(rootAgents)},
 	} {
-		if strings.Contains(source.content, "nana route --explain") {
-			t.Fatalf("%s should not require route preview CLI guidance", source.name)
+		if !strings.Contains(source.content, "`nana route --explain \"<prompt>\"` to preview routing") {
+			t.Fatalf("%s missing route preview CLI guidance", source.name)
+		}
+		if strings.Contains(source.content, "Preview: `nana route --explain <prompt>`") {
+			t.Fatalf("%s should not use stale inline route preview guidance", source.name)
 		}
 	}
 	for _, needle := range []string{
@@ -266,12 +269,6 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 		if !strings.Contains(string(rootAgents), strings.ReplaceAll(needle, "~/.codex", "./.codex")) {
 			t.Fatalf("root AGENTS.md missing expected guidance %q", needle)
 		}
-	}
-	if strings.Contains(string(diskContent), "nana route --explain") {
-		t.Fatalf("template AGENTS.md should not advertise route preview from generated runtime guidance")
-	}
-	if strings.Contains(string(rootAgents), "nana route --explain") {
-		t.Fatalf("root AGENTS.md should not advertise route preview from generated runtime guidance")
 	}
 }
 
@@ -348,9 +345,9 @@ func TestGeneratedAgentsFinalReportChecklistIsEmbedded(t *testing.T) {
 		{name: "root AGENTS.md", content: string(rootAgents)},
 	} {
 		for _, needle := range []string{
-			"final reports include",
+			"final-report checklist",
 			"changed files",
-			"verification",
+			"verification evidence",
 			"simplifications made",
 			"remaining risks",
 		} {
