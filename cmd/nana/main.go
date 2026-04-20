@@ -67,6 +67,7 @@ Local tools and support:
   nana reasoning               Inspect or configure reasoning defaults
   nana account <subcommand>    Manage account routing
   nana cleanup                 Clean NANA runtime artifacts
+  nana artifacts list          List repo-local NANA artifacts and summaries
   nana ask                     Ask through the configured helper surface
   nana agents                  Inspect available role agents
   nana agents-init             Initialize repo agent instructions
@@ -84,6 +85,7 @@ More help:
   nana help investigate
   nana help repo
   nana help usage
+  nana help artifacts
   nana help review
   nana help review-rules
   nana help start
@@ -254,6 +256,11 @@ func main() {
 		return
 	case "cleanup":
 		if err := gocli.Cleanup(args[1:]); err != nil {
+			exitWithError(err)
+		}
+		return
+	case "artifacts":
+		if err := gocli.Artifacts(mustGetwd(), args[1:]); err != nil {
 			exitWithError(err)
 		}
 		return
@@ -432,6 +439,9 @@ func handleNestedHelp(args []string) bool {
 		return true
 	case "cleanup":
 		mustHandleHelp(gocli.Cleanup([]string{"--help"}))
+		return true
+	case "artifacts":
+		mustHandleHelp(gocli.Artifacts(cwd, []string{"help"}))
 		return true
 	case "config":
 		mustHandleHelp(gocli.Config([]string{"--help"}))

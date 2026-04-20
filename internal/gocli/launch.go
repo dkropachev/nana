@@ -119,6 +119,8 @@ func ResolveCLIInvocation(args []string) CLIInvocation {
 		return CLIInvocation{Command: "work-on", LaunchArgs: nil}
 	case "work-local":
 		return CLIInvocation{Command: "work-local", LaunchArgs: nil}
+	case "artifacts":
+		return CLIInvocation{Command: "artifacts", LaunchArgs: nil}
 	case "explore":
 		return CLIInvocation{Command: "reflect", LaunchArgs: nil}
 	default:

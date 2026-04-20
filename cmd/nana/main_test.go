@@ -191,6 +191,7 @@ func TestBinaryNestedGithubHelpRoutesLocally(t *testing.T) {
 		{args: []string{"ui-scout", "--help"}, expected: "nana ui-scout - Audit UI pages and flows with issue-style findings"},
 		{args: []string{"work", "--help"}, expected: "nana work - Unified local and GitHub-backed implementation runtime"},
 		{args: []string{"usage", "--help"}, expected: "nana usage - Report token spend across NANA-managed sessions"},
+		{args: []string{"artifacts", "--help"}, expected: "nana artifacts - List repo-local NANA artifacts"},
 		{args: []string{"config", "--help"}, expected: "Usage:\n  nana config show"},
 		{args: []string{"hud", "--help"}, expected: "Usage:\n  nana hud"},
 		{args: []string{"work-on", "--help"}, expected: "has been replaced by `nana work`"},
@@ -253,6 +254,7 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 		"nana config",
 		"nana usage",
 		"nana account <subcommand>",
+		"nana artifacts list",
 		"nana reflect | nana explore",
 		"nana hud",
 		"More help:",
@@ -261,6 +263,7 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 		"nana help investigate",
 		"nana help repo",
 		"nana help usage",
+		"nana help artifacts",
 	}
 	for _, snippet := range expectedSnippets {
 		if !strings.Contains(help, snippet) {
