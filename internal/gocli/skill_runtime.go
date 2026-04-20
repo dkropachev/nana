@@ -128,14 +128,6 @@ func (cache *skillRuntimeDocCache) load(cwd string, skill string, label string, 
 			Size:        entry.Size,
 			ModTime:     entry.ModTime,
 		}
-		cache.emitTelemetry(cwd, skillRuntimeDocTelemetry{
-			Skill:       skill,
-			Path:        cleanPath,
-			Label:       label,
-			CacheStatus: "hit",
-			Size:        entry.Size,
-			ModTime:     entry.ModTime,
-		})
 		return doc, true, nil
 	}
 	cache.mu.Unlock()

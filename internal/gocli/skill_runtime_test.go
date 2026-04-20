@@ -51,8 +51,51 @@ func TestSkillRuntimeDocCacheAvoidsRereadForUnchangedSkillInSession(t *testing.T
 	if second[0].Content != "runtime v1\n" || second[0].CacheStatus != "hit" {
 		t.Fatalf("unexpected second doc: %#v", second[0])
 	}
-	if len(cacheEvents) != 2 || cacheEvents[0].CacheStatus != "miss" || cacheEvents[1].CacheStatus != "hit" {
-		t.Fatalf("expected miss then hit telemetry, got %#v", cacheEvents)
+	if len(cacheEvents) != 1 || cacheEvents[0].CacheStatus != "miss" {
+		t.Fatalf("expected only the cache miss to emit load telemetry, got %#v", cacheEvents)
+	}
+}
+
+func TestSkillRuntimeDocCacheDoesNotAppendDuplicateLoadTelemetry(t *testing.T) {
+	cwd := t.TempDir()
+	codexHome := filepath.Join(cwd, "codex-home")
+	runtimePath := filepath.Join(codexHome, "skills", "autopilot", "RUNTIME.md")
+	if err := os.MkdirAll(filepath.Dir(runtimePath), 0o755); err != nil {
+		t.Fatalf("mkdir runtime dir: %v", err)
+	}
+	if err := os.WriteFile(runtimePath, []byte("runtime rules\n"), 0o644); err != nil {
+		t.Fatalf("write runtime: %v", err)
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("NANA_CONTEXT_TELEMETRY", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-skill-runtime-cache-test")
+
+	cache := newSkillRuntimeDocCache()
+	for i := 0; i < 2; i++ {
+		docs, err := loadActivatedSkillRuntimeDocsWithCache(cwd, "$autopilot", cache)
+		if err != nil {
+			t.Fatalf("load %d: %v", i+1, err)
+		}
+		if len(docs) != 1 {
+			t.Fatalf("load %d expected one doc, got %#v", i+1, docs)
+		}
+	}
+
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read telemetry log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected one skill_doc_load event for repeated unchanged loads, got %d:\n%s", len(lines), content)
+	}
+	if !strings.Contains(lines[0], `"event":"skill_doc_load"`) || !strings.Contains(lines[0], `"cache":"miss"`) {
+		t.Fatalf("expected single cache miss load telemetry event, got:\n%s", lines[0])
+	}
+	if strings.Contains(string(content), `"cache":"hit"`) {
+		t.Fatalf("cache hits must not append duplicate skill_doc_load telemetry:\n%s", content)
 	}
 }
 

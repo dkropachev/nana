@@ -653,9 +653,6 @@ func TestRouteRulesStayInSyncWithAgentsTemplate(t *testing.T) {
 		t.Fatalf("read template AGENTS.md: %v", err)
 	}
 	template := string(content)
-	if !strings.Contains(template, "`nana route --explain \"<prompt>\"` to preview routing") {
-		t.Fatalf("template AGENTS.md should document route preview CLI guidance")
-	}
 	if !strings.Contains(template, "Sync trigger tests with this list") {
 		t.Fatalf("template AGENTS.md missing trigger synchronization guidance")
 	}

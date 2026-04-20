@@ -38,8 +38,12 @@ type routeActivation struct {
 	// RUNTIME.md for lazy runtime skills and falls back to SKILL.md for regular
 	// installed skills that do not ship a compact runtime document.
 	RuntimePath string
-	DocLabel    string
-	Start       int
+	// RuntimeActualPath is the filesystem path used by runtime-doc loaders. It
+	// may differ from RuntimePath when project-scoped guidance is displayed with
+	// a dot-relative path.
+	RuntimeActualPath string
+	DocLabel          string
+	Start             int
 }
 
 type routeIgnoredTrigger struct {
@@ -64,8 +68,9 @@ type keywordRouteCandidate struct {
 }
 
 type routeDoc struct {
-	Path  string
-	Label string
+	Path       string
+	ActualPath string
+	Label      string
 }
 
 type routeDocBase struct {
@@ -147,7 +152,11 @@ func ExplainPromptRoute(prompt string) routePreview {
 }
 
 func ExplainPromptRouteForCWD(cwd string, prompt string) routePreview {
-	return explainPromptRoute(prompt, routeDocResolver(cwd), routeExplicitSkillValidator(cwd))
+	return ExplainPromptRouteForCWDAndCodexHome(cwd, "", prompt)
+}
+
+func ExplainPromptRouteForCWDAndCodexHome(cwd string, codexHome string, prompt string) routePreview {
+	return explainPromptRoute(prompt, routeDocResolverForCodexHome(cwd, codexHome), routeExplicitSkillValidatorForCodexHome(cwd, codexHome))
 }
 
 func explainPromptRoute(prompt string, docPath func(string) routeDoc, validExplicitSkill func(string) bool) routePreview {
@@ -186,12 +195,13 @@ func explainPromptRoute(prompt string, docPath func(string) routeDoc, validExpli
 		seenSkills[skill] = true
 		doc := docPath(skill)
 		preview.Activations = append(preview.Activations, routeActivation{
-			Skill:       skill,
-			Source:      routeSourceExplicitInvocation,
-			Trigger:     prompt[start:fullEnd],
-			RuntimePath: doc.Path,
-			DocLabel:    doc.Label,
-			Start:       start,
+			Skill:             skill,
+			Source:            routeSourceExplicitInvocation,
+			Trigger:           prompt[start:fullEnd],
+			RuntimePath:       doc.Path,
+			RuntimeActualPath: doc.ActualPath,
+			DocLabel:          doc.Label,
+			Start:             start,
 		})
 	}
 
@@ -237,12 +247,13 @@ func explainPromptRoute(prompt string, docPath func(string) routeDoc, validExpli
 		doc := docPath(rule.Skill)
 		keywordCandidates = append(keywordCandidates, keywordRouteCandidate{
 			Activation: routeActivation{
-				Skill:       rule.Skill,
-				Source:      routeSourceImplicitKeyword,
-				Trigger:     match.trigger,
-				RuntimePath: doc.Path,
-				DocLabel:    doc.Label,
-				Start:       match.start,
+				Skill:             rule.Skill,
+				Source:            routeSourceImplicitKeyword,
+				Trigger:           match.trigger,
+				RuntimePath:       doc.Path,
+				RuntimeActualPath: doc.ActualPath,
+				DocLabel:          doc.Label,
+				Start:             match.start,
 			},
 			RuleOrder: ruleOrder,
 		})
@@ -285,7 +296,11 @@ func isKnownRouteSkill(skill string) bool {
 }
 
 func routeExplicitSkillValidator(cwd string) func(string) bool {
-	base := routeDocBaseForCWD(cwd)
+	return routeExplicitSkillValidatorForCodexHome(cwd, "")
+}
+
+func routeExplicitSkillValidatorForCodexHome(cwd string, codexHome string) func(string) bool {
+	base := routeDocBaseForCodexHome(cwd, codexHome)
 	return func(skill string) bool {
 		if isKnownRouteSkill(skill) {
 			return true
@@ -314,8 +329,9 @@ func installedRouteSkillDoc(base routeDocBase, skill string) (routeDoc, bool) {
 			continue
 		}
 		return routeDoc{
-			Path:  base.displayDocPath(skill, candidate.filename),
-			Label: candidate.label,
+			Path:       base.displayDocPath(skill, candidate.filename),
+			ActualPath: actualPath,
+			Label:      candidate.label,
 		}, true
 	}
 	return routeDoc{}, false
@@ -419,29 +435,55 @@ func routeRuntimePath(skill string) string {
 
 func routeRuntimeDocResolver() func(string) routeDoc {
 	return func(skill string) routeDoc {
+		path := routeRuntimePath(skill)
 		return routeDoc{
-			Path:  routeRuntimePath(skill),
-			Label: routeDocLabelRuntime,
+			Path:       path,
+			ActualPath: path,
+			Label:      routeDocLabelRuntime,
 		}
 	}
 }
 
 func routeDocResolver(cwd string) func(string) routeDoc {
-	base := routeDocBaseForCWD(cwd)
+	return routeDocResolverForCodexHome(cwd, "")
+}
+
+func routeDocResolverForCodexHome(cwd string, codexHome string) func(string) routeDoc {
+	base := routeDocBaseForCodexHome(cwd, codexHome)
 	return func(skill string) routeDoc {
 		if !isKnownRouteSkill(skill) {
 			if doc, ok := installedRouteSkillDoc(base, skill); ok {
 				return doc
 			}
 		}
+		actualPath := filepath.Join(base.actualSkillsDir, skill, "RUNTIME.md")
 		return routeDoc{
-			Path:  base.displayDocPath(skill, "RUNTIME.md"),
-			Label: routeDocLabelRuntime,
+			Path:       base.displayDocPath(skill, "RUNTIME.md"),
+			ActualPath: actualPath,
+			Label:      routeDocLabelRuntime,
 		}
 	}
 }
 
 func routeDocBaseForCWD(cwd string) routeDocBase {
+	return routeDocBaseForCodexHome(cwd, "")
+}
+
+func routeDocBaseForCodexHome(cwd string, codexHome string) routeDocBase {
+	if codexHome := strings.TrimSpace(codexHome); codexHome != "" {
+		displayCodexHome := codexHome
+		displayDotRelative := false
+		if isProjectScopedCodexHome(cwd, codexHome) {
+			displayCodexHome = ".codex"
+			displayDotRelative = true
+		}
+		return routeDocBase{
+			actualSkillsDir:    filepath.Join(codexHome, "skills"),
+			displaySkillsDir:   filepath.Join(displayCodexHome, "skills"),
+			displayDotRelative: displayDotRelative,
+		}
+	}
+
 	if codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); codexHome != "" {
 		return routeDocBase{
 			actualSkillsDir:  filepath.Join(codexHome, "skills"),
@@ -465,6 +507,26 @@ func routeDocBaseForCWD(cwd string) routeDocBase {
 		displaySkillsDir:   filepath.Join(displayCodexHome, "skills"),
 		displayDotRelative: displayDotRelative,
 	}
+}
+
+func isProjectScopedCodexHome(cwd string, codexHome string) bool {
+	if strings.TrimSpace(cwd) == "" || strings.TrimSpace(codexHome) == "" {
+		return false
+	}
+	expected := filepath.Join(cwd, ".codex")
+	return sameRoutePath(expected, codexHome)
+}
+
+func sameRoutePath(left string, right string) bool {
+	leftClean := filepath.Clean(strings.TrimSpace(left))
+	rightClean := filepath.Clean(strings.TrimSpace(right))
+	leftAbs, leftErr := filepath.Abs(leftClean)
+	rightAbs, rightErr := filepath.Abs(rightClean)
+	if leftErr == nil && rightErr == nil {
+		leftClean = filepath.Clean(leftAbs)
+		rightClean = filepath.Clean(rightAbs)
+	}
+	return leftClean == rightClean
 }
 
 func (base routeDocBase) displayDocPath(skill string, filename string) string {
