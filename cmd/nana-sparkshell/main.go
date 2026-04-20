@@ -17,16 +17,15 @@ import (
 )
 
 const (
-	defaultTmuxTailLines     = 200
-	minTmuxTailLines         = 100
-	maxTmuxTailLines         = 1000
-	defaultMaxVisibleLines   = 40
-	defaultSummaryTimeoutMS  = 60_000
-	defaultSparkModel        = "gpt-5.3-codex-spark"
-	defaultFrontierModel     = "gpt-5.4"
-	defaultSummaryMaxLines   = 150
-	defaultSummaryMaxBytes   = 8_000
-	defaultTelemetryMaxBytes = 1 << 20
+	defaultTmuxTailLines    = 200
+	minTmuxTailLines        = 100
+	maxTmuxTailLines        = 1000
+	defaultMaxVisibleLines  = 40
+	defaultSummaryTimeoutMS = 60_000
+	defaultSparkModel       = "gpt-5.3-codex-spark"
+	defaultFrontierModel    = "gpt-5.4"
+	defaultSummaryMaxLines  = 150
+	defaultSummaryMaxBytes  = 8_000
 )
 
 const (
@@ -114,7 +113,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer) (int, error) {
 	if !strings.HasSuffix(summary, "\n") {
 		summary += "\n"
 	}
-	if _, err := io.WriteString(stdout, summary); err != nil {
+	rendered := summary + compactionFooter(output, summary)
+	if _, err := io.WriteString(stdout, rendered); err != nil {
 		return 0, sparkError{message: err.Error(), exitCode: 1}
 	}
 	appendShellTelemetry("shell_output_compaction", executionArgs, output, summary, nil)
@@ -312,6 +312,53 @@ func combinedVisibleLines(stdout []byte, stderr []byte) int {
 	return countVisibleLines(stdout) + countVisibleLines(stderr)
 }
 
+func compactionFooter(output commandOutput, summary string) string {
+	capturedLines := combinedVisibleLines(output.stdout, output.stderr)
+	summaryLines := countVisibleStringLines(summary)
+	omittedLines := maxInt(capturedLines-summaryLines, 0)
+	capturedBytes := len(output.stdout) + len(output.stderr)
+	summaryBytes := len(summary)
+
+	return fmt.Sprintf(
+		"[nana sparkshell compacted: captured %d %s/%d %s; displayed summary %d %s/%d %s; omitted %d %s; telemetry log %s]\n",
+		capturedLines,
+		plural(capturedLines, "line", "lines"),
+		capturedBytes,
+		plural(capturedBytes, "byte", "bytes"),
+		summaryLines,
+		plural(summaryLines, "line", "lines"),
+		summaryBytes,
+		plural(summaryBytes, "byte", "bytes"),
+		omittedLines,
+		plural(omittedLines, "line", "lines"),
+		shellTelemetryLocation(),
+	)
+}
+
+func shellTelemetryLocation() string {
+	if telemetryDisabled() {
+		return "disabled"
+	}
+	if path := strings.TrimSpace(os.Getenv("NANA_CONTEXT_TELEMETRY_LOG")); path != "" {
+		return path
+	}
+	return "not configured"
+}
+
+func maxInt(value int, minimum int) int {
+	if value < minimum {
+		return minimum
+	}
+	return value
+}
+
+func plural(count int, singular string, pluralForm string) string {
+	if count == 1 {
+		return singular
+	}
+	return pluralForm
+}
+
 type shellTelemetryEvent struct {
 	Timestamp     string `json:"timestamp"`
 	RunID         string `json:"run_id,omitempty"`
@@ -401,49 +448,12 @@ func appendShellTelemetryIfEnabled(buildEvent func() shellTelemetryEvent) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return
 	}
-	line, err := json.Marshal(buildEvent())
-	if err != nil {
-		return
-	}
-	line = append(line, '\n')
-	rotateTelemetryLogIfNeeded(path, telemetryMaxBytes(), int64(len(line)))
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
 	}
 	defer file.Close()
-	_, _ = file.Write(line)
-}
-
-func telemetryMaxBytes() int64 {
-	raw := strings.TrimSpace(os.Getenv("NANA_CONTEXT_TELEMETRY_MAX_BYTES"))
-	if raw == "" {
-		return defaultTelemetryMaxBytes
-	}
-	parsed, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || parsed <= 0 {
-		return defaultTelemetryMaxBytes
-	}
-	return parsed
-}
-
-func rotateTelemetryLogIfNeeded(path string, maxBytes int64, incomingBytes int64) {
-	if maxBytes <= 0 {
-		return
-	}
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size()+incomingBytes <= maxBytes {
-		return
-	}
-	rotatedPath := path + ".1"
-	if err := os.Rename(path, rotatedPath); err == nil {
-		return
-	}
-	if _, err := os.Stat(rotatedPath); err == nil {
-		if err := os.Remove(rotatedPath); err == nil {
-			_ = os.Rename(path, rotatedPath)
-		}
-	}
+	_ = json.NewEncoder(file).Encode(buildEvent())
 }
 
 func telemetryDisabled() bool {

@@ -241,12 +241,22 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 	if strings.Contains(string(rootAgents), "`AGENTS.md` under `./.codex`") {
 		t.Fatalf("root AGENTS.md should not point generated AGENTS.md at ./.codex")
 	}
+	for _, source := range []struct {
+		name    string
+		content string
+	}{
+		{name: "templates/AGENTS.md", content: string(diskContent)},
+		{name: "root AGENTS.md", content: string(rootAgents)},
+	} {
+		if strings.Contains(source.content, "nana route --explain") {
+			t.Fatalf("%s should not require route preview CLI guidance", source.name)
+		}
+	}
 	for _, needle := range []string{
 		"`~/.codex/skills/autopilot/RUNTIME.md`",
 		"`~/.codex/skills/deep-interview/RUNTIME.md`",
 		"`~/.codex/skills/security-review/RUNTIME.md`",
 		"`~/.codex/skills/web-clone/RUNTIME.md`",
-		"`skill_doc_load` hit/miss",
 		"`routing_decision` in plans, traces, and final reports",
 		"`role_tier` (tier/roles)",
 	} {

@@ -17,7 +17,7 @@ NANA coordinates Codex prompts, skills, and optional team/runtime state. Role pr
 <!-- NANA:GUIDANCE:OPERATING:END -->
 - Keep diffs small/reversible, reuse existing patterns, add no dependency unless explicitly requested, and prefer deletion over addition.
 - For cleanup/refactor/deslop work: write a cleanup plan first and lock behavior with tests when not already protected.
-- Verify before completion; final-report checklist: changed files, verification evidence, simplifications made, remaining risks.
+- Verify; final-report checklist: changed files, verification evidence, simplifications made, remaining risks.
 - Commits should use a why-first subject; optional trailers: `Constraint:`, `Rejected:`, `Directive:`, `Confidence:`, `Scope-risk:`, `Tested:`, `Not-tested:`.
 
 ## Mode Selection and Delegation
@@ -28,8 +28,8 @@ NANA coordinates Codex prompts, skills, and optional team/runtime state. Role pr
 - When routing affects execution, include `routing_decision` in plans, traces, and final reports: `mode`, `role_tier` (tier/roles), `trigger`, `confidence`.
 
 ## Lazy Runtime Skills
-When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md. Explicit `$skill` invocations run left-to-right before implicit keyword matches; keyword matches are case-insensitive on token boundaries; `/prompts:<name>` suppresses implicit unless explicit `$skill`s appear. Use `nana route --explain "<prompt>"` to preview routing.
-<!-- Sync trigger tests with this list. -->
+Load detailed skill runtime docs only when invoked. When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md. Explicit `$skill` invocations run left-to-right before implicit keyword matches; keyword matches are case-insensitive; `/prompts:<name>` disables implicit keyword activation unless explicit `$skill` tokens are present. The rest is the task.
+Sync trigger tests with this list.
 - `$autopilot` (`~/.codex/skills/autopilot/RUNTIME.md`): `autopilot`, `build me`, `I want a`
 - `$ultrawork` (`~/.codex/skills/ultrawork/RUNTIME.md`): `ultrawork`, `ulw`, `parallel`
 - `$analyze` (`~/.codex/skills/analyze/RUNTIME.md`): `analyze`, `investigate`
