@@ -164,6 +164,7 @@ type startUIWorkRun struct {
 	RepoLabel        string `json:"repo_label,omitempty"`
 	Status           string `json:"status,omitempty"`
 	CurrentPhase     string `json:"current_phase,omitempty"`
+	CurrentRound     int    `json:"current_round,omitempty"`
 	CurrentIteration int    `json:"current_iteration,omitempty"`
 	UpdatedAt        string `json:"updated_at"`
 	TargetKind       string `json:"target_kind,omitempty"`
@@ -3102,7 +3103,7 @@ func startUIWorkRunFromIndex(entry workRunIndexEntry, sourcePathIndex map[string
 		if strings.EqualFold(strings.TrimSpace(manifest.MergeState), "merged") {
 			status = "merged"
 		}
-		phase := defaultString(manifest.NextAction, manifest.TargetKind)
+		phase := defaultString(strings.TrimSpace(manifest.CurrentPhase), defaultString(manifest.NextAction, manifest.TargetKind))
 		blocked := manifest.NeedsHuman || strings.Contains(strings.ToLower(phase), "blocked") || strings.EqualFold(strings.TrimSpace(manifest.ExecutionStatus), "paused")
 		return startUIWorkRun{
 			RunID:            entry.RunID,
@@ -3113,6 +3114,7 @@ func startUIWorkRunFromIndex(entry workRunIndexEntry, sourcePathIndex map[string
 			RepoLabel:        startUIWorkRunRepoLabel(manifest.RepoSlug, manifest.RepoName, manifest.ManagedRepoRoot),
 			Status:           status,
 			CurrentPhase:     phase,
+			CurrentRound:     manifest.CurrentRound,
 			UpdatedAt:        manifest.UpdatedAt,
 			TargetKind:       manifest.TargetKind,
 			TargetURL:        manifest.TargetURL,
@@ -3146,6 +3148,7 @@ func startUIWorkRunFromLocalManifest(entry workRunIndexEntry, manifest localWork
 		RepoLabel:        startUIWorkRunRepoLabel(repoSlug, manifest.RepoName, manifest.RepoRoot),
 		Status:           status,
 		CurrentPhase:     manifest.CurrentPhase,
+		CurrentRound:     manifest.CurrentRound,
 		CurrentIteration: manifest.CurrentIteration,
 		UpdatedAt:        manifest.UpdatedAt,
 		ArtifactPath:     localWorkRunDirByID(manifest.RepoID, manifest.RunID),

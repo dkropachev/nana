@@ -38,9 +38,7 @@ func TestResumeGithubWorkUsesLeaderSessionCheckpoint(t *testing.T) {
 	runDir := filepath.Join(repoRoot, "runs", runID)
 	sandboxPath := filepath.Join(runDir, "sandbox")
 	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
-	if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
-		t.Fatalf("mkdir sandbox repo: %v", err)
-	}
+	createLocalWorkRepoAt(t, sandboxRepoPath)
 	manifest := githubWorkManifest{
 		Version:         1,
 		RunID:           runID,
@@ -88,6 +86,42 @@ func TestResumeGithubWorkUsesLeaderSessionCheckpoint(t *testing.T) {
 	}
 	if snapshot.LeaderSessionID != "session-gh" || snapshot.LeaderResumeEligible {
 		t.Fatalf("unexpected leader checkpoint snapshot: %#v", snapshot)
+	}
+}
+
+func TestResumeGithubWorkRejectsCompletionOnlyResumeWithoutBaseline(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoRoot := githubWorkRepoRoot("acme/widget")
+	runID := "gh-completion-no-baseline"
+	runDir := filepath.Join(repoRoot, "runs", runID)
+	sandboxPath := filepath.Join(runDir, "sandbox")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	createLocalWorkRepoAt(t, sandboxRepoPath)
+	manifest := githubWorkManifest{
+		Version:         1,
+		RunID:           runID,
+		RepoSlug:        "acme/widget",
+		RepoOwner:       "acme",
+		RepoName:        "widget",
+		TargetURL:       "https://github.com/acme/widget/issues/1",
+		TargetKind:      "issue",
+		TargetNumber:    1,
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+		CurrentPhase:    "completion-harden",
+		CurrentRound:    1,
+		UpdatedAt:       ISOTimeNow(),
+		APIBaseURL:      "https://api.github.com",
+	}
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	if err := writeGithubJSON(manifestPath, manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	err := resumeGithubWork(localWorkResumeOptions{RunSelection: localWorkRunSelection{RunID: runID}})
+	if err == nil || !strings.Contains(err.Error(), "missing baseline_sha") {
+		t.Fatalf("expected missing baseline error, got %v", err)
 	}
 }
 

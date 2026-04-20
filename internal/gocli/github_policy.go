@@ -87,28 +87,36 @@ type githubRepoProfile struct {
 }
 
 type githubExplainPayload struct {
-	RunID                 string                    `json:"run_id"`
-	RepoSlug              string                    `json:"repo_slug"`
-	TargetURL             string                    `json:"target_url"`
-	Policy                *githubResolvedWorkPolicy `json:"policy,omitempty"`
-	RepoProfilePath       string                    `json:"repo_profile_path,omitempty"`
-	RepoProfile           *githubRepoProfile        `json:"repo_profile,omitempty"`
-	ControlPlaneReviewers []string                  `json:"control_plane_reviewers,omitempty"`
-	IgnoredFeedbackActors map[string]int            `json:"ignored_feedback_actors,omitempty"`
-	RequestedReviewers    []string                  `json:"requested_reviewers,omitempty"`
-	ReviewRequestState    string                    `json:"review_request_state,omitempty"`
-	ReviewRequestError    string                    `json:"review_request_error,omitempty"`
-	PublicationState      string                    `json:"publication_state,omitempty"`
-	PublicationDetail     string                    `json:"publication_detail,omitempty"`
-	PublicationError      string                    `json:"publication_error,omitempty"`
-	MergeState            string                    `json:"merge_state,omitempty"`
-	MergeError            string                    `json:"merge_error,omitempty"`
-	MergeMethod           string                    `json:"merge_method,omitempty"`
-	MergedPRNumber        int                       `json:"merged_pr_number,omitempty"`
-	MergedSHA             string                    `json:"merged_sha,omitempty"`
-	NeedsHuman            bool                      `json:"needs_human,omitempty"`
-	NeedsHumanReason      string                    `json:"needs_human_reason,omitempty"`
-	NextAction            string                    `json:"next_action,omitempty"`
+	RunID                   string                             `json:"run_id"`
+	RepoSlug                string                             `json:"repo_slug"`
+	TargetURL               string                             `json:"target_url"`
+	CurrentPhase            string                             `json:"current_phase,omitempty"`
+	CurrentRound            int                                `json:"current_round,omitempty"`
+	Policy                  *githubResolvedWorkPolicy          `json:"policy,omitempty"`
+	RepoProfilePath         string                             `json:"repo_profile_path,omitempty"`
+	RepoProfile             *githubRepoProfile                 `json:"repo_profile,omitempty"`
+	ControlPlaneReviewers   []string                           `json:"control_plane_reviewers,omitempty"`
+	IgnoredFeedbackActors   map[string]int                     `json:"ignored_feedback_actors,omitempty"`
+	RequestedReviewers      []string                           `json:"requested_reviewers,omitempty"`
+	ReviewRequestState      string                             `json:"review_request_state,omitempty"`
+	ReviewRequestError      string                             `json:"review_request_error,omitempty"`
+	PublicationState        string                             `json:"publication_state,omitempty"`
+	PublicationDetail       string                             `json:"publication_detail,omitempty"`
+	PublicationError        string                             `json:"publication_error,omitempty"`
+	MergeState              string                             `json:"merge_state,omitempty"`
+	MergeError              string                             `json:"merge_error,omitempty"`
+	MergeMethod             string                             `json:"merge_method,omitempty"`
+	MergedPRNumber          int                                `json:"merged_pr_number,omitempty"`
+	MergedSHA               string                             `json:"merged_sha,omitempty"`
+	NeedsHuman              bool                               `json:"needs_human,omitempty"`
+	NeedsHumanReason        string                             `json:"needs_human_reason,omitempty"`
+	NextAction              string                             `json:"next_action,omitempty"`
+	CompletionRounds        []githubWorkCompletionRoundSummary `json:"completion_rounds,omitempty"`
+	FinalGateStatus         string                             `json:"final_gate_status,omitempty"`
+	CandidateAuditStatus    string                             `json:"candidate_audit_status,omitempty"`
+	CandidateBlockedPaths   []string                           `json:"candidate_blocked_paths,omitempty"`
+	RejectedFindingCount    int                                `json:"rejected_finding_count,omitempty"`
+	PreexistingFindingCount int                                `json:"preexisting_finding_count,omitempty"`
 }
 
 const (
@@ -720,28 +728,36 @@ func buildGithubRuntimeContextLines(manifest githubWorkManifest) []string {
 
 func buildGithubExplainPayload(manifest githubWorkManifest) githubExplainPayload {
 	return githubExplainPayload{
-		RunID:                 manifest.RunID,
-		RepoSlug:              manifest.RepoSlug,
-		TargetURL:             manifest.TargetURL,
-		Policy:                manifest.Policy,
-		RepoProfilePath:       manifest.RepoProfilePath,
-		RepoProfile:           manifest.RepoProfile,
-		ControlPlaneReviewers: append([]string{}, manifest.ControlPlaneReviewers...),
-		IgnoredFeedbackActors: cloneGithubIgnoredActorMap(manifest.IgnoredFeedbackActors),
-		RequestedReviewers:    append([]string{}, manifest.RequestedReviewers...),
-		ReviewRequestState:    manifest.ReviewRequestState,
-		ReviewRequestError:    manifest.ReviewRequestError,
-		PublicationState:      manifest.PublicationState,
-		PublicationDetail:     manifest.PublicationDetail,
-		PublicationError:      manifest.PublicationError,
-		MergeState:            manifest.MergeState,
-		MergeError:            manifest.MergeError,
-		MergeMethod:           manifest.MergeMethod,
-		MergedPRNumber:        manifest.MergedPRNumber,
-		MergedSHA:             manifest.MergedSHA,
-		NeedsHuman:            manifest.NeedsHuman,
-		NeedsHumanReason:      manifest.NeedsHumanReason,
-		NextAction:            manifest.NextAction,
+		RunID:                   manifest.RunID,
+		RepoSlug:                manifest.RepoSlug,
+		TargetURL:               manifest.TargetURL,
+		CurrentPhase:            manifest.CurrentPhase,
+		CurrentRound:            manifest.CurrentRound,
+		Policy:                  manifest.Policy,
+		RepoProfilePath:         manifest.RepoProfilePath,
+		RepoProfile:             manifest.RepoProfile,
+		ControlPlaneReviewers:   append([]string{}, manifest.ControlPlaneReviewers...),
+		IgnoredFeedbackActors:   cloneGithubIgnoredActorMap(manifest.IgnoredFeedbackActors),
+		RequestedReviewers:      append([]string{}, manifest.RequestedReviewers...),
+		ReviewRequestState:      manifest.ReviewRequestState,
+		ReviewRequestError:      manifest.ReviewRequestError,
+		PublicationState:        manifest.PublicationState,
+		PublicationDetail:       manifest.PublicationDetail,
+		PublicationError:        manifest.PublicationError,
+		MergeState:              manifest.MergeState,
+		MergeError:              manifest.MergeError,
+		MergeMethod:             manifest.MergeMethod,
+		MergedPRNumber:          manifest.MergedPRNumber,
+		MergedSHA:               manifest.MergedSHA,
+		NeedsHuman:              manifest.NeedsHuman,
+		NeedsHumanReason:        manifest.NeedsHumanReason,
+		NextAction:              manifest.NextAction,
+		CompletionRounds:        append([]githubWorkCompletionRoundSummary{}, manifest.CompletionRounds...),
+		FinalGateStatus:         manifest.FinalGateStatus,
+		CandidateAuditStatus:    manifest.CandidateAuditStatus,
+		CandidateBlockedPaths:   append([]string{}, manifest.CandidateBlockedPaths...),
+		RejectedFindingCount:    len(manifest.RejectedFindingFingerprints),
+		PreexistingFindingCount: len(manifest.PreexistingFindings),
 	}
 }
 

@@ -38,6 +38,9 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 	if err != nil {
 		return err
 	}
+	if _, err := captureGithubWorkBaselineIfMissing(manifestPath, &manifest); err != nil {
+		return err
+	}
 	apiBaseURL := strings.TrimSpace(os.Getenv("GITHUB_API_URL"))
 	if apiBaseURL == "" {
 		apiBaseURL = manifest.APIBaseURL
@@ -181,6 +184,10 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 		},
 	})
 	manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	completionErr := error(nil)
+	if runErr == nil {
+		completionErr = runGithubWorkCompletionLoop(manifestPath, runDir, &manifest, options.CodexArgs)
+	}
 	if pauseErr, ok := isCodexRateLimitPauseError(runErr); ok {
 		manifest.ExecutionStatus = "paused"
 		manifest.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
@@ -190,8 +197,21 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 	} else if runErr != nil {
 		manifest.ExecutionStatus = "failed"
 		manifest.LastError = runErr.Error()
+	} else if pauseErr, ok := isCodexRateLimitPauseError(completionErr); ok {
+		manifest.ExecutionStatus = "paused"
+		manifest.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
+		manifest.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+		manifest.PausedAt = manifest.UpdatedAt
+		manifest.LastError = codexPauseInfoMessage(pauseErr.Info)
+	} else if completionErr != nil {
+		if manifest.ExecutionStatus != "blocked" {
+			manifest.ExecutionStatus = "failed"
+		}
+		manifest.LastError = defaultString(strings.TrimSpace(manifest.LastError), completionErr.Error())
 	} else {
 		manifest.ExecutionStatus = "completed"
+		manifest.CurrentPhase = "completed"
+		manifest.CurrentRound = 0
 		manifest.PauseReason = ""
 		manifest.PauseUntil = ""
 		manifest.PausedAt = ""
@@ -213,7 +233,10 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 	if strings.TrimSpace(result.Stderr) != "" {
 		fmt.Fprint(os.Stdout, result.Stderr)
 	}
-	return runErr
+	if runErr != nil {
+		return runErr
+	}
+	return completionErr
 }
 
 func fetchGithubFeedbackSnapshot(manifest githubWorkManifest, reviewers []string, apiBaseURL string, token string, targetOverrideURL string) (githubFeedbackSnapshot, error) {

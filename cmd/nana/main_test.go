@@ -53,6 +53,34 @@ func configureBinaryTestGitInsteadOf(t *testing.T, home string, from string, to 
 	}
 }
 
+func initBinaryGitRepo(t *testing.T, repo string) {
+	t.Helper()
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("# repo\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "Makefile"), []byte("lint:\n\t@true\nbuild:\n\t@true\ntest:\n\t@true\ntest-integration:\n\t@true\n"), 0o644); err != nil {
+		t.Fatalf("write Makefile: %v", err)
+	}
+	gitEnv := append(os.Environ(),
+		"GIT_AUTHOR_NAME=Test",
+		"GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=Test",
+		"GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	for _, args := range [][]string{{"init", "-b", "main"}, {"add", "."}, {"commit", "-m", "init"}} {
+		cmd := runCommand(t, "git", args...)
+		cmd.Dir = repo
+		cmd.Env = gitEnv
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, output)
+		}
+	}
+}
+
 func buildNanaBinary(t *testing.T) string {
 	t.Helper()
 	buildNanaBinaryOnce.Do(func() {
@@ -907,9 +935,7 @@ func TestBinaryIssueSyncRunsNativelyWithoutLegacyBridge(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(managedRepoRoot, "runs", runID), 0o755); err != nil {
 		t.Fatalf("mkdir run dir: %v", err)
 	}
-	if err := os.MkdirAll(repoCheckoutPath, 0o755); err != nil {
-		t.Fatalf("mkdir repo checkout: %v", err)
-	}
+	initBinaryGitRepo(t, repoCheckoutPath)
 	manifest := fmt.Sprintf(`{
   "run_id": %q,
   "repo_slug": "acme/widget",
@@ -974,9 +1000,7 @@ func TestBinaryGithubWorkVerifyRefreshRunsNativelyWithoutLegacyBridge(t *testing
 	if err := os.MkdirAll(filepath.Join(managedRepoRoot, "runs", runID), 0o755); err != nil {
 		t.Fatalf("mkdir run dir: %v", err)
 	}
-	if err := os.MkdirAll(repoCheckoutPath, 0o755); err != nil {
-		t.Fatalf("mkdir repo checkout: %v", err)
-	}
+	initBinaryGitRepo(t, repoCheckoutPath)
 	if err := os.WriteFile(filepath.Join(repoCheckoutPath, "package.json"), []byte(`{"name":"widget","scripts":{"lint":"eslint .","build":"tsc","test":"vitest"}}`), 0o644); err != nil {
 		t.Fatalf("write package.json: %v", err)
 	}
@@ -1026,9 +1050,7 @@ func TestBinaryGithubWorkSyncRunsNatively(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(managedRepoRoot, "runs", runID), 0o755); err != nil {
 		t.Fatalf("mkdir run dir: %v", err)
 	}
-	if err := os.MkdirAll(repoCheckoutPath, 0o755); err != nil {
-		t.Fatalf("mkdir repo checkout: %v", err)
-	}
+	initBinaryGitRepo(t, repoCheckoutPath)
 	manifest := fmt.Sprintf(`{
   "run_id": %q,
   "repo_slug": "acme/widget",

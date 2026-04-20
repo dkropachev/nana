@@ -732,9 +732,7 @@ func TestGithubIssueSyncExecutesNativelyFromTargetURL(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir run dir: %v", err)
 	}
-	if err := os.MkdirAll(repoCheckoutPath, 0o755); err != nil {
-		t.Fatalf("mkdir repo checkout: %v", err)
-	}
+	createLocalWorkRepoAt(t, repoCheckoutPath)
 	manifest := fmt.Sprintf(`{
   "run_id": "gh-run-2",
   "repo_slug": "acme/widget",
@@ -1057,9 +1055,7 @@ func TestGithubWorkSyncExecutesNatively(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(managedRepoRoot, "runs", runID), 0o755); err != nil {
 		t.Fatalf("mkdir run dir: %v", err)
 	}
-	if err := os.MkdirAll(repoCheckoutPath, 0o755); err != nil {
-		t.Fatalf("mkdir repo checkout: %v", err)
-	}
+	createLocalWorkRepoAt(t, repoCheckoutPath)
 	manifest := fmt.Sprintf(`{
   "run_id": %q,
   "repo_slug": "acme/widget",
@@ -1112,6 +1108,9 @@ func TestGithubWorkSyncExecutesNatively(t *testing.T) {
 	if updatedManifest.LastSeenIssueCommentID != 101 {
 		t.Fatalf("expected feedback cursor update, got %+v", updatedManifest)
 	}
+	if strings.TrimSpace(updatedManifest.BaselineSHA) == "" {
+		t.Fatalf("expected sync to capture baseline for legacy run, got %+v", updatedManifest)
+	}
 	if _, err := os.Stat(filepath.Join(managedRepoRoot, "runs", runID, "feedback-instructions.md")); err != nil {
 		t.Fatalf("expected feedback instructions: %v", err)
 	}
@@ -1137,9 +1136,7 @@ func TestGithubWorkSyncBuildsActorSetFromAssignedTrustedAndRequestedReviewers(t 
 	if err := os.MkdirAll(filepath.Join(managedRepoRoot, "runs", runID), 0o755); err != nil {
 		t.Fatalf("mkdir run dir: %v", err)
 	}
-	if err := os.MkdirAll(repoCheckoutPath, 0o755); err != nil {
-		t.Fatalf("mkdir repo checkout: %v", err)
-	}
+	createLocalWorkRepoAt(t, repoCheckoutPath)
 	manifest := fmt.Sprintf(`{
   "run_id": %q,
   "repo_slug": "acme/widget",
@@ -1219,6 +1216,235 @@ func TestGithubWorkSyncBuildsActorSetFromAssignedTrustedAndRequestedReviewers(t 
 	if !slices.Contains(updatedManifest.ControlPlaneReviewers, "trusted-a") || !slices.Contains(updatedManifest.ControlPlaneReviewers, "assigned-a") || !slices.Contains(updatedManifest.ControlPlaneReviewers, "requested-a") {
 		t.Fatalf("missing control plane reviewers: %+v", updatedManifest.ControlPlaneReviewers)
 	}
+}
+
+func TestGithubWorkCompletionLoopHardensFinalGateFinding(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	installGithubCompletionFakeCodex(t, home)
+
+	manifestPath, runDir, repoCheckoutPath := createGithubCompletionRun(t, home, "gh-completion-hardening")
+	if err := os.WriteFile(filepath.Join(repoCheckoutPath, "README.md"), []byte("# local work\nfeature\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+
+	manifest, err := readGithubWorkManifest(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	output, err := captureStdout(t, func() error {
+		return runGithubWorkCompletionLoop(manifestPath, runDir, &manifest, nil)
+	})
+	if err != nil {
+		t.Fatalf("runGithubWorkCompletionLoop: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "Completion round 1: hardening 1 finding(s).") {
+		t.Fatalf("expected hardening output, got %q", output)
+	}
+	updated, err := readGithubWorkManifest(manifestPath)
+	if err != nil {
+		t.Fatalf("read updated manifest: %v", err)
+	}
+	if len(updated.CompletionRounds) != 2 {
+		t.Fatalf("expected bootstrap + one hardening round, got %+v", updated.CompletionRounds)
+	}
+	if updated.CompletionRounds[0].FinalGateStatus != "findings" || updated.CompletionRounds[0].ValidatedFindings == 0 {
+		t.Fatalf("expected bootstrap final gate findings, got %+v", updated.CompletionRounds[0])
+	}
+	if updated.CompletionRounds[1].Status != "completed" || updated.CompletionRounds[1].FinalGateStatus != "passed" {
+		t.Fatalf("expected hardening round to complete cleanly, got %+v", updated.CompletionRounds[1])
+	}
+	readme, err := os.ReadFile(filepath.Join(repoCheckoutPath, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	if !strings.Contains(string(readme), "regression") {
+		t.Fatalf("expected hardening to update README, got %q", string(readme))
+	}
+}
+
+func TestGithubWorkCompletionLoopSkipsPreexistingFinding(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("FAKE_COMPLETION_MODE", "preexisting")
+	installGithubCompletionFakeCodex(t, home)
+
+	manifestPath, runDir, repoCheckoutPath := createGithubCompletionRun(t, home, "gh-completion-preexisting")
+	if err := os.WriteFile(filepath.Join(repoCheckoutPath, "README.md"), []byte("# local work\nfeature\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+
+	manifest, err := readGithubWorkManifest(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := runGithubWorkCompletionLoop(manifestPath, runDir, &manifest, nil); err != nil {
+		t.Fatalf("runGithubWorkCompletionLoop: %v", err)
+	}
+	updated, err := readGithubWorkManifest(manifestPath)
+	if err != nil {
+		t.Fatalf("read updated manifest: %v", err)
+	}
+	if len(updated.CompletionRounds) != 1 {
+		t.Fatalf("expected single bootstrap round, got %+v", updated.CompletionRounds)
+	}
+	if updated.CompletionRounds[0].PreexistingFindings != 1 || updated.CompletionRounds[0].Status != "completed" {
+		t.Fatalf("expected preexisting finding to be remembered and excluded, got %+v", updated.CompletionRounds[0])
+	}
+	if len(updated.PreexistingFindingFingerprints) != 1 || len(updated.PreexistingFindings) != 1 {
+		t.Fatalf("expected persisted preexisting finding memory, got %+v", updated)
+	}
+}
+
+func TestGithubWorkStatusShowsCurrentPhaseAndRound(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	managedRepoRoot := filepath.Join(home, ".nana", "work", "repos", "acme", "widget")
+	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42")
+	repoCheckoutPath := createLocalWorkRepoAt(t, filepath.Join(sandboxPath, "repo"))
+	runID := "gh-run-status-phase"
+	runDir := filepath.Join(managedRepoRoot, "runs", runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	manifest := githubWorkManifest{
+		RunID:           runID,
+		RepoSlug:        "acme/widget",
+		RepoOwner:       "acme",
+		RepoName:        "widget",
+		SandboxID:       "issue-42",
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: repoCheckoutPath,
+		SourcePath:      repoCheckoutPath,
+		TargetKind:      "issue",
+		TargetNumber:    42,
+		TargetURL:       "https://github.com/acme/widget/issues/42",
+		ExecutionStatus: "running",
+		CurrentPhase:    "completion-harden",
+		CurrentRound:    2,
+		UpdatedAt:       "2026-04-19T00:00:00Z",
+	}
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	if err := writeGithubJSON(manifestPath, manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+		t.Fatalf("index manifest: %v", err)
+	}
+	output, err := captureStdout(t, func() error {
+		return githubWorkStatus(localWorkRunSelection{RunID: runID}, false)
+	})
+	if err != nil {
+		t.Fatalf("githubWorkStatus: %v", err)
+	}
+	if !strings.Contains(output, "Current phase: completion-harden round=2") {
+		t.Fatalf("expected phase/round in status output, got %q", output)
+	}
+}
+
+func createGithubCompletionRun(t *testing.T, home string, runID string) (string, string, string) {
+	t.Helper()
+	managedRepoRoot := filepath.Join(home, ".nana", "work", "repos", "acme", "widget")
+	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", runID)
+	repoCheckoutPath := createLocalWorkRepoAt(t, filepath.Join(sandboxPath, "repo"))
+	runDir := filepath.Join(managedRepoRoot, "runs", runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	baselineSHA, err := githubGitOutput(repoCheckoutPath, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("read baseline sha: %v", err)
+	}
+	plan := detectGithubVerificationPlan(repoCheckoutPath)
+	scriptsDir, err := writeGithubVerificationScripts(sandboxPath, repoCheckoutPath, plan, runID)
+	if err != nil {
+		t.Fatalf("write verification scripts: %v", err)
+	}
+	manifest := githubWorkManifest{
+		RunID:                  runID,
+		RepoSlug:               "acme/widget",
+		RepoOwner:              "acme",
+		RepoName:               "widget",
+		ManagedRepoRoot:        managedRepoRoot,
+		SourcePath:             repoCheckoutPath,
+		BaselineSHA:            strings.TrimSpace(baselineSHA),
+		SandboxID:              runID,
+		SandboxPath:            sandboxPath,
+		SandboxRepoPath:        repoCheckoutPath,
+		VerificationPlan:       &plan,
+		VerificationScriptsDir: scriptsDir,
+		TargetKind:             "issue",
+		TargetNumber:           42,
+		TargetURL:              "https://github.com/acme/widget/issues/42",
+		ExecutionStatus:        "running",
+		UpdatedAt:              "2026-04-19T00:00:00Z",
+	}
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	if err := writeGithubJSON(manifestPath, manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+		t.Fatalf("index manifest: %v", err)
+	}
+	return manifestPath, runDir, repoCheckoutPath
+}
+
+func installGithubCompletionFakeCodex(t *testing.T, home string) {
+	t.Helper()
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		"repo=\"\"",
+		"prompt=\"\"",
+		"while [ $# -gt 0 ]; do",
+		"  case \"$1\" in",
+		"    exec) shift ;;",
+		"    -C) repo=\"$2\"; shift 2 ;;",
+		"    -) prompt=$(cat); shift ;;",
+		"    *) prompt=\"$1\"; shift ;;",
+		"  esac",
+		"done",
+		"fingerprint=$(printf '%s\\n' \"$prompt\" | awk '/^- fingerprint: / {sub(/^- fingerprint: /,\"\"); print; exit}')",
+		"mode=${FAKE_COMPLETION_MODE:-confirmed}",
+		"if printf '%s' \"$prompt\" | grep -q 'mandatory final completion gate'; then",
+		"  if grep -q 'regression' \"$repo/README.md\"; then",
+		"    printf '{\"findings\":[]}\\n'",
+		"  else",
+		"    printf '{\"findings\":[{\"title\":\"Quality final gate found missing regression\",\"severity\":\"medium\",\"path\":\"README.md\",\"line\":1,\"summary\":\"add regression\",\"detail\":\"detail\",\"fix\":\"fix\",\"rationale\":\"why\"}]}\\n'",
+		"  fi",
+		"  exit 0",
+		"fi",
+		"if printf '%s' \"$prompt\" | grep -q 'Decide each finding as one of'; then",
+		"  if [ \"$mode\" = \"preexisting\" ]; then",
+		"    printf '{\"decisions\":[{\"fingerprint\":\"%s\",\"status\":\"preexisting\",\"reason\":\"already present before this run\"}]}\\n' \"$fingerprint\"",
+		"  else",
+		"    printf '{\"decisions\":[{\"fingerprint\":\"%s\",\"status\":\"confirmed\",\"reason\":\"valid finding\"}]}\\n' \"$fingerprint\"",
+		"  fi",
+		"  exit 0",
+		"fi",
+		"if printf '%s' \"$prompt\" | grep -q 'NANA Work-local Hardening Pass'; then",
+		"  if ! grep -q 'regression' \"$repo/README.md\"; then",
+		"    printf 'regression\\n' >> \"$repo/README.md\"",
+		"  fi",
+		"  printf 'hardening-complete\\n'",
+		"  exit 0",
+		"fi",
+		"if printf '%s' \"$prompt\" | grep -q 'Review this local implementation and return JSON only.'; then",
+		"  printf '{\"findings\":[]}\\n'",
+		"  exit 0",
+		"fi",
+		"printf 'leader-stub\\n'",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(fakeBin, "codex"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 }
 
 func TestGithubAnyHumanFeedbackFiltersBotsAuthorAndBlocked(t *testing.T) {
@@ -2265,6 +2491,17 @@ func TestGithubWorkExplainJSONIncludesReviewMergeAndIgnoredActorState(t *testing
   "publication_state": "ci_waiting",
   "publication_detail": "check_runs_unavailable",
   "publication_error": "",
+  "current_phase": "completion-harden",
+  "current_round": 2,
+  "completion_rounds": [
+    {"round":0,"status":"retrying","verification_summary":"verification passed (lint, compile, unit)","review_findings":1,"final_gate_status":"findings","candidate_audit_status":"passed"},
+    {"round":2,"status":"completed","verification_summary":"verification passed (lint, compile, unit, integration)","review_findings":0,"final_gate_status":"passed","candidate_audit_status":"passed"}
+  ],
+  "final_gate_status": "passed",
+  "candidate_audit_status": "passed",
+  "candidate_blocked_paths": [],
+  "rejected_finding_fingerprints": ["reject-1"],
+  "preexisting_findings": [{"fingerprint":"pre-1","title":"Preexisting","path":"README.md","reason":"older issue"}],
   "merge_state": "blocked",
   "merge_error": "GitHub CI is not green",
   "merge_method": "squash"
@@ -2288,6 +2525,94 @@ func TestGithubWorkExplainJSONIncludesReviewMergeAndIgnoredActorState(t *testing
 	}
 	if payload.ReviewRequestState != "requested" || payload.PublicationState != "ci_waiting" || payload.PublicationDetail != "check_runs_unavailable" || payload.MergeState != "blocked" || payload.MergeError != "GitHub CI is not green" {
 		t.Fatalf("missing review/merge state: %+v", payload)
+	}
+	if payload.CurrentPhase != "completion-harden" || payload.CurrentRound != 2 || payload.FinalGateStatus != "passed" || payload.CandidateAuditStatus != "passed" {
+		t.Fatalf("missing completion state: %+v", payload)
+	}
+	if payload.RejectedFindingCount != 1 || payload.PreexistingFindingCount != 1 || len(payload.CompletionRounds) != 2 {
+		t.Fatalf("missing completion counters: %+v", payload)
+	}
+}
+
+func TestGithubWorkStatusJSONIncludesCompletionFields(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	managedRepoRoot := filepath.Join(home, ".nana", "work", "repos", "acme", "widget")
+	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42")
+	repoCheckoutPath := createLocalWorkRepoAt(t, filepath.Join(sandboxPath, "repo"))
+	runID := "gh-status-completion-json"
+	runDir := filepath.Join(managedRepoRoot, "runs", runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	manifest := githubWorkManifest{
+		RunID:                       runID,
+		RepoSlug:                    "acme/widget",
+		RepoOwner:                   "acme",
+		RepoName:                    "widget",
+		SandboxID:                   "issue-42",
+		SandboxPath:                 sandboxPath,
+		SandboxRepoPath:             repoCheckoutPath,
+		SourcePath:                  repoCheckoutPath,
+		TargetKind:                  "issue",
+		TargetNumber:                42,
+		TargetURL:                   "https://github.com/acme/widget/issues/42",
+		ExecutionStatus:             "running",
+		CurrentPhase:                "completion-final-review",
+		CurrentRound:                1,
+		FinalGateStatus:             "findings",
+		CandidateAuditStatus:        "passed",
+		RejectedFindingFingerprints: []string{"reject-1", "reject-2"},
+		PreexistingFindings:         []localWorkRememberedFinding{{Fingerprint: "pre-1"}},
+		CompletionRounds:            []githubWorkCompletionRoundSummary{{Round: 1, Status: "retrying", VerificationSummary: "verification passed (lint, compile, unit)", ReviewFindings: 1}},
+		UpdatedAt:                   "2026-04-19T00:00:00Z",
+	}
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	if err := writeGithubJSON(manifestPath, manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+		t.Fatalf("index manifest: %v", err)
+	}
+	output, err := captureStdout(t, func() error {
+		return githubWorkStatus(localWorkRunSelection{RunID: runID}, true)
+	})
+	if err != nil {
+		t.Fatalf("githubWorkStatus --json: %v", err)
+	}
+	var snapshot githubWorkStatusSnapshot
+	if err := json.Unmarshal([]byte(output), &snapshot); err != nil {
+		t.Fatalf("unmarshal snapshot: %v\n%s", err, output)
+	}
+	if snapshot.CurrentPhase != "completion-final-review" || snapshot.CurrentRound != 1 || snapshot.FinalGateStatus != "findings" || snapshot.CandidateAuditStatus != "passed" {
+		t.Fatalf("missing completion state: %+v", snapshot)
+	}
+	if snapshot.RejectedFindingCount != 2 || snapshot.PreexistingFindingCount != 1 || len(snapshot.CompletionRounds) != 1 {
+		t.Fatalf("missing completion counters: %+v", snapshot)
+	}
+}
+
+func TestWriteThreadUsageArtifactReadsScopedGithubCodexHome(t *testing.T) {
+	home := t.TempDir()
+	sandboxPath := filepath.Join(home, "sandbox")
+	runDir := filepath.Join(home, "run")
+	sessionsDir := filepath.Join(sandboxPath, ".nana", "work", "codex-home", "github-hardener-round-1", "sessions", "2026", "04", "19")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "rollout.jsonl"), []byte(strings.Join([]string{
+		`{"timestamp":"2026-04-19T12:00:01.000Z","type":"session_meta","payload":{"agent_nickname":"RoundOne","agent_role":"executor"}}`,
+		`{"timestamp":"2026-04-19T12:00:11.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":321}}}}`,
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write rollout: %v", err)
+	}
+	artifact, err := writeThreadUsageArtifact(runDir, sandboxPath)
+	if err != nil {
+		t.Fatalf("writeThreadUsageArtifact: %v", err)
+	}
+	if artifact.TotalTokens != 321 || len(artifact.Rows) != 1 || artifact.Rows[0].Nickname != "RoundOne" {
+		t.Fatalf("unexpected thread usage artifact: %+v", artifact)
 	}
 }
 

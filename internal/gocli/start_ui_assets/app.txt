@@ -1855,10 +1855,13 @@
         pause_reason: defaultString(run.pause_reason, ""),
         pause_until: defaultString(run.pause_until, ""),
         current_phase: defaultString(run.current_phase, "Awaiting phase"),
+        current_round: run.current_round || 0,
         updated_at: formatDateTime(run.updated_at),
       };
       if (row.pause_until) {
         row.current_phase = `Retry ${formatDateTime(row.pause_until)}`;
+      } else if (row.current_round > 0) {
+        row.current_phase = `${row.current_phase} · Round ${row.current_round}`;
       }
       if (includeRepo) {
         row.repo_slug = runRepoDisplay(run);
@@ -1913,6 +1916,7 @@
         pause_reason: defaultString(run.pause_reason, ""),
         pause_until: defaultString(run.pause_until, ""),
         current_phase: defaultString(run.current_phase, "Awaiting phase"),
+        current_round: run.current_round || 0,
         target_url: defaultString(run.target_url, "-"),
         updated_at: formatDateTime(run.updated_at),
         can_sync: run.backend === "github",
@@ -1920,6 +1924,8 @@
       };
       if (row.pause_until) {
         row.current_phase = `Retry ${formatDateTime(row.pause_until)}`;
+      } else if (row.current_round > 0) {
+        row.current_phase = `${row.current_phase} · Round ${row.current_round}`;
       }
       if (includeRepo) {
         row.repo_slug = runRepoDisplay(run);
@@ -4404,6 +4410,12 @@
     const manifest = detail ? (detail.github_manifest || detail.local_manifest || null) : null;
     const status = detail && detail.github_status ? detail.github_status : null;
     const typedDetail = detail || {};
+    const latestCompletionRound = manifest && Array.isArray(manifest.completion_rounds) && manifest.completion_rounds.length
+      ? manifest.completion_rounds[manifest.completion_rounds.length - 1]
+      : null;
+    const phaseSummary = summary.current_round && !summary.pause_until
+      ? `${defaultString(summary.current_phase, "Awaiting phase")} · Round ${summary.current_round}`
+      : defaultString(summary.current_phase, "Awaiting phase");
     const runPauseSummary = pauseStateSummary(summary.pause_until, summary.pause_reason);
     const laneMarkup = status && Array.isArray(status.lanes) && status.lanes.length
       ? `<ul class="status-list">${status.lanes.map((lane) => `
@@ -4420,6 +4432,9 @@
           <article class="queue-item"><span class="queue-label">Next Action</span><p class="queue-copy">${escapeHTML(defaultString(typedDetail.next_action, "(none)"))}</p></article>
           <article class="queue-item"><span class="queue-label">Human Gate</span><p class="queue-copy">${escapeHTML(defaultString(typedDetail.human_gate_reason, "(none)"))}</p></article>
           <article class="queue-item"><span class="queue-label">Publication Detail</span><p class="queue-copy">${escapeHTML(defaultString(status && status.publication_detail, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Final Gate</span><p class="queue-copy">${escapeHTML(defaultString(status && status.final_gate_status, defaultString(manifest && manifest.final_gate_status, "(none)")))}</p></article>
+          <article class="queue-item"><span class="queue-label">Candidate Audit</span><p class="queue-copy">${escapeHTML(defaultString(status && status.candidate_audit_status, defaultString(manifest && manifest.candidate_audit_status, "(none)")))}</p></article>
+          <article class="queue-item"><span class="queue-label">Latest Completion</span><p class="queue-copy">${escapeHTML(latestCompletionRound ? `Round ${latestCompletionRound.round}: ${defaultString(latestCompletionRound.status, "(none)")} · ${defaultString(latestCompletionRound.verification_summary, "(none)")}` : "(none)")}</p></article>
           <article class="queue-item"><span class="queue-label">External URL</span><p class="queue-copy">${escapeHTML(defaultString(typedDetail.external_url, "(none)"))}</p></article>
         </div>
         <div class="section-divider"></div>
@@ -4452,7 +4467,7 @@
           </div>
           <div class="drawer-summary-card">
             <span class="drawer-label">Phase</span>
-            <span class="drawer-value">${escapeHTML(defaultString(summary.current_phase, "Awaiting phase"))}</span>
+            <span class="drawer-value">${escapeHTML(phaseSummary)}</span>
           </div>
           <div class="drawer-summary-card">
             <span class="drawer-label">Artifact Root</span>
@@ -4476,7 +4491,7 @@
           <article class="queue-item"><span class="queue-label">Backend</span><p class="queue-copy">${escapeHTML(defaultString(summary.backend, "unknown"))}</p></article>
           <article class="queue-item"><span class="queue-label">Publication</span><p class="queue-copy">${escapeHTML(defaultString(summary.publication_state, typedDetail.backend === "github" && manifest && manifest.publication_state || "(none)"))}</p></article>
           <article class="queue-item"><span class="queue-label">Repo</span><p class="queue-copy">${escapeHTML(runRepoDisplay(summary))}</p></article>
-          <article class="queue-item"><span class="queue-label">Current Phase</span><p class="queue-copy">${escapeHTML(defaultString(summary.current_phase, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Current Phase</span><p class="queue-copy">${escapeHTML(phaseSummary)}</p></article>
           ${summary.pause_until ? `<article class="queue-item"><span class="queue-label">Pause Until</span><p class="queue-copy">${escapeHTML(formatDateTime(summary.pause_until))}</p></article>` : ""}
           ${summary.pause_reason ? `<article class="queue-item"><span class="queue-label">Pause Reason</span><p class="queue-copy">${escapeHTML(summary.pause_reason)}</p></article>` : ""}
         </div>

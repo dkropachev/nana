@@ -247,27 +247,35 @@ func resolveWorkBackend(cwd string, selection localWorkRunSelection) (string, er
 }
 
 type githubWorkStatusSnapshot struct {
-	RunID                string                        `json:"run_id"`
-	RepoSlug             string                        `json:"repo_slug"`
-	TargetKind           string                        `json:"target_kind"`
-	TargetNumber         int                           `json:"target_number"`
-	TargetURL            string                        `json:"target_url"`
-	Sandbox              string                        `json:"sandbox"`
-	RepoCheckout         string                        `json:"repo_checkout"`
-	UpdatedAt            string                        `json:"updated_at"`
-	ReviewReviewer       string                        `json:"review_reviewer,omitempty"`
-	PublicationState     string                        `json:"publication_state,omitempty"`
-	PublicationDetail    string                        `json:"publication_detail,omitempty"`
-	PublicationError     string                        `json:"publication_error,omitempty"`
-	ExecutionStatus      string                        `json:"execution_status,omitempty"`
-	PauseReason          string                        `json:"pause_reason,omitempty"`
-	PauseUntil           string                        `json:"pause_until,omitempty"`
-	LastError            string                        `json:"last_error,omitempty"`
-	LeaderSessionID      string                        `json:"leader_session_id,omitempty"`
-	LeaderResumeEligible bool                          `json:"leader_resume_eligible,omitempty"`
-	Lanes                []githubLaneRuntimeState      `json:"lanes,omitempty"`
-	FeedbackAvailable    bool                          `json:"feedback_available,omitempty"`
-	LockState            *repoAccessLockStatusSnapshot `json:"lock_state,omitempty"`
+	RunID                   string                             `json:"run_id"`
+	RepoSlug                string                             `json:"repo_slug"`
+	TargetKind              string                             `json:"target_kind"`
+	TargetNumber            int                                `json:"target_number"`
+	TargetURL               string                             `json:"target_url"`
+	Sandbox                 string                             `json:"sandbox"`
+	RepoCheckout            string                             `json:"repo_checkout"`
+	UpdatedAt               string                             `json:"updated_at"`
+	ReviewReviewer          string                             `json:"review_reviewer,omitempty"`
+	PublicationState        string                             `json:"publication_state,omitempty"`
+	PublicationDetail       string                             `json:"publication_detail,omitempty"`
+	PublicationError        string                             `json:"publication_error,omitempty"`
+	ExecutionStatus         string                             `json:"execution_status,omitempty"`
+	CurrentPhase            string                             `json:"current_phase,omitempty"`
+	CurrentRound            int                                `json:"current_round,omitempty"`
+	CompletionRounds        []githubWorkCompletionRoundSummary `json:"completion_rounds,omitempty"`
+	FinalGateStatus         string                             `json:"final_gate_status,omitempty"`
+	CandidateAuditStatus    string                             `json:"candidate_audit_status,omitempty"`
+	CandidateBlockedPaths   []string                           `json:"candidate_blocked_paths,omitempty"`
+	RejectedFindingCount    int                                `json:"rejected_finding_count,omitempty"`
+	PreexistingFindingCount int                                `json:"preexisting_finding_count,omitempty"`
+	PauseReason             string                             `json:"pause_reason,omitempty"`
+	PauseUntil              string                             `json:"pause_until,omitempty"`
+	LastError               string                             `json:"last_error,omitempty"`
+	LeaderSessionID         string                             `json:"leader_session_id,omitempty"`
+	LeaderResumeEligible    bool                               `json:"leader_resume_eligible,omitempty"`
+	Lanes                   []githubLaneRuntimeState           `json:"lanes,omitempty"`
+	FeedbackAvailable       bool                               `json:"feedback_available,omitempty"`
+	LockState               *repoAccessLockStatusSnapshot      `json:"lock_state,omitempty"`
 }
 
 func githubWorkStatus(selection localWorkRunSelection, jsonOutput bool) error {
@@ -305,6 +313,13 @@ func githubWorkStatus(selection localWorkRunSelection, jsonOutput bool) error {
 	if strings.TrimSpace(snapshot.ExecutionStatus) != "" {
 		fmt.Fprintf(os.Stdout, "[work] Execution status: %s\n", snapshot.ExecutionStatus)
 	}
+	if strings.TrimSpace(snapshot.CurrentPhase) != "" {
+		fmt.Fprintf(os.Stdout, "[work] Current phase: %s", snapshot.CurrentPhase)
+		if snapshot.CurrentRound > 0 {
+			fmt.Fprintf(os.Stdout, " round=%d", snapshot.CurrentRound)
+		}
+		fmt.Fprintln(os.Stdout)
+	}
 	if strings.TrimSpace(snapshot.PauseUntil) != "" {
 		fmt.Fprintf(os.Stdout, "[work] Pause until: %s", snapshot.PauseUntil)
 		if strings.TrimSpace(snapshot.PauseReason) != "" {
@@ -314,6 +329,19 @@ func githubWorkStatus(selection localWorkRunSelection, jsonOutput bool) error {
 	}
 	if strings.TrimSpace(snapshot.LastError) != "" {
 		fmt.Fprintf(os.Stdout, "[work] Last error: %s\n", snapshot.LastError)
+	}
+	if strings.TrimSpace(snapshot.FinalGateStatus) != "" {
+		fmt.Fprintf(os.Stdout, "[work] Final gate: %s\n", snapshot.FinalGateStatus)
+	}
+	if strings.TrimSpace(snapshot.CandidateAuditStatus) != "" {
+		fmt.Fprintf(os.Stdout, "[work] Candidate audit: %s\n", snapshot.CandidateAuditStatus)
+	}
+	if len(snapshot.CandidateBlockedPaths) > 0 {
+		fmt.Fprintf(os.Stdout, "[work] Candidate blocked paths: %s\n", strings.Join(snapshot.CandidateBlockedPaths, ", "))
+	}
+	if len(snapshot.CompletionRounds) > 0 {
+		last := snapshot.CompletionRounds[len(snapshot.CompletionRounds)-1]
+		fmt.Fprintf(os.Stdout, "[work] Latest completion round: %d status=%s verification=%s findings=%d\n", last.Round, defaultString(last.Status, "(none)"), defaultString(last.VerificationSummary, "(none)"), last.ReviewFindings)
 	}
 	if snapshot.LockState != nil {
 		if repoAccessLockStateHasHolders(snapshot.LockState.Source) {
@@ -419,27 +447,35 @@ func buildGithubWorkStatusSnapshot(manifest githubWorkManifest, runDir string) (
 		return githubWorkStatusSnapshot{}, err
 	}
 	return githubWorkStatusSnapshot{
-		RunID:                manifest.RunID,
-		RepoSlug:             manifest.RepoSlug,
-		TargetKind:           manifest.TargetKind,
-		TargetNumber:         manifest.TargetNumber,
-		TargetURL:            manifest.TargetURL,
-		Sandbox:              manifest.SandboxPath,
-		RepoCheckout:         manifest.SandboxRepoPath,
-		UpdatedAt:            manifest.UpdatedAt,
-		ReviewReviewer:       manifest.ReviewReviewer,
-		PublicationState:     manifest.PublicationState,
-		PublicationDetail:    manifest.PublicationDetail,
-		PublicationError:     manifest.PublicationError,
-		ExecutionStatus:      manifest.ExecutionStatus,
-		PauseReason:          manifest.PauseReason,
-		PauseUntil:           manifest.PauseUntil,
-		LastError:            manifest.LastError,
-		LeaderSessionID:      strings.TrimSpace(leaderCheckpoint.SessionID),
-		LeaderResumeEligible: leaderCheckpoint.ResumeEligible,
-		Lanes:                lanes,
-		FeedbackAvailable:    feedbackErr == nil,
-		LockState:            lockState,
+		RunID:                   manifest.RunID,
+		RepoSlug:                manifest.RepoSlug,
+		TargetKind:              manifest.TargetKind,
+		TargetNumber:            manifest.TargetNumber,
+		TargetURL:               manifest.TargetURL,
+		Sandbox:                 manifest.SandboxPath,
+		RepoCheckout:            manifest.SandboxRepoPath,
+		UpdatedAt:               manifest.UpdatedAt,
+		ReviewReviewer:          manifest.ReviewReviewer,
+		PublicationState:        manifest.PublicationState,
+		PublicationDetail:       manifest.PublicationDetail,
+		PublicationError:        manifest.PublicationError,
+		ExecutionStatus:         manifest.ExecutionStatus,
+		CurrentPhase:            manifest.CurrentPhase,
+		CurrentRound:            manifest.CurrentRound,
+		CompletionRounds:        append([]githubWorkCompletionRoundSummary{}, manifest.CompletionRounds...),
+		FinalGateStatus:         manifest.FinalGateStatus,
+		CandidateAuditStatus:    manifest.CandidateAuditStatus,
+		CandidateBlockedPaths:   append([]string{}, manifest.CandidateBlockedPaths...),
+		RejectedFindingCount:    len(manifest.RejectedFindingFingerprints),
+		PreexistingFindingCount: len(manifest.PreexistingFindings),
+		PauseReason:             manifest.PauseReason,
+		PauseUntil:              manifest.PauseUntil,
+		LastError:               manifest.LastError,
+		LeaderSessionID:         strings.TrimSpace(leaderCheckpoint.SessionID),
+		LeaderResumeEligible:    leaderCheckpoint.ResumeEligible,
+		Lanes:                   lanes,
+		FeedbackAvailable:       feedbackErr == nil,
+		LockState:               lockState,
 	}, nil
 }
 
@@ -476,6 +512,8 @@ func githubWorkLogFiles(runDir string) ([]string, error) {
 		"feedback-instructions.md",
 		"retrospective.md",
 		"thread-usage.json",
+		"completion/*",
+		"completion/*/*",
 		"lane-runtime/*",
 	}
 	seen := map[string]bool{}
@@ -506,6 +544,7 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 	if err != nil {
 		return err
 	}
+	manifestPath := filepath.Join(runDir, "manifest.json")
 	sandboxLock, err := acquireSandboxWriteLock(manifest.SandboxRepoPath, repoAccessLockOwner{
 		Backend: "github-work",
 		RunID:   manifest.RunID,
@@ -518,6 +557,50 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 	defer func() {
 		_ = sandboxLock.Release()
 	}()
+	if strings.TrimSpace(manifest.CurrentPhase) != "" && manifest.CurrentPhase != "completed" && manifest.CurrentPhase != "leader" {
+		if err := requireGithubWorkBaselineForCompletionResume(&manifest); err != nil {
+			return err
+		}
+		if err := runGithubWorkCompletionLoop(manifestPath, runDir, &manifest, options.CodexArgs); err != nil {
+			manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			if pauseErr, ok := isCodexRateLimitPauseError(err); ok {
+				manifest.ExecutionStatus = "paused"
+				manifest.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
+				manifest.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+				manifest.PausedAt = manifest.UpdatedAt
+				manifest.LastError = codexPauseInfoMessage(pauseErr.Info)
+			} else if manifest.ExecutionStatus != "blocked" {
+				manifest.ExecutionStatus = "failed"
+				manifest.LastError = err.Error()
+			}
+			if writeErr := writeGithubJSON(manifestPath, manifest); writeErr != nil {
+				return writeErr
+			}
+			if writeErr := indexGithubWorkRunManifest(manifestPath, manifest); writeErr != nil {
+				return writeErr
+			}
+			return err
+		}
+		manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		manifest.ExecutionStatus = "completed"
+		manifest.CurrentPhase = "completed"
+		manifest.CurrentRound = 0
+		manifest.PauseReason = ""
+		manifest.PauseUntil = ""
+		manifest.PausedAt = ""
+		manifest.LastError = ""
+		if err := writeGithubJSON(manifestPath, manifest); err != nil {
+			return err
+		}
+		if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stdout, "[github] Resuming completion loop for run %s.\n", manifest.RunID)
+		return nil
+	}
+	if _, err := captureGithubWorkBaselineIfMissing(manifestPath, &manifest); err != nil {
+		return err
+	}
 
 	laneCodexHome, err := ensureGithubLaneCodexHome(manifest.SandboxPath, "leader")
 	if err != nil {
@@ -580,12 +663,42 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 		manifest.PausedAt = ""
 		manifest.LastError = ""
 	}
-	manifestPath := filepath.Join(runDir, "manifest.json")
 	if err := writeGithubJSON(manifestPath, manifest); err != nil {
 		return err
 	}
 	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
 		return err
+	}
+	completionErr := error(nil)
+	if runErr == nil {
+		completionErr = runGithubWorkCompletionLoop(manifestPath, runDir, &manifest, options.CodexArgs)
+		manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		if pauseErr, ok := isCodexRateLimitPauseError(completionErr); ok {
+			manifest.ExecutionStatus = "paused"
+			manifest.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
+			manifest.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+			manifest.PausedAt = manifest.UpdatedAt
+			manifest.LastError = codexPauseInfoMessage(pauseErr.Info)
+		} else if completionErr != nil {
+			if manifest.ExecutionStatus != "blocked" {
+				manifest.ExecutionStatus = "failed"
+			}
+			manifest.LastError = defaultString(strings.TrimSpace(manifest.LastError), completionErr.Error())
+		} else {
+			manifest.ExecutionStatus = "completed"
+			manifest.CurrentPhase = "completed"
+			manifest.CurrentRound = 0
+			manifest.PauseReason = ""
+			manifest.PauseUntil = ""
+			manifest.PausedAt = ""
+			manifest.LastError = ""
+		}
+		if err := writeGithubJSON(manifestPath, manifest); err != nil {
+			return err
+		}
+		if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+			return err
+		}
 	}
 
 	fmt.Fprintf(os.Stdout, "[github] Resuming run %s for %s %s #%d\n", manifest.RunID, manifest.RepoSlug, manifest.TargetKind, manifest.TargetNumber)
@@ -595,7 +708,10 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 	if strings.TrimSpace(result.Stderr) != "" {
 		fmt.Fprint(os.Stdout, result.Stderr)
 	}
-	return runErr
+	if runErr != nil {
+		return runErr
+	}
+	return completionErr
 }
 
 func workHomeRoot() string {

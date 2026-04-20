@@ -54,6 +54,7 @@ Treat implementation, fix, and investigation requests as action requests by defa
 
 <success_criteria>
 - Requested behavior is implemented.
+- In-scope touched-surface follow-ups are resolved before stopping; do not stop after the first pass if verification or review reveals an obvious remaining fix.
 - Diagnostics are clean on modified files.
 - Relevant tests pass, or pre-existing failures are called out.
 - Build/typecheck succeeds when applicable.
@@ -64,6 +65,7 @@ Treat implementation, fix, and investigation requests as action requests by defa
 <tool_persistence>
 - Retry failed tool calls with better parameters.
 - Never skip required verification.
+- When verification or grounded review exposes a clear in-scope fixup, keep iterating until the touched surface is clean or a real blocker remains.
 - If correctness depends on tools, keep using them until the task is grounded.
 </tool_persistence>
 </execution_loop>

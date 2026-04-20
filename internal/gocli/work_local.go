@@ -176,6 +176,8 @@ type localWorkManifest struct {
 	PreexistingFindingFingerprints []string                       `json:"preexisting_finding_fingerprints,omitempty"`
 	PreexistingFindings            []localWorkRememberedFinding   `json:"preexisting_findings,omitempty"`
 	Iterations                     []localWorkIterationSummary    `json:"iterations,omitempty"`
+	APIBaseURL                     string                         `json:"-"`
+	PauseManifestPath              string                         `json:"-"`
 }
 
 type localWorkTokenUsageTotals struct {
@@ -3605,20 +3607,20 @@ func runLocalWorkCodexPrompt(manifest localWorkManifest, codexArgs []string, pro
 		CheckpointPath:   checkpointPath,
 		StepKey:          codexHomeAlias,
 		ResumeStrategy:   codexResumeSamePrompt,
-		Env:              append(buildCodexEnv(NotifyTempContract{}, scopedCodexHome), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
+		Env:              append(localWorkPromptEnv(manifest, scopedCodexHome), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
 		RateLimitPolicy:  codexRateLimitPolicyDefault(codexRateLimitPolicy(manifest.RateLimitPolicy)),
 		OnPause: func(info codexRateLimitPauseInfo) {
-			updateLocalWorkPausedManifest(manifest.RunID, info, true)
+			updateLocalWorkPausedManifest(manifest, info, true)
 		},
 		OnResume: func(info codexRateLimitPauseInfo) {
-			updateLocalWorkPausedManifest(manifest.RunID, info, false)
+			updateLocalWorkPausedManifest(manifest, info, false)
 		},
 	})
 	execResult := localWorkExecutionResult{
 		Stdout: result.Stdout,
 		Stderr: result.Stderr,
 	}
-	if persistErr := persistLocalWorkTokenUsage(manifest.RunID); persistErr != nil && !os.IsNotExist(persistErr) {
+	if persistErr := persistPromptTokenUsage(manifest); persistErr != nil && !os.IsNotExist(persistErr) {
 		if err != nil {
 			return execResult, fmt.Errorf("%w (also failed to persist token usage: %v)", err, persistErr)
 		}
@@ -3627,7 +3629,58 @@ func runLocalWorkCodexPrompt(manifest localWorkManifest, codexArgs []string, pro
 	return execResult, err
 }
 
-func updateLocalWorkPausedManifest(runID string, info codexRateLimitPauseInfo, paused bool) {
+func persistPromptTokenUsage(manifest localWorkManifest) error {
+	if strings.TrimSpace(manifest.PauseManifestPath) != "" {
+		return persistGithubWorkTokenUsage(manifest)
+	}
+	return persistLocalWorkTokenUsage(manifest.RunID)
+}
+
+func persistGithubWorkTokenUsage(manifest localWorkManifest) error {
+	if strings.TrimSpace(manifest.PauseManifestPath) == "" {
+		return nil
+	}
+	runDir := filepath.Dir(strings.TrimSpace(manifest.PauseManifestPath))
+	_, err := writeThreadUsageArtifact(runDir, manifest.SandboxPath)
+	return err
+}
+
+func localWorkPromptEnv(manifest localWorkManifest, scopedCodexHome string) []string {
+	if strings.TrimSpace(manifest.APIBaseURL) != "" {
+		return buildGithubCodexEnv(NotifyTempContract{}, scopedCodexHome, manifest.APIBaseURL)
+	}
+	return buildCodexEnv(NotifyTempContract{}, scopedCodexHome)
+}
+
+func updateLocalWorkPausedManifest(manifest localWorkManifest, info codexRateLimitPauseInfo, paused bool) {
+	if strings.TrimSpace(manifest.PauseManifestPath) != "" {
+		var githubManifest githubWorkManifest
+		if err := readGithubJSON(manifest.PauseManifestPath, &githubManifest); err != nil {
+			return
+		}
+		now := ISOTimeNow()
+		if paused {
+			githubManifest.ExecutionStatus = "paused"
+			githubManifest.PauseReason = strings.TrimSpace(info.Reason)
+			githubManifest.PauseUntil = strings.TrimSpace(info.RetryAfter)
+			githubManifest.PausedAt = now
+			githubManifest.LastError = codexPauseInfoMessage(info)
+		} else {
+			githubManifest.ExecutionStatus = "running"
+			githubManifest.PauseReason = ""
+			githubManifest.PauseUntil = ""
+			githubManifest.PausedAt = ""
+			githubManifest.LastError = ""
+		}
+		githubManifest.UpdatedAt = now
+		_ = writeGithubJSON(manifest.PauseManifestPath, githubManifest)
+		_ = indexGithubWorkRunManifest(manifest.PauseManifestPath, githubManifest)
+		return
+	}
+	updateStandaloneLocalWorkPausedManifest(manifest.RunID, info, paused)
+}
+
+func updateStandaloneLocalWorkPausedManifest(runID string, info codexRateLimitPauseInfo, paused bool) {
 	manifest, err := readLocalWorkManifestByRunID(runID)
 	if err != nil {
 		return

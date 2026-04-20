@@ -275,6 +275,7 @@ func buildGithubLaneExecutionInstructions(manifest githubWorkManifest, lane gith
 		lines = append(lines, "- Review only. Do not edit files. Return concrete findings with file references.")
 	} else {
 		lines = append(lines, "- Implement or remediate only the work that belongs to this lane, then run the worker-done verification gate.")
+		lines = append(lines, "- Treat follow-up work inside this lane as complete only when no obvious in-scope fixups remain for the touched surface after verification.")
 	}
 	if strings.TrimSpace(task) != "" {
 		lines = append(lines, fmt.Sprintf("- Caller task: %s", task))

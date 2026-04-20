@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -814,6 +815,14 @@ func githubWorkExplain(args []string) error {
 		fmt.Sprintf("Target: %s", manifest.TargetURL),
 		"",
 	}
+	if strings.TrimSpace(manifest.CurrentPhase) != "" {
+		phase := manifest.CurrentPhase
+		if manifest.CurrentRound > 0 {
+			phase = fmt.Sprintf("%s (round %d)", phase, manifest.CurrentRound)
+		}
+		lines = append(lines, fmt.Sprintf("Current phase: %s", phase))
+		lines = append(lines, "")
+	}
 	if manifest.Policy != nil {
 		lines = append(lines,
 			fmt.Sprintf("Policy: experimental=%t feedback_source=%s repo_native=%s human_gate=%s", manifest.Policy.Experimental, manifest.Policy.FeedbackSource, manifest.Policy.RepoNativeStrictness, manifest.Policy.HumanGate),
@@ -853,6 +862,22 @@ func githubWorkExplain(args []string) error {
 		fmt.Sprintf("Needs human reason: %s", defaultString(manifest.NeedsHumanReason, "(none)")),
 		fmt.Sprintf("Next action: %s", defaultString(manifest.NextAction, "continue")),
 	)
+	if strings.TrimSpace(manifest.FinalGateStatus) != "" || strings.TrimSpace(manifest.CandidateAuditStatus) != "" || len(manifest.CompletionRounds) > 0 {
+		lines = append(lines, "")
+		lines = append(lines,
+			fmt.Sprintf("Final gate status: %s", defaultString(manifest.FinalGateStatus, "(none)")),
+			fmt.Sprintf("Candidate audit: %s", defaultString(manifest.CandidateAuditStatus, "(none)")),
+			fmt.Sprintf("Stored rejected findings: %d", len(manifest.RejectedFindingFingerprints)),
+			fmt.Sprintf("Stored preexisting findings: %d", len(manifest.PreexistingFindings)),
+		)
+		if len(manifest.CandidateBlockedPaths) > 0 {
+			lines = append(lines, fmt.Sprintf("Candidate blocked paths: %s", strings.Join(manifest.CandidateBlockedPaths, ", ")))
+		}
+		if len(manifest.CompletionRounds) > 0 {
+			last := manifest.CompletionRounds[len(manifest.CompletionRounds)-1]
+			lines = append(lines, fmt.Sprintf("Latest completion round: %d status=%s verification=%s final_gate=%s findings=%d", last.Round, defaultString(last.Status, "(none)"), last.VerificationSummary, defaultString(last.FinalGateStatus, "(none)"), last.ReviewFindings))
+		}
+	}
 	for _, line := range lines {
 		fmt.Fprintln(os.Stdout, line)
 	}
@@ -1540,6 +1565,7 @@ func buildGithubConsiderationInstructionLines(activeConsiderations []string, rol
 		"Pipeline is composed from the base coder lane plus the active consideration packs.",
 		"Execution is staged:",
 		"- Bootstrap loop: use only the coder lane plus the architect overview lane to land the basic feature and get minimal verification working.",
+		"- Runtime-owned completion loop: after the bootstrap pass, Nana itself reruns verification, validates final-gate findings, and drives in-scope hardening rounds until no actionable follow-ups remain or the round cap is reached.",
 		"- Hardening loop: only after the basic feature exists and basic verification passes, activate the remaining consideration lanes for API, perf, QA, security, dependency, and style follow-up.",
 	}
 	if len(activeConsiderations) == 0 {
@@ -1682,25 +1708,115 @@ func indexGithubWorkRunManifest(manifestPath string, manifest githubWorkManifest
 }
 
 func writeThreadUsageArtifact(runDir string, sandboxPath string) (*githubThreadUsageArtifact, error) {
-	rows, err := readThreadRowsFromRollouts(filepath.Join(sandboxPath, ".codex", "sessions"))
-	if err != nil {
-		return nil, err
+	rows := []githubThreadUsageRow{}
+	for _, root := range githubThreadUsageRoots(sandboxPath) {
+		found, err := readThreadRowsFromRollouts(root)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		rows = append(rows, found...)
 	}
-	total := 0
-	for _, row := range rows {
-		total += row.TokensUsed
-	}
+	rows = mergeGithubThreadUsageRows(rows)
 	artifact := &githubThreadUsageArtifact{
 		Version:     1,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		SandboxPath: sandboxPath,
 		Rows:        rows,
-		TotalTokens: total,
+		TotalTokens: githubThreadUsageTotal(rows),
+	}
+	if existing, err := readGithubThreadUsageArtifact(filepath.Join(runDir, "thread-usage.json")); err == nil {
+		artifact = mergeGithubThreadUsageArtifacts(existing, artifact)
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, err
 	}
 	if err := writeGithubJSON(filepath.Join(runDir, "thread-usage.json"), artifact); err != nil {
 		return nil, err
 	}
 	return artifact, nil
+}
+
+func githubThreadUsageRoots(sandboxPath string) []string {
+	return []string{
+		filepath.Join(sandboxPath, ".codex", "sessions"),
+		filepath.Join(sandboxPath, ".nana", "work", "codex-home"),
+	}
+}
+
+func githubThreadUsageTotal(rows []githubThreadUsageRow) int {
+	total := 0
+	for _, row := range rows {
+		total += row.TokensUsed
+	}
+	return total
+}
+
+func readGithubThreadUsageArtifact(path string) (*githubThreadUsageArtifact, error) {
+	var artifact githubThreadUsageArtifact
+	if err := readGithubJSON(path, &artifact); err != nil {
+		return nil, err
+	}
+	return &artifact, nil
+}
+
+func mergeGithubThreadUsageRows(rows []githubThreadUsageRow) []githubThreadUsageRow {
+	index := map[string]githubThreadUsageRow{}
+	order := []string{}
+	for _, row := range rows {
+		key := fmt.Sprintf("%s|%s|%d", strings.TrimSpace(row.Nickname), strings.TrimSpace(row.Role), row.StartedAt)
+		existing, ok := index[key]
+		if !ok {
+			index[key] = row
+			order = append(order, key)
+			continue
+		}
+		if row.TokensUsed > existing.TokensUsed {
+			existing.TokensUsed = row.TokensUsed
+		}
+		if existing.StartedAt == 0 || (row.StartedAt > 0 && row.StartedAt < existing.StartedAt) {
+			existing.StartedAt = row.StartedAt
+		}
+		if row.UpdatedAt > existing.UpdatedAt {
+			existing.UpdatedAt = row.UpdatedAt
+		}
+		if existing.Nickname == "" {
+			existing.Nickname = row.Nickname
+		}
+		if existing.Role == "" {
+			existing.Role = row.Role
+		}
+		index[key] = existing
+	}
+	merged := make([]githubThreadUsageRow, 0, len(order))
+	for _, key := range order {
+		merged = append(merged, index[key])
+	}
+	sort.Slice(merged, func(i, j int) bool {
+		if merged[i].StartedAt != merged[j].StartedAt {
+			return merged[i].StartedAt < merged[j].StartedAt
+		}
+		if merged[i].Nickname != merged[j].Nickname {
+			return merged[i].Nickname < merged[j].Nickname
+		}
+		return merged[i].Role < merged[j].Role
+	})
+	return merged
+}
+
+func mergeGithubThreadUsageArtifacts(existing *githubThreadUsageArtifact, current *githubThreadUsageArtifact) *githubThreadUsageArtifact {
+	if existing == nil {
+		return current
+	}
+	if current == nil {
+		return existing
+	}
+	merged := &githubThreadUsageArtifact{
+		Version:     maxInt(existing.Version, current.Version),
+		GeneratedAt: defaultString(strings.TrimSpace(current.GeneratedAt), existing.GeneratedAt),
+		SandboxPath: defaultString(strings.TrimSpace(current.SandboxPath), existing.SandboxPath),
+	}
+	merged.Rows = mergeGithubThreadUsageRows(append(append([]githubThreadUsageRow{}, existing.Rows...), current.Rows...))
+	merged.TotalTokens = githubThreadUsageTotal(merged.Rows)
+	return merged
 }
 
 func readThreadRowsFromRollouts(sessionsRoot string) ([]githubThreadUsageRow, error) {

@@ -1505,20 +1505,25 @@ func TestStartUIAPIAssistantWorkspaceRoutes(t *testing.T) {
 		t.Fatalf("mkdir github run dir: %v", err)
 	}
 	githubManifest := githubWorkManifest{
-		RunID:            "gh-ui-blocked",
-		RepoSlug:         repoSlug,
-		RepoOwner:        "acme",
-		RepoName:         "widget",
-		ManagedRepoRoot:  githubManagedRoot,
-		SourcePath:       sourcePath,
-		TargetURL:        "https://github.com/acme/widget/issues/7",
-		TargetKind:       "issue",
-		TargetNumber:     7,
-		UpdatedAt:        now,
-		PublicationState: "ci_waiting",
-		NeedsHuman:       true,
-		NeedsHumanReason: "approval required",
-		NextAction:       "waiting for approval",
+		RunID:                "gh-ui-blocked",
+		RepoSlug:             repoSlug,
+		RepoOwner:            "acme",
+		RepoName:             "widget",
+		ManagedRepoRoot:      githubManagedRoot,
+		SourcePath:           sourcePath,
+		TargetURL:            "https://github.com/acme/widget/issues/7",
+		TargetKind:           "issue",
+		TargetNumber:         7,
+		UpdatedAt:            now,
+		CurrentPhase:         "completion-harden",
+		CurrentRound:         2,
+		PublicationState:     "ci_waiting",
+		FinalGateStatus:      "findings",
+		CandidateAuditStatus: "passed",
+		NeedsHuman:           true,
+		NeedsHumanReason:     "approval required",
+		NextAction:           "waiting for approval",
+		CompletionRounds:     []githubWorkCompletionRoundSummary{{Round: 2, Status: "retrying", VerificationSummary: "verification passed (lint, compile, unit)", ReviewFindings: 1}},
 	}
 	githubManifestPath := filepath.Join(githubRunDir, "manifest.json")
 	if err := writeGithubJSON(githubManifestPath, githubManifest); err != nil {
@@ -1724,6 +1729,12 @@ func TestStartUIAPIAssistantWorkspaceRoutes(t *testing.T) {
 	}
 	if !runDetail.SyncAllowed || runDetail.GithubManifest == nil || runDetail.GithubStatus == nil || runDetail.HumanGateReason != "approval required" {
 		t.Fatalf("unexpected work run detail: %+v", runDetail)
+	}
+	if runDetail.Summary.CurrentPhase != "completion-harden" || runDetail.Summary.CurrentRound != 2 {
+		t.Fatalf("expected GitHub run summary phase/round, got %+v", runDetail.Summary)
+	}
+	if runDetail.GithubStatus.FinalGateStatus != "findings" || len(runDetail.GithubStatus.CompletionRounds) != 1 {
+		t.Fatalf("expected completion state in GitHub status, got %+v", runDetail.GithubStatus)
 	}
 
 	runSyncRequest, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/work/runs/gh-ui-blocked/sync", nil)

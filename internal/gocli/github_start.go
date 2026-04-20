@@ -92,6 +92,11 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 		roleLayout = "split"
 	}
 	verificationPlan := detectGithubVerificationPlan(sandboxRepoPath)
+	baselineSHA, err := githubGitOutput(sandboxRepoPath, "rev-parse", "HEAD")
+	if err != nil {
+		return githubWorkManifest{}, err
+	}
+	baselineSHA = strings.TrimSpace(baselineSHA)
 	runDir := filepath.Join(paths.RepoRoot, "runs", runID)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return githubWorkManifest{}, err
@@ -113,6 +118,7 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 		RepoName:                repoMeta.RepoName,
 		ManagedRepoRoot:         paths.RepoRoot,
 		SourcePath:              paths.SourcePath,
+		BaselineSHA:             baselineSHA,
 		SandboxID:               sandboxID,
 		SandboxPath:             sandboxPath,
 		SandboxRepoPath:         sandboxRepoPath,
@@ -229,6 +235,10 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 		},
 	})
 	manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	completionErr := error(nil)
+	if runErr == nil {
+		completionErr = runGithubWorkCompletionLoop(manifestPath, runDir, &manifest, options.CodexArgs)
+	}
 	if pauseErr, ok := isCodexRateLimitPauseError(runErr); ok {
 		manifest.ExecutionStatus = "paused"
 		manifest.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
@@ -238,8 +248,21 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 	} else if runErr != nil {
 		manifest.ExecutionStatus = "failed"
 		manifest.LastError = runErr.Error()
+	} else if pauseErr, ok := isCodexRateLimitPauseError(completionErr); ok {
+		manifest.ExecutionStatus = "paused"
+		manifest.PauseReason = strings.TrimSpace(pauseErr.Info.Reason)
+		manifest.PauseUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
+		manifest.PausedAt = manifest.UpdatedAt
+		manifest.LastError = codexPauseInfoMessage(pauseErr.Info)
+	} else if completionErr != nil {
+		if manifest.ExecutionStatus != "blocked" {
+			manifest.ExecutionStatus = "failed"
+		}
+		manifest.LastError = defaultString(strings.TrimSpace(manifest.LastError), completionErr.Error())
 	} else {
 		manifest.ExecutionStatus = "completed"
+		manifest.CurrentPhase = "completed"
+		manifest.CurrentRound = 0
 		manifest.PauseReason = ""
 		manifest.PauseUntil = ""
 		manifest.PausedAt = ""
@@ -263,7 +286,10 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 	if strings.TrimSpace(result.Stderr) != "" {
 		fmt.Fprint(os.Stdout, result.Stderr)
 	}
-	return manifest, runErr
+	if runErr != nil {
+		return manifest, runErr
+	}
+	return manifest, completionErr
 }
 
 func prepareGithubWorkSource(paths githubManagedRepoPaths, repoMeta *githubManagedRepoMetadata, owner repoAccessLockOwner, now time.Time, sandboxRepoPath string, observeReadPhase func(sourcePath string) error) (githubPreparedManagedSource, error) {
