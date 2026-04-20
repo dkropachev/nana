@@ -297,6 +297,130 @@ func TestAccountAddFailsWhenDeviceLoginWritesNoCredentials(t *testing.T) {
 	}
 }
 
+func TestAccountImportRegistersManagedAccountFromExplicitPath(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".nana", "codex-home")
+	source := filepath.Join(home, "exports", "auth.json")
+
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+		t.Fatalf("mkdir source dir: %v", err)
+	}
+	if err := os.WriteFile(source, []byte(chatgptProfileJSON("import-token", "import-refresh", "import-account")), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error { return Account([]string{"import", "ops-team", "--from", source}) })
+	if err != nil {
+		t.Fatalf("Account(import): %v", err)
+	}
+	if !strings.Contains(output, `Registered Codex credentials as account "ops-team"`) {
+		t.Fatalf("unexpected output: %q", output)
+	}
+
+	registry, err := loadManagedAuthRegistry(codexHome)
+	if err != nil {
+		t.Fatalf("load registry: %v", err)
+	}
+	if account := registry.account("ops-team"); account == nil {
+		t.Fatalf("expected imported account, got %#v", registry)
+	}
+
+	profile, err := readManagedAccountProfile(managedAuthAccountPathForHome(codexHome, "ops-team"))
+	if err != nil {
+		t.Fatalf("read imported profile: %v", err)
+	}
+	if profile.Tokens == nil || profile.Tokens.AccessToken != "import-token" {
+		t.Fatalf("unexpected imported profile: %#v", profile)
+	}
+}
+
+func TestAccountImportRequiresFromPath(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".nana", "codex-home")
+
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+
+	_, err := captureStdout(t, func() error { return Account([]string{"import", "ops-team"}) })
+	if err == nil {
+		t.Fatal("expected missing --from failure")
+	}
+	if !strings.Contains(err.Error(), "nana account import requires --from <path>") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAccountExportCopiesManagedAccountProfile(t *testing.T) {
+	codexHome := filepath.Join(t.TempDir(), ".codex")
+	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
+		Preferred: "primary",
+		Accounts: map[string]managedAccountFixtureEntry{
+			"primary":   {Profile: chatgptProfileJSON("primary-token", "primary-refresh", "primary-acct")},
+			"secondary": {Profile: chatgptProfileJSON("secondary-token", "secondary-refresh", "secondary-acct")},
+		},
+		Active: "primary",
+	})
+	target := filepath.Join(t.TempDir(), "exports", "secondary.json")
+	t.Setenv("CODEX_HOME", codexHome)
+
+	output, err := captureStdout(t, func() error { return Account([]string{"export", "secondary", "--to", target}) })
+	if err != nil {
+		t.Fatalf("Account(export): %v", err)
+	}
+	if !strings.Contains(output, `Exported managed account "secondary"`) {
+		t.Fatalf("unexpected output: %q", output)
+	}
+
+	sourceContent, err := os.ReadFile(managedAuthAccountPathForHome(codexHome, "secondary"))
+	if err != nil {
+		t.Fatalf("read source account: %v", err)
+	}
+	targetContent, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read exported account: %v", err)
+	}
+	if string(targetContent) != string(sourceContent) {
+		t.Fatalf("expected exported account to match source, source=%q target=%q", string(sourceContent), string(targetContent))
+	}
+}
+
+func TestAccountExportRejectsManagedTargetPath(t *testing.T) {
+	codexHome := filepath.Join(t.TempDir(), ".codex")
+	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
+		Preferred: "primary",
+		Accounts: map[string]managedAccountFixtureEntry{
+			"primary": {Profile: chatgptProfileJSON("primary-token", "primary-refresh", "primary-acct")},
+		},
+		Active: "primary",
+	})
+	target := managedAuthAccountPathForHome(codexHome, "primary")
+	before, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read primary account before export: %v", err)
+	}
+
+	_, err = captureStdout(t, func() error {
+		return exportManagedAccount(codexHome, authExportOptions{Name: "primary", Target: target})
+	})
+	if err == nil {
+		t.Fatal("expected self-export failure")
+	}
+	if !strings.Contains(err.Error(), `refusing to export managed account "primary" onto itself`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	after, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read primary account after export: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("managed account changed during rejected self-export, before=%q after=%q", string(before), string(after))
+	}
+}
+
 func TestAccountStatusShowsUsageState(t *testing.T) {
 	codexHome := filepath.Join(t.TempDir(), ".codex")
 	writeManagedAccountFixture(t, codexHome, managedAccountFixture{

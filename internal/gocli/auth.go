@@ -81,6 +81,11 @@ type authImportOptions struct {
 	Primary bool
 }
 
+type authExportOptions struct {
+	Name   string
+	Target string
+}
+
 func LegacyCodexAuthPath(home string) string {
 	if home == "" {
 		home, _ = os.UserHomeDir()
@@ -143,6 +148,27 @@ func Account(args []string) error {
 			return err
 		}
 		return addManagedAccount(CodexHome(), options)
+	case "import":
+		options, err := parseAccountImportOptions(args[1:])
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(options.Source) == "" {
+			return fmt.Errorf("nana account import requires --from <path>\n%s", accountUsage())
+		}
+		return addManagedAccount(CodexHome(), options)
+	case "export":
+		options, err := parseAccountExportOptions(args[1:])
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(options.Name) == "" {
+			return fmt.Errorf("nana account export requires an account name\n%s", accountUsage())
+		}
+		if strings.TrimSpace(options.Target) == "" {
+			return fmt.Errorf("nana account export requires --to <path>\n%s", accountUsage())
+		}
+		return exportManagedAccount(CodexHome(), options)
 	case "list":
 		return listManagedAccounts(CodexHome())
 	case "status":
@@ -184,6 +210,8 @@ func accountUsage() string {
 	return `Usage:
   nana account pull [name] [--from <path>] [--primary]
   nana account add [name] [--primary] [--from <path>]
+  nana account import [name] --from <path> [--primary]
+  nana account export <name> --to <path>
   nana account list
   nana account status
   nana account activate <name>
@@ -194,6 +222,8 @@ func accountUsage() string {
 Notes:
   - Managed account profiles live under CODEX_HOME.
   - nana account add launches codex login --device-auth in an isolated temporary CODEX_HOME unless --from is provided.
+  - nana account import adds a managed profile from an explicit auth.json path.
+  - nana account export copies a managed profile to an explicit auth.json path.
   - When no account name is provided, NANA picks one automatically.
   - The preferred profile is tried first. When it is cooling down, NANA falls back to the next enabled profile.
   - Live sessions only queue account changes; fallback and switch-back apply on the next NANA-managed restart boundary.`
@@ -216,6 +246,34 @@ func parseAccountImportOptions(args []string) (authImportOptions, error) {
 			index++
 		case strings.HasPrefix(token, "--from="):
 			options.Source = strings.TrimSpace(strings.TrimPrefix(token, "--from="))
+		case strings.HasPrefix(token, "-"):
+			return options, fmt.Errorf("unknown account option: %s\n%s", token, accountUsage())
+		case options.Name == "":
+			options.Name = token
+		default:
+			return options, fmt.Errorf("unexpected account argument: %s\n%s", token, accountUsage())
+		}
+	}
+
+	options.Name = normalizeManagedAuthName(options.Name)
+	return options, nil
+}
+
+func parseAccountExportOptions(args []string) (authExportOptions, error) {
+	options := authExportOptions{}
+	for index := 0; index < len(args); index++ {
+		token := strings.TrimSpace(args[index])
+		switch {
+		case token == "":
+			continue
+		case token == "--to":
+			if index+1 >= len(args) {
+				return options, fmt.Errorf("missing value after --to\n%s", accountUsage())
+			}
+			options.Target = strings.TrimSpace(args[index+1])
+			index++
+		case strings.HasPrefix(token, "--to="):
+			options.Target = strings.TrimSpace(strings.TrimPrefix(token, "--to="))
 		case strings.HasPrefix(token, "-"):
 			return options, fmt.Errorf("unknown account option: %s\n%s", token, accountUsage())
 		case options.Name == "":
@@ -470,6 +528,48 @@ func importManagedAccount(codexHome string, options authImportOptions) error {
 		fmt.Fprintf(os.Stdout, "[nana] Active account is now %q\n", name)
 	}
 	return nil
+}
+
+func exportManagedAccount(codexHome string, options authExportOptions) error {
+	name := normalizeManagedAuthName(options.Name)
+	if name == "" {
+		return fmt.Errorf("invalid account name %q", options.Name)
+	}
+	target := strings.TrimSpace(options.Target)
+	if target == "" {
+		return fmt.Errorf("missing export target")
+	}
+
+	registry, err := loadManagedAuthRegistry(codexHome)
+	if err != nil {
+		return err
+	}
+	account := registry.account(name)
+	if account == nil {
+		return fmt.Errorf("managed account %q not found", name)
+	}
+	if sameManagedAuthFile(account.AuthPath, target) {
+		return fmt.Errorf("refusing to export managed account %q onto itself at %s", name, target)
+	}
+	if err := copyFile(account.AuthPath, target); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "[nana] Exported managed account %q to %s\n", name, target)
+	return nil
+}
+
+func sameManagedAuthFile(source string, target string) bool {
+	source = filepath.Clean(strings.TrimSpace(source))
+	target = filepath.Clean(strings.TrimSpace(target))
+	if source == "" || target == "" {
+		return false
+	}
+	if source == target {
+		return true
+	}
+	sourceAbs, sourceErr := filepath.Abs(source)
+	targetAbs, targetErr := filepath.Abs(target)
+	return sourceErr == nil && targetErr == nil && sourceAbs == targetAbs
 }
 
 func listManagedAccounts(codexHome string) error {
