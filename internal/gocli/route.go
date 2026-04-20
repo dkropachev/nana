@@ -547,3 +547,14 @@ func routeActivationWhy(activation routeActivation) string {
 		return activation.Source
 	}
 }
+
+func routeActivationMode(activation routeActivation) string {
+	switch activation.Source {
+	case routeSourceExplicitInvocation:
+		return "explicit"
+	case routeSourceImplicitKeyword:
+		return "implicit"
+	default:
+		return strings.TrimSpace(activation.Source)
+	}
+}

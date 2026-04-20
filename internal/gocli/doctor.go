@@ -14,9 +14,16 @@ import (
 )
 
 type doctorCheck struct {
-	Name    string
-	Status  string
-	Message string
+	Name        string
+	Status      string
+	Message     string
+	Remediation *doctorRemediation
+}
+
+type doctorRemediation struct {
+	Path             string
+	SafeAutomaticFix string
+	ManualFallback   string
 }
 
 func Doctor(cwd string, repoRoot string) error {
@@ -59,7 +66,6 @@ func Doctor(cwd string, repoRoot string) error {
 		checkDirectory("State dir", BaseStateDir(cwd)),
 		checkNanaStatePaths(cwd),
 		checkNanaJSONStateFiles(cwd),
-		checkNanaStateSchemas(cwd),
 		checkWorkSQLiteState(),
 		checkNanaStateSchemas(cwd),
 		checkMcpServers(paths.configPath),

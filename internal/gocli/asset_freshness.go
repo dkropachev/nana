@@ -286,6 +286,39 @@ func staleAssetMessage(details []string) string {
 	return fmt.Sprintf("%s, %s (+%d more)", details[0], details[1], len(details)-2)
 }
 
+func setupFixCommand(scope string) string {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return "nana setup"
+	}
+	return fmt.Sprintf("nana setup --scope %s", scope)
+}
+
+func setupForceFixCommand(scope string) string {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return "nana setup --force"
+	}
+	return fmt.Sprintf("nana setup --force --scope %s", scope)
+}
+
+func manualDoctorRemediation(path string, manualFallback string) *doctorRemediation {
+	return &doctorRemediation{
+		Path:             strings.TrimSpace(path),
+		SafeAutomaticFix: "no",
+		ManualFallback:   strings.TrimSpace(manualFallback),
+	}
+}
+
+func setupDoctorRemediation(scope string, path string, manualFallback string) *doctorRemediation {
+	command := setupFixCommand(scope)
+	return &doctorRemediation{
+		Path:             strings.TrimSpace(path),
+		SafeAutomaticFix: fmt.Sprintf("yes — run `%s`", command),
+		ManualFallback:   strings.TrimSpace(manualFallback),
+	}
+}
+
 func checkManagedAgentsFreshness(scope string, cwd string, codexHomeDir string, repoRoot string) doctorCheck {
 	freshness, err := evaluateManagedAssetFreshness(scope, cwd, codexHomeDir, repoRoot)
 	if err != nil {
@@ -466,6 +499,16 @@ func assetWarningStatePath(cwd string) string {
 	return filepath.Join(BaseStateDir(cwd), "asset-freshness-warning.json")
 }
 
+func managedAssetWarningSeenKey(scope string, cwd string, freshness managedAssetFreshness) string {
+	base := filepath.Clean(strings.TrimSpace(cwd))
+	if scope != "project" {
+		if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+			base = filepath.Clean(home)
+		}
+	}
+	return scope + "|" + base + "|" + freshness.Fingerprint
+}
+
 func maybeWarnManagedAssetDrift(cwd string, codexHomeDir string, repoRoot string) {
 	scope, _ := resolveDoctorScope(cwd)
 	freshness, err := evaluateManagedAssetFreshness(scope, cwd, codexHomeDir, repoRoot)
@@ -473,16 +516,18 @@ func maybeWarnManagedAssetDrift(cwd string, codexHomeDir string, repoRoot string
 		return
 	}
 	statePath := assetWarningStatePath(cwd)
+	memoKey := filepath.Clean(strings.TrimSpace(codexHomeDir))
+	seenKey := managedAssetWarningSeenKey(scope, cwd, freshness)
 	if freshness.allFresh() {
 		managedAssetWarningMemoMu.Lock()
-		delete(managedAssetWarningMemo, statePath)
-		delete(managedAssetWarningSeen, freshness.Fingerprint)
+		delete(managedAssetWarningMemo, memoKey)
+		delete(managedAssetWarningSeen, seenKey)
 		managedAssetWarningMemoMu.Unlock()
 		_ = os.Remove(statePath)
 		return
 	}
 	managedAssetWarningMemoMu.Lock()
-	if managedAssetWarningMemo[statePath] == freshness.Fingerprint || managedAssetWarningSeen[freshness.Fingerprint] {
+	if managedAssetWarningMemo[memoKey] == freshness.Fingerprint || managedAssetWarningSeen[seenKey] {
 		managedAssetWarningMemoMu.Unlock()
 		return
 	}
@@ -490,8 +535,8 @@ func maybeWarnManagedAssetDrift(cwd string, codexHomeDir string, repoRoot string
 	state, _ := readManagedAssetWarningState(statePath)
 	if state.Fingerprint == freshness.Fingerprint {
 		managedAssetWarningMemoMu.Lock()
-		managedAssetWarningMemo[statePath] = freshness.Fingerprint
-		managedAssetWarningSeen[freshness.Fingerprint] = true
+		managedAssetWarningMemo[memoKey] = freshness.Fingerprint
+		managedAssetWarningSeen[seenKey] = true
 		managedAssetWarningMemoMu.Unlock()
 		return
 	}
@@ -500,8 +545,8 @@ func maybeWarnManagedAssetDrift(cwd string, codexHomeDir string, repoRoot string
 	}
 	fmt.Fprint(os.Stderr, managedAssetDriftWarning(scope, freshness))
 	managedAssetWarningMemoMu.Lock()
-	managedAssetWarningMemo[statePath] = freshness.Fingerprint
-	managedAssetWarningSeen[freshness.Fingerprint] = true
+	managedAssetWarningMemo[memoKey] = freshness.Fingerprint
+	managedAssetWarningSeen[seenKey] = true
 	managedAssetWarningMemoMu.Unlock()
 	_ = writeManagedAssetWarningState(statePath, managedAssetWarningState{
 		Fingerprint: freshness.Fingerprint,
