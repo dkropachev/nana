@@ -291,6 +291,79 @@ func TestSummaryModeWritesCompactionTelemetry(t *testing.T) {
 	}
 }
 
+func TestSummaryModeCompactsNoisyOutputAndRecordsTelemetry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell snippets use POSIX sh")
+	}
+	binaryPath := buildBinary(t)
+	cwd := t.TempDir()
+	writeExecutable(t, filepath.Join(cwd, "noisy-output"), `#!/bin/sh
+i=1
+while [ "$i" -le 250 ]; do
+  printf 'noisy-line-%03d payload should be summarized not streamed\n' "$i"
+  i=$((i + 1))
+done
+printf 'warning-stream-line\n' >&2
+`)
+	writeExecutable(t, filepath.Join(cwd, "codex"), `#!/bin/sh
+cat >/dev/null
+printf '%s\n' '- summary: compacted noisy output into a short report'
+`)
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	cmd := runCommand(t, binaryPath, "noisy-output")
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(),
+		"PATH="+cwd+":"+os.Getenv("PATH"),
+		"NANA_SPARKSHELL_LINES=10",
+		"NANA_CONTEXT_TELEMETRY=1",
+		"NANA_CONTEXT_TELEMETRY_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("summary mode failed: %v\n%s", err, output)
+	}
+
+	rendered := string(output)
+	if !strings.Contains(rendered, "- summary: compacted noisy output into a short report") {
+		t.Fatalf("missing compact summary in output: %q", output)
+	}
+	for _, leaked := range []string{"noisy-line-001", "noisy-line-250", "warning-stream-line"} {
+		if strings.Contains(rendered, leaked) {
+			t.Fatalf("user-visible output leaked raw noisy line %q: %.512q", leaked, rendered)
+		}
+	}
+	if len(output) > 256 {
+		t.Fatalf("user-visible output was not compact; got %d bytes: %.512q", len(output), rendered)
+	}
+
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read telemetry log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected one telemetry event, got %d: %q", len(lines), content)
+	}
+	var event map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &event); err != nil {
+		t.Fatalf("unmarshal telemetry event: %v\n%s", err, lines[0])
+	}
+	if event["event"] != "shell_output_compaction" || event["tool"] != "nana-sparkshell" || event["command_name"] != "noisy-output" {
+		t.Fatalf("unexpected telemetry identity fields: %#v", event)
+	}
+	if event["stdout_lines"] != float64(250) || event["stderr_lines"] != float64(1) || event["summarized"] != true {
+		t.Fatalf("unexpected telemetry compaction fields: %#v", event)
+	}
+	capturedBytes, _ := event["captured_bytes"].(float64)
+	summaryBytes, _ := event["summary_bytes"].(float64)
+	if capturedBytes <= 8_000 || summaryBytes <= 0 || summaryBytes >= capturedBytes {
+		t.Fatalf("telemetry did not record large-output compaction: %#v", event)
+	}
+	if strings.Contains(string(content), "noisy-line-001") || strings.Contains(string(content), "warning-stream-line") {
+		t.Fatalf("telemetry leaked raw noisy output: %q", content)
+	}
+}
+
 func TestSummaryFailureFallsBackToRawOutputWithNotice(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell snippets use POSIX sh")

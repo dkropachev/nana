@@ -62,9 +62,9 @@ Local tools and support:
   nana next                    Print the highest-priority next step and command
   nana status                  Show current local NANA runtime status
   nana verify [--json]         Run the repo-native verification profile
-  nana route --explain <prompt>
-                               Preview prompt-to-skill routing
   nana usage                   Report token spend across NANA-managed sessions
+  nana route --explain <prompt>
+                               Preview NANA prompt-to-skill routing
   nana cancel                  Cancel active NANA runtime modes
   nana config                  Show or update persisted NANA defaults
   nana reasoning               Inspect or configure reasoning defaults
@@ -232,13 +232,13 @@ func main() {
 			exitWithError(err)
 		}
 		return
-	case "route":
-		if err := gocli.Route(mustGetwd(), args[1:]); err != nil {
+	case "usage":
+		if err := gocli.Usage(mustGetwd(), args[1:]); err != nil {
 			exitWithError(err)
 		}
 		return
-	case "usage":
-		if err := gocli.Usage(mustGetwd(), args[1:]); err != nil {
+	case "route":
+		if err := gocli.Route(mustGetwd(), args[1:]); err != nil {
 			exitWithError(err)
 		}
 		return
@@ -465,11 +465,11 @@ func handleNestedHelp(args []string) bool {
 	case "verify":
 		mustHandleHelp(gocli.Verify(cwd, []string{"--help"}))
 		return true
-	case "route":
-		mustHandleHelp(gocli.Route(cwd, []string{"--help"}))
-		return true
 	case "usage":
 		mustHandleHelp(gocli.Usage(cwd, []string{"--help"}))
+		return true
+	case "route":
+		mustHandleHelp(gocli.Route(cwd, []string{"--help"}))
 		return true
 	case "ask":
 		mustHandleHelp(gocli.Ask(repoRoot, cwd, []string{"--help"}))

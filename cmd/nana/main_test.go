@@ -253,9 +253,9 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 		"Local tools and support:",
 		"nana next",
 		"nana verify [--json]",
-		"nana route --explain <prompt>",
 		"nana config",
 		"nana usage",
+		"nana route --explain <prompt>",
 		"nana account <subcommand>",
 		"nana artifacts list",
 		"nana reflect | nana explore",
@@ -271,6 +271,36 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 	for _, snippet := range expectedSnippets {
 		if !strings.Contains(help, snippet) {
 			t.Fatalf("expected top-level help to contain %q, got %q", snippet, output)
+		}
+	}
+}
+
+func TestBinaryRouteExplainIsReachable(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cwd := t.TempDir()
+	home := filepath.Join(cwd, "home")
+
+	cmd := runCommand(t, binaryPath, "route", "--explain", "build me a cli")
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"CODEX_HOME="+filepath.Join(home, ".codex-home"),
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("binary route explain failed: %v\n%s", err, output)
+	}
+	route := string(output)
+	expectedSnippets := []string{
+		"Route preview:",
+		"Prompt: build me a cli",
+		"1. $autopilot",
+		`source: implicit keyword "build me"`,
+		filepath.Join(home, ".codex-home", "skills", "autopilot", "RUNTIME.md"),
+	}
+	for _, snippet := range expectedSnippets {
+		if !strings.Contains(route, snippet) {
+			t.Fatalf("expected route output to contain %q, got %q", snippet, output)
 		}
 	}
 }
@@ -337,37 +367,6 @@ func TestBinaryAuthCommandIsUnknown(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "unknown command: auth") {
 		t.Fatalf("expected unknown auth command output, got %q", output)
-	}
-}
-
-func TestBinaryRouteExplainCommandRunsNativePreview(t *testing.T) {
-	binaryPath := buildNanaBinary(t)
-	cwd := t.TempDir()
-	home := filepath.Join(cwd, "home")
-
-	cmd := runCommand(t, binaryPath, "route", "--explain", "Please", "ANALYZE", "this")
-	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(),
-		"HOME="+home,
-		"CODEX_HOME=",
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("binary route explain failed: %v\n%s", err, output)
-	}
-	preview := string(output)
-	for _, expected := range []string{
-		"Route preview:",
-		"Prompt: Please ANALYZE this",
-		"1. $analyze",
-		`source: implicit keyword "ANALYZE"`,
-	} {
-		if !strings.Contains(preview, expected) {
-			t.Fatalf("expected route output to contain %q, got %q", expected, output)
-		}
-	}
-	if strings.Contains(preview, "unknown command: route") {
-		t.Fatalf("route command should be dispatched before unknown-command fallback, got %q", output)
 	}
 }
 
