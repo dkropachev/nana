@@ -58,9 +58,12 @@ That document defines the GPT-5.4 behavior contract contributors should preserve
 
 ### Adding a new skill
 
+Read the [skill contribution guide](./docs/skills.md) before adding triggers or runtime docs.
+
 1. Create `skills/my-skill/SKILL.md` with the skill workflow
-2. Run `nana setup --force` to install it to `~/.codex/skills/`
-3. Use `$my-skill` in Codex CLI
+2. Check trigger wording and fallback behavior against the guide
+3. Run `nana setup --force` to install it to `~/.codex/skills/`
+4. Use `$my-skill` in Codex CLI
 
 ## Workflow
 

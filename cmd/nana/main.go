@@ -67,6 +67,7 @@ Local tools and support:
   nana config                  Show or update persisted NANA defaults
   nana reasoning               Inspect or configure reasoning defaults
   nana account <subcommand>    Manage account routing
+  nana route --explain "..."   Preview prompt-to-skill routing
   nana cleanup                 Clean NANA runtime artifacts
   nana artifacts list          List repo-local NANA artifacts and summaries
   nana ask                     Ask through the configured helper surface
@@ -74,8 +75,6 @@ Local tools and support:
   nana agents-init             Initialize repo agent instructions
   nana reflect | nana explore  Run read-only repo reflection/search helpers
   nana sparkshell              Run noisy shell commands with compact summaries
-  nana route --explain <prompt>
-                               Preview prompt-to-skill routing
   nana session                 Search prior local session history
   nana trace                   Report child-agent telemetry and concurrency budget pressure
   nana hooks                   Manage NANA hook integration
@@ -108,6 +107,7 @@ Safest CLI entry points:
   nana doctor                   Verify installation health
   nana help [command]           Show top-level or command-specific help
   nana hud [--watch]            Show local NANA runtime status
+  nana route --explain "..."    Preview prompt-to-skill routing
   nana explore --prompt "..."   Run a read-only repository lookup
   nana sparkshell <command>     Summarize noisy shell output or bounded verification
   nana next                     Show the next operator action
@@ -242,11 +242,6 @@ func main() {
 			exitWithError(err)
 		}
 		return
-	case "route":
-		if err := gocli.Route(mustGetwd(), args[1:]); err != nil {
-			exitWithError(err)
-		}
-		return
 	case "cancel":
 		if err := gocli.Cancel(mustGetwd()); err != nil {
 			exitWithError(err)
@@ -259,6 +254,11 @@ func main() {
 		return
 	case "config":
 		if err := gocli.Config(args[1:]); err != nil {
+			exitWithError(err)
+		}
+		return
+	case "route":
+		if err := gocli.Route(mustGetwd(), args[1:]); err != nil {
 			exitWithError(err)
 		}
 		return
@@ -462,9 +462,6 @@ func handleNestedHelp(args []string) bool {
 	case "next":
 		mustHandleHelp(gocli.Next(cwd, []string{"--help"}))
 		return true
-	case "route":
-		mustHandleHelp(gocli.Route(cwd, []string{"--help"}))
-		return true
 	case "verify":
 		mustHandleHelp(gocli.Verify(cwd, []string{"--help"}))
 		return true
@@ -509,6 +506,9 @@ func handleNestedHelp(args []string) bool {
 		return true
 	case "hud":
 		mustHandleHelp(gocli.HUD(cwd, os.Args[0], []string{"--help"}))
+		return true
+	case "route":
+		mustHandleHelp(gocli.Route(cwd, []string{"--help"}))
 		return true
 	case "repo":
 		mustHandleHelp(gocli.Repo(cwd, []string{"help"}))
