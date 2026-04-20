@@ -188,7 +188,6 @@ func TestBinaryNestedGithubHelpRoutesLocally(t *testing.T) {
 		{args: []string{"repo", "--help"}, expected: "nana repo - Repository onboarding and verification-plan inspection"},
 		{args: []string{"start", "--help"}, expected: "nana start - Run repo automation or scout startup"},
 		{args: []string{"next", "--help"}, expected: "nana next - Show the highest-priority item that needs operator attention"},
-		{args: []string{"route", "--help"}, expected: "nana route - Preview NANA prompt-to-skill routing"},
 		{args: []string{"verify", "--help"}, expected: "nana verify - Run the repository-native verification profile"},
 		{args: []string{"ui-scout", "--help"}, expected: "nana ui-scout - Audit UI pages and flows with issue-style findings"},
 		{args: []string{"work", "--help"}, expected: "nana work - Unified local and GitHub-backed implementation runtime"},
@@ -253,13 +252,13 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 		"nana repo scout ...",
 		"Local tools and support:",
 		"nana next",
-		`nana route --explain "..."`,
-		"nana verify [--json] [--dry-run]",
+		"nana verify [--json]",
 		"nana config",
 		"nana usage",
 		"nana account <subcommand>",
 		"nana artifacts list",
 		"nana reflect | nana explore",
+		"nana route --explain <prompt>",
 		"nana hud",
 		"More help:",
 		"nana help workflows",
@@ -273,6 +272,38 @@ func TestBinaryTopLevelHelpListsWorkSurfaces(t *testing.T) {
 		if !strings.Contains(help, snippet) {
 			t.Fatalf("expected top-level help to contain %q, got %q", snippet, output)
 		}
+	}
+}
+
+func TestBinaryRouteExplainPreviewSucceeds(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cwd := t.TempDir()
+	home := filepath.Join(cwd, "home")
+
+	cmd := runCommand(t, binaryPath, "route", "--explain", "analyze this")
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"CODEX_HOME=",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("binary route explain failed: %v\n%s", err, output)
+	}
+	preview := string(output)
+	for _, expected := range []string{
+		"Route preview:",
+		"Prompt: analyze this",
+		"1. $analyze",
+		`source: implicit keyword "analyze"`,
+		filepath.Join(home, ".nana", "codex-home", "skills", "analyze", "RUNTIME.md"),
+	} {
+		if !strings.Contains(preview, expected) {
+			t.Fatalf("expected route preview to contain %q, got %q", expected, output)
+		}
+	}
+	if strings.Contains(preview, "unknown command: route") {
+		t.Fatalf("route command should be wired in cmd/nana, got %q", output)
 	}
 }
 
@@ -296,7 +327,6 @@ func TestBinaryHelpTopicRoutesToWorkflowDiscovery(t *testing.T) {
 		"nana hud [--watch]",
 		`nana explore --prompt "..."`,
 		"nana sparkshell <command>",
-		`nana route --explain "..."`,
 		"Core modes:",
 		"direct execution",
 		"deep-interview",
@@ -324,40 +354,6 @@ func TestBinaryHelpTopicRoutesToWorkflowDiscovery(t *testing.T) {
 		if !strings.Contains(help, snippet) {
 			t.Fatalf("expected workflow help to contain %q, got %q", snippet, output)
 		}
-	}
-}
-
-func TestBinaryRouteExplainDispatchesToNativePreview(t *testing.T) {
-	binaryPath := buildNanaBinary(t)
-	cwd := t.TempDir()
-	home := filepath.Join(cwd, "home")
-	codexHome := filepath.Join(home, ".codex-home")
-
-	cmd := runCommand(t, binaryPath, "route", "--explain", "fix build")
-	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(),
-		"HOME="+home,
-		"CODEX_HOME="+codexHome,
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("binary route explain failed: %v\n%s", err, output)
-	}
-	preview := string(output)
-	expectedSnippets := []string{
-		"Route preview:",
-		"Prompt: fix build",
-		"$build-fix",
-		`source: implicit keyword "fix build"`,
-		filepath.Join(codexHome, "skills", "build-fix", "RUNTIME.md"),
-	}
-	for _, snippet := range expectedSnippets {
-		if !strings.Contains(preview, snippet) {
-			t.Fatalf("expected route preview to contain %q, got %q", snippet, output)
-		}
-	}
-	if strings.Contains(preview, "unknown command") {
-		t.Fatalf("route should dispatch natively, got %q", output)
 	}
 }
 

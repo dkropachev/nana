@@ -11,7 +11,7 @@
 [![Discord](https://img.shields.io/discord/1452487457085063218?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/PUwSMR9XNk)
 
 **Website:** https://dkropachev.github.io/nana/  
-**Docs:** [Getting Started](./docs/getting-started.html) · [Start UI](./docs/start-ui.html) · [Agents](./docs/agents.html) · [Skills](./docs/skills.html) · [Integrations](./docs/integrations.html) · [Work](./docs/work.md) · [Demo](./DEMO.md) · [OpenClaw guide](./docs/openclaw-integration.md)
+**Docs:** [Getting Started](./docs/getting-started.html) · [CLI Quickstart](./docs/quickstart.md) · [Start UI](./docs/start-ui.html) · [Agents](./docs/agents.html) · [Skills](./docs/skills.html) · [Integrations](./docs/integrations.html) · [Work](./docs/work.md) · [Demo](./DEMO.md) · [OpenClaw guide](./docs/openclaw-integration.md)
 
 `nana` is a personal AI assistant for developers, built on top of [OpenAI Codex CLI](https://github.com/openai/codex).
 
@@ -201,7 +201,7 @@ Most users should think of NANA as **better task routing + better workflow + bet
 ## Start here if you are new
 
 1. Run `nana setup`
-2. Run `nana help workflows` for a compact index of modes, trigger phrases, skills, and safe support commands
+2. Run `nana help workflows` or read the [CLI Quickstart](./docs/quickstart.md) for a compact index of modes, trigger phrases, skills, and safe support commands
 3. Launch with `nana --madmax --high` for thorough work or `nana --fast` to start by issuing Codex `/fast`
 4. Use `$deep-interview "..."` when the request or boundaries are still unclear
 5. Use `$ralplan "..."` to approve the plan and review tradeoffs
@@ -219,7 +219,6 @@ Most users should think of NANA as **better task routing + better workflow + bet
 | --- | --- |
 | `nana help workflows` | discovering modes, trigger phrases, safe entry commands, and common utility skills |
 | `nana next` | showing the top item that needs attention and the next command to run |
-| `nana route --explain "..."` | previewing which explicit skill or implicit trigger would activate, including the runtime doc path |
 | `$deep-interview "..."` | clarifying intent, boundaries, and non-goals |
 | `$ralplan "..."` | approving the implementation plan and tradeoffs |
 | `nana investigate "..."` | source-backed investigation with proof-linked JSON reports and validator enforcement |
@@ -495,6 +494,7 @@ If this happens, try:
 ## Documentation
 
 - [Getting Started](./docs/getting-started.html)
+- [CLI command-discovery quickstart](./docs/quickstart.md)
 - [Start UI assistant workspace guide](./docs/start-ui.html)
 - [Demo guide](./DEMO.md)
 - [Agent catalog](./docs/agents.html)
