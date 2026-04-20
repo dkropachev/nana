@@ -16,4 +16,5 @@ Create an actionable implementation plan when the user wants planning, scoping, 
 - Gather codebase facts before asking preference questions.
 - Ask only about preferences, scope, or tradeoffs that cannot be discovered locally.
 - Output an actionable plan with testable acceptance criteria.
+- When mode/model routing shaped the plan, include `routing_decision` with mode, role_tier, trigger, and confidence.
 </Runtime_Rules>

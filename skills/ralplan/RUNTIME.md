@@ -16,5 +16,5 @@ Run a consensus planning loop when architecture, tradeoffs, or test strategy nee
 - Keep planning read-only.
 - Require explicit tradeoffs, concrete verification, and actionable acceptance criteria.
 - Output the approved plan without implementing it.
-- If execution is blocked on planning artifacts, inspect `.nana/plans/`, list missing `prd-*.md` and/or `test-spec-*.md`, and give the next action: run `$ralplan "<scope>"` or add the files there before retrying.
+- Include `routing_decision` with mode, role_tier, trigger, and confidence when the consensus path or model tier shaped the plan.
 </Runtime_Rules>

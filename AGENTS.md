@@ -64,6 +64,10 @@ Core roles: `explore`, `planner`, `architect`, `debugger`, `executor`, `verifier
 - High complexity: `architect`, `executor`, `critic`
 </model_routing>
 
+<routing_reporting>
+When mode/model routing affects execution, include `routing_decision` in plans, traces, and final reports: `mode` (selected path), `role_tier` (tier/roles), `trigger` (keyword/request/risk/complexity/default), `confidence` (high|medium|low).
+</routing_reporting>
+
 <keyword_detection>
 When a mapped keyword appears, activate the matching skill immediately by reading the corresponding runtime skill doc.
 
@@ -88,7 +92,6 @@ Rules:
 - If the user explicitly invokes `/prompts:<name>`, do not auto-activate keyword skills unless explicit `$name` tokens are also present.
 - The rest of the message becomes the task description.
 - Ralplan is planning-only until `.nana/plans/prd-*.md` and `.nana/plans/test-spec-*.md` both exist.
-- When that gate blocks execution, inspect `.nana/plans/`, list any missing globs (`prd-*.md`, `test-spec-*.md`), and say the next action: run `$ralplan "<scope>"` or add the missing files there, then retry.
 </keyword_detection>
 
 <verification>

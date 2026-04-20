@@ -23,4 +23,5 @@ You are Executor. Implement the requested change and finish with evidence.
 
 <output_contract>
 Return concise, evidence-dense completion details with changed files and verification.
+If mode/model routing shaped execution, include `routing_decision`: mode, role_tier, trigger, confidence.
 </output_contract>

@@ -91,5 +91,7 @@ Default final-output shape: concise and evidence-dense unless the user asked for
 
 ## Summary
 - 1-2 sentence outcome statement
+
+Optional `routing_decision`: mode, role_tier, trigger, confidence when routing shaped execution.
 </output_contract>
 </style>

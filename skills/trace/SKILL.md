@@ -31,3 +31,4 @@ Present the timeline first, then the summary. Highlight:
 - **Mode transitions** (how execution modes changed)
 - **Bottlenecks** (slow tools or agents)
 - **Flow patterns** (keyword -> skill -> agent chains)
+- **Routing decision** when available: `routing_decision` with `mode`, `role_tier`, `trigger`, and `confidence`

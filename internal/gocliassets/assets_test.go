@@ -109,6 +109,7 @@ func TestSkillAssetsStayInSyncWithSkillFiles(t *testing.T) {
 		"autopilot/SKILL.md",
 		"deep-interview/SKILL.md",
 		"pipeline/SKILL.md",
+		"trace/SKILL.md",
 		"visual-verdict/SKILL.md",
 		"web-clone/SKILL.md",
 	} {
@@ -204,60 +205,42 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 		"`~/.codex/skills/deep-interview/RUNTIME.md`",
 		"`~/.codex/skills/security-review/RUNTIME.md`",
 		"`~/.codex/skills/web-clone/RUNTIME.md`",
+		"`routing_decision` in plans, traces, and final reports",
+		"`role_tier` (tier/roles)",
 	} {
 		if !strings.Contains(string(diskContent), needle) {
-			t.Fatalf("template AGENTS.md missing runtime skill reference %q", needle)
+			t.Fatalf("template AGENTS.md missing expected guidance %q", needle)
 		}
 		if !strings.Contains(string(rootAgents), strings.ReplaceAll(needle, "~/.codex", "./.codex")) {
-			t.Fatalf("root AGENTS.md missing runtime skill reference %q", needle)
+			t.Fatalf("root AGENTS.md missing expected guidance %q", needle)
 		}
 	}
 }
 
-func TestRalplanGateAssetsGiveMissingArtifactRecovery(t *testing.T) {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
-
-	templateContent, err := os.ReadFile(filepath.Join(repoRoot, "templates", "AGENTS.md"))
+func TestRoutingDecisionGuidanceIsEmbeddedForReportSurfaces(t *testing.T) {
+	prompts, err := Prompts()
 	if err != nil {
-		t.Fatalf("read template AGENTS.md: %v", err)
-	}
-	rootAgents, err := os.ReadFile(filepath.Join(repoRoot, "AGENTS.md"))
-	if err != nil {
-		t.Fatalf("read root AGENTS.md: %v", err)
-	}
-	runtimeSkill, err := os.ReadFile(filepath.Join(repoRoot, "skills", "ralplan", "RUNTIME.md"))
-	if err != nil {
-		t.Fatalf("read ralplan runtime skill: %v", err)
-	}
-	templates, err := Templates()
-	if err != nil {
-		t.Fatalf("Templates(): %v", err)
+		t.Fatalf("Prompts(): %v", err)
 	}
 	skills, err := Skills()
 	if err != nil {
 		t.Fatalf("Skills(): %v", err)
 	}
-
-	for label, content := range map[string]string{
-		"root AGENTS.md":              string(rootAgents),
-		"template AGENTS.md":          string(templateContent),
-		"embedded template AGENTS.md": templates["AGENTS.md"],
-		"ralplan runtime skill":       string(runtimeSkill),
-		"embedded ralplan runtime":    skills["ralplan/RUNTIME.md"],
-	} {
-		for _, needle := range []string{
-			"inspect `.nana/plans/`",
-			"prd-*.md",
-			"test-spec-*.md",
-			"run `$ralplan \"<scope>\"`",
-		} {
-			if !strings.Contains(content, needle) {
-				t.Fatalf("%s missing actionable ralplan gate guidance %q", label, needle)
-			}
+	templates, err := Templates()
+	if err != nil {
+		t.Fatalf("Templates(): %v", err)
+	}
+	surfaces := map[string]string{
+		"templates/AGENTS.md":          templates["AGENTS.md"],
+		"prompts/executor.md":          prompts["executor.md"],
+		"prompts/executor-embedded.md": prompts["executor-embedded.md"],
+		"skills/plan/RUNTIME.md":       skills["plan/RUNTIME.md"],
+		"skills/ralplan/RUNTIME.md":    skills["ralplan/RUNTIME.md"],
+		"skills/trace/SKILL.md":        skills["trace/SKILL.md"],
+	}
+	for name, content := range surfaces {
+		if !strings.Contains(content, "routing_decision") {
+			t.Fatalf("%s missing routing_decision guidance", name)
 		}
 	}
 }
