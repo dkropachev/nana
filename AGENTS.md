@@ -65,7 +65,7 @@ Core roles: `explore`, `planner`, `architect`, `debugger`, `executor`, `verifier
 </model_routing>
 
 <keyword_detection>
-When a mapped selector is intentionally invoked, activate the matching skill by reading the corresponding runtime skill doc.
+When a mapped keyword appears, activate the matching skill immediately by reading the corresponding runtime skill doc.
 
 Mappings:
 - `autopilot`, `build me`, `I want a` -> `$autopilot` (`./.codex/skills/autopilot/RUNTIME.md`)
@@ -83,9 +83,8 @@ Mappings:
 - `web-clone`, `clone site`, `clone website`, `copy webpage` -> `$web-clone` (`./.codex/skills/web-clone/RUNTIME.md`)
 
 Rules:
+- Keywords are case-insensitive and match anywhere.
 - Explicit `$name` invocations run left-to-right before implicit keyword routing.
-- Implicit routing is case-insensitive and phrase-aware: match complete mapped tokens/phrases only when they are user-authored command phrases, not substrings or incidental prose.
-- Ignore implicit matches inside fenced code, block quotes, quoted AGENTS/policy text, and explicit file excerpts.
 - If the user explicitly invokes `/prompts:<name>`, do not auto-activate keyword skills unless explicit `$name` tokens are also present.
 - The rest of the message becomes the task description.
 - Ralplan is planning-only until `.nana/plans/prd-*.md` and `.nana/plans/test-spec-*.md` both exist.
@@ -107,9 +106,13 @@ Mode selection:
 - Otherwise execute directly.
 
 Command routing:
-- Prefer `nana explore` for simple read-only repository lookups.
-- Use `nana sparkshell` for noisy read-only shell output, bounded verification runs, and tmux-pane summaries.
-- Keep edits, tests, diagnostics, and ambiguous investigations on the richer normal path.
+| Example task | Use |
+|---|---|
+| Find a file/symbol/policy by name, read-only | `nana explore --prompt "find where review state is written"` |
+| Summarize noisy read-only output or a tmux pane | `nana sparkshell git status`; `nana sparkshell --tmux-pane %12 --tail-lines 400` |
+| Run bounded verification when a compact PASS/FAIL summary is enough | `nana sparkshell go test ./internal/gocliassets` |
+| Edit files, need exact stdout/stderr, debug failing diagnostics/tests, or investigate ambiguity | normal shell/tools |
+- If `sparkshell` is incomplete or hides needed details, retry on the normal path.
 
 Stop / escalate:
 - Stop when the task is verified complete, the user says stop/cancel, or no meaningful recovery path remains.
