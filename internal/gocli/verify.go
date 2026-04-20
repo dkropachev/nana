@@ -37,6 +37,8 @@ Profile:
   Optional changed_scope guidance may map changed files to targeted checks.
   A changed_scope profile must keep a full_check command as the fallback.
   Nana searches the current directory and its parents for the profile file.
+  If the profile is missing or invalid, preflight output reports searched paths,
+  detected fallback commands, and a minimal profile example.
 `
 
 type verificationProfile struct {
@@ -113,6 +115,27 @@ type verificationRunOptions struct {
 	Stderr           io.Writer
 }
 
+type verificationProfilePreflight struct {
+	Status        string
+	StartDir      string
+	SearchedPaths []string
+	ProfilePath   string
+	Error         string
+	Fallback      verificationFallbackSummary
+}
+
+type verificationFallbackSummary struct {
+	RepoRoot string
+	Source   string
+	Commands []verificationFallbackCommand
+	Warnings []string
+}
+
+type verificationFallbackCommand struct {
+	Stage   string
+	Command string
+}
+
 func Verify(cwd string, args []string) error {
 	options, err := parseVerifyOptions(args)
 	if err != nil {
@@ -121,8 +144,9 @@ func Verify(cwd string, args []string) error {
 	if options.Help {
 		return nil
 	}
-	repoRoot, profilePath, profile, err := loadVerificationProfile(cwd)
+	repoRoot, profilePath, profile, preflight, err := loadVerificationProfileWithPreflight(cwd)
 	if err != nil {
+		printVerificationProfileRecovery(preflight)
 		return err
 	}
 	if options.ProfileOnly {
@@ -167,36 +191,162 @@ func parseVerifyOptions(args []string) (verifyOptions, error) {
 }
 
 func loadVerificationProfile(cwd string) (string, string, verificationProfile, error) {
-	repoRoot, profilePath, ok := findVerificationProfile(cwd)
+	repoRoot, profilePath, profile, _, err := loadVerificationProfileWithPreflight(cwd)
+	return repoRoot, profilePath, profile, err
+}
+
+func loadVerificationProfileWithPreflight(cwd string) (string, string, verificationProfile, verificationProfilePreflight, error) {
+	repoRoot, profilePath, ok, searchedPaths := findVerificationProfileWithSearch(cwd)
+	preflight := verificationProfilePreflight{
+		Status:        "valid",
+		StartDir:      absolutePathOrInput(cwd),
+		SearchedPaths: searchedPaths,
+		ProfilePath:   profilePath,
+	}
 	if !ok {
-		return "", "", verificationProfile{}, fmt.Errorf("%s not found from %s or its parents", VerifyProfileFile, cwd)
+		preflight.Status = "missing"
+		preflight.Fallback = buildVerificationFallbackSummary(cwd, "")
+		err := fmt.Errorf("%s not found from %s or its parents", VerifyProfileFile, cwd)
+		preflight.Error = err.Error()
+		return "", "", verificationProfile{}, preflight, err
 	}
 	var profile verificationProfile
 	if err := readGithubJSON(profilePath, &profile); err != nil {
-		return "", "", verificationProfile{}, err
+		profileErr := err
+		err := fmt.Errorf("invalid %s: %w", profilePath, profileErr)
+		preflight.Status = "invalid"
+		preflight.Error = profileErr.Error()
+		preflight.Fallback = buildVerificationFallbackSummary(cwd, profilePath)
+		return "", "", verificationProfile{}, preflight, err
 	}
 	if err := normalizeVerificationProfile(&profile); err != nil {
-		return "", "", verificationProfile{}, fmt.Errorf("invalid %s: %w", profilePath, err)
+		profileErr := err
+		err := fmt.Errorf("invalid %s: %w", profilePath, profileErr)
+		preflight.Status = "invalid"
+		preflight.Error = profileErr.Error()
+		preflight.Fallback = buildVerificationFallbackSummary(cwd, profilePath)
+		return "", "", verificationProfile{}, preflight, err
 	}
-	return repoRoot, profilePath, profile, nil
+	return repoRoot, profilePath, profile, preflight, nil
 }
 
 func findVerificationProfile(cwd string) (string, string, bool) {
+	repoRoot, profilePath, ok, _ := findVerificationProfileWithSearch(cwd)
+	return repoRoot, profilePath, ok
+}
+
+func findVerificationProfileWithSearch(cwd string) (string, string, bool, []string) {
 	current, err := filepath.Abs(cwd)
 	if err != nil {
 		current = cwd
 	}
+	searchedPaths := []string{}
 	for {
 		candidate := filepath.Join(current, VerifyProfileFile)
+		searchedPaths = append(searchedPaths, candidate)
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return current, candidate, true
+			return current, candidate, true, searchedPaths
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return "", "", false
+			return "", "", false, searchedPaths
 		}
 		current = parent
 	}
+}
+
+func absolutePathOrInput(path string) string {
+	if absolute, err := filepath.Abs(path); err == nil {
+		return absolute
+	}
+	return path
+}
+
+func buildVerificationFallbackSummary(cwd string, profilePath string) verificationFallbackSummary {
+	repoRoot := verificationFallbackRepoRoot(cwd, profilePath)
+	plan := detectGithubVerificationPlan(repoRoot)
+	return verificationFallbackSummary{
+		RepoRoot: repoRoot,
+		Source:   defaultString(plan.Source, "heuristic"),
+		Commands: flattenVerificationFallbackCommands(plan),
+		Warnings: append([]string{}, plan.Warnings...),
+	}
+}
+
+func verificationFallbackRepoRoot(cwd string, profilePath string) string {
+	if strings.TrimSpace(profilePath) != "" {
+		return filepath.Dir(profilePath)
+	}
+	if output, err := readGitOutput(cwd, "rev-parse", "--show-toplevel"); err == nil {
+		if root := strings.TrimSpace(output); root != "" {
+			return filepath.Clean(root)
+		}
+	}
+	return absolutePathOrInput(cwd)
+}
+
+func flattenVerificationFallbackCommands(plan githubVerificationPlan) []verificationFallbackCommand {
+	var commands []verificationFallbackCommand
+	add := func(stage string, values []string) {
+		for _, command := range values {
+			command = strings.TrimSpace(command)
+			if command != "" {
+				commands = append(commands, verificationFallbackCommand{Stage: stage, Command: command})
+			}
+		}
+	}
+	add("lint", plan.Lint)
+	add("compile", plan.Compile)
+	add("unit", plan.Unit)
+	add("integration", plan.Integration)
+	add("benchmark", plan.Benchmarks)
+	return commands
+}
+
+func printVerificationProfileRecovery(preflight verificationProfilePreflight) {
+	message := formatVerificationProfileRecovery(preflight)
+	if strings.TrimSpace(message) == "" {
+		return
+	}
+	fmt.Fprint(os.Stderr, message)
+}
+
+func formatVerificationProfileRecovery(preflight verificationProfilePreflight) string {
+	switch preflight.Status {
+	case "missing", "invalid":
+	default:
+		return ""
+	}
+	var builder strings.Builder
+	if preflight.Status == "missing" {
+		fmt.Fprintf(&builder, "[verify] preflight: %s was not found.\n", VerifyProfileFile)
+	} else {
+		fmt.Fprintf(&builder, "[verify] preflight: cannot use %s: %s\n", defaultString(preflight.ProfilePath, VerifyProfileFile), preflight.Error)
+	}
+	if len(preflight.SearchedPaths) > 0 {
+		fmt.Fprintf(&builder, "[verify] searched for %s from %s:\n", VerifyProfileFile, defaultString(preflight.StartDir, "."))
+		for _, path := range preflight.SearchedPaths {
+			fmt.Fprintf(&builder, "[verify]   %s\n", path)
+		}
+	}
+	fallback := preflight.Fallback
+	if len(fallback.Commands) > 0 {
+		fmt.Fprintf(&builder, "[verify] fallback: detected repo-native checks from %s at %s; run these if continuing without a usable profile:\n", defaultString(fallback.Source, "heuristic"), defaultString(fallback.RepoRoot, "."))
+		for _, command := range fallback.Commands {
+			fmt.Fprintf(&builder, "[verify]   %s: %s\n", command.Stage, command.Command)
+		}
+	} else {
+		fmt.Fprintf(&builder, "[verify] fallback: no automatic checks were detected at %s; use this repo's documented verification commands.\n", defaultString(fallback.RepoRoot, defaultString(preflight.StartDir, ".")))
+	}
+	for _, warning := range fallback.Warnings {
+		warning = strings.TrimSpace(warning)
+		if warning != "" {
+			fmt.Fprintf(&builder, "[verify] warning: %s\n", warning)
+		}
+	}
+	fmt.Fprintf(&builder, "[verify] define: add %s at the repo root with canonical stages, for example:\n", VerifyProfileFile)
+	fmt.Fprintf(&builder, "[verify]   {\"version\":1,\"stages\":[{\"name\":\"test\",\"command\":\"make test\"}]}\n")
+	return builder.String()
 }
 
 func normalizeVerificationProfile(profile *verificationProfile) error {

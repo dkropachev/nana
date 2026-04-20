@@ -246,7 +246,7 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 		"`~/.codex/skills/deep-interview/RUNTIME.md`",
 		"`~/.codex/skills/security-review/RUNTIME.md`",
 		"`~/.codex/skills/web-clone/RUNTIME.md`",
-		"`nana route --explain \"<prompt>\"` to preview routing",
+		"Sync trigger tests with this list",
 		"`routing_decision` in plans, traces, and final reports",
 		"`role_tier` (tier/roles)",
 	} {

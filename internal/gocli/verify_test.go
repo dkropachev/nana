@@ -188,6 +188,103 @@ func TestLoadVerificationProfileRepositoryRuntimeGuidanceTargetsExistingSetupFal
 	}
 }
 
+func TestVerifyJSONPreflightReportsMissingProfileRecovery(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "Makefile"), []byte(strings.Join([]string{
+		"lint:",
+		"\t@true",
+		"build:",
+		"\t@true",
+		"test:",
+		"\t@true",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write Makefile: %v", err)
+	}
+
+	stdout, stderr, err := captureOutput(t, func() error { return Verify(repo, []string{"--json"}) })
+	if err == nil {
+		t.Fatalf("expected missing profile error")
+	}
+	if strings.TrimSpace(stdout) != "" {
+		t.Fatalf("missing-profile preflight should not corrupt JSON stdout, got %q", stdout)
+	}
+	for _, needle := range []string{
+		"[verify] preflight: nana-verify.json was not found.",
+		"[verify] searched for nana-verify.json",
+		filepath.Join(repo, VerifyProfileFile),
+		"[verify] fallback: detected repo-native checks from makefile",
+		"lint: make lint",
+		"compile: make build",
+		"unit: make test",
+		"[verify] define: add nana-verify.json at the repo root",
+		`{"version":1,"stages":[{"name":"test","command":"make test"}]}`,
+	} {
+		if !strings.Contains(stderr, needle) {
+			t.Fatalf("missing-profile recovery missing %q; stderr:\n%s", needle, stderr)
+		}
+	}
+}
+
+func TestVerifyJSONPreflightReportsInvalidProfileRecovery(t *testing.T) {
+	repo := t.TempDir()
+	profilePath := filepath.Join(repo, VerifyProfileFile)
+	if err := os.WriteFile(profilePath, []byte(`{"version":1,"stages":[]}`), 0o644); err != nil {
+		t.Fatalf("write profile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "Makefile"), []byte("test:\n\t@true\n"), 0o644); err != nil {
+		t.Fatalf("write Makefile: %v", err)
+	}
+
+	stdout, stderr, err := captureOutput(t, func() error { return Verify(repo, []string{"--json"}) })
+	if err == nil {
+		t.Fatalf("expected invalid profile error")
+	}
+	if strings.TrimSpace(stdout) != "" {
+		t.Fatalf("invalid-profile preflight should not corrupt JSON stdout, got %q", stdout)
+	}
+	for _, needle := range []string{
+		"[verify] preflight: cannot use " + profilePath,
+		"at least one stage is required",
+		"[verify] searched for nana-verify.json",
+		"[verify] fallback: detected repo-native checks from makefile",
+		"unit: make test",
+		"[verify] define: add nana-verify.json at the repo root",
+	} {
+		if !strings.Contains(stderr, needle) {
+			t.Fatalf("invalid-profile recovery missing %q; stderr:\n%s", needle, stderr)
+		}
+	}
+}
+
+func TestVerifyJSONPreflightIsSilentForValidProfile(t *testing.T) {
+	repo := t.TempDir()
+	profile := `{
+  "version": 1,
+  "name": "valid-profile",
+  "stages": [{"name":"test","command":"printf ok"}]
+}
+`
+	if err := os.WriteFile(filepath.Join(repo, VerifyProfileFile), []byte(profile), 0o644); err != nil {
+		t.Fatalf("write profile: %v", err)
+	}
+
+	stdout, stderr, err := captureOutput(t, func() error { return Verify(repo, []string{"--json"}) })
+	if err != nil {
+		t.Fatalf("Verify(--json): %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if strings.TrimSpace(stderr) != "" {
+		t.Fatalf("valid profile should not emit recovery preflight, got stderr:\n%s", stderr)
+	}
+	var report verificationEvidence
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("unmarshal report: %v\n%s", err, stdout)
+	}
+	if !report.Passed || report.Profile.Name != "valid-profile" || len(report.Stages) != 1 || report.Stages[0].Output != "ok" {
+		t.Fatalf("unexpected valid-profile report: %#v", report)
+	}
+}
+
 func TestVerifyEmitsJSONEvidence(t *testing.T) {
 	repo := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repo, "marker.txt"), []byte("marker\n"), 0o644); err != nil {
