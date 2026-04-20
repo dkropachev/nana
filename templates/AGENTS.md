@@ -7,7 +7,7 @@ USE CODEX NATIVE SUBAGENTS FOR INDEPENDENT PARALLEL SUBTASKS WHEN THAT IMPROVES 
 
 # nana - Compact Runtime Policy
 
-NANA coordinates Codex prompts, skills, and optional team/runtime state. Role prompts under `prompts/*.md` narrow work but never override this file.
+NANA coordinates prompts/skills/state; role prompts narrow but never override.
 
 ## Always-on Policy
 <!-- NANA:GUIDANCE:OPERATING:START -->
@@ -28,7 +28,8 @@ NANA coordinates Codex prompts, skills, and optional team/runtime state. Role pr
 - When routing affects execution, include `routing_decision` in plans, traces, and final reports: `mode`, `role_tier` (tier/roles), `trigger`, `confidence`.
 
 ## Lazy Runtime Skills
-Load runtime docs only when invoked. When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md. Use `nana route --explain "<prompt>"` to preview routing. Explicit `$skill` invocations run left-to-right before implicit keyword matches; keyword matches are case-insensitive; `/prompts:<name>` disables implicit keyword activation unless explicit `$skill` tokens are present.
+Sync trigger tests with this list before route edits.
+Load detailed skill runtime docs only when invoked. When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md. Explicit `$skill`s run left-to-right before keyword matches; keyword matches are case-insensitive; `/prompts:<name>` disables implicit keyword activation unless explicit `$skill` tokens are present. The rest is the task.
 - `$autopilot` (`~/.codex/skills/autopilot/RUNTIME.md`): `autopilot`, `build me`, `I want a`
 - `$ultrawork` (`~/.codex/skills/ultrawork/RUNTIME.md`): `ultrawork`, `ulw`, `parallel`
 - `$analyze` (`~/.codex/skills/analyze/RUNTIME.md`): `analyze`, `investigate`
@@ -45,7 +46,7 @@ Load runtime docs only when invoked. When a listed keyword matches, invoke that 
 
 ## Execution and Verification
 - Prefer `nana explore` for simple read-only lookups and `nana sparkshell` for noisy read-only output/checks; keep edits and ambiguous investigations on the normal path.
-- Prefer `nana verify --json` when `nana-verify.json` exists; otherwise use documented repo verification commands.
+- Prefer `nana verify --json` when `nana-verify.json` exists; otherwise use documented repo verification commands; `changed_scope.paths`/`full_check` fallback
 - Run independent work in parallel and dependent checks sequentially. Use background execution for long builds/tests when helpful.
 - Stop only when the task is verified complete, the user says stop/cancel, or no meaningful recovery path remains; escalate only for destructive, irreversible, materially branching, or authority-blocked decisions.
 <verification>

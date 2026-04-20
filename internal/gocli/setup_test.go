@@ -157,6 +157,8 @@ func TestSetupProjectFallsBackToEmbeddedAssets(t *testing.T) {
 	for _, needle := range []string{
 		"Prefer `nana verify --json` when `nana-verify.json` exists",
 		"otherwise use documented repo verification commands",
+		"`changed_scope.paths`",
+		"`full_check` fallback",
 	} {
 		if !strings.Contains(string(agentsMd), needle) {
 			t.Fatalf("expected embedded AGENTS template to include conditional verify guidance %q, got %q", needle, string(agentsMd))

@@ -52,6 +52,142 @@ func TestLoadVerificationProfileSearchesParents(t *testing.T) {
 	}
 }
 
+func TestLoadVerificationProfileIncludesChangedScopeGuidance(t *testing.T) {
+	repo := t.TempDir()
+	profilePath := filepath.Join(repo, VerifyProfileFile)
+	if err := os.WriteFile(profilePath, []byte(`{
+  "version": 1,
+  "name": "changed-scope-profile",
+  "stages": [
+    {"name":"lint","command":"make lint"},
+    {"name":"test","command":"make test"}
+  ],
+  "changed_scope": {
+    "description": "Use targeted checks for local iteration.",
+    "full_check": {
+      "description": "Release fallback.",
+      "command": "make verify"
+    },
+    "paths": [
+      {
+        "name": "go",
+        "patterns": [" internal/**/*.go ", ""],
+        "stages": [" lint ", "test"],
+        "checks": [" go test ./internal/gocli -run TestVerify "]
+      }
+    ]
+  }
+}
+`), 0o644); err != nil {
+		t.Fatalf("write profile: %v", err)
+	}
+
+	_, _, profile, err := loadVerificationProfile(repo)
+	if err != nil {
+		t.Fatalf("loadVerificationProfile(): %v", err)
+	}
+	if profile.ChangedScope == nil {
+		t.Fatalf("expected changed scope guidance: %#v", profile)
+	}
+	scope := profile.ChangedScope
+	if scope.FullCheck.Command != "make verify" {
+		t.Fatalf("unexpected full_check command: %#v", scope.FullCheck)
+	}
+	if len(scope.Paths) != 1 {
+		t.Fatalf("expected one changed-scope path, got %#v", scope.Paths)
+	}
+	pathScope := scope.Paths[0]
+	if pathScope.Name != "go" {
+		t.Fatalf("unexpected path scope name: %#v", pathScope)
+	}
+	if strings.Join(pathScope.Patterns, ",") != "internal/**/*.go" {
+		t.Fatalf("patterns were not normalized: %#v", pathScope.Patterns)
+	}
+	if strings.Join(pathScope.Stages, ",") != "lint,test" {
+		t.Fatalf("stages were not normalized: %#v", pathScope.Stages)
+	}
+	if strings.Join(pathScope.Checks, ",") != "go test ./internal/gocli -run TestVerify" {
+		t.Fatalf("checks were not normalized: %#v", pathScope.Checks)
+	}
+}
+
+func TestLoadVerificationProfileRequiresChangedScopeFullCheck(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, VerifyProfileFile), []byte(`{
+  "version": 1,
+  "stages": [{"name":"lint","command":"make lint"}],
+  "changed_scope": {
+    "paths": [{"name":"docs","patterns":["*.md"],"checks":["git diff --check"]}]
+  }
+}
+`), 0o644); err != nil {
+		t.Fatalf("write profile: %v", err)
+	}
+
+	_, _, _, err := loadVerificationProfile(repo)
+	if err == nil || !strings.Contains(err.Error(), "changed_scope.full_check is missing command") {
+		t.Fatalf("expected missing full_check error, got %v", err)
+	}
+}
+
+func TestLoadVerificationProfileRepositoryRuntimeGuidanceTargetsExistingSetupFallbackTest(t *testing.T) {
+	repoRoot := repoRootFromCaller(t)
+	_, _, profile, err := loadVerificationProfile(repoRoot)
+	if err != nil {
+		t.Fatalf("loadVerificationProfile(%q): %v", repoRoot, err)
+	}
+	if profile.ChangedScope == nil {
+		t.Fatalf("repository profile is missing changed_scope guidance")
+	}
+
+	var setupCheck string
+	for _, pathScope := range profile.ChangedScope.Paths {
+		if pathScope.Name != "runtime-guidance-assets" {
+			continue
+		}
+		for _, check := range pathScope.Checks {
+			if strings.Contains(check, "./internal/gocli") && strings.Contains(check, "TestSetupProject") {
+				setupCheck = check
+				break
+			}
+		}
+	}
+	if setupCheck == "" {
+		t.Fatalf("runtime-guidance-assets changed_scope is missing a setup project check: %#v", profile.ChangedScope.Paths)
+	}
+	if strings.Contains(setupCheck, "TestSetupProjectUsesEmbeddedAssetsWhenRepoRootMissing") {
+		t.Fatalf("runtime-guidance-assets changed_scope still targets removed setup test: %q", setupCheck)
+	}
+
+	const setupFallbackTest = "TestSetupProjectFallsBackToEmbeddedAssets"
+	for _, required := range []string{
+		"go test ./internal/gocli -list '^" + setupFallbackTest + "$'",
+		"grep -q '^" + setupFallbackTest + "$'",
+		"go test ./internal/gocli -run '^" + setupFallbackTest + "$'",
+	} {
+		if !strings.Contains(setupCheck, required) {
+			t.Fatalf("runtime-guidance-assets setup check should include %q guard, got %q", required, setupCheck)
+		}
+	}
+
+	cmd := exec.Command("go", "test", "./internal/gocli", "-list", "^"+setupFallbackTest+"$")
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go test ./internal/gocli -list %q failed: %v\n%s", setupFallbackTest, err, string(output))
+	}
+	matched := false
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.TrimSpace(line) == setupFallbackTest {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		t.Fatalf("setup fallback test was not listed by go test; output:\n%s", string(output))
+	}
+}
+
 func TestVerifyEmitsJSONEvidence(t *testing.T) {
 	repo := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repo, "marker.txt"), []byte("marker\n"), 0o644); err != nil {
@@ -93,132 +229,6 @@ func TestVerifyEmitsJSONEvidence(t *testing.T) {
 	}
 	if report.Stages[1].Name != "test" || report.Stages[1].Status != "passed" || report.Stages[1].Output != "test-ok" {
 		t.Fatalf("unexpected test evidence: %#v", report.Stages[1])
-	}
-}
-
-func TestVerifyDryRunJSONListsPlanWithoutRunningCommands(t *testing.T) {
-	repo := t.TempDir()
-	profile := `{
-  "version": 1,
-  "name": "dry-profile",
-  "description": "dry run profile",
-  "stages": [
-    {
-      "name":"lint",
-      "description":"check formatting",
-      "command":"printf should-not-run > marker.txt",
-      "dependency_group":"static",
-      "expected_artifact":"no gofmt drift",
-      "estimated_cost":"low",
-      "success_criteria":"gofmt reports no changed files"
-    },
-    {
-      "name":"static-analysis",
-      "description":"run vet",
-      "command":"printf also-should-not-run > marker.txt",
-      "dependency_group":"static",
-      "expected_artifact":"go vet is clean",
-      "estimated_cost":"medium"
-    },
-    {
-      "name":"test",
-      "command":"printf default-metadata > marker.txt"
-    }
-  ]
-}
-`
-	if err := os.WriteFile(filepath.Join(repo, VerifyProfileFile), []byte(profile), 0o644); err != nil {
-		t.Fatalf("write profile: %v", err)
-	}
-
-	output, err := captureStdout(t, func() error { return Verify(repo, []string{"--json", "--dry-run"}) })
-	if err != nil {
-		t.Fatalf("Verify(--json --dry-run): %v\n%s", err, output)
-	}
-	if _, err := os.Stat(filepath.Join(repo, "marker.txt")); !os.IsNotExist(err) {
-		t.Fatalf("dry-run executed a stage command; marker stat error=%v", err)
-	}
-	var plan verificationPlan
-	if err := json.Unmarshal([]byte(output), &plan); err != nil {
-		t.Fatalf("unmarshal plan: %v\n%s", err, output)
-	}
-	if !plan.DryRun || plan.RepoRoot != repo || plan.Profile.Name != "dry-profile" {
-		t.Fatalf("unexpected plan header: %#v", plan)
-	}
-	if plan.ExecutionMode != "profile-order" || plan.SuccessCriteria != "all stages exit with status 0" {
-		t.Fatalf("unexpected plan execution metadata: %#v", plan)
-	}
-	if len(plan.Stages) != 3 {
-		t.Fatalf("expected 3 plan stages, got %#v", plan.Stages)
-	}
-	lint := plan.Stages[0]
-	if lint.Name != "lint" || lint.Command != "printf should-not-run > marker.txt" {
-		t.Fatalf("unexpected lint stage: %#v", lint)
-	}
-	if lint.DependencyGroup != "static" || !lint.CanRunInParallel {
-		t.Fatalf("expected lint to be marked parallel-eligible in static group: %#v", lint)
-	}
-	if lint.ExpectedArtifact != "no gofmt drift" || lint.EstimatedCost != "low" {
-		t.Fatalf("unexpected lint artifact/cost metadata: %#v", lint)
-	}
-	if lint.SuccessCriteria != "gofmt reports no changed files" {
-		t.Fatalf("unexpected lint success criteria: %#v", lint)
-	}
-	if !strings.Contains(lint.SelectionReason, "check formatting") {
-		t.Fatalf("expected selection reason to include stage description: %#v", lint)
-	}
-	staticAnalysis := plan.Stages[1]
-	if staticAnalysis.DependencyGroup != "static" || !staticAnalysis.CanRunInParallel {
-		t.Fatalf("expected static-analysis to be marked parallel-eligible in static group: %#v", staticAnalysis)
-	}
-	defaulted := plan.Stages[2]
-	if defaulted.DependencyGroup != "profile-order-3" || defaulted.CanRunInParallel {
-		t.Fatalf("unexpected default dependency group metadata: %#v", defaulted)
-	}
-	if defaulted.SuccessCriteria != "command exits with status 0" {
-		t.Fatalf("unexpected default success criteria: %#v", defaulted)
-	}
-}
-
-func TestVerifyDryRunHumanOutputListsPlanWithoutRunningCommands(t *testing.T) {
-	repo := t.TempDir()
-	profile := `{
-  "version": 1,
-  "name": "human-dry-profile",
-  "stages": [
-    {
-      "name":"lint",
-      "description":"check formatting",
-      "command":"printf should-not-run > marker.txt",
-      "dependency_group":"static",
-      "expected_artifact":"no gofmt drift",
-      "estimated_cost":"low"
-    }
-  ]
-}
-`
-	if err := os.WriteFile(filepath.Join(repo, VerifyProfileFile), []byte(profile), 0o644); err != nil {
-		t.Fatalf("write profile: %v", err)
-	}
-
-	output, err := captureStdout(t, func() error { return Verify(repo, []string{"--dry-run"}) })
-	if err != nil {
-		t.Fatalf("Verify(--dry-run): %v\n%s", err, output)
-	}
-	if _, err := os.Stat(filepath.Join(repo, "marker.txt")); !os.IsNotExist(err) {
-		t.Fatalf("dry-run executed a stage command; marker stat error=%v", err)
-	}
-	for _, needle := range []string{
-		"[verify] dry-run: human-dry-profile",
-		"[verify] execution: profile-order; success: all stages exit with status 0",
-		"[verify] lint: printf should-not-run > marker.txt",
-		"[verify]   dependency_group: static; parallel: no",
-		"[verify]   expected_artifact: no gofmt drift",
-		"[verify]   estimated_cost: low",
-	} {
-		if !strings.Contains(output, needle) {
-			t.Fatalf("expected %q in dry-run output:\n%s", needle, output)
-		}
 	}
 }
 

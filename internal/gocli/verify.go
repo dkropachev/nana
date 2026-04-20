@@ -25,34 +25,51 @@ const (
 const VerifyHelp = `nana verify - Run the repository-native verification profile
 
 Usage:
-  nana verify [--json] [--dry-run]
+  nana verify [--json]
   nana verify --profile [--json]
 
 Options:
   --json       Emit machine-readable JSON evidence.
-  --dry-run    Print the verification plan without running commands.
   --profile    Print the detected verification profile without running commands.
 
 Profile:
-  ` + VerifyProfileFile + ` defines the canonical profile-order stages for this repo.
+  ` + VerifyProfileFile + ` defines the canonical sequential stages for this repo.
+  Optional changed_scope guidance may map changed files to targeted checks.
+  A changed_scope profile must keep a full_check command as the fallback.
   Nana searches the current directory and its parents for the profile file.
 `
 
 type verificationProfile struct {
-	Version     int                        `json:"version"`
-	Name        string                     `json:"name,omitempty"`
-	Description string                     `json:"description,omitempty"`
-	Stages      []verificationStageProfile `json:"stages"`
+	Version      int                        `json:"version"`
+	Name         string                     `json:"name,omitempty"`
+	Description  string                     `json:"description,omitempty"`
+	Stages       []verificationStageProfile `json:"stages"`
+	ChangedScope *verificationChangedScope  `json:"changed_scope,omitempty"`
 }
 
 type verificationStageProfile struct {
-	Name             string `json:"name"`
-	Description      string `json:"description,omitempty"`
-	Command          string `json:"command"`
-	DependencyGroup  string `json:"dependency_group,omitempty"`
-	ExpectedArtifact string `json:"expected_artifact,omitempty"`
-	EstimatedCost    string `json:"estimated_cost,omitempty"`
-	SuccessCriteria  string `json:"success_criteria,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Command     string `json:"command"`
+}
+
+type verificationChangedScope struct {
+	Description string                            `json:"description,omitempty"`
+	FullCheck   verificationChangedScopeFullCheck `json:"full_check"`
+	Paths       []verificationChangedScopePath    `json:"paths,omitempty"`
+}
+
+type verificationChangedScopeFullCheck struct {
+	Description string `json:"description,omitempty"`
+	Command     string `json:"command"`
+}
+
+type verificationChangedScopePath struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	Patterns    []string `json:"patterns"`
+	Stages      []string `json:"stages,omitempty"`
+	Checks      []string `json:"checks,omitempty"`
 }
 
 type verificationCommandEvidence struct {
@@ -84,33 +101,8 @@ type verificationEvidence struct {
 	Stages         []verificationCommandEvidence `json:"stages"`
 }
 
-type verificationPlan struct {
-	Version         int                     `json:"version"`
-	GeneratedAt     string                  `json:"generated_at"`
-	RepoRoot        string                  `json:"repo_root"`
-	ProfilePath     string                  `json:"profile_path"`
-	Profile         verificationProfile     `json:"profile"`
-	DryRun          bool                    `json:"dry_run"`
-	ExecutionMode   string                  `json:"execution_mode"`
-	SuccessCriteria string                  `json:"success_criteria"`
-	Stages          []verificationPlanStage `json:"stages"`
-}
-
-type verificationPlanStage struct {
-	Name             string `json:"name"`
-	Description      string `json:"description,omitempty"`
-	Command          string `json:"command"`
-	DependencyGroup  string `json:"dependency_group"`
-	SelectionReason  string `json:"selection_reason"`
-	CanRunInParallel bool   `json:"can_run_in_parallel"`
-	ExpectedArtifact string `json:"expected_artifact,omitempty"`
-	EstimatedCost    string `json:"estimated_cost,omitempty"`
-	SuccessCriteria  string `json:"success_criteria"`
-}
-
 type verifyOptions struct {
 	JSON        bool
-	DryRun      bool
 	ProfileOnly bool
 	Help        bool
 }
@@ -135,9 +127,6 @@ func Verify(cwd string, args []string) error {
 	}
 	if options.ProfileOnly {
 		return printVerificationProfile(profilePath, profile, options.JSON)
-	}
-	if options.DryRun {
-		return printVerificationPlan(buildVerificationPlan(repoRoot, profilePath, profile), options.JSON)
 	}
 
 	runOptions := defaultVerificationRunOptions()
@@ -164,8 +153,6 @@ func parseVerifyOptions(args []string) (verifyOptions, error) {
 		switch token {
 		case "--json", "-j":
 			options.JSON = true
-		case "--dry-run", "dry-run", "--explain", "explain":
-			options.DryRun = true
 		case "--profile", "profile", "list":
 			options.ProfileOnly = true
 		case "--help", "-h", "help":
@@ -227,10 +214,6 @@ func normalizeVerificationProfile(profile *verificationProfile) error {
 		stage.Name = strings.TrimSpace(stage.Name)
 		stage.Description = strings.TrimSpace(stage.Description)
 		stage.Command = strings.TrimSpace(stage.Command)
-		stage.DependencyGroup = strings.TrimSpace(stage.DependencyGroup)
-		stage.ExpectedArtifact = strings.TrimSpace(stage.ExpectedArtifact)
-		stage.EstimatedCost = strings.TrimSpace(stage.EstimatedCost)
-		stage.SuccessCriteria = strings.TrimSpace(stage.SuccessCriteria)
 		if stage.Name == "" {
 			return fmt.Errorf("stage %d is missing name", index+1)
 		}
@@ -242,58 +225,60 @@ func normalizeVerificationProfile(profile *verificationProfile) error {
 		}
 		seen[stage.Name] = true
 	}
+	if profile.ChangedScope != nil {
+		if err := normalizeVerificationChangedScope(profile.ChangedScope, seen); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-func buildVerificationPlan(repoRoot string, profilePath string, profile verificationProfile) verificationPlan {
-	dependencyGroups := make([]string, len(profile.Stages))
-	dependencyGroupCounts := map[string]int{}
-	for index, stage := range profile.Stages {
-		group := verificationStageDependencyGroup(stage, index)
-		dependencyGroups[index] = group
-		dependencyGroupCounts[group]++
+func normalizeVerificationChangedScope(scope *verificationChangedScope, stageNames map[string]bool) error {
+	scope.Description = strings.TrimSpace(scope.Description)
+	scope.FullCheck.Description = strings.TrimSpace(scope.FullCheck.Description)
+	scope.FullCheck.Command = strings.TrimSpace(scope.FullCheck.Command)
+	if scope.FullCheck.Command == "" {
+		return fmt.Errorf("changed_scope.full_check is missing command")
 	}
-
-	plan := verificationPlan{
-		Version:         1,
-		GeneratedAt:     ISOTimeNow(),
-		RepoRoot:        repoRoot,
-		ProfilePath:     profilePath,
-		Profile:         profile,
-		DryRun:          true,
-		ExecutionMode:   "profile-order",
-		SuccessCriteria: "all stages exit with status 0",
+	seen := map[string]bool{}
+	for index := range scope.Paths {
+		pathScope := &scope.Paths[index]
+		pathScope.Name = strings.TrimSpace(pathScope.Name)
+		pathScope.Description = strings.TrimSpace(pathScope.Description)
+		if pathScope.Name == "" {
+			return fmt.Errorf("changed_scope.paths[%d] is missing name", index)
+		}
+		if seen[pathScope.Name] {
+			return fmt.Errorf("duplicate changed_scope path %q", pathScope.Name)
+		}
+		seen[pathScope.Name] = true
+		pathScope.Patterns = trimNonEmptyStrings(pathScope.Patterns)
+		pathScope.Stages = trimNonEmptyStrings(pathScope.Stages)
+		pathScope.Checks = trimNonEmptyStrings(pathScope.Checks)
+		if len(pathScope.Patterns) == 0 {
+			return fmt.Errorf("changed_scope path %q is missing patterns", pathScope.Name)
+		}
+		if len(pathScope.Stages)+len(pathScope.Checks) == 0 {
+			return fmt.Errorf("changed_scope path %q is missing stages or checks", pathScope.Name)
+		}
+		for _, stage := range pathScope.Stages {
+			if !stageNames[stage] {
+				return fmt.Errorf("changed_scope path %q references unknown stage %q", pathScope.Name, stage)
+			}
+		}
 	}
-	for index, stage := range profile.Stages {
-		group := dependencyGroups[index]
-		plan.Stages = append(plan.Stages, verificationPlanStage{
-			Name:             stage.Name,
-			Description:      stage.Description,
-			Command:          stage.Command,
-			DependencyGroup:  group,
-			SelectionReason:  verificationStageSelectionReason(profilePath, profile, stage),
-			CanRunInParallel: dependencyGroupCounts[group] > 1,
-			ExpectedArtifact: stage.ExpectedArtifact,
-			EstimatedCost:    stage.EstimatedCost,
-			SuccessCriteria:  defaultString(stage.SuccessCriteria, "command exits with status 0"),
-		})
-	}
-	return plan
+	return nil
 }
 
-func verificationStageDependencyGroup(stage verificationStageProfile, index int) string {
-	if stage.DependencyGroup != "" {
-		return stage.DependencyGroup
+func trimNonEmptyStrings(values []string) []string {
+	trimmed := values[:0]
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			trimmed = append(trimmed, value)
+		}
 	}
-	return fmt.Sprintf("profile-order-%d", index+1)
-}
-
-func verificationStageSelectionReason(profilePath string, profile verificationProfile, stage verificationStageProfile) string {
-	profileName := defaultString(profile.Name, filepath.Base(profilePath))
-	if stage.Description != "" {
-		return fmt.Sprintf("selected by %s profile: %s", profileName, stage.Description)
-	}
-	return fmt.Sprintf("selected by %s profile", profileName)
+	return trimmed
 }
 
 func defaultVerificationRunOptions() verificationRunOptions {
@@ -410,29 +395,12 @@ func printVerificationProfile(profilePath string, profile verificationProfile, j
 	for _, stage := range profile.Stages {
 		fmt.Fprintf(os.Stdout, "[verify] %s: %s\n", stage.Name, stage.Command)
 	}
-	return nil
-}
-
-func printVerificationPlan(plan verificationPlan, jsonOutput bool) error {
-	if jsonOutput {
-		return writeIndentedJSON(plan)
-	}
-	fmt.Fprintf(os.Stdout, "[verify] dry-run: %s (%s)\n", defaultString(plan.Profile.Name, "repository"), plan.ProfilePath)
-	fmt.Fprintf(os.Stdout, "[verify] execution: %s; success: %s\n", plan.ExecutionMode, plan.SuccessCriteria)
-	for _, stage := range plan.Stages {
-		parallel := "no"
-		if stage.CanRunInParallel {
-			parallel = "yes"
-		}
-		fmt.Fprintf(os.Stdout, "[verify] %s: %s\n", stage.Name, stage.Command)
-		fmt.Fprintf(os.Stdout, "[verify]   dependency_group: %s; parallel: %s\n", stage.DependencyGroup, parallel)
-		fmt.Fprintf(os.Stdout, "[verify]   success: %s\n", stage.SuccessCriteria)
-		fmt.Fprintf(os.Stdout, "[verify]   why: %s\n", stage.SelectionReason)
-		if stage.ExpectedArtifact != "" {
-			fmt.Fprintf(os.Stdout, "[verify]   expected_artifact: %s\n", stage.ExpectedArtifact)
-		}
-		if stage.EstimatedCost != "" {
-			fmt.Fprintf(os.Stdout, "[verify]   estimated_cost: %s\n", stage.EstimatedCost)
+	if profile.ChangedScope != nil {
+		fmt.Fprintf(os.Stdout, "[verify] changed-scope full-check: %s\n", profile.ChangedScope.FullCheck.Command)
+		for _, pathScope := range profile.ChangedScope.Paths {
+			targets := append([]string{}, pathScope.Stages...)
+			targets = append(targets, pathScope.Checks...)
+			fmt.Fprintf(os.Stdout, "[verify] changed-scope %s: %s -> %s\n", pathScope.Name, strings.Join(pathScope.Patterns, ", "), strings.Join(targets, "; "))
 		}
 	}
 	return nil
