@@ -65,17 +65,28 @@ func TestStatusAndCancel(t *testing.T) {
 	cwd := t.TempDir()
 	stateDir := filepath.Join(cwd, ".nana", "state", "sessions", "sess-1")
 	logDir := filepath.Join(cwd, ".nana", "logs")
+	plansDir := filepath.Join(cwd, ".nana", "plans")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		t.Fatalf("mkdir logs: %v", err)
 	}
+	if err := os.MkdirAll(plansDir, 0o755); err != nil {
+		t.Fatalf("mkdir plans: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(cwd, ".nana", "state", "session.json"), []byte(`{"session_id":"sess-1"}`), 0o644); err != nil {
 		t.Fatalf("session.json: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(cwd, "nana-verify.json"), []byte(`{"commands":[]}`), 0o644); err != nil {
+		t.Fatalf("nana-verify.json: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(stateDir, "team-state.json"), []byte(`{"active":true,"current_phase":"team-exec"}`), 0o644); err != nil {
 		t.Fatalf("team-state.json: %v", err)
+	}
+	planPath := filepath.Join(plansDir, "prd-recovery.md")
+	if err := os.WriteFile(planPath, []byte("# PRD: Recovery\n"), 0o644); err != nil {
+		t.Fatalf("write plan: %v", err)
 	}
 	hookLog := filepath.Join(logDir, "hooks-2026-04-08.jsonl")
 	if err := os.WriteFile(hookLog, []byte(`{"event":"turn-complete"}`), 0o644); err != nil {
@@ -109,6 +120,24 @@ func TestStatusAndCancel(t *testing.T) {
 	}
 	if !strings.Contains(cancelOutput, "Cancelled: team") {
 		t.Fatalf("unexpected cancel output: %q", cancelOutput)
+	}
+	for _, needle := range []string{
+		"Recovery summary:",
+		"Session: sess-1",
+		"Affected state:",
+		"team (was phase: team-exec): " + filepath.Join(".nana", "state", "sessions", "sess-1", "team-state.json"),
+		"Open artifacts:",
+		filepath.Join(".nana", "logs", "hooks-2026-04-08.jsonl"),
+		"Pending plans:",
+		filepath.Join(".nana", "plans", "prd-recovery.md"),
+		"Safe next commands:",
+		"nana status",
+		"nana doctor",
+		"nana verify --json",
+	} {
+		if !strings.Contains(cancelOutput, needle) {
+			t.Fatalf("expected cancel output to contain %q, got %q", needle, cancelOutput)
+		}
 	}
 	updated, err := os.ReadFile(filepath.Join(stateDir, "team-state.json"))
 	if err != nil {
@@ -390,6 +419,105 @@ func TestRouteExplainExplicitBeforeImplicit(t *testing.T) {
 	if preview.Activations[1].Skill != "analyze" || preview.Activations[1].Source != "implicit keyword" {
 		t.Fatalf("expected implicit analyze second, got %#v", preview.Activations[1])
 	}
+	if len(preview.IgnoredTriggers) != 0 {
+		t.Fatalf("explicit $tdd token should not be re-reported as an ignored implicit keyword, got %#v", preview.IgnoredTriggers)
+	}
+}
+
+func TestRouteExplainExplicitPrecedenceListsIgnoredImplicitTrigger(t *testing.T) {
+	preview := ExplainPromptRoute("$tdd please test first")
+	if len(preview.Activations) != 1 {
+		t.Fatalf("expected one activation, got %#v", preview.Activations)
+	}
+	if preview.Activations[0].Skill != "tdd" || preview.Activations[0].Source != "explicit invocation" {
+		t.Fatalf("expected explicit tdd activation, got %#v", preview.Activations[0])
+	}
+	if len(preview.IgnoredTriggers) != 1 {
+		t.Fatalf("expected ignored implicit trigger for duplicate tdd activation, got %#v", preview.IgnoredTriggers)
+	}
+	ignored := preview.IgnoredTriggers[0]
+	if ignored.Skill != "tdd" || ignored.Source != "implicit keyword" || ignored.Trigger != "test first" {
+		t.Fatalf("expected ignored implicit tdd trigger, got %#v", ignored)
+	}
+	if !strings.Contains(ignored.Reason, "explicit $tdd activation takes precedence") {
+		t.Fatalf("expected explicit precedence reason, got %#v", ignored)
+	}
+
+	output := FormatRoutePreview(preview)
+	for _, expected := range []string{
+		"Ignored triggers:",
+		"source: implicit keyword \"test first\"",
+		"why: ignored because explicit $tdd activation takes precedence for the same skill",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected %q in route output, got %q", expected, output)
+		}
+	}
+}
+
+func TestRouteExplainExplicitPrecedenceListsLaterImplicitTrigger(t *testing.T) {
+	preview := ExplainPromptRoute("$tdd then tdd")
+	if len(preview.Activations) != 1 {
+		t.Fatalf("expected one activation, got %#v", preview.Activations)
+	}
+	if preview.Activations[0].Skill != "tdd" || preview.Activations[0].Source != "explicit invocation" {
+		t.Fatalf("expected explicit tdd activation, got %#v", preview.Activations[0])
+	}
+	if len(preview.IgnoredTriggers) != 1 {
+		t.Fatalf("expected later implicit tdd trigger to be ignored, got %#v", preview.IgnoredTriggers)
+	}
+	ignored := preview.IgnoredTriggers[0]
+	if ignored.Skill != "tdd" || ignored.Source != "implicit keyword" || ignored.Trigger != "tdd" {
+		t.Fatalf("expected ignored later implicit tdd trigger, got %#v", ignored)
+	}
+	if !strings.Contains(ignored.Reason, "explicit $tdd activation takes precedence") {
+		t.Fatalf("expected explicit precedence reason, got %#v", ignored)
+	}
+}
+
+func TestRouteExplainAdjacentDuplicateImplicitKeywordListsIgnoredTrigger(t *testing.T) {
+	prompt := "tdd tdd"
+	preview := ExplainPromptRoute(prompt)
+	if len(preview.Activations) != 1 {
+		t.Fatalf("expected one activation, got %#v", preview.Activations)
+	}
+	activation := preview.Activations[0]
+	if activation.Skill != "tdd" || activation.Source != "implicit keyword" || activation.Trigger != "tdd" {
+		t.Fatalf("expected first implicit tdd activation, got %#v", activation)
+	}
+	if activation.Start != 0 {
+		t.Fatalf("expected first tdd activation at start 0, got %#v", activation.Start)
+	}
+	if len(preview.IgnoredTriggers) != 1 {
+		t.Fatalf("expected duplicate implicit tdd trigger to be ignored, got %#v", preview.IgnoredTriggers)
+	}
+	ignored := preview.IgnoredTriggers[0]
+	if ignored.Skill != "tdd" || ignored.Source != "implicit keyword" || ignored.Trigger != "tdd" {
+		t.Fatalf("expected ignored duplicate implicit tdd trigger, got %#v", ignored)
+	}
+	if ignored.Start != strings.LastIndex(prompt, "tdd") {
+		t.Fatalf("expected ignored tdd start index to point at duplicate, got %#v", ignored.Start)
+	}
+	if !strings.Contains(ignored.Reason, "one activation per skill") {
+		t.Fatalf("expected one-activation-per-skill reason, got %#v", ignored)
+	}
+}
+
+func TestRouteExplainDuplicateExplicitInvocationListsIgnoredTrigger(t *testing.T) {
+	preview := ExplainPromptRoute("$tdd then $tdd")
+	if len(preview.Activations) != 1 {
+		t.Fatalf("expected one activation, got %#v", preview.Activations)
+	}
+	if len(preview.IgnoredTriggers) != 1 {
+		t.Fatalf("expected duplicate explicit invocation to be ignored, got %#v", preview.IgnoredTriggers)
+	}
+	ignored := preview.IgnoredTriggers[0]
+	if ignored.Skill != "tdd" || ignored.Source != "explicit invocation" || ignored.Trigger != "$tdd" {
+		t.Fatalf("expected ignored duplicate explicit tdd trigger, got %#v", ignored)
+	}
+	if !strings.Contains(ignored.Reason, "duplicate explicit invocation") {
+		t.Fatalf("expected duplicate explicit reason, got %#v", ignored)
+	}
 }
 
 func TestRouteExplainExplicitInvocationAllowsPunctuationDelimiters(t *testing.T) {
@@ -442,6 +570,20 @@ func TestRouteExplainUnknownExplicitTokenDoesNotSuppressImplicitKeyword(t *testi
 	}
 }
 
+func TestRouteExplainUnknownDollarPrefixedKeywordStillAllowsLaterImplicitKeyword(t *testing.T) {
+	preview := ExplainPromptRoute("$analyze-this please analyze")
+	if len(preview.Activations) != 1 {
+		t.Fatalf("expected later implicit analyze activation, got %#v", preview.Activations)
+	}
+	activation := preview.Activations[0]
+	if activation.Skill != "analyze" || activation.Source != "implicit keyword" || activation.Trigger != "analyze" {
+		t.Fatalf("expected later implicit analyze activation, got %#v", activation)
+	}
+	if activation.Start != strings.LastIndex("$analyze-this please analyze", "analyze") {
+		t.Fatalf("expected later analyze start index, got %#v", activation.Start)
+	}
+}
+
 func TestRouteExplainExplicitInvocationAllowsInstalledSkillDocs(t *testing.T) {
 	codexHome := filepath.Join(t.TempDir(), "codex-home")
 	installedSkillDir := filepath.Join(codexHome, "skills", "pipeline")
@@ -483,7 +625,7 @@ func TestRouteExplainExplicitInvocationAllowsInstalledSkillDocs(t *testing.T) {
 
 func TestRouteExplainPromptInvocationSuppressesKeywords(t *testing.T) {
 	output, err := captureStdout(t, func() error {
-		return Route(t.TempDir(), []string{"--explain", "/prompts:executor please analyze this"})
+		return Route(t.TempDir(), []string{"--explain", "/prompts:executor please analyze this and fix build"})
 	})
 	if err != nil {
 		t.Fatalf("Route(): %v", err)
@@ -491,14 +633,17 @@ func TestRouteExplainPromptInvocationSuppressesKeywords(t *testing.T) {
 	for _, expected := range []string{
 		"Activations: none",
 		"/prompts:executor suppresses implicit keyword routing",
+		"Ignored triggers:",
+		"$analyze",
+		"source: implicit keyword \"analyze\"",
+		"$build-fix",
+		"source: implicit keyword \"fix build\"",
+		"why: suppressed by /prompts:executor because /prompts:<name> disables implicit keyword routing",
 		"Implicit keywords: suppressed by /prompts:executor",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected %q in route output, got %q", expected, output)
 		}
-	}
-	if strings.Contains(output, "Activations:\n  1. $analyze") {
-		t.Fatalf("suppressed prompt should not activate analyze, got %q", output)
 	}
 }
 
@@ -508,8 +653,8 @@ func TestRouteRulesStayInSyncWithAgentsTemplate(t *testing.T) {
 		t.Fatalf("read template AGENTS.md: %v", err)
 	}
 	template := string(content)
-	if strings.Contains(template, "nana route --explain") {
-		t.Fatalf("template AGENTS.md should not advertise route preview guidance")
+	if !strings.Contains(template, "Sync trigger tests with this list") {
+		t.Fatalf("template AGENTS.md missing trigger synchronization guidance")
 	}
 	for _, rule := range routeRules {
 		if !strings.Contains(template, "- `$"+rule.Skill+"`") {

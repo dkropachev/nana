@@ -153,7 +153,14 @@ func ExplainPromptRouteForCWD(cwd string, prompt string) routePreview {
 }
 
 func ExplainPromptRouteForCWDAndCodexHome(cwd string, codexHome string, prompt string) routePreview {
-	base := routeDocBaseForCWDAndCodexHome(cwd, codexHome)
+	codexHome = strings.TrimSpace(codexHome)
+	if codexHome == "" {
+		return ExplainPromptRouteForCWD(cwd, prompt)
+	}
+	base := routeDocBase{
+		actualSkillsDir:  filepath.Join(codexHome, "skills"),
+		displaySkillsDir: filepath.Join(codexHome, "skills"),
+	}
 	return explainPromptRoute(prompt, routeDocResolverForBase(base), routeExplicitSkillValidatorForBase(base))
 }
 
@@ -454,27 +461,9 @@ func routeDocResolverForBase(base routeDocBase) func(string) routeDoc {
 		}
 		return routeDoc{
 			Path:       base.displayDocPath(skill, "RUNTIME.md"),
-			ActualPath: base.actualDocPath(skill, "RUNTIME.md"),
+			ActualPath: filepath.Join(base.actualSkillsDir, skill, "RUNTIME.md"),
 			Label:      routeDocLabelRuntime,
 		}
-	}
-}
-
-func routeDocBaseForCWDAndCodexHome(cwd string, codexHome string) routeDocBase {
-	codexHome = strings.TrimSpace(codexHome)
-	if codexHome == "" {
-		return routeDocBaseForCWD(cwd)
-	}
-	displayCodexHome := codexHome
-	displayDotRelative := false
-	if cwd != "" && filepath.Clean(codexHome) == filepath.Clean(filepath.Join(cwd, ".codex")) {
-		displayCodexHome = ".codex"
-		displayDotRelative = true
-	}
-	return routeDocBase{
-		actualSkillsDir:    filepath.Join(codexHome, "skills"),
-		displaySkillsDir:   filepath.Join(displayCodexHome, "skills"),
-		displayDotRelative: displayDotRelative,
 	}
 }
 
@@ -510,10 +499,6 @@ func (base routeDocBase) displayDocPath(skill string, filename string) string {
 		return "." + string(os.PathSeparator) + displayPath
 	}
 	return displayPath
-}
-
-func (base routeDocBase) actualDocPath(skill string, filename string) string {
-	return filepath.Join(base.actualSkillsDir, skill, filename)
 }
 
 func FormatRoutePreview(preview routePreview) string {
