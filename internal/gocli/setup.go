@@ -22,6 +22,7 @@ type SetupOptions struct {
 	Verbose bool
 
 	writeCache *setupWriteCache
+	stats      *setupWriteStats
 	timer      *setupPhaseTimer
 }
 
@@ -39,6 +40,12 @@ type setupCacheEntry struct {
 	Checksum        string `json:"checksum"`
 	Size            int64  `json:"size"`
 	ModTimeUnixNano int64  `json:"mod_time_unix_nano"`
+}
+
+type setupWriteStats struct {
+	Created   int
+	Updated   int
+	Unchanged int
 }
 
 type setupPhaseTimer struct {
@@ -76,6 +83,7 @@ func Setup(repoRoot string, cwd string, args []string) error {
 	fmt.Fprintln(os.Stdout)
 
 	options.timer = newSetupPhaseTimer(options.Verbose)
+	options.stats = &setupWriteStats{}
 	if !options.DryRun {
 		options.writeCache = loadSetupWriteCache(setupWriteCachePath(cwd))
 	}
@@ -120,15 +128,17 @@ func Setup(repoRoot string, cwd string, args []string) error {
 		return err
 	}
 	if err := runSetupPhase(options, "persist setup scope", func() error {
-		if options.DryRun {
-			return nil
-		}
-		if err := os.MkdirAll(filepath.Join(cwd, ".nana"), 0o755); err != nil {
-			return err
+		if !options.DryRun {
+			if err := os.MkdirAll(filepath.Join(cwd, ".nana"), 0o755); err != nil {
+				return err
+			}
 		}
 		scopePath := filepath.Join(cwd, ".nana", "setup-scope.json")
 		payload, _ := json.Marshal(map[string]string{"scope": options.Scope})
-		return writeBytesIfChanged(scopePath, payload, options)
+		if err := writeBytesIfChanged(scopePath, payload, options); err != nil {
+			return err
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -137,6 +147,7 @@ func Setup(repoRoot string, cwd string, args []string) error {
 	}); err != nil {
 		return err
 	}
+	options.stats.printSummary(os.Stdout, options.DryRun)
 	options.timer.printSummary(os.Stdout)
 	return nil
 }
@@ -255,6 +266,7 @@ func bootstrapInvestigateAuth(sourceCodexHome string, investigateCodexHome strin
 	source := filepath.Join(sourceCodexHome, "auth.json")
 	target := filepath.Join(investigateCodexHome, "auth.json")
 	if _, err := os.Stat(target); err == nil {
+		options.stats.recordUnchanged()
 		return nil
 	}
 	content, err := os.ReadFile(source)
@@ -264,13 +276,7 @@ func bootstrapInvestigateAuth(sourceCodexHome string, investigateCodexHome strin
 		}
 		return err
 	}
-	if options.DryRun {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(target, content, 0o644)
+	return writeBytesIfMissing(target, content, options)
 }
 
 func installPrompts(repoRoot string, promptsDir string, options SetupOptions) error {
@@ -398,9 +404,6 @@ func ensureNanaDirectories(cwd string, options SetupOptions) error {
 			return err
 		}
 	}
-	if options.DryRun {
-		return nil
-	}
 	for _, file := range []struct {
 		path    string
 		content string
@@ -408,28 +411,37 @@ func ensureNanaDirectories(cwd string, options SetupOptions) error {
 		{path: filepath.Join(cwd, ".nana", "project-memory.json"), content: "{}\n"},
 		{path: filepath.Join(cwd, ".nana", "notepad.md"), content: "# NANA Notepad\n\n"},
 	} {
-		if err := writeFileIfMissing(file.path, file.content); err != nil {
+		if err := writeFileIfMissing(file.path, file.content, options); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func writeFileIfMissing(path string, content string) error {
+func writeFileIfMissing(path string, content string, options SetupOptions) error {
+	return writeBytesIfMissing(path, []byte(content), options)
+}
+
+func writeBytesIfMissing(path string, content []byte, options SetupOptions) error {
 	info, err := os.Stat(path)
 	if err == nil {
 		if info.IsDir() {
 			return fmt.Errorf("%s exists and is a directory", path)
 		}
+		options.stats.recordUnchanged()
 		return nil
 	}
 	if !os.IsNotExist(err) {
 		return err
 	}
+	options.stats.recordChanged("created")
+	if options.DryRun {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(content), 0o644)
+	return os.WriteFile(path, content, 0o644)
 }
 
 func writeSetupConfig(configPath string, options SetupOptions) error {
@@ -496,29 +508,34 @@ func writeFileIfChanged(path string, content string, options SetupOptions) error
 }
 
 func writeBytesIfChanged(path string, content []byte, options SetupOptions) error {
-	return writeBytesWithChecksumGuard(path, content, 0o644, options.DryRun, options.writeCache)
+	return writeBytesWithChecksumGuard(path, content, 0o644, options.DryRun, options.writeCache, options.stats)
 }
 
 func writeRuntimeBytesIfChanged(path string, content []byte) error {
-	return writeBytesWithChecksumGuard(path, content, 0o644, false, nil)
+	return writeBytesWithChecksumGuard(path, content, 0o644, false, nil, nil)
 }
 
-func writeBytesWithChecksumGuard(path string, content []byte, mode os.FileMode, dryRun bool, cache *setupWriteCache) error {
+func writeBytesWithChecksumGuard(path string, content []byte, mode os.FileMode, dryRun bool, cache *setupWriteCache, stats *setupWriteStats) error {
 	checksum := sha256BytesHex(content)
 	if cache != nil && cache.matches(path, checksum) {
+		stats.recordUnchanged()
 		return nil
 	}
+	status := "created"
 	if existing, err := os.ReadFile(path); err == nil {
 		if sha256BytesHex(existing) == checksum {
 			if cache != nil && !dryRun {
 				cache.update(path, checksum)
 			}
+			stats.recordUnchanged()
 			return nil
 		}
+		status = "updated"
 	} else if !os.IsNotExist(err) {
 		return err
 	}
 	if dryRun {
+		stats.recordChanged(status)
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -530,6 +547,7 @@ func writeBytesWithChecksumGuard(path string, content []byte, mode os.FileMode, 
 	if cache != nil {
 		cache.update(path, checksum)
 	}
+	stats.recordChanged(status)
 	return nil
 }
 
@@ -667,6 +685,36 @@ func (c *setupWriteCache) save() error {
 
 func setupCacheKey(path string) string {
 	return filepath.Clean(path)
+}
+
+func (s *setupWriteStats) recordUnchanged() {
+	if s == nil {
+		return
+	}
+	s.Unchanged++
+}
+
+func (s *setupWriteStats) recordChanged(status string) {
+	if s == nil {
+		return
+	}
+	switch status {
+	case "created":
+		s.Created++
+	case "updated":
+		s.Updated++
+	}
+}
+
+func (s *setupWriteStats) printSummary(out *os.File, dryRun bool) {
+	if s == nil {
+		return
+	}
+	if dryRun {
+		fmt.Fprintf(out, "Setup outputs: would_create=%d would_update=%d unchanged=%d\n", s.Created, s.Updated, s.Unchanged)
+		return
+	}
+	fmt.Fprintf(out, "Setup outputs: created=%d updated=%d unchanged=%d\n", s.Created, s.Updated, s.Unchanged)
 }
 
 func newSetupPhaseTimer(enabled bool) *setupPhaseTimer {

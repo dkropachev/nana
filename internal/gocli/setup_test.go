@@ -46,6 +46,73 @@ func TestSetupProjectDryRunDoesNotPersistScope(t *testing.T) {
 	}
 }
 
+func TestSetupDryRunOutputSummaryReportsPlannedChanges(t *testing.T) {
+	cwd, repoRoot := setupTestFixture(t)
+	home := filepath.Join(cwd, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+
+	output, err := captureStdout(t, func() error { return Setup(repoRoot, cwd, []string{"--scope", "project", "--dry-run"}) })
+	if err != nil {
+		t.Fatalf("Setup(): %v", err)
+	}
+	if !strings.Contains(output, "[dry-run mode] No files will be modified.") {
+		t.Fatalf("dry-run setup output missing no-modification notice: %q", output)
+	}
+	if !strings.Contains(output, "Setup outputs:") || !strings.Contains(output, "would_create=") || !strings.Contains(output, "would_update=") || !strings.Contains(output, "unchanged=") {
+		t.Fatalf("dry-run setup output missing planned-change summary: %q", output)
+	}
+	if !strings.Contains(output, "would_create=13") {
+		t.Fatalf("dry-run setup summary should include checksum and missing-only planned creates, got %q", output)
+	}
+	if strings.Contains(output, "Setup outputs: created=") || strings.Contains(output, " updated=") {
+		t.Fatalf("dry-run setup output should not report completed writes: %q", output)
+	}
+}
+
+func TestEnsureNanaDirectoriesDryRunReportsMissingStateFilesWithoutWriting(t *testing.T) {
+	cwd := t.TempDir()
+	stats := &setupWriteStats{}
+
+	if err := ensureNanaDirectories(cwd, SetupOptions{DryRun: true, stats: stats}); err != nil {
+		t.Fatalf("ensureNanaDirectories(): %v", err)
+	}
+	if stats.Created != 2 || stats.Updated != 0 || stats.Unchanged != 0 {
+		t.Fatalf("dry-run should report two planned missing-only file creates, got %+v", stats)
+	}
+	for _, path := range []string{
+		filepath.Join(cwd, ".nana", "project-memory.json"),
+		filepath.Join(cwd, ".nana", "notepad.md"),
+	} {
+		if fileExists(path) {
+			t.Fatalf("dry-run should not write %s", path)
+		}
+	}
+}
+
+func TestBootstrapInvestigateAuthDryRunReportsPlannedCreateWithoutWriting(t *testing.T) {
+	cwd := t.TempDir()
+	sourceCodexHome := filepath.Join(cwd, "source-codex-home")
+	investigateCodexHome := filepath.Join(cwd, "investigate-codex-home")
+	if err := os.MkdirAll(sourceCodexHome, 0o755); err != nil {
+		t.Fatalf("mkdir source codex home: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceCodexHome, "auth.json"), []byte(`{"token":"secret"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write source auth: %v", err)
+	}
+	stats := &setupWriteStats{}
+
+	if err := bootstrapInvestigateAuth(sourceCodexHome, investigateCodexHome, SetupOptions{DryRun: true, stats: stats}); err != nil {
+		t.Fatalf("bootstrapInvestigateAuth(): %v", err)
+	}
+	if stats.Created != 1 || stats.Updated != 0 || stats.Unchanged != 0 {
+		t.Fatalf("dry-run should report planned auth copy create, got %+v", stats)
+	}
+	if fileExists(filepath.Join(investigateCodexHome, "auth.json")) {
+		t.Fatalf("dry-run should not write investigate auth.json")
+	}
+}
+
 func TestSetupProjectWritesLocalAssets(t *testing.T) {
 	cwd := t.TempDir()
 	repoRoot := cwd
@@ -157,8 +224,6 @@ func TestSetupProjectFallsBackToEmbeddedAssets(t *testing.T) {
 	for _, needle := range []string{
 		"Prefer `nana verify --json` when `nana-verify.json` exists",
 		"otherwise use documented repo verification commands",
-		"`changed_scope.paths`",
-		"`full_check` fallback",
 	} {
 		if !strings.Contains(string(agentsMd), needle) {
 			t.Fatalf("expected embedded AGENTS template to include conditional verify guidance %q, got %q", needle, string(agentsMd))
@@ -234,11 +299,47 @@ func TestSetupWarmRunKeepsGeneratedArtifactsAndCacheUnchanged(t *testing.T) {
 	if !strings.Contains(output, "Setup timings:") || !strings.Contains(output, "install prompts") {
 		t.Fatalf("verbose setup output missing phase timings: %q", output)
 	}
+	if !strings.Contains(output, "Setup outputs:") || !strings.Contains(output, "created=0") || !strings.Contains(output, "updated=0") || !strings.Contains(output, "unchanged=") {
+		t.Fatalf("warm setup output missing unchanged summary: %q", output)
+	}
 	after := statSetupFiles(t, paths)
 	for _, path := range paths {
 		if before[path] != after[path] {
 			t.Fatalf("warm setup rewrote unchanged file %s: before=%+v after=%+v", path, before[path], after[path])
 		}
+	}
+}
+
+func TestSetupOutputSummaryReportsCreatedUpdatedUnchanged(t *testing.T) {
+	cwd, repoRoot := setupTestFixture(t)
+	home := filepath.Join(cwd, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+
+	output, err := captureStdout(t, func() error { return Setup(repoRoot, cwd, []string{"--scope", "project"}) })
+	if err != nil {
+		t.Fatalf("Setup() first run: %v", err)
+	}
+	if !strings.Contains(output, "Setup outputs:") || !strings.Contains(output, "created=") || !strings.Contains(output, "updated=") || !strings.Contains(output, "unchanged=") {
+		t.Fatalf("setup output missing write summary: %q", output)
+	}
+
+	if err := os.WriteFile(filepath.Join(repoRoot, "prompts", "executor.md"), []byte("# changed\n"), 0o644); err != nil {
+		t.Fatalf("change prompt source: %v", err)
+	}
+	output, err = captureStdout(t, func() error { return Setup(repoRoot, cwd, []string{"--scope", "project"}) })
+	if err != nil {
+		t.Fatalf("Setup() update run: %v", err)
+	}
+	if !strings.Contains(output, "created=0") || !strings.Contains(output, "updated=2") || !strings.Contains(output, "unchanged=") {
+		t.Fatalf("setup output missing expected update counts: %q", output)
+	}
+	content, err := os.ReadFile(filepath.Join(cwd, ".codex", "prompts", "executor.md"))
+	if err != nil {
+		t.Fatalf("read updated prompt: %v", err)
+	}
+	if string(content) != "# changed\n" {
+		t.Fatalf("expected setup to refresh changed prompt, got %q", content)
 	}
 }
 

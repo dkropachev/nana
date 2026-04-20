@@ -181,7 +181,7 @@ func hooksInit(cwd string) error {
 		content = sampleHookPluginWindows
 		mode = 0o644
 	}
-	if err := writeBytesWithChecksumGuard(samplePath, []byte(content), mode, false, nil); err != nil {
+	if err := writeBytesWithChecksumGuard(samplePath, []byte(content), mode, false, nil, nil); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "Created %s\n", samplePath)
