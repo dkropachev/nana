@@ -70,3 +70,18 @@ func TestHooksValidate(t *testing.T) {
 		t.Fatalf("unexpected validate output: %q", output)
 	}
 }
+
+func TestAppendHookLogRecordsLatestRuntimeArtifact(t *testing.T) {
+	cwd := t.TempDir()
+	if err := appendHookLog(cwd, "sample", hookEventEnvelope{Event: "turn-complete"}, hookResultLog{
+		Level:   "info",
+		Message: "observed",
+	}); err != nil {
+		t.Fatalf("appendHookLog: %v", err)
+	}
+
+	got := latestRuntimeArtifactPath(cwd)
+	if !strings.HasPrefix(got, filepath.Join(".nana", "logs", "hooks-")) || !strings.HasSuffix(got, ".jsonl") {
+		t.Fatalf("latestRuntimeArtifactPath() = %q, want hook log path", got)
+	}
+}

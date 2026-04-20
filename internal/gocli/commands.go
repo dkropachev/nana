@@ -57,6 +57,27 @@ func Status(cwd string) error {
 		}
 		fmt.Fprintf(os.Stdout, "%s: %s (phase: %s)\n", ref.Mode, status, phase)
 	}
+	runtimeRecovery, err := BuildRuntimeRecoveryStatus(cwd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[nana-go] status warning: %v\n", err)
+		return nil
+	}
+	if runtimeRecovery != nil {
+		activeMode := runtimeRecovery.ActiveMode
+		if len(runtimeRecovery.ActiveModes) > 1 {
+			activeMode = fmt.Sprintf("%s (+%d more)", activeMode, len(runtimeRecovery.ActiveModes)-1)
+		}
+		fmt.Fprintf(os.Stdout, "Active mode: %s\n", activeMode)
+		if strings.TrimSpace(runtimeRecovery.StateFile) != "" {
+			fmt.Fprintf(os.Stdout, "State file: %s\n", runtimeRecovery.StateFile)
+		}
+		if strings.TrimSpace(runtimeRecovery.LatestArtifact) != "" {
+			fmt.Fprintf(os.Stdout, "Latest artifact: %s\n", runtimeRecovery.LatestArtifact)
+		}
+		if strings.TrimSpace(runtimeRecovery.RecoveryHint) != "" {
+			fmt.Fprintf(os.Stdout, "Recovery: %s\n", runtimeRecovery.RecoveryHint)
+		}
+	}
 	return nil
 }
 

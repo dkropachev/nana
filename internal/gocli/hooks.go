@@ -553,8 +553,11 @@ func appendHookLog(cwd, plugin string, event hookEventEnvelope, entry hookResult
 		return err
 	}
 	defer file.Close()
-	_, err = file.Write(append(data, '\n'))
-	return err
+	if _, err := file.Write(append(data, '\n')); err != nil {
+		return err
+	}
+	_ = RecordRuntimeArtifact(cwd, path)
+	return nil
 }
 
 func hooksLogPath(cwd string, now time.Time) string {

@@ -4687,7 +4687,11 @@ func groupIDs(groups []localWorkFindingGroup) []string {
 }
 
 func writeJSONArtifact(path string, value interface{}) error {
-	return os.WriteFile(path, mustMarshalJSON(value), 0o644)
+	if err := os.WriteFile(path, mustMarshalJSON(value), 0o644); err != nil {
+		return err
+	}
+	recordRuntimeArtifactWrite(path)
+	return nil
 }
 
 func writeLocalWorkJSONAtomically(path string, value interface{}) error {

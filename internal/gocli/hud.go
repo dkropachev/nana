@@ -107,20 +107,21 @@ type HUDAccountState struct {
 }
 
 type HUDRenderContext struct {
-	Version       string           `json:"version,omitempty"`
-	GitBranch     string           `json:"gitBranch,omitempty"`
-	VerifyLoop    *HUDModeState    `json:"verifyLoop,omitempty"`
-	Ultrawork     *HUDModeState    `json:"ultrawork,omitempty"`
-	Autopilot     *HUDModeState    `json:"autopilot,omitempty"`
-	Ralplan       *HUDModeState    `json:"ralplan,omitempty"`
-	DeepInterview *HUDModeState    `json:"deepInterview,omitempty"`
-	Autoresearch  *HUDModeState    `json:"autoresearch,omitempty"`
-	Ultraqa       *HUDModeState    `json:"ultraqa,omitempty"`
-	Team          *HUDModeState    `json:"team,omitempty"`
-	Account       *HUDAccountState `json:"account,omitempty"`
-	Metrics       *HUDMetrics      `json:"metrics,omitempty"`
-	HUDNotify     *HUDNotifyState  `json:"hudNotify,omitempty"`
-	Session       *HUDSessionState `json:"session,omitempty"`
+	Version       string                 `json:"version,omitempty"`
+	GitBranch     string                 `json:"gitBranch,omitempty"`
+	VerifyLoop    *HUDModeState          `json:"verifyLoop,omitempty"`
+	Ultrawork     *HUDModeState          `json:"ultrawork,omitempty"`
+	Autopilot     *HUDModeState          `json:"autopilot,omitempty"`
+	Ralplan       *HUDModeState          `json:"ralplan,omitempty"`
+	DeepInterview *HUDModeState          `json:"deepInterview,omitempty"`
+	Autoresearch  *HUDModeState          `json:"autoresearch,omitempty"`
+	Ultraqa       *HUDModeState          `json:"ultraqa,omitempty"`
+	Team          *HUDModeState          `json:"team,omitempty"`
+	Account       *HUDAccountState       `json:"account,omitempty"`
+	Metrics       *HUDMetrics            `json:"metrics,omitempty"`
+	HUDNotify     *HUDNotifyState        `json:"hudNotify,omitempty"`
+	Session       *HUDSessionState       `json:"session,omitempty"`
+	Runtime       *RuntimeRecoveryStatus `json:"runtime,omitempty"`
 }
 
 func HUD(cwd string, executablePath string, args []string) error {
@@ -334,6 +335,7 @@ func readAllHUDState(cwd string, config ResolvedHUDConfig) (HUDRenderContext, er
 	metrics, _ := readHUDMetrics(cwd)
 	hudNotify, _ := readHUDNotifyState(cwd)
 	session, _ := readHUDSessionState(cwd)
+	runtimeRecovery, _ := BuildRuntimeRecoveryStatus(cwd)
 
 	ctx := HUDRenderContext{
 		Version:       readHUDVersion(),
@@ -350,6 +352,7 @@ func readAllHUDState(cwd string, config ResolvedHUDConfig) (HUDRenderContext, er
 		Metrics:       metrics,
 		HUDNotify:     hudNotify,
 		Session:       session,
+		Runtime:       runtimeRecovery,
 	}
 	return ctx, nil
 }
@@ -587,6 +590,7 @@ func renderHUD(ctx HUDRenderContext, preset HUDPreset) string {
 		appendIf(renderHUDUltraqa(ctx.Ultraqa))
 	}
 	appendIf(renderHUDTeam(ctx.Team))
+	appendIf(renderHUDRuntimeRecovery(ctx.Runtime))
 	appendIf(renderHUDAccount(ctx.Account))
 	appendIf(renderHUDTurns(ctx))
 	if preset != HUDPresetMinimal {
@@ -695,6 +699,27 @@ func renderHUDTeam(state *HUDModeState) string {
 		return "team:" + strings.TrimSpace(state.TeamName)
 	}
 	return "team"
+}
+
+func renderHUDRuntimeRecovery(state *RuntimeRecoveryStatus) string {
+	if state == nil || strings.TrimSpace(state.ActiveMode) == "" {
+		return ""
+	}
+	mode := strings.TrimSpace(state.ActiveMode)
+	if len(state.ActiveModes) > 1 {
+		mode = fmt.Sprintf("%s+%d", mode, len(state.ActiveModes)-1)
+	}
+	parts := []string{"mode:" + mode}
+	if strings.TrimSpace(state.StateFile) != "" {
+		parts = append(parts, "state:"+strings.TrimSpace(state.StateFile))
+	}
+	if strings.TrimSpace(state.LatestArtifact) != "" {
+		parts = append(parts, "artifact:"+strings.TrimSpace(state.LatestArtifact))
+	}
+	if strings.TrimSpace(state.CancelHint) != "" {
+		parts = append(parts, "cancel:"+strings.TrimSpace(state.CancelHint))
+	}
+	return strings.Join(parts, " ")
 }
 
 func renderHUDAccount(state *HUDAccountState) string {

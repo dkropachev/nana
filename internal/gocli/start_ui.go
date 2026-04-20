@@ -2684,6 +2684,7 @@ func startUISpawnBackgroundNana(workdir string, logPath string, args []string) e
 		_ = logFile.Close()
 		return err
 	}
+	recordRuntimeArtifactWrite(logPath)
 	go func() {
 		defer logFile.Close()
 		_ = cmd.Wait()

@@ -1238,7 +1238,11 @@ func writeGithubJSON(path string, value interface{}) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(content, '\n'), 0o644)
+	if err := os.WriteFile(path, append(content, '\n'), 0o644); err != nil {
+		return err
+	}
+	recordRuntimeArtifactWrite(path)
+	return nil
 }
 
 func validRepoSlug(value string) bool {

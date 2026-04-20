@@ -117,6 +117,84 @@ func TestHUDSessionScopedModePrecedence(t *testing.T) {
 	}
 }
 
+func TestHUDIncludesRuntimeRecoveryHints(t *testing.T) {
+	cwd := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), ".codex"))
+
+	rootStateDir := filepath.Join(cwd, ".nana", "state")
+	sessionStateDir := filepath.Join(rootStateDir, "sessions", "sess-hud")
+	logDir := filepath.Join(cwd, ".nana", "logs")
+	if err := os.MkdirAll(sessionStateDir, 0o755); err != nil {
+		t.Fatalf("mkdir session state: %v", err)
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("mkdir logs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootStateDir, "session.json"), []byte(`{"session_id":"sess-hud","started_at":"2026-04-08T00:00:00Z"}`), 0o644); err != nil {
+		t.Fatalf("write session.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootStateDir, "autopilot-state.json"), []byte(`{"active":true,"current_phase":"root-phase"}`), 0o644); err != nil {
+		t.Fatalf("write root autopilot state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionStateDir, "autopilot-state.json"), []byte(`{"active":true,"current_phase":"session-phase"}`), 0o644); err != nil {
+		t.Fatalf("write session autopilot state: %v", err)
+	}
+
+	oldLog := filepath.Join(logDir, "old.log")
+	newLog := filepath.Join(logDir, "new.log")
+	if err := os.WriteFile(oldLog, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write old log: %v", err)
+	}
+	if err := os.WriteFile(newLog, []byte("new"), 0o644); err != nil {
+		t.Fatalf("write new log: %v", err)
+	}
+	oldTime := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
+	newTime := oldTime.Add(time.Minute)
+	if err := os.Chtimes(oldLog, oldTime, oldTime); err != nil {
+		t.Fatalf("chtime old log: %v", err)
+	}
+	if err := os.Chtimes(newLog, newTime, newTime); err != nil {
+		t.Fatalf("chtime new log: %v", err)
+	}
+	if err := RecordRuntimeArtifact(cwd, newLog); err != nil {
+		t.Fatalf("record runtime artifact: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error {
+		return HUD(cwd, "/tmp/nana", []string{})
+	})
+	if err != nil {
+		t.Fatalf("HUD(): %v", err)
+	}
+
+	wantState := filepath.Join(".nana", "state", "sessions", "sess-hud", "autopilot-state.json")
+	wantArtifact := filepath.Join(".nana", "logs", "new.log")
+	for _, needle := range []string{
+		"mode:autopilot",
+		"state:" + wantState,
+		"artifact:" + wantArtifact,
+		"cancel:$cancel",
+	} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("expected HUD output to contain %q, got %q", needle, output)
+		}
+	}
+
+	jsonOutput, err := captureStdout(t, func() error {
+		return HUD(cwd, "/tmp/nana", []string{"--json"})
+	})
+	if err != nil {
+		t.Fatalf("HUD(--json): %v", err)
+	}
+	var parsed HUDRenderContext
+	if err := json.Unmarshal([]byte(jsonOutput), &parsed); err != nil {
+		t.Fatalf("parse HUD json: %v\noutput=%s", err, jsonOutput)
+	}
+	if parsed.Runtime == nil || parsed.Runtime.ActiveMode != "autopilot" || parsed.Runtime.StateFile != wantState || parsed.Runtime.LatestArtifact != wantArtifact || parsed.Runtime.CancelHint != "$cancel" {
+		t.Fatalf("unexpected runtime recovery payload: %+v", parsed.Runtime)
+	}
+}
+
 func TestBuildGitBranchLabelUsesConfiguredRepoLabel(t *testing.T) {
 	cwd := t.TempDir()
 	for _, args := range [][]string{

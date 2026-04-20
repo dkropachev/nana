@@ -64,14 +64,25 @@ func TestReadAndUpsertTomlString(t *testing.T) {
 func TestStatusAndCancel(t *testing.T) {
 	cwd := t.TempDir()
 	stateDir := filepath.Join(cwd, ".nana", "state", "sessions", "sess-1")
+	logDir := filepath.Join(cwd, ".nana", "logs")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("mkdir logs: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(cwd, ".nana", "state", "session.json"), []byte(`{"session_id":"sess-1"}`), 0o644); err != nil {
 		t.Fatalf("session.json: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(stateDir, "team-state.json"), []byte(`{"active":true,"current_phase":"team-exec"}`), 0o644); err != nil {
 		t.Fatalf("team-state.json: %v", err)
+	}
+	hookLog := filepath.Join(logDir, "hooks-2026-04-08.jsonl")
+	if err := os.WriteFile(hookLog, []byte(`{"event":"turn-complete"}`), 0o644); err != nil {
+		t.Fatalf("write hook log: %v", err)
+	}
+	if err := RecordRuntimeArtifact(cwd, hookLog); err != nil {
+		t.Fatalf("record runtime artifact: %v", err)
 	}
 
 	statusOutput, err := captureStdout(t, func() error { return Status(cwd) })
@@ -80,6 +91,16 @@ func TestStatusAndCancel(t *testing.T) {
 	}
 	if !strings.Contains(statusOutput, "team: ACTIVE (phase: team-exec)") {
 		t.Fatalf("unexpected status output: %q", statusOutput)
+	}
+	for _, needle := range []string{
+		"Active mode: team",
+		"State file: " + filepath.Join(".nana", "state", "sessions", "sess-1", "team-state.json"),
+		"Latest artifact: " + filepath.Join(".nana", "logs", "hooks-2026-04-08.jsonl"),
+		"Recovery: Run $cancel",
+	} {
+		if !strings.Contains(statusOutput, needle) {
+			t.Fatalf("expected status output to contain %q, got %q", needle, statusOutput)
+		}
 	}
 
 	cancelOutput, err := captureStdout(t, func() error { return Cancel(cwd) })
