@@ -199,28 +199,65 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 	if len(rootAgents) > 8192 {
 		t.Fatalf("root AGENTS.md exceeds budget: %d", len(rootAgents))
 	}
-	if strings.Contains(string(diskContent), "match anywhere") {
-		t.Fatal("template AGENTS.md still allows broad keyword matches")
-	}
-	if strings.Contains(string(rootAgents), "match anywhere") {
-		t.Fatal("root AGENTS.md still allows broad keyword matches")
-	}
 	for _, needle := range []string{
 		"`~/.codex/skills/autopilot/RUNTIME.md`",
 		"`~/.codex/skills/deep-interview/RUNTIME.md`",
 		"`~/.codex/skills/security-review/RUNTIME.md`",
 		"`~/.codex/skills/web-clone/RUNTIME.md`",
-		"phrase-aware",
-		"user-authored command phrases",
-		"fenced code",
-		"quoted AGENTS/policy text",
-		"explicit file excerpts",
 	} {
 		if !strings.Contains(string(diskContent), needle) {
-			t.Fatalf("template AGENTS.md missing expected keyword guidance %q", needle)
+			t.Fatalf("template AGENTS.md missing runtime skill reference %q", needle)
 		}
 		if !strings.Contains(string(rootAgents), strings.ReplaceAll(needle, "~/.codex", "./.codex")) {
-			t.Fatalf("root AGENTS.md missing expected keyword guidance %q", needle)
+			t.Fatalf("root AGENTS.md missing runtime skill reference %q", needle)
+		}
+	}
+}
+
+func TestRalplanGateAssetsGiveMissingArtifactRecovery(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+
+	templateContent, err := os.ReadFile(filepath.Join(repoRoot, "templates", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read template AGENTS.md: %v", err)
+	}
+	rootAgents, err := os.ReadFile(filepath.Join(repoRoot, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read root AGENTS.md: %v", err)
+	}
+	runtimeSkill, err := os.ReadFile(filepath.Join(repoRoot, "skills", "ralplan", "RUNTIME.md"))
+	if err != nil {
+		t.Fatalf("read ralplan runtime skill: %v", err)
+	}
+	templates, err := Templates()
+	if err != nil {
+		t.Fatalf("Templates(): %v", err)
+	}
+	skills, err := Skills()
+	if err != nil {
+		t.Fatalf("Skills(): %v", err)
+	}
+
+	for label, content := range map[string]string{
+		"root AGENTS.md":              string(rootAgents),
+		"template AGENTS.md":          string(templateContent),
+		"embedded template AGENTS.md": templates["AGENTS.md"],
+		"ralplan runtime skill":       string(runtimeSkill),
+		"embedded ralplan runtime":    skills["ralplan/RUNTIME.md"],
+	} {
+		for _, needle := range []string{
+			"inspect `.nana/plans/`",
+			"prd-*.md",
+			"test-spec-*.md",
+			"run `$ralplan \"<scope>\"`",
+		} {
+			if !strings.Contains(content, needle) {
+				t.Fatalf("%s missing actionable ralplan gate guidance %q", label, needle)
+			}
 		}
 	}
 }

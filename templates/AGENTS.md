@@ -30,8 +30,8 @@ Role prompts under `prompts/*.md` narrow the work, but they do not override this
 - Reuse existing utilities and patterns before adding abstractions.
 - No new dependencies without explicit request.
 - Keep diffs small, reviewable, and reversible.
-- Use the smallest profile that proves the change; escalate on failures or broad/risky/deps/build/CI/API/security/perf edits.
-- Final reports include changed files, profile/rationale, simplifications, and risks.
+- Run lint, typecheck, tests, and static analysis after changes.
+- Final reports must include changed files, simplifications made, and remaining risks.
 
 ## Lore Commits
 When committing, use a why-first subject and optional git trailers such as `Constraint:`, `Rejected:`, `Directive:`, `Confidence:`, `Scope-risk:`, `Tested:`, and `Not-tested:` when they add decision value.
@@ -87,11 +87,11 @@ Rules:
 - If the user explicitly invokes `/prompts:<name>`, do not auto-activate keyword skills unless explicit `$name` tokens are also present.
 - The rest of the message becomes the task description.
 - Ralplan is planning-only until `.nana/plans/prd-*.md` and `.nana/plans/test-spec-*.md` both exist.
+- When that gate blocks execution, inspect `.nana/plans/`, list any missing globs (`prd-*.md`, `test-spec-*.md`), and say the next action: run `$ralplan "<scope>"` or add the missing files there, then retry.
 </keyword_detection>
 
 <verification>
 Verify before claiming completion.
-- Profiles: `docs-only`=docs/text diff + any markdown/link checks; `prompt-only`=AGENTS/prompts/skills consistency + asset tests if templates/assets change; `scoped-code`=touched-package format/lint/typecheck/tests/static; `full`=repo-wide lint/typecheck/tests/static analysis for broad/risky/deps/build/CI/API/security/perf edits, review findings, or failed scoped checks.
 <!-- NANA:GUIDANCE:VERIFYSEQ:START -->
 - Identify what proves the claim, run the verification, read the output, then report with evidence.
 - Run dependent tasks sequentially.
