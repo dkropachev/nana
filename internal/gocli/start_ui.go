@@ -1427,6 +1427,19 @@ func (h *startUIAPI) handleWorkItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSONResponse(w, detail)
+	case r.Method == http.MethodPost && tail == "requeue":
+		err := requeuePausedWorkItemByID(itemID, "ui")
+		h.invalidateOverviewCache()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		detail, err := readWorkItemDetail(itemID)
+		if err != nil {
+			writeStartUIError(w, err, http.StatusInternalServerError)
+			return
+		}
+		writeJSONResponse(w, detail)
 	case r.Method == http.MethodPost && tail == "restore":
 		err := restoreWorkItemByID(itemID, "ui")
 		h.invalidateOverviewCache()

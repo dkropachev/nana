@@ -5174,6 +5174,7 @@
     const item = detail.item;
     const draft = item.latest_draft || null;
     const workItemPauseSummary = pauseStateSummary(item.pause_until, item.pause_reason);
+    const showRestoreButton = Boolean(item.hidden || item.status === "dropped");
     const events = (detail.events || []).map((event) => {
       return `
         <li>
@@ -5212,11 +5213,12 @@
         </div>
       </div>
       <div class="drawer-toolbar">
+        ${item.status === "paused" ? `<button class="tx-btn tx-btn-secondary" type="button" data-work-item-requeue="${escapeHTML(item.id)}">Return to Queue</button>` : ""}
         <button class="tx-btn tx-btn-secondary" type="button" data-work-item-run="${escapeHTML(item.id)}">Run</button>
         <button class="tx-btn tx-btn-secondary" type="button" data-work-item-fix="${escapeHTML(item.id)}">Fix</button>
         <button class="tx-btn tx-btn-primary" type="button" data-work-item-submit="${escapeHTML(item.id)}">Submit</button>
         <button class="tx-btn tx-btn-secondary" type="button" data-work-item-drop="${escapeHTML(item.id)}">Drop</button>
-        ${item.hidden ? `<button class="tx-btn tx-btn-secondary" type="button" data-work-item-restore="${escapeHTML(item.id)}">Restore</button>` : ""}
+        ${showRestoreButton ? `<button class="tx-btn tx-btn-secondary" type="button" data-work-item-restore="${escapeHTML(item.id)}">Restore</button>` : ""}
         <button class="tx-btn tx-btn-secondary" type="button" data-work-item-refresh="${escapeHTML(item.id)}">Refresh</button>
       </div>
       <div class="surface">
@@ -6176,6 +6178,21 @@
     });
 
     document.body.addEventListener("click", (event) => {
+      const requeueButton = event.target.closest("[data-work-item-requeue]");
+      if (requeueButton) {
+        const itemID = requeueButton.getAttribute("data-work-item-requeue");
+        api(`/api/v1/work-items/${encodeURIComponent(itemID)}/requeue`, {
+          method: "POST",
+        }).then(() => {
+          toast("success", "Work item queued", itemID);
+          load();
+          loadWorkItemDetail(itemID);
+        }).catch((error) => {
+          toast("danger", "Queue update failed", error.message);
+        });
+        return;
+      }
+
       const runButton = event.target.closest("[data-work-item-run]");
       if (runButton) {
         const itemID = runButton.getAttribute("data-work-item-run");

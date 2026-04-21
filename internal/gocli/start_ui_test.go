@@ -2031,6 +2031,33 @@ func TestStartUIAPIWorkItems(t *testing.T) {
 	}
 }
 
+func TestStartUIAPIWorkItemsCanRequeuePausedItem(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	item := startUITestCreateQueuedWorkItem(t, "requeue-paused")
+	item.Status = workItemStatusPaused
+	item.PauseReason = "rate limited"
+	item.PauseUntil = "2026-04-21T18:00:00Z"
+	startUITestUpdateWorkItem(t, item)
+
+	server := httptest.NewServer((&startUIAPI{cwd: t.TempDir()}).routes())
+	defer server.Close()
+
+	response, err := http.Post(server.URL+"/api/v1/work-items/"+item.ID+"/requeue", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST requeue: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected requeue status: %d", response.StatusCode)
+	}
+	updated := startUITestReadWorkItem(t, item.ID)
+	if updated.Status != workItemStatusQueued || updated.PauseReason != "" || updated.PauseUntil != "" {
+		t.Fatalf("expected paused work item to return to queued with pause cleared, got %+v", updated)
+	}
+}
+
 func TestStartUIWorkItemPausedStateIsPendingAndBlocked(t *testing.T) {
 	item := workItem{
 		ID:          "wi-paused",
@@ -4950,6 +4977,39 @@ func TestStartUIWorkItemRestoreEventWriteFailureInvalidatesOverviewCache(t *test
 	}
 	if startUITestOverviewCacheValid(api) {
 		t.Fatalf("expected failed work-item restore side effect to invalidate overview cache")
+	}
+}
+
+func TestStartUIWorkItemRequeueEventWriteFailureInvalidatesOverviewCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	item := startUITestCreateQueuedWorkItem(t, "requeue-event-fail")
+	item.Status = workItemStatusPaused
+	item.PauseReason = "rate limited"
+	item.PauseUntil = "2026-04-21T18:00:00Z"
+	startUITestUpdateWorkItem(t, item)
+	api := &startUIAPI{cwd: cwd}
+	startUITestPrimeOverviewCache(t, api)
+	startUITestFailWorkItemEvents(t)
+
+	server := httptest.NewServer(api.routes())
+	defer server.Close()
+	response, err := http.Post(server.URL+"/api/v1/work-items/"+item.ID+"/requeue", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST work item requeue: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected requeue failure status 400, got %d", response.StatusCode)
+	}
+	updated := startUITestReadWorkItem(t, item.ID)
+	if updated.Status != workItemStatusPaused || updated.PauseReason != item.PauseReason || updated.PauseUntil != item.PauseUntil {
+		t.Fatalf("expected requeue rollback on event failure, got %+v", updated)
+	}
+	if startUITestOverviewCacheValid(api) {
+		t.Fatalf("expected failed work-item requeue side effect to invalidate overview cache")
 	}
 }
 

@@ -1344,6 +1344,27 @@ func dropWorkItemByID(itemID string, actor string) error {
 	})
 }
 
+func requeuePausedWorkItemByID(itemID string, actor string) error {
+	return withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+		item, err := store.readWorkItem(itemID)
+		if err != nil {
+			return err
+		}
+		if item.Status != workItemStatusPaused {
+			return fmt.Errorf("work item %s is not paused", itemID)
+		}
+		item.Status = workItemStatusQueued
+		item.Hidden = false
+		item.HiddenReason = ""
+		item.PauseReason = ""
+		item.PauseUntil = ""
+		item.Metadata = clearWorkItemPauseMetadata(item.Metadata)
+		item.UpdatedAt = ISOTimeNow()
+		item.LatestActionAt = item.UpdatedAt
+		return store.updateWorkItemWithEvent(item, "requeued", actor, map[string]any{"status": item.Status})
+	})
+}
+
 func restoreWorkItemByID(itemID string, actor string) error {
 	return withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
 		item, err := store.readWorkItem(itemID)
