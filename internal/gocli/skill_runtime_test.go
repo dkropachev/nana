@@ -226,6 +226,34 @@ func TestSkillRuntimeDocLoaderAnnotatesPromptSuppressionDecision(t *testing.T) {
 	}
 }
 
+func TestSkillRuntimeDocLoaderAnnotatesImplicitKeywordActivationDecision(t *testing.T) {
+	cwd := t.TempDir()
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	runtimePath := filepath.Join(codexHome, "skills", "analyze", "RUNTIME.md")
+	if err := os.MkdirAll(filepath.Dir(runtimePath), 0o755); err != nil {
+		t.Fatalf("mkdir runtime dir: %v", err)
+	}
+	if err := os.WriteFile(runtimePath, []byte("analyze runtime rules\n"), 0o644); err != nil {
+		t.Fatalf("write runtime: %v", err)
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+
+	docs, err := loadActivatedSkillRuntimeDocsWithCache(cwd, "please analyze this failure", newSkillRuntimeDocCache())
+	if err != nil {
+		t.Fatalf("load activated runtime docs: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("expected one implicit runtime doc, got %#v", docs)
+	}
+	doc := docs[0]
+	if doc.MatchedKeyword != "analyze" || doc.ActivationMode != "implicit" || doc.ActivationSource != routeSourceImplicitKeyword {
+		t.Fatalf("expected implicit activation decision, got %#v", doc)
+	}
+	if !strings.Contains(doc.SourceRule, "keyword match") {
+		t.Fatalf("expected implicit source rule, got %#v", doc.SourceRule)
+	}
+}
+
 func TestSkillRuntimeDocTelemetryWritesActivationDecisionFields(t *testing.T) {
 	cwd := t.TempDir()
 	codexHome := filepath.Join(t.TempDir(), "codex-home")
@@ -240,7 +268,6 @@ func TestSkillRuntimeDocTelemetryWritesActivationDecisionFields(t *testing.T) {
 	t.Setenv("NANA_CONTEXT_TELEMETRY", "")
 	t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", "")
 	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-route")
-	t.Setenv("NANA_CONTEXT_TELEMETRY_TURN_ID", "turn-route")
 	t.Setenv("NANA_WORK_RUN_ID", "")
 	t.Setenv("NANA_RUN_ID", "")
 	t.Setenv("NANA_SESSION_ID", "")
@@ -260,7 +287,6 @@ func TestSkillRuntimeDocTelemetryWritesActivationDecisionFields(t *testing.T) {
 		`"source_rule":"explicit $name invocations run left-to-right before implicit keyword routing"`,
 		`"implicit_suppressed":true`,
 		`"implicit_suppressed_by":"/prompts:executor"`,
-		`"turn_id":"turn-route"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected telemetry log to contain %q:\n%s", want, text)

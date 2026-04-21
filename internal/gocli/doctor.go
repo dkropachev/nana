@@ -26,6 +26,45 @@ type doctorRemediation struct {
 	ManualFallback   string
 }
 
+func setupFixCommand(scope string) string {
+	return setupCommand(scope, false)
+}
+
+func setupForceFixCommand(scope string) string {
+	return setupCommand(scope, true)
+}
+
+func setupCommand(scope string, force bool) string {
+	scope = strings.TrimSpace(scope)
+	parts := []string{"nana", "setup"}
+	if force {
+		parts = append(parts, "--force")
+	}
+	if scope != "" {
+		parts = append(parts, "--scope", scope)
+	}
+	return strings.Join(parts, " ")
+}
+
+func setupDoctorRemediation(scope string, path string, manualFallback string) *doctorRemediation {
+	if manualFallback == "" {
+		manualFallback = fmt.Sprintf("inspect %s, then run `%s`", path, setupFixCommand(scope))
+	}
+	return &doctorRemediation{
+		Path:             path,
+		SafeAutomaticFix: fmt.Sprintf("yes — run `%s`", setupFixCommand(scope)),
+		ManualFallback:   manualFallback,
+	}
+}
+
+func manualDoctorRemediation(path string, manualFallback string) *doctorRemediation {
+	return &doctorRemediation{
+		Path:             path,
+		SafeAutomaticFix: "no — manual review required",
+		ManualFallback:   manualFallback,
+	}
+}
+
 func Doctor(cwd string, repoRoot string) error {
 	scope, source := resolveDoctorScope(cwd)
 	paths := resolveDoctorPaths(cwd, scope)
@@ -87,17 +126,6 @@ func Doctor(cwd string, repoRoot string) error {
 			passCount++
 		}
 		fmt.Fprintf(os.Stdout, "  %s %s: %s\n", icon, check.Name, check.Message)
-		if check.Remediation != nil {
-			if strings.TrimSpace(check.Remediation.Path) != "" {
-				fmt.Fprintf(os.Stdout, "      affected path: %s\n", check.Remediation.Path)
-			}
-			if strings.TrimSpace(check.Remediation.SafeAutomaticFix) != "" {
-				fmt.Fprintf(os.Stdout, "      safe automatic fix: %s\n", check.Remediation.SafeAutomaticFix)
-			}
-			if strings.TrimSpace(check.Remediation.ManualFallback) != "" {
-				fmt.Fprintf(os.Stdout, "      manual fallback: %s\n", check.Remediation.ManualFallback)
-			}
-		}
 	}
 
 	fmt.Fprintf(os.Stdout, "\nResults: %d passed, %d warnings, %d failed\n", passCount, warnCount, failCount)

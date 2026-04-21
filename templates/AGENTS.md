@@ -7,7 +7,7 @@ USE CODEX NATIVE SUBAGENTS FOR INDEPENDENT PARALLEL SUBTASKS WHEN THAT IMPROVES 
 
 # nana - Compact Runtime Policy
 
-NANA coordinates Codex prompts, skills, and optional team/runtime state. Role prompts under `prompts/*.md` narrow work but never override this file.
+NANA coordinates Codex prompts, skills, and runtime state. Role prompts narrow work but never override this file.
 
 ## Always-on Policy
 <!-- NANA:GUIDANCE:OPERATING:START -->
@@ -17,18 +17,19 @@ NANA coordinates Codex prompts, skills, and optional team/runtime state. Role pr
 <!-- NANA:GUIDANCE:OPERATING:END -->
 - Keep diffs small/reversible, reuse existing patterns, add no dependency unless explicitly requested, and prefer deletion over addition.
 - For cleanup/refactor/deslop work: write a cleanup plan first and lock behavior with tests when not already protected.
-- Verify before completion; final reports include changed files, verification, simplifications made, and remaining risks when relevant.
-- Commits should use a why-first subject; optional trailers: `Constraint:`, `Rejected:`, `Directive:`, `Confidence:`, `Scope-risk:`, `Tested:`, `Not-tested:`.
+- Verify before completion; final-report checklist: changed files, verification evidence, simplifications made, remaining risks.
+- Commit subjects should be why-first; trailers: `Constraint:`, `Rejected:`, `Directive:`, `Confidence:`, `Scope-risk:`, `Tested:`, `Not-tested:`.
 
 ## Mode Selection and Delegation
-- Default to solo execution. Use `$deep-interview` for unclear intent or explicit "don't assume"; `$ralplan` for unresolved plan/tradeoff/test-shape review; otherwise execute.
+- Default solo. Use `$deep-interview` for unclear intent or explicit "don't assume"; `$ralplan` for unresolved plan/tradeoff/test-shape review; otherwise execute.
 - Delegate only for quality/speed/safety. Leader scopes and verifies; workers stay scoped and do not re-plan the whole task. Max 6 children.
 - Outside active `team`/`swarm`, use `executor` for implementation and reserve `worker` for team runtime. Core roles: `explore`, `planner`, `architect`, `debugger`, `executor`, `verifier`.
 - Routing hints: low complexity `explore`/`style-reviewer`/`writer`; standard `executor`/`debugger`/`test-engineer`; high complexity `architect`/`executor`/`critic`.
 - When routing affects execution, include `routing_decision` in plans, traces, and final reports: `mode`, `role_tier` (tier/roles), `trigger`, `confidence`.
 
 ## Lazy Runtime Skills
-Load runtime docs only when invoked. Sync trigger tests with this list. A listed keyword invokes that `$skill` by reading its RUNTIME.md. Explicit `$skill` invocations run left-to-right before implicit keyword matches; keyword matches are case-insensitive; `/prompts:<name>` disables implicit routing unless explicit `$skill` tokens are present.
+Load runtime docs lazily. When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md. Explicit `$skill` invocations run left-to-right before implicit keyword matches; keyword matches are case-insensitive; `/prompts:<name>` suppresses implicit routing unless explicit `$skill` tokens are present. Sync trigger tests with this list.
+`nana route --explain "<prompt>"` to preview routing.
 - `$autopilot` (`~/.codex/skills/autopilot/RUNTIME.md`): `autopilot`, `build me`, `I want a`
 - `$ultrawork` (`~/.codex/skills/ultrawork/RUNTIME.md`): `ultrawork`, `ulw`, `parallel`
 - `$analyze` (`~/.codex/skills/analyze/RUNTIME.md`): `analyze`, `investigate`
@@ -47,7 +48,7 @@ Load runtime docs only when invoked. Sync trigger tests with this list. A listed
 - Prefer `nana explore` for simple read-only lookups and `nana sparkshell` for noisy read-only output/checks; keep edits and ambiguous investigations on the normal path.
 - Prefer `nana verify --json` when `nana-verify.json` exists; otherwise use documented repo verification commands.
 - Run independent work in parallel and dependent checks sequentially. Use background execution for long builds/tests when helpful.
-- Stop only when verified complete, the user requests `stop`/`cancel`/`abort`, or no recovery path remains; internal completion checks do not invoke `$cancel`; escalate only for destructive, irreversible, materially branching, or authority-blocked decisions.
+- Stop only when verified complete, no recovery path remains, or the user explicitly says `stop`/`cancel`/`abort` (routes to `$cancel`; internal completion checks do not); escalate only for destructive, irreversible, materially branching, or authority-blocked decisions.
 <verification>
 <!-- NANA:GUIDANCE:VERIFYSEQ:START -->
 - Identify what proves the claim, run the check, read the output, then report with evidence.

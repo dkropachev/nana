@@ -555,6 +555,6 @@ func routeActivationMode(activation routeActivation) string {
 	case routeSourceImplicitKeyword:
 		return "implicit"
 	default:
-		return strings.TrimSpace(activation.Source)
+		return "unknown"
 	}
 }
