@@ -66,7 +66,6 @@ func Doctor(cwd string, repoRoot string) error {
 		checkDirectory("State dir", BaseStateDir(cwd)),
 		checkNanaStatePaths(cwd),
 		checkNanaJSONStateFiles(cwd),
-		checkWorkSQLiteState(),
 		checkNanaStateSchemas(cwd),
 		checkMcpServers(paths.configPath),
 		checkDirectory("Investigate Codex home", ResolveInvestigateCodexHome(cwd)),
@@ -88,6 +87,17 @@ func Doctor(cwd string, repoRoot string) error {
 			passCount++
 		}
 		fmt.Fprintf(os.Stdout, "  %s %s: %s\n", icon, check.Name, check.Message)
+		if check.Remediation != nil {
+			if strings.TrimSpace(check.Remediation.Path) != "" {
+				fmt.Fprintf(os.Stdout, "      affected path: %s\n", check.Remediation.Path)
+			}
+			if strings.TrimSpace(check.Remediation.SafeAutomaticFix) != "" {
+				fmt.Fprintf(os.Stdout, "      safe automatic fix: %s\n", check.Remediation.SafeAutomaticFix)
+			}
+			if strings.TrimSpace(check.Remediation.ManualFallback) != "" {
+				fmt.Fprintf(os.Stdout, "      manual fallback: %s\n", check.Remediation.ManualFallback)
+			}
+		}
 	}
 
 	fmt.Fprintf(os.Stdout, "\nResults: %d passed, %d warnings, %d failed\n", passCount, warnCount, failCount)
@@ -789,39 +799,6 @@ func checkNanaJSONStateFiles(cwd string) doctorCheck {
 		return doctorCheck{Name: "NANA JSON state", Status: "pass", Message: "no JSON state files yet"}
 	}
 	return doctorCheck{Name: "NANA JSON state", Status: "pass", Message: fmt.Sprintf("%d JSON state file(s) valid", len(paths))}
-}
-
-func checkWorkSQLiteState() doctorCheck {
-	report, err := inspectLocalWorkDB()
-	if err != nil {
-		return doctorCheck{Name: "Work SQLite state", Status: "fail", Message: err.Error()}
-	}
-	if !report.Exists {
-		return doctorCheck{Name: "Work SQLite state", Status: "pass", Message: "not created yet"}
-	}
-	if report.Empty {
-		return doctorCheck{Name: "Work SQLite state", Status: "pass", Message: "empty schema present"}
-	}
-	failures := []string{}
-	warnings := []string{}
-	for _, diagnostic := range report.Diagnostics {
-		switch diagnostic.Severity {
-		case "fail":
-			failures = append(failures, diagnostic.Message)
-		case "warn":
-			warnings = append(warnings, diagnostic.Message)
-		}
-	}
-	if len(failures) > 0 {
-		return doctorCheck{Name: "Work SQLite state", Status: "fail", Message: strings.Join(limitStrings(failures, 3), "; ")}
-	}
-	if report.RepairRequired || len(warnings) > 0 {
-		if len(warnings) == 0 {
-			warnings = append(warnings, "repair required")
-		}
-		return doctorCheck{Name: "Work SQLite state", Status: "warn", Message: strings.Join(limitStrings(warnings, 3), "; ")}
-	}
-	return doctorCheck{Name: "Work SQLite state", Status: "pass", Message: fmt.Sprintf("schema version %d healthy", report.SchemaVersion)}
 }
 
 func limitStrings(values []string, limit int) []string {

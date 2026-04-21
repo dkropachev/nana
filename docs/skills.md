@@ -18,7 +18,7 @@ Use this checklist when adding or changing a nana skill. Skills are a high-lever
 - **Lazy runtime wiring:** if the skill needs implicit keyword activation, update both `templates/AGENTS.md` and the generated `AGENTS.md` entry in the same change. Explicit-only skills do not need a lazy trigger row.
 - **Runtime size:** keep the initially loaded `SKILL.md` concise. Move long workflows, tables, examples, or role prompts into `RUNTIME.md` or targeted reference files.
 - **Reference loading:** if a skill has `references/`, instruct agents to open only the specific file needed for the current variant. Do not require bulk-loading a whole folder.
-- **Telemetry:** preserve the existing expectation that skill and reference loads are recorded as `skill_doc_load` and `skill_reference_load` events in `.nana/logs/context-telemetry.ndjson`. Do not log raw user arguments, tool output, secrets, or large prompt bodies. Run `nana telemetry summary` after runtime/reference changes and resolve skill-load budget warnings.
+- **Telemetry:** preserve the existing expectation that skill and reference loads are recorded as `skill_doc_load` and `skill_reference_load` events in `.nana/logs/context-telemetry.ndjson`. Do not log raw user arguments, tool output, secrets, or large prompt bodies.
 - **Fallback behavior:** say what the agent should do when the skill file, runtime document, script, or external CLI is missing. Prefer a safe degraded workflow over failing silently.
 - **Verification:** include a minimal local check that proves the skill can be discovered and that repo diagnostics still pass.
 
@@ -90,8 +90,9 @@ For large workflows, keep the template as the short entry point and put detailed
 ## Performance and context budget
 
 - Keep `SKILL.md` short enough to scan quickly; use links to specific runtime/reference files for variant detail.
-- Treat `nana telemetry summary` warnings as regressions unless the workflow intentionally needs more context. Defaults warn above 8 skill/reference load events or above 3 reference loads in the selected run/session; use `--skill-load-budget` or `--reference-load-budget` to tune local checks.
+- Keep each turn near the default telemetry budget: at most 3 skill runtime doc loads, 4 reference loads, and 6 total skill/reference loads. `nana telemetry summary` warns when the current run exceeds these thresholds.
 - Prefer reusable scripts or templates over pasting long generated examples into the skill body.
+- If a workflow needs more context, split references by variant and tell agents to summarize the loaded section before opening another file.
 - Make optional network calls, external CLIs, and expensive checks explicit in the workflow, with a documented fallback when unavailable.
 - Do not add broad implicit triggers just to improve discoverability; document explicit `$skill-name` usage instead.
 

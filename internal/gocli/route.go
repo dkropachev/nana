@@ -212,18 +212,6 @@ func explainPromptRoute(prompt string, docPath func(string) routeDoc, validExpli
 
 	if promptInvocation := firstPromptInvocation(prompt); promptInvocation != "" {
 		preview.ImplicitSuppressedBy = promptInvocation
-		for _, rule := range routeRules {
-			for _, match := range keywordMatches(prompt, rule.Keywords) {
-				preview.IgnoredTriggers = append(preview.IgnoredTriggers, routeIgnoredTrigger{
-					Skill:   rule.Skill,
-					Source:  routeSourceImplicitKeyword,
-					Trigger: match.trigger,
-					Reason:  fmt.Sprintf("suppressed by %s because /prompts:<name> disables implicit keyword routing", promptInvocation),
-					Start:   match.start,
-				})
-			}
-		}
-		sortIgnoredTriggers(preview.IgnoredTriggers)
 		if len(preview.Activations) == 0 {
 			preview.NoActivationReason = fmt.Sprintf("%s suppresses implicit keyword routing; add an explicit $skill token to activate a skill.", promptInvocation)
 		}
@@ -461,7 +449,7 @@ func routeDocResolverForBase(base routeDocBase) func(string) routeDoc {
 		}
 		return routeDoc{
 			Path:       base.displayDocPath(skill, "RUNTIME.md"),
-			ActualPath: filepath.Join(base.actualSkillsDir, skill, "RUNTIME.md"),
+			ActualPath: base.actualDocPath(skill, "RUNTIME.md"),
 			Label:      routeDocLabelRuntime,
 		}
 	}
@@ -499,6 +487,10 @@ func (base routeDocBase) displayDocPath(skill string, filename string) string {
 		return "." + string(os.PathSeparator) + displayPath
 	}
 	return displayPath
+}
+
+func (base routeDocBase) actualDocPath(skill string, filename string) string {
+	return filepath.Join(base.actualSkillsDir, skill, filename)
 }
 
 func FormatRoutePreview(preview routePreview) string {
