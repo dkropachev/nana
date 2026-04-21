@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -464,11 +465,587 @@ func TestStartUIAPIUsage(t *testing.T) {
 	if payload.Summary.Totals.TotalTokens != 360 || payload.Summary.Totals.Sessions != 2 {
 		t.Fatalf("unexpected usage summary: %+v", payload.Summary.Totals)
 	}
+	if strings.TrimSpace(payload.Version) == "" {
+		t.Fatalf("expected usage version, got %+v", payload)
+	}
 	if len(payload.ByRoot) != 2 || payload.ByRoot[0].Key != "work" {
 		t.Fatalf("unexpected root breakdown: %+v", payload.ByRoot)
 	}
 	if len(payload.TopSessions) != 2 || payload.TopSessions[0].SessionID != "usage-work" {
 		t.Fatalf("unexpected top sessions: %+v", payload.TopSessions)
+	}
+}
+
+func TestStartUIUsageCacheReusesRecentReportAndRefreshesAfterTTL(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	rolloutPath := writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID:      "usage-cache",
+		Timestamp:      "2026-04-15T12:00:00Z",
+		CWD:            cwd,
+		Model:          "gpt-5.4",
+		TokenSnapshots: []usageTokenSnapshot{{Input: 100, Output: 20, Total: 120}},
+	})
+
+	resetUsageRolloutCache()
+	defer resetUsageRolloutCache()
+
+	previousTTL := startUIUsageCacheTTL
+	previousNow := startUIUsageCacheNow
+	previousIndexProbe := startUIUsageIndexProbeInterval
+	startUIUsageCacheTTL = time.Hour
+	startUIUsageIndexProbeInterval = 0
+	now := time.Date(2026, time.April, 20, 12, 0, 0, 0, time.UTC)
+	startUIUsageCacheNow = func() time.Time { return now }
+	defer func() {
+		startUIUsageCacheTTL = previousTTL
+		startUIUsageCacheNow = previousNow
+		startUIUsageIndexProbeInterval = previousIndexProbe
+	}()
+
+	api := &startUIAPI{cwd: cwd}
+	first, err := api.buildUsageReport(url.Values{"root": {"all"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(first): %v", err)
+	}
+	if first.Summary.Totals.TotalTokens != 120 {
+		t.Fatalf("unexpected first total: %+v", first.Summary.Totals)
+	}
+	if strings.TrimSpace(first.Version) == "" {
+		t.Fatalf("expected first usage version")
+	}
+
+	second, err := api.buildUsageReport(url.Values{"root": {"all"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(second): %v", err)
+	}
+	if second.Version != first.Version || second.Summary.Totals.TotalTokens != first.Summary.Totals.TotalTokens {
+		t.Fatalf("expected identical cached report, got first=%+v second=%+v", first.Summary.Totals, second.Summary.Totals)
+	}
+
+	rolloutPath = writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID:      "usage-cache",
+		Timestamp:      "2026-04-15T12:00:00Z",
+		CWD:            cwd,
+		Model:          "gpt-5.4",
+		TokenSnapshots: []usageTokenSnapshot{{Input: 200, Output: 40, Total: 240}},
+	})
+	updatedAt := now.Add(30 * time.Minute)
+	if err := os.Chtimes(rolloutPath, updatedAt, updatedAt); err != nil {
+		t.Fatalf("chtimes updated rollout: %v", err)
+	}
+
+	refreshed, err := api.buildUsageReport(url.Values{"root": {"all"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(refreshed): %v", err)
+	}
+	if refreshed.Summary.Totals.TotalTokens != 240 {
+		t.Fatalf("expected refreshed total to update to 240, got %+v", refreshed.Summary.Totals)
+	}
+	if refreshed.Version == first.Version {
+		t.Fatalf("expected usage version change after rollout update")
+	}
+}
+
+func TestStartUIUsageIndexWritesPersistentState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID:      "usage-index",
+		Timestamp:      "2026-04-15T12:00:00Z",
+		CWD:            cwd,
+		Model:          "gpt-5.4",
+		TokenSnapshots: []usageTokenSnapshot{{Input: 80, Output: 12, Total: 92}},
+	})
+
+	resetUsageRolloutCache()
+	defer resetUsageRolloutCache()
+
+	previousIndexProbe := startUIUsageIndexProbeInterval
+	startUIUsageIndexProbeInterval = 0
+	defer func() { startUIUsageIndexProbeInterval = previousIndexProbe }()
+
+	api := &startUIAPI{cwd: cwd}
+	report, err := api.buildUsageReport(url.Values{"root": {"all"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(): %v", err)
+	}
+	if strings.TrimSpace(report.Version) == "" {
+		t.Fatalf("expected usage report version")
+	}
+
+	index := readStartUIUsageIndexState(startUIUsageIndexPath())
+	if index.SessionRootsScanned != 1 {
+		t.Fatalf("unexpected session roots scanned: %+v", index)
+	}
+	if len(index.Entries) != 1 || index.Entries[0].Record.SessionID != "usage-index" {
+		t.Fatalf("unexpected persisted usage index: %+v", index)
+	}
+	if index.SchemaVersion != startUIUsageIndexSchemaVersion {
+		t.Fatalf("unexpected schema version in persisted usage index: %+v", index)
+	}
+	if index.Version != report.Version {
+		t.Fatalf("expected persisted index version to match report version: index=%q report=%q", index.Version, report.Version)
+	}
+	if _, err := os.Stat(startUIUsageIndexPath() + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("expected no lingering temp index file, got err=%v", err)
+	}
+}
+
+func TestStartUIOverviewWritesPersistentState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	repoSlug := "acme/widget"
+	createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  "2026-04-15T12:00:00Z",
+		Issues: map[string]startWorkIssueState{
+			"1": {SourceNumber: 1, Title: "Issue", Status: startWorkStatusQueued, UpdatedAt: "2026-04-15T12:00:00Z"},
+		},
+		ServiceTasks: map[string]startWorkServiceTask{},
+		PlannedItems: map[string]startWorkPlannedItem{},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	api := &startUIAPI{cwd: cwd}
+	overview, err := api.buildOverview()
+	if err != nil {
+		t.Fatalf("buildOverview(): %v", err)
+	}
+
+	persisted := readStartUIPersistedOverviewCacheState(startUIOverviewCachePath())
+	if persisted.SchemaVersion != startUIOverviewCacheSchemaVersion {
+		t.Fatalf("unexpected overview cache schema version: %+v", persisted)
+	}
+	if persisted.OverviewVersion != startUIOverviewVersion(overview) {
+		t.Fatalf("expected persisted overview version to match built overview: persisted=%q built=%q", persisted.OverviewVersion, startUIOverviewVersion(overview))
+	}
+	if persisted.Overview.Totals.IssuesQueued != overview.Totals.IssuesQueued {
+		t.Fatalf("unexpected persisted overview totals: %+v", persisted.Overview.Totals)
+	}
+	if strings.TrimSpace(persisted.DependencyToken) == "" || len(persisted.Dependencies) == 0 {
+		t.Fatalf("expected persisted dependency snapshot, got %+v", persisted)
+	}
+	if _, err := os.Stat(startUIOverviewCachePath() + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("expected no lingering temp overview cache file, got err=%v", err)
+	}
+}
+
+func TestStartUIEventsPayloadUsesLastKnownUsageVersion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	rolloutPath := writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID:      "usage-events",
+		Timestamp:      "2026-04-15T12:00:00Z",
+		CWD:            cwd,
+		Model:          "gpt-5.4",
+		TokenSnapshots: []usageTokenSnapshot{{Input: 50, Output: 10, Total: 60}},
+	})
+
+	resetUsageRolloutCache()
+	defer resetUsageRolloutCache()
+
+	previousIndexProbe := startUIUsageIndexProbeInterval
+	startUIUsageIndexProbeInterval = 0
+	defer func() { startUIUsageIndexProbeInterval = previousIndexProbe }()
+
+	api := &startUIAPI{cwd: cwd}
+	firstReport, err := api.buildUsageReport(url.Values{"root": {"all"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(first): %v", err)
+	}
+
+	first, err := api.buildEventsPayload()
+	if err != nil {
+		t.Fatalf("buildEventsPayload(first): %v", err)
+	}
+	firstOverviewVersion := strings.TrimSpace(fmt.Sprint(first["overview_version"]))
+	firstUsageVersion := strings.TrimSpace(fmt.Sprint(first["usage_version"]))
+	if firstOverviewVersion == "" || firstUsageVersion == "" {
+		t.Fatalf("expected event versions, got %+v", first)
+	}
+	if firstUsageVersion != firstReport.Version {
+		t.Fatalf("expected events payload to expose last known usage version %q, got %+v", firstReport.Version, first)
+	}
+	for _, forbidden := range []string{"totals", "repos", "work_runs", "work_items", "hud"} {
+		if _, ok := first[forbidden]; ok {
+			t.Fatalf("expected versions-only events payload, got %+v", first)
+		}
+	}
+
+	rolloutPath = writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID:      "usage-events",
+		Timestamp:      "2026-04-15T12:00:00Z",
+		CWD:            cwd,
+		Model:          "gpt-5.4",
+		TokenSnapshots: []usageTokenSnapshot{{Input: 90, Output: 10, Total: 100}},
+	})
+	updatedAt := time.Now().Add(time.Minute)
+	if err := os.Chtimes(rolloutPath, updatedAt, updatedAt); err != nil {
+		t.Fatalf("chtimes updated rollout: %v", err)
+	}
+
+	second, err := api.buildEventsPayload()
+	if err != nil {
+		t.Fatalf("buildEventsPayload(second): %v", err)
+	}
+	secondOverviewVersion := strings.TrimSpace(fmt.Sprint(second["overview_version"]))
+	secondUsageVersion := strings.TrimSpace(fmt.Sprint(second["usage_version"]))
+	if secondOverviewVersion != firstOverviewVersion {
+		t.Fatalf("expected overview version to stay stable, got %q -> %q", firstOverviewVersion, secondOverviewVersion)
+	}
+	if secondUsageVersion != firstUsageVersion {
+		t.Fatalf("expected events payload to keep last known usage version until usage refresh, got %q -> %q", firstUsageVersion, secondUsageVersion)
+	}
+
+	refreshedReport, err := api.buildUsageReport(url.Values{"root": {"all"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(refreshed): %v", err)
+	}
+	if refreshedReport.Version == firstReport.Version {
+		t.Fatalf("expected usage report version to change after rollout update")
+	}
+
+	third, err := api.buildEventsPayload()
+	if err != nil {
+		t.Fatalf("buildEventsPayload(third): %v", err)
+	}
+	thirdUsageVersion := strings.TrimSpace(fmt.Sprint(third["usage_version"]))
+	if thirdUsageVersion != refreshedReport.Version {
+		t.Fatalf("expected events payload to expose refreshed usage version %q, got %+v", refreshedReport.Version, third)
+	}
+}
+
+func TestStartUIEventsPayloadLoadsPersistedUsageVersionWarmState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID:      "usage-events-warm",
+		Timestamp:      "2026-04-15T12:00:00Z",
+		CWD:            cwd,
+		Model:          "gpt-5.4",
+		TokenSnapshots: []usageTokenSnapshot{{Input: 41, Output: 9, Total: 50}},
+	})
+
+	resetUsageRolloutCache()
+	defer resetUsageRolloutCache()
+
+	sourceAPI := &startUIAPI{cwd: cwd}
+	report, err := sourceAPI.buildUsageReport(url.Values{"root": {"all"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(seed): %v", err)
+	}
+
+	warmAPI := &startUIAPI{cwd: cwd}
+	warmAPI.loadPersistedUsageIndex()
+	if !warmAPI.usageIndexCache.valid {
+		t.Fatalf("expected loadPersistedUsageIndex to populate cache")
+	}
+	if !warmAPI.usageIndexCache.checkedAt.IsZero() {
+		t.Fatalf("expected persisted usage cache warm state to remain stale for the next usage refresh")
+	}
+
+	payload, err := warmAPI.buildEventsPayload()
+	if err != nil {
+		t.Fatalf("buildEventsPayload(warm): %v", err)
+	}
+	if strings.TrimSpace(fmt.Sprint(payload["usage_version"])) != report.Version {
+		t.Fatalf("expected warm events payload to use persisted usage version %q, got %+v", report.Version, payload)
+	}
+}
+
+func TestStartUIUsageIndexRebuildsWhenPersistedFileIsCorrupt(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID:      "usage-corrupt",
+		Timestamp:      "2026-04-15T12:00:00Z",
+		CWD:            cwd,
+		Model:          "gpt-5.4",
+		TokenSnapshots: []usageTokenSnapshot{{Input: 33, Output: 9, Total: 42}},
+	})
+
+	resetUsageRolloutCache()
+	defer resetUsageRolloutCache()
+
+	previousIndexProbe := startUIUsageIndexProbeInterval
+	startUIUsageIndexProbeInterval = 0
+	defer func() { startUIUsageIndexProbeInterval = previousIndexProbe }()
+
+	api := &startUIAPI{cwd: cwd}
+	if _, err := api.buildUsageReport(url.Values{"root": {"all"}}); err != nil {
+		t.Fatalf("seed buildUsageReport(): %v", err)
+	}
+	if err := os.WriteFile(startUIUsageIndexPath(), []byte("{invalid-json"), 0o644); err != nil {
+		t.Fatalf("write corrupt usage index: %v", err)
+	}
+	api.usageIndexCache = startUISectionCache[startUIUsageIndexState]{}
+
+	report, err := api.buildUsageReport(url.Values{"root": {"all"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport after corrupt index: %v", err)
+	}
+	if report.Summary.Totals.TotalTokens != 42 {
+		t.Fatalf("expected rebuild from transcripts after corrupt index, got %+v", report.Summary.Totals)
+	}
+	index := readStartUIUsageIndexState(startUIUsageIndexPath())
+	if index.SchemaVersion != startUIUsageIndexSchemaVersion || len(index.Entries) != 1 {
+		t.Fatalf("expected rebuilt persisted index, got %+v", index)
+	}
+}
+
+func TestStartUIOverviewLoadsPersistedWarmState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	repoSlug := "acme/widget"
+	createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  "2026-04-15T12:00:00Z",
+		Issues: map[string]startWorkIssueState{
+			"1": {SourceNumber: 1, Title: "Issue", Status: startWorkStatusQueued, UpdatedAt: "2026-04-15T12:00:00Z"},
+		},
+		ServiceTasks: map[string]startWorkServiceTask{},
+		PlannedItems: map[string]startWorkPlannedItem{},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	seedAPI := &startUIAPI{cwd: cwd}
+	if _, err := seedAPI.buildOverview(); err != nil {
+		t.Fatalf("seed buildOverview(): %v", err)
+	}
+
+	api := &startUIAPI{cwd: cwd}
+	api.loadPersistedOverviewCache()
+	if !api.overviewCache.valid {
+		t.Fatalf("expected overview cache to load from persisted state")
+	}
+	if api.overviewCache.overview.Totals.IssuesQueued != 1 {
+		t.Fatalf("unexpected loaded overview cache: %+v", api.overviewCache.overview.Totals)
+	}
+}
+
+func TestStartUIOverviewRebuildsWhenPersistedFileIsCorrupt(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	repoSlug := "acme/widget"
+	createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  "2026-04-15T12:00:00Z",
+		Issues: map[string]startWorkIssueState{
+			"1": {SourceNumber: 1, Title: "Issue", Status: startWorkStatusQueued, UpdatedAt: "2026-04-15T12:00:00Z"},
+		},
+		ServiceTasks: map[string]startWorkServiceTask{},
+		PlannedItems: map[string]startWorkPlannedItem{},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(startUIOverviewCachePath()), 0o755); err != nil {
+		t.Fatalf("mkdir overview cache dir: %v", err)
+	}
+	if err := os.WriteFile(startUIOverviewCachePath(), []byte("{invalid-json"), 0o644); err != nil {
+		t.Fatalf("write corrupt overview cache: %v", err)
+	}
+
+	api := &startUIAPI{cwd: cwd}
+	api.loadPersistedOverviewCache()
+	if api.overviewCache.valid {
+		t.Fatalf("expected corrupt overview cache to be ignored")
+	}
+	overview, err := api.buildOverview()
+	if err != nil {
+		t.Fatalf("buildOverview(): %v", err)
+	}
+	if overview.Totals.IssuesQueued != 1 {
+		t.Fatalf("expected rebuild from source state, got %+v", overview.Totals)
+	}
+	persisted := readStartUIPersistedOverviewCacheState(startUIOverviewCachePath())
+	if persisted.SchemaVersion != startUIOverviewCacheSchemaVersion || persisted.Overview.Totals.IssuesQueued != 1 {
+		t.Fatalf("expected rebuilt persisted overview cache, got %+v", persisted)
+	}
+}
+
+func TestStartUIOverviewRebuildsWhenPersistedFileSchemaIsStale(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	repoSlug := "acme/widget"
+	createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  "2026-04-15T12:00:00Z",
+		Issues: map[string]startWorkIssueState{
+			"1": {SourceNumber: 1, Title: "Issue", Status: startWorkStatusQueued, UpdatedAt: "2026-04-15T12:00:00Z"},
+		},
+		ServiceTasks: map[string]startWorkServiceTask{},
+		PlannedItems: map[string]startWorkPlannedItem{},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+	stale := startUIPersistedOverviewCacheState{
+		SchemaVersion:   startUIOverviewCacheSchemaVersion - 1,
+		OverviewVersion: "stale",
+		GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+		Overview:        startUIOverview{GeneratedAt: time.Now().UTC().Format(time.RFC3339), Totals: startUITotals{IssuesQueued: 999}},
+		Dependencies:    []string{"stale"},
+		DependencyToken: "stale",
+	}
+	if err := writeStartUIPersistedOverviewCacheState(startUIOverviewCachePath(), stale); err != nil {
+		t.Fatalf("write stale overview cache: %v", err)
+	}
+
+	api := &startUIAPI{cwd: cwd}
+	api.loadPersistedOverviewCache()
+	if api.overviewCache.valid {
+		t.Fatalf("expected stale-schema overview cache to be ignored")
+	}
+	overview, err := api.buildOverview()
+	if err != nil {
+		t.Fatalf("buildOverview(): %v", err)
+	}
+	if overview.Totals.IssuesQueued != 1 {
+		t.Fatalf("expected rebuild from source state, got %+v", overview.Totals)
+	}
+	persisted := readStartUIPersistedOverviewCacheState(startUIOverviewCachePath())
+	if persisted.SchemaVersion != startUIOverviewCacheSchemaVersion || persisted.OverviewVersion == "stale" {
+		t.Fatalf("expected rebuilt current-schema overview cache, got %+v", persisted)
+	}
+}
+
+func TestStartUIUsageIndexRebuildsWhenSchemaVersionIsStale(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID:      "usage-stale-schema",
+		Timestamp:      "2026-04-15T12:00:00Z",
+		CWD:            cwd,
+		Model:          "gpt-5.4",
+		TokenSnapshots: []usageTokenSnapshot{{Input: 41, Output: 1, Total: 42}},
+	})
+
+	resetUsageRolloutCache()
+	defer resetUsageRolloutCache()
+
+	previousIndexProbe := startUIUsageIndexProbeInterval
+	startUIUsageIndexProbeInterval = 0
+	defer func() { startUIUsageIndexProbeInterval = previousIndexProbe }()
+
+	stale := startUIUsageIndexState{
+		SchemaVersion:       startUIUsageIndexSchemaVersion - 1,
+		Version:             "stale",
+		UpdatedAt:           time.Now().UTC().Format(time.RFC3339),
+		SessionRootsScanned: 99,
+		Entries: []startUIUsageIndexEntry{{
+			Path:   filepath.Join(home, "stale.jsonl"),
+			Root:   "main",
+			Record: usageRecord{SessionID: "stale", TotalTokens: 999, HasTokenUsage: true},
+		}},
+	}
+	if err := writeStartUIUsageIndexState(startUIUsageIndexPath(), stale); err != nil {
+		t.Fatalf("write stale schema usage index: %v", err)
+	}
+
+	api := &startUIAPI{cwd: cwd}
+	report, err := api.buildUsageReport(url.Values{"root": {"all"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport after stale schema: %v", err)
+	}
+	if report.Summary.Totals.TotalTokens != 42 {
+		t.Fatalf("expected rebuild from transcripts after stale schema, got %+v", report.Summary.Totals)
+	}
+	index := readStartUIUsageIndexState(startUIUsageIndexPath())
+	if index.SchemaVersion != startUIUsageIndexSchemaVersion || index.Version == "stale" {
+		t.Fatalf("expected rebuilt current-schema index, got %+v", index)
+	}
+}
+
+func TestStartUIPrewarmPopulatesOverviewAndUsageIndexCaches(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	repoSlug := "acme/widget"
+	createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  "2026-04-15T12:00:00Z",
+		Issues: map[string]startWorkIssueState{
+			"1": {SourceNumber: 1, Title: "Issue", Status: startWorkStatusQueued, UpdatedAt: "2026-04-15T12:00:00Z"},
+		},
+		ServiceTasks: map[string]startWorkServiceTask{},
+		PlannedItems: map[string]startWorkPlannedItem{},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+	writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID:      "usage-prewarm",
+		Timestamp:      "2026-04-15T12:00:00Z",
+		CWD:            cwd,
+		Model:          "gpt-5.4",
+		TokenSnapshots: []usageTokenSnapshot{{Input: 60, Output: 6, Total: 66}},
+	})
+
+	resetUsageRolloutCache()
+	defer resetUsageRolloutCache()
+
+	api := &startUIAPI{cwd: cwd}
+	if err := api.prewarmStartUIData(); err != nil {
+		t.Fatalf("prewarmStartUIData(): %v", err)
+	}
+	if !api.overviewCache.valid {
+		t.Fatalf("expected overview cache to be populated by prewarm")
+	}
+	if !api.usageIndexCache.valid || len(api.usageIndexCache.value.Entries) != 1 {
+		t.Fatalf("expected usage index cache to be populated by prewarm, got %+v", api.usageIndexCache.value)
+	}
+	if _, err := os.Stat(startUIOverviewCachePath()); err != nil {
+		t.Fatalf("expected persisted overview cache after prewarm: %v", err)
+	}
+	if _, err := os.Stat(startUIUsageIndexPath()); err != nil {
+		t.Fatalf("expected persisted usage index after prewarm: %v", err)
 	}
 }
 
@@ -3640,7 +4217,7 @@ func TestStartUIOverviewCacheReusesSnapshotUntilStateChanges(t *testing.T) {
 	api.overviewCacheMu.Lock()
 	api.overviewCache.overview.Totals.Repos = 99
 	api.overviewCache.overview.Totals.IssuesQueued = 99
-	api.overviewCache.events = startUIOverviewEventsPayload(api.overviewCache.overview)
+	api.overviewCache.events = startUIOverviewEventsPayload(api.overviewCache.overview, startUIOverviewVersion(api.overviewCache.overview), "")
 	api.overviewCacheMu.Unlock()
 
 	cached, err := api.buildOverview()
@@ -3836,7 +4413,7 @@ func TestStartUIOverviewCacheInvalidatesWhenWorkDBChanges(t *testing.T) {
 
 	api.overviewCacheMu.Lock()
 	api.overviewCache.overview.Totals.ActiveWorkRuns = 77
-	api.overviewCache.events = startUIOverviewEventsPayload(api.overviewCache.overview)
+	api.overviewCache.events = startUIOverviewEventsPayload(api.overviewCache.overview, startUIOverviewVersion(api.overviewCache.overview), "")
 	api.overviewCache.checkedAt = time.Time{}
 	api.overviewCacheMu.Unlock()
 
@@ -4025,6 +4602,23 @@ func BenchmarkStartUIBuildOverviewSyntheticMultiRepo(b *testing.B) {
 	}
 }
 
+func BenchmarkStartUIBuildOverviewWarmPersistedCacheSyntheticMultiRepo(b *testing.B) {
+	api := setupStartUISyntheticOverviewBenchmark(b, 25, 15)
+	if _, err := api.buildOverview(); err != nil {
+		b.Fatalf("seed buildOverview: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		warmAPI := &startUIAPI{cwd: api.cwd}
+		warmAPI.loadPersistedOverviewCache()
+		if _, err := warmAPI.buildOverview(); err != nil {
+			b.Fatalf("buildOverview warm persisted cache: %v", err)
+		}
+	}
+}
+
 func BenchmarkStartUIBuildEventsPayloadSyntheticMultiRepo(b *testing.B) {
 	api := setupStartUISyntheticOverviewBenchmark(b, 25, 15)
 	if _, err := api.buildEventsPayload(); err != nil {
@@ -4037,6 +4631,95 @@ func BenchmarkStartUIBuildEventsPayloadSyntheticMultiRepo(b *testing.B) {
 			b.Fatalf("buildEventsPayload: %v", err)
 		}
 	}
+}
+
+func BenchmarkStartUIBuildUsageReportSyntheticSessions(b *testing.B) {
+	api := setupStartUISyntheticUsageBenchmark(b, 800)
+	query := url.Values{"root": {"all"}}
+	indexPath := startUIUsageIndexPath()
+
+	b.Run("full-refresh", func(b *testing.B) {
+		previousTTL := startUIUsageCacheTTL
+		previousIndexProbe := startUIUsageIndexProbeInterval
+		startUIUsageCacheTTL = 0
+		startUIUsageIndexProbeInterval = 0
+		defer func() {
+			startUIUsageCacheTTL = previousTTL
+			startUIUsageIndexProbeInterval = previousIndexProbe
+		}()
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			resetUsageRolloutCache()
+			api.usageCache = nil
+			api.usageIndexCache = startUISectionCache[startUIUsageIndexState]{}
+			_ = os.Remove(indexPath)
+			if _, err := api.buildUsageReport(query); err != nil {
+				b.Fatalf("buildUsageReport(full-refresh): %v", err)
+			}
+		}
+	})
+
+	b.Run("indexed-cold", func(b *testing.B) {
+		previousTTL := startUIUsageCacheTTL
+		previousIndexProbe := startUIUsageIndexProbeInterval
+		startUIUsageCacheTTL = 0
+		startUIUsageIndexProbeInterval = 0
+		defer func() {
+			startUIUsageCacheTTL = previousTTL
+			startUIUsageIndexProbeInterval = previousIndexProbe
+		}()
+
+		resetUsageRolloutCache()
+		api.usageCache = nil
+		api.usageIndexCache = startUISectionCache[startUIUsageIndexState]{}
+		_ = os.Remove(indexPath)
+		if _, err := api.buildUsageReport(query); err != nil {
+			b.Fatalf("seed usage index: %v", err)
+		}
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			resetUsageRolloutCache()
+			api.usageCache = nil
+			api.usageIndexCache = startUISectionCache[startUIUsageIndexState]{}
+			if _, err := api.buildUsageReport(query); err != nil {
+				b.Fatalf("buildUsageReport(indexed-cold): %v", err)
+			}
+		}
+	})
+
+	b.Run("warm", func(b *testing.B) {
+		previousTTL := startUIUsageCacheTTL
+		previousNow := startUIUsageCacheNow
+		previousIndexProbe := startUIUsageIndexProbeInterval
+		startUIUsageCacheTTL = time.Hour
+		startUIUsageIndexProbeInterval = time.Hour
+		now := time.Now()
+		startUIUsageCacheNow = func() time.Time { return now }
+		defer func() {
+			startUIUsageCacheTTL = previousTTL
+			startUIUsageCacheNow = previousNow
+			startUIUsageIndexProbeInterval = previousIndexProbe
+		}()
+
+		resetUsageRolloutCache()
+		api.usageCache = nil
+		api.usageIndexCache = startUISectionCache[startUIUsageIndexState]{}
+		if _, err := api.buildUsageReport(query); err != nil {
+			b.Fatalf("warm usage seed: %v", err)
+		}
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, err := api.buildUsageReport(query); err != nil {
+				b.Fatalf("buildUsageReport(warm): %v", err)
+			}
+		}
+	})
 }
 
 func setupStartUISyntheticOverviewBenchmark(b *testing.B, repoCount int, workItemCount int) *startUIAPI {
@@ -4131,6 +4814,45 @@ func setupStartUISyntheticOverviewBenchmark(b *testing.B, repoCount int, workIte
 		}, "benchmark"); err != nil {
 			b.Fatalf("enqueue work item: %v", err)
 		}
+	}
+
+	return &startUIAPI{cwd: cwd}
+}
+
+func setupStartUISyntheticUsageBenchmark(b *testing.B, sessionCount int) *startUIAPI {
+	b.Helper()
+	home := b.TempDir()
+	b.Setenv("HOME", home)
+	cwd := b.TempDir()
+	resetUsageRolloutCache()
+	now := time.Date(2026, time.April, 15, 12, 0, 0, 0, time.UTC)
+
+	for i := 0; i < sessionCount; i++ {
+		rootDir := filepath.Join(home, ".nana", "codex-home", "sessions")
+		cwdValue := filepath.Join(cwd, fmt.Sprintf("repo-%03d", i%25))
+		fixture := usageRolloutFixture{
+			SessionID: fmt.Sprintf("usage-bench-%04d", i),
+			Timestamp: now.Add(time.Duration(i) * time.Minute).Format(time.RFC3339),
+			CWD:       cwdValue,
+			Model:     "gpt-5.4",
+			TokenSnapshots: []usageTokenSnapshot{{
+				Input:           100 + (i % 10),
+				CachedInput:     i % 5,
+				Output:          25 + (i % 7),
+				ReasoningOutput: i % 3,
+				Total:           130 + (i % 17),
+			}},
+		}
+		if i%3 == 1 {
+			rootDir = filepath.Join(home, ".nana", "work", "sandboxes", fmt.Sprintf("repo-%03d", i), "lw-1", ".nana", "work", "codex-home", "leader", "sessions")
+			fixture.AgentRole = "leader"
+			fixture.CWD = filepath.Join(home, ".nana", "work", "sandboxes", fmt.Sprintf("repo-%03d", i), "lw-1", "repo")
+		} else if i%3 == 2 {
+			rootDir = filepath.Join(home, ".nana", "work", "repos", "acme", fmt.Sprintf("widget-%03d", i), ".nana", "start", "codex-home", "triage", "sessions")
+			fixture.AgentRole = "triage"
+			fixture.CWD = filepath.Join(home, ".nana", "work", "repos", "acme", fmt.Sprintf("widget-%03d", i), "source")
+		}
+		writeUsageRollout(b, rootDir, fixture)
 	}
 
 	return &startUIAPI{cwd: cwd}

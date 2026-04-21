@@ -23,10 +23,12 @@ import (
 )
 
 const (
-	startUIDefaultAPIPort   = 17653
-	startUIDefaultWebPort   = 17654
-	startUIBindHost         = "0.0.0.0"
-	startUIOverviewRunLimit = 10
+	startUIDefaultAPIPort             = 17653
+	startUIDefaultWebPort             = 17654
+	startUIBindHost                   = "0.0.0.0"
+	startUIOverviewRunLimit           = 10
+	startUIOverviewCacheSchemaVersion = 1
+	startUIUsageIndexSchemaVersion    = 1
 )
 
 type startUIRuntimeState struct {
@@ -38,11 +40,13 @@ type startUIRuntimeState struct {
 }
 
 type startUISupervisor struct {
-	runtimePath string
-	apiServer   *http.Server
-	webServer   *http.Server
-	apiURL      string
-	webURL      string
+	runtimePath   string
+	apiServer     *http.Server
+	webServer     *http.Server
+	apiURL        string
+	webURL        string
+	prewarmCancel context.CancelFunc
+	prewarmDone   chan struct{}
 }
 
 type startUIAPI struct {
@@ -50,11 +54,18 @@ type startUIAPI struct {
 	allowedWebOrigin string
 	overviewCacheMu  sync.Mutex
 	overviewCache    startUIOverviewCache
+	sectionCacheMu   sync.Mutex
+	sectionCaches    startUIOverviewSectionCaches
+	usageIndexMu     sync.Mutex
+	usageIndexCache  startUISectionCache[startUIUsageIndexState]
+	usageCacheMu     sync.Mutex
+	usageCache       map[string]startUIUsageCacheEntry
 }
 
 type startUIOverviewCache struct {
 	valid     bool
 	token     string
+	version   string
 	checkedAt time.Time
 	deps      []string
 	overview  startUIOverview
@@ -63,14 +74,77 @@ type startUIOverviewCache struct {
 
 var startUIOverviewCacheProbeInterval = 5 * time.Second
 
-type startUIOverviewDependencySnapshot struct {
+type startUIDependencySnapshot struct {
 	deps  []string
 	token string
+}
+
+type startUISectionCache[T any] struct {
+	valid     bool
+	token     string
+	checkedAt time.Time
+	deps      []string
+	value     T
+}
+
+type startUIOverviewSectionCaches struct {
+	repos              startUISectionCache[startUIOverviewReposSection]
+	workRuns           startUISectionCache[[]startUIWorkRun]
+	workItems          startUISectionCache[startUIOverviewWorkItemsSection]
+	investigationCount startUISectionCache[int]
+	hud                startUISectionCache[HUDRenderContext]
+}
+
+type startUIOverviewReposSection struct {
+	summaries []startUIRepoSummary
+}
+
+type startUIOverviewWorkItemsSection struct {
+	raw          []workItem
+	items        []startUIWorkItem
+	hiddenCount  int
+	pendingCount int
+}
+
+type startUIUsageCacheEntry struct {
+	expiresAt time.Time
+	report    startUIUsageReport
+}
+
+type startUIUsageIndexEntry struct {
+	Path             string      `json:"path"`
+	Root             string      `json:"root"`
+	Size             int64       `json:"size"`
+	ModifiedUnixNano int64       `json:"modified_unix_nano"`
+	Record           usageRecord `json:"record"`
+}
+
+type startUIUsageIndexState struct {
+	SchemaVersion       int                      `json:"schema_version"`
+	Version             string                   `json:"version"`
+	UpdatedAt           string                   `json:"updated_at"`
+	SessionRootsScanned int                      `json:"session_roots_scanned"`
+	Entries             []startUIUsageIndexEntry `json:"entries"`
+}
+
+type startUIPersistedOverviewCacheState struct {
+	SchemaVersion   int             `json:"schema_version"`
+	OverviewVersion string          `json:"overview_version"`
+	GeneratedAt     string          `json:"generated_at"`
+	Overview        startUIOverview `json:"overview"`
+	Dependencies    []string        `json:"dependencies,omitempty"`
+	DependencyToken string          `json:"dependency_token,omitempty"`
 }
 
 // startUIOverviewCacheAfterUncachedBuildHook is overridden by tests to simulate
 // an external writer changing overview dependencies between build and snapshot.
 var startUIOverviewCacheAfterUncachedBuildHook func()
+var startUIPrewarmLogWriter io.Writer = os.Stderr
+var startUIPrewarmDelay = time.Second
+var startUISectionCacheProbeInterval = 5 * time.Second
+var startUIUsageIndexProbeInterval = 5 * time.Second
+var startUIUsageCacheTTL = 5 * time.Second
+var startUIUsageCacheNow = time.Now
 
 type startUITotals struct {
 	Repos            int `json:"repos"`
@@ -142,6 +216,7 @@ type startUIUsageFilters struct {
 
 type startUIUsageReport struct {
 	GeneratedAt string                  `json:"generated_at"`
+	Version     string                  `json:"version"`
 	Filters     startUIUsageFilters     `json:"filters"`
 	Summary     usageSummaryReport      `json:"summary"`
 	ByRoot      []usageGroupRow         `json:"by_root"`
@@ -661,15 +736,21 @@ func launchStartUISupervisor(cwd string, options startOptions) (*startUISupervis
 	}
 
 	api := &startUIAPI{cwd: cwd, allowedWebOrigin: webURL}
+	api.loadPersistedOverviewCache()
+	api.loadPersistedUsageIndex()
 	apiServer := &http.Server{Handler: api.routes()}
 	webServer := &http.Server{Handler: startUIWebHandler(apiURL)}
+	prewarmCtx, prewarmCancel := context.WithCancel(context.Background())
+	prewarmDone := make(chan struct{})
 
 	supervisor := &startUISupervisor{
-		runtimePath: filepath.Join(githubNanaHome(), "start", "ui", "runtime.json"),
-		apiServer:   apiServer,
-		webServer:   webServer,
-		apiURL:      apiURL,
-		webURL:      webURL,
+		runtimePath:   filepath.Join(githubNanaHome(), "start", "ui", "runtime.json"),
+		apiServer:     apiServer,
+		webServer:     webServer,
+		apiURL:        apiURL,
+		webURL:        webURL,
+		prewarmCancel: prewarmCancel,
+		prewarmDone:   prewarmDone,
 	}
 	go func() {
 		_ = apiServer.Serve(apiListener)
@@ -688,12 +769,58 @@ func launchStartUISupervisor(cwd string, options startOptions) (*startUISupervis
 	}
 	fmt.Fprintf(os.Stdout, "[start-ui] API: %s\n", apiURL)
 	fmt.Fprintf(os.Stdout, "[start-ui] Web: %s\n", webURL)
+	go api.prewarmStartUIDataAsync(prewarmCtx, prewarmDone)
 	return supervisor, nil
+}
+
+func (h *startUIAPI) prewarmStartUIDataAsync(ctx context.Context, done chan struct{}) {
+	if done != nil {
+		defer close(done)
+	}
+	if startUIPrewarmDelay > 0 {
+		timer := time.NewTimer(startUIPrewarmDelay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+	}
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+	}
+	if err := h.prewarmStartUIData(); err != nil && startUIPrewarmLogWriter != nil {
+		fmt.Fprintf(startUIPrewarmLogWriter, "[start-ui] prewarm failed: %v\n", err)
+	}
+}
+
+func (h *startUIAPI) prewarmStartUIData() error {
+	errs := []error{}
+	if _, err := h.buildOverview(); err != nil {
+		errs = append(errs, fmt.Errorf("overview: %w", err))
+	}
+	if _, err := h.loadUsageIndex(); err != nil {
+		errs = append(errs, fmt.Errorf("usage index: %w", err))
+	}
+	return errors.Join(errs...)
 }
 
 func (s *startUISupervisor) Close() error {
 	if s == nil {
 		return nil
+	}
+	if s.prewarmCancel != nil {
+		s.prewarmCancel()
+	}
+	if s.prewarmDone != nil {
+		select {
+		case <-s.prewarmDone:
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -1487,6 +1614,9 @@ func (h *startUIAPI) buildCachedOverview() (startUIOverview, error) {
 			h.overviewCache.checkedAt = now
 			return h.overviewCache.overview, nil
 		}
+		h.sectionCacheMu.Lock()
+		h.sectionCaches = startUIOverviewSectionCaches{}
+		h.sectionCacheMu.Unlock()
 	}
 
 	overview, snapshot, stable, err := h.buildOverviewWithStableDependencySnapshot()
@@ -1494,6 +1624,9 @@ func (h *startUIAPI) buildCachedOverview() (startUIOverview, error) {
 		return startUIOverview{}, err
 	}
 	if !stable {
+		h.sectionCacheMu.Lock()
+		h.sectionCaches = startUIOverviewSectionCaches{}
+		h.sectionCacheMu.Unlock()
 		overview, snapshot, stable, err = h.buildOverviewWithStableDependencySnapshot()
 		if err != nil {
 			h.overviewCache.valid = false
@@ -1505,23 +1638,33 @@ func (h *startUIAPI) buildCachedOverview() (startUIOverview, error) {
 		return overview, nil
 	}
 
-	events := startUIOverviewEventsPayload(overview)
+	version := startUIOverviewVersion(overview)
+	events := startUIOverviewEventsPayload(overview, version, "")
 	h.overviewCache = startUIOverviewCache{
 		valid:     true,
 		token:     snapshot.token,
+		version:   version,
 		checkedAt: time.Now(),
 		deps:      snapshot.deps,
 		overview:  overview,
 		events:    events,
 	}
+	_ = writeStartUIPersistedOverviewCacheState(startUIOverviewCachePath(), startUIPersistedOverviewCacheState{
+		SchemaVersion:   startUIOverviewCacheSchemaVersion,
+		OverviewVersion: version,
+		GeneratedAt:     overview.GeneratedAt,
+		Overview:        overview,
+		Dependencies:    append([]string(nil), snapshot.deps...),
+		DependencyToken: snapshot.token,
+	})
 	return overview, nil
 }
 
-func (h *startUIAPI) buildOverviewWithStableDependencySnapshot() (startUIOverview, startUIOverviewDependencySnapshot, bool, error) {
+func (h *startUIAPI) buildOverviewWithStableDependencySnapshot() (startUIOverview, startUIDependencySnapshot, bool, error) {
 	before := snapshotStartUIOverviewDependencies(h.cwd)
 	overview, err := h.buildOverviewUncached()
 	if err != nil {
-		return startUIOverview{}, startUIOverviewDependencySnapshot{}, false, err
+		return startUIOverview{}, startUIDependencySnapshot{}, false, err
 	}
 	if startUIOverviewCacheAfterUncachedBuildHook != nil {
 		startUIOverviewCacheAfterUncachedBuildHook()
@@ -1531,40 +1674,84 @@ func (h *startUIAPI) buildOverviewWithStableDependencySnapshot() (startUIOvervie
 }
 
 func (h *startUIAPI) buildOverviewUncached() (startUIOverview, error) {
-	repos, err := listStartUIRepoSummaries(false)
-	if err != nil {
-		return startUIOverview{}, err
+	var (
+		repoSection        startUIOverviewReposSection
+		workRuns           []startUIWorkRun
+		workItemsSection   startUIOverviewWorkItemsSection
+		investigationCount int
+		hud                HUDRenderContext
+		loadErr            error
+		loadErrMu          sync.Mutex
+		wg                 sync.WaitGroup
+	)
+	recordError := func(err error) {
+		if err == nil {
+			return
+		}
+		loadErrMu.Lock()
+		if loadErr == nil {
+			loadErr = err
+		}
+		loadErrMu.Unlock()
 	}
-	workRuns, err := loadStartUIWorkRuns(startUIOverviewRunLimit)
-	if err != nil {
-		return startUIOverview{}, err
+
+	wg.Add(5)
+	go func() {
+		defer wg.Done()
+		section, err := h.loadOverviewReposSection()
+		if err != nil {
+			recordError(err)
+			return
+		}
+		repoSection = section
+	}()
+	go func() {
+		defer wg.Done()
+		runs, err := h.loadOverviewWorkRunsSection()
+		if err != nil {
+			recordError(err)
+			return
+		}
+		workRuns = runs
+	}()
+	go func() {
+		defer wg.Done()
+		section, err := h.loadOverviewWorkItemsSection()
+		if err != nil {
+			recordError(err)
+			return
+		}
+		workItemsSection = section
+	}()
+	go func() {
+		defer wg.Done()
+		count, err := h.loadOverviewInvestigationCountSection()
+		if err != nil {
+			recordError(err)
+			return
+		}
+		investigationCount = count
+	}()
+	go func() {
+		defer wg.Done()
+		value, err := h.loadOverviewHUDSection()
+		if err != nil {
+			recordError(err)
+			return
+		}
+		hud = value
+	}()
+	wg.Wait()
+	if loadErr != nil {
+		return startUIOverview{}, loadErr
 	}
-	workItems, hiddenCount, pendingWorkItems, err := loadStartUIWorkItemsWithHiddenCount(10)
-	if err != nil {
-		return startUIOverview{}, err
-	}
-	investigations, err := listStartUIInvestigations(h.cwd)
-	if err != nil {
-		return startUIOverview{}, err
-	}
-	reviews, err := loadStartUIFeedbackQueue("review")
-	if err != nil {
-		return startUIOverview{}, err
-	}
-	replies, err := loadStartUIFeedbackQueue("reply")
-	if err != nil {
-		return startUIOverview{}, err
-	}
-	approvals, err := loadStartUIApprovals()
-	if err != nil {
-		return startUIOverview{}, err
-	}
-	hud, err := h.loadHUD()
-	if err != nil {
-		return startUIOverview{}, err
-	}
+
+	repos := startUIStripRepoSummaryState(repoSection.summaries)
+	reviewCount, replyCount := startUICountFeedbackItems(workItemsSection.raw)
+	approvalCount := startUICountApprovals(workRuns, workItemsSection.raw, repoSection.summaries)
+
 	totals := startUITotals{Repos: len(repos)}
-	for _, repo := range repos {
+	for _, repo := range repoSection.summaries {
 		totals.IssuesQueued += repo.IssueCounts[startWorkStatusQueued]
 		totals.IssuesInProgress += repo.IssueCounts[startWorkStatusInProgress]
 		totals.BlockedIssues += repo.IssueCounts[startWorkStatusBlocked]
@@ -1582,19 +1769,19 @@ func (h *startUIAPI) buildOverviewUncached() (startUIOverview, error) {
 			totals.ActiveWorkRuns++
 		}
 	}
-	totals.PendingWorkItems = pendingWorkItems
-	totals.HiddenWorkItems = hiddenCount
-	totals.Investigations = len(investigations)
-	totals.ReviewItems = len(reviews)
-	totals.ReplyItems = len(replies)
-	totals.ApprovalItems = len(approvals)
+	totals.PendingWorkItems = workItemsSection.pendingCount
+	totals.HiddenWorkItems = workItemsSection.hiddenCount
+	totals.Investigations = investigationCount
+	totals.ReviewItems = reviewCount
+	totals.ReplyItems = replyCount
+	totals.ApprovalItems = approvalCount
 	return startUIOverview{
 		GeneratedAt:  time.Now().UTC().Format(time.RFC3339),
 		Totals:       totals,
 		ScoutCatalog: startUIScoutCatalog(),
 		Repos:        repos,
 		WorkRuns:     workRuns,
-		WorkItems:    workItems,
+		WorkItems:    workItemsSection.items,
 		HUD:          hud,
 	}, nil
 }
@@ -1617,22 +1804,37 @@ func (h *startUIAPI) buildUsageReport(query url.Values) (startUIUsageReport, err
 	if _, err := parseSinceSpec(options.Since); err != nil {
 		return startUIUsageReport{}, err
 	}
-	records, sessionRootsScanned, err := collectUsageRecords(options)
+	index, err := h.loadUsageIndex()
 	if err != nil {
 		return startUIUsageReport{}, err
 	}
-	summary := buildUsageSummaryReport(records, sessionRootsScanned)
-	analytics := buildUsageAnalyticsReport(records, sessionRootsScanned)
-	return startUIUsageReport{
+	filters := startUIUsageFilters{
+		Since:    options.Since,
+		Project:  options.Project,
+		Root:     options.Root,
+		Activity: options.Activity,
+		Phase:    options.Phase,
+		Model:    options.Model,
+	}
+	cacheKey := startUIUsageCacheKey(filters, index.Version)
+	now := startUIUsageCacheNow()
+	if startUIUsageCacheTTL > 0 {
+		h.usageCacheMu.Lock()
+		if entry, ok := h.usageCache[cacheKey]; ok && now.Before(entry.expiresAt) {
+			report := entry.report
+			h.usageCacheMu.Unlock()
+			return report, nil
+		}
+		h.usageCacheMu.Unlock()
+	}
+
+	records := startUIUsageRecordsForReport(index, options)
+	summary := buildUsageSummaryReport(records, index.SessionRootsScanned)
+	analytics := buildUsageAnalyticsReport(records, index.SessionRootsScanned)
+	report := startUIUsageReport{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		Filters: startUIUsageFilters{
-			Since:    options.Since,
-			Project:  options.Project,
-			Root:     options.Root,
-			Activity: options.Activity,
-			Phase:    options.Phase,
-			Model:    options.Model,
-		},
+		Version:     index.Version,
+		Filters:     filters,
 		Summary:     summary,
 		ByRoot:      buildUsageGroups(records, "root"),
 		ByActivity:  buildUsageGroups(records, "activity"),
@@ -1640,9 +1842,305 @@ func (h *startUIAPI) buildUsageReport(query url.Values) (startUIUsageReport, err
 		ByLane:      buildUsageGroups(records, "lane"),
 		ByDay:       buildUsageGroups(records, "day"),
 		ByModel:     buildUsageGroups(records, "model"),
-		TopSessions: buildUsageTopReport(records, sessionRootsScanned, "session", 10).Sessions,
+		TopSessions: buildUsageTopReport(records, index.SessionRootsScanned, "session", 10).Sessions,
 		Insights:    analytics.Insights,
-	}, nil
+	}
+	if startUIUsageCacheTTL > 0 {
+		h.usageCacheMu.Lock()
+		if h.usageCache == nil {
+			h.usageCache = map[string]startUIUsageCacheEntry{}
+		}
+		h.usageCache[cacheKey] = startUIUsageCacheEntry{
+			expiresAt: now.Add(startUIUsageCacheTTL),
+			report:    report,
+		}
+		h.usageCacheMu.Unlock()
+	}
+	return report, nil
+}
+
+func startUIUsageCacheKey(filters startUIUsageFilters, version string) string {
+	return strings.Join([]string{
+		strings.TrimSpace(version),
+		strings.TrimSpace(filters.Since),
+		strings.TrimSpace(filters.Project),
+		defaultString(strings.TrimSpace(filters.Root), "all"),
+		strings.TrimSpace(filters.Activity),
+		strings.TrimSpace(filters.Phase),
+		strings.TrimSpace(filters.Model),
+	}, "\x00")
+}
+
+func startUIUsageIndexPath() string {
+	return filepath.Join(githubNanaHome(), "start", "ui", "usage-index.json")
+}
+
+func startUIOverviewCachePath() string {
+	return filepath.Join(githubNanaHome(), "start", "ui", "overview-cache.json")
+}
+
+func (h *startUIAPI) loadPersistedOverviewCache() {
+	state := readStartUIPersistedOverviewCacheState(startUIOverviewCachePath())
+	if strings.TrimSpace(state.OverviewVersion) == "" || strings.TrimSpace(state.DependencyToken) == "" {
+		return
+	}
+	current := snapshotStartUIOverviewDependencies(h.cwd)
+	if current.token != state.DependencyToken {
+		return
+	}
+	overview := state.Overview
+	if strings.TrimSpace(overview.GeneratedAt) == "" {
+		overview.GeneratedAt = state.GeneratedAt
+	}
+	h.overviewCacheMu.Lock()
+	defer h.overviewCacheMu.Unlock()
+	h.overviewCache = startUIOverviewCache{
+		valid:     true,
+		token:     current.token,
+		version:   state.OverviewVersion,
+		checkedAt: time.Now(),
+		deps:      current.deps,
+		overview:  overview,
+		events:    startUIOverviewEventsPayload(overview, state.OverviewVersion, ""),
+	}
+}
+
+func (h *startUIAPI) loadPersistedUsageIndex() {
+	state := readStartUIUsageIndexState(startUIUsageIndexPath())
+	if strings.TrimSpace(state.Version) == "" {
+		return
+	}
+	h.usageIndexMu.Lock()
+	defer h.usageIndexMu.Unlock()
+	h.usageIndexCache.valid = true
+	h.usageIndexCache.checkedAt = time.Time{}
+	h.usageIndexCache.value = state
+}
+
+func (h *startUIAPI) peekUsageDataVersion() string {
+	h.usageIndexMu.Lock()
+	if h.usageIndexCache.valid {
+		version := strings.TrimSpace(h.usageIndexCache.value.Version)
+		h.usageIndexMu.Unlock()
+		return version
+	}
+	h.usageIndexMu.Unlock()
+
+	state := readStartUIUsageIndexState(startUIUsageIndexPath())
+	version := strings.TrimSpace(state.Version)
+	if version == "" {
+		return ""
+	}
+
+	h.usageIndexMu.Lock()
+	if !h.usageIndexCache.valid {
+		h.usageIndexCache.valid = true
+		h.usageIndexCache.checkedAt = time.Time{}
+		h.usageIndexCache.value = state
+	}
+	h.usageIndexMu.Unlock()
+	return version
+}
+
+func (h *startUIAPI) loadUsageIndex() (startUIUsageIndexState, error) {
+	now := time.Now()
+	h.usageIndexMu.Lock()
+	if h.usageIndexCache.valid && startUIUsageIndexProbeInterval > 0 && now.Sub(h.usageIndexCache.checkedAt) < startUIUsageIndexProbeInterval {
+		index := h.usageIndexCache.value
+		h.usageIndexMu.Unlock()
+		return index, nil
+	}
+	h.usageIndexMu.Unlock()
+
+	index, err := refreshStartUIUsageIndex(h.cwd, startUIUsageIndexPath())
+	if err != nil {
+		return startUIUsageIndexState{}, err
+	}
+
+	h.usageIndexMu.Lock()
+	h.usageIndexCache.valid = true
+	h.usageIndexCache.checkedAt = time.Now()
+	h.usageIndexCache.value = index
+	h.usageIndexMu.Unlock()
+	return index, nil
+}
+
+func refreshStartUIUsageIndex(cwd string, path string) (startUIUsageIndexState, error) {
+	previous := readStartUIUsageIndexState(path)
+	previousByPath := map[string]startUIUsageIndexEntry{}
+	for _, entry := range previous.Entries {
+		previousByPath[filepath.Clean(entry.Path)] = entry
+	}
+
+	sessionRoots, err := discoverUsageSessionRoots(cwd)
+	if err != nil {
+		return startUIUsageIndexState{}, err
+	}
+	currentByPath := map[string]startUIUsageIndexEntry{}
+	for _, root := range sessionRoots {
+		err := walkRolloutFiles(root.SessionsDir, 0, func(path string) (bool, error) {
+			info, err := os.Stat(path)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return false, nil
+				}
+				return false, err
+			}
+			cleanPath := filepath.Clean(path)
+			size := info.Size()
+			modified := info.ModTime().UnixNano()
+			if entry, ok := previousByPath[cleanPath]; ok && entry.Root == root.Name && entry.Size == size && entry.ModifiedUnixNano == modified {
+				currentByPath[cleanPath] = entry
+				return false, nil
+			}
+			record, err := loadUsageRollout(cleanPath, root.Name)
+			if err != nil {
+				return false, err
+			}
+			currentByPath[cleanPath] = startUIUsageIndexEntry{
+				Path:             cleanPath,
+				Root:             root.Name,
+				Size:             size,
+				ModifiedUnixNano: modified,
+				Record:           record,
+			}
+			return false, nil
+		})
+		if err != nil {
+			return startUIUsageIndexState{}, err
+		}
+	}
+
+	entries := make([]startUIUsageIndexEntry, 0, len(currentByPath))
+	for _, entry := range currentByPath {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Path < entries[j].Path
+	})
+
+	next := startUIUsageIndexState{
+		SchemaVersion:       startUIUsageIndexSchemaVersion,
+		Version:             startUIUsageIndexVersion(entries, len(sessionRoots)),
+		UpdatedAt:           time.Now().UTC().Format(time.RFC3339),
+		SessionRootsScanned: len(sessionRoots),
+		Entries:             entries,
+	}
+	if previous.SchemaVersion == next.SchemaVersion && previous.Version == next.Version && previous.SessionRootsScanned == next.SessionRootsScanned && len(previous.Entries) == len(next.Entries) {
+		return previous, nil
+	}
+	if err := writeStartUIUsageIndexState(path, next); err != nil {
+		return startUIUsageIndexState{}, err
+	}
+	return next, nil
+}
+
+func readStartUIUsageIndexState(path string) startUIUsageIndexState {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return startUIUsageIndexState{}
+	}
+	state := startUIUsageIndexState{}
+	if err := json.Unmarshal(content, &state); err != nil {
+		return startUIUsageIndexState{}
+	}
+	if state.SchemaVersion != startUIUsageIndexSchemaVersion {
+		return startUIUsageIndexState{}
+	}
+	return state
+}
+
+func readStartUIPersistedOverviewCacheState(path string) startUIPersistedOverviewCacheState {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return startUIPersistedOverviewCacheState{}
+	}
+	state := startUIPersistedOverviewCacheState{}
+	if err := json.Unmarshal(content, &state); err != nil {
+		return startUIPersistedOverviewCacheState{}
+	}
+	if state.SchemaVersion != startUIOverviewCacheSchemaVersion {
+		return startUIPersistedOverviewCacheState{}
+	}
+	return state
+}
+
+func writeStartUIUsageIndexState(path string, value startUIUsageIndexState) error {
+	return writeStartUIRuntimeJSONAtomically(path, value)
+}
+
+func writeStartUIPersistedOverviewCacheState(path string, value startUIPersistedOverviewCacheState) error {
+	return writeStartUIRuntimeJSONAtomically(path, value)
+}
+
+func writeStartUIRuntimeJSONAtomically(path string, value any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmpPath := path + ".tmp"
+	content, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(append(content, '\n')); err != nil {
+		file.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	recordRuntimeArtifactWrite(path)
+	return nil
+}
+
+func startUIUsageIndexVersion(entries []startUIUsageIndexEntry, sessionRootsScanned int) string {
+	return hashJSON(struct {
+		SessionRootsScanned int                      `json:"session_roots_scanned"`
+		Entries             []startUIUsageIndexEntry `json:"entries"`
+	}{
+		SessionRootsScanned: sessionRootsScanned,
+		Entries:             entries,
+	})
+}
+
+func startUIUsageRecordsForReport(index startUIUsageIndexState, options usageOptions) []usageRecord {
+	projectFilter := normalizeUsageProjectFilter(options.Project, options.CWD)
+	projectRepoID := ""
+	if projectFilter != "" {
+		if info, err := os.Stat(projectFilter); err == nil && info.IsDir() {
+			projectRepoID = localWorkRepoID(projectFilter)
+		}
+	}
+	records := make([]usageRecord, 0, len(index.Entries))
+	for _, entry := range index.Entries {
+		record := entry.Record
+		if !usageRecordMatchesFilters(record, options, projectFilter, projectRepoID) {
+			continue
+		}
+		records = append(records, record)
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].Timestamp == records[j].Timestamp {
+			return records[i].SessionID < records[j].SessionID
+		}
+		return records[i].Timestamp > records[j].Timestamp
+	})
+	return records
 }
 
 func (h *startUIAPI) buildEventsPayload() (map[string]any, error) {
@@ -1650,24 +2148,23 @@ func (h *startUIAPI) buildEventsPayload() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	usageVersion := h.peekUsageDataVersion()
 	h.overviewCacheMu.Lock()
 	if h.overviewCache.valid && h.overviewCache.overview.GeneratedAt == overview.GeneratedAt && h.overviewCache.events != nil {
-		events := h.overviewCache.events
+		events := cloneStartUIEventPayload(h.overviewCache.events)
+		events["usage_version"] = usageVersion
 		h.overviewCacheMu.Unlock()
 		return events, nil
 	}
 	h.overviewCacheMu.Unlock()
-	return startUIOverviewEventsPayload(overview), nil
+	return startUIOverviewEventsPayload(overview, startUIOverviewVersion(overview), usageVersion), nil
 }
 
-func startUIOverviewEventsPayload(overview startUIOverview) map[string]any {
+func startUIOverviewEventsPayload(overview startUIOverview, overviewVersion string, usageVersion string) map[string]any {
 	return map[string]any{
-		"generated_at": overview.GeneratedAt,
-		"totals":       overview.Totals,
-		"repos":        overview.Repos,
-		"work_runs":    overview.WorkRuns,
-		"work_items":   overview.WorkItems,
-		"hud":          overview.HUD,
+		"generated_at":     overview.GeneratedAt,
+		"overview_version": overviewVersion,
+		"usage_version":    usageVersion,
 	}
 }
 
@@ -1675,6 +2172,175 @@ func (h *startUIAPI) invalidateOverviewCache() {
 	h.overviewCacheMu.Lock()
 	defer h.overviewCacheMu.Unlock()
 	h.overviewCache.valid = false
+	h.sectionCacheMu.Lock()
+	h.sectionCaches = startUIOverviewSectionCaches{}
+	h.sectionCacheMu.Unlock()
+}
+
+func (h *startUIAPI) loadOverviewReposSection() (startUIOverviewReposSection, error) {
+	return startUILoadCachedSection(&h.sectionCacheMu, &h.sectionCaches.repos, startUISectionCacheProbeInterval, func() []string {
+		return listStartUIRepoSummaryDependencies(h.cwd)
+	}, func() (startUIOverviewReposSection, error) {
+		repos, err := listStartUIRepoSummaries(true)
+		if err != nil {
+			return startUIOverviewReposSection{}, err
+		}
+		return startUIOverviewReposSection{summaries: repos}, nil
+	})
+}
+
+func (h *startUIAPI) loadOverviewWorkRunsSection() ([]startUIWorkRun, error) {
+	return startUILoadCachedSection(&h.sectionCacheMu, &h.sectionCaches.workRuns, startUISectionCacheProbeInterval, func() []string {
+		return listStartUIWorkRunDependencies(h.cwd)
+	}, func() ([]startUIWorkRun, error) {
+		return loadStartUIWorkRuns(startUIOverviewRunLimit)
+	})
+}
+
+func (h *startUIAPI) loadOverviewWorkItemsSection() (startUIOverviewWorkItemsSection, error) {
+	return startUILoadCachedSection(&h.sectionCacheMu, &h.sectionCaches.workItems, startUISectionCacheProbeInterval, listStartUIWorkItemDependencies, func() (startUIOverviewWorkItemsSection, error) {
+		return withLocalWorkReadStore(func(store *localWorkDBStore) (startUIOverviewWorkItemsSection, error) {
+			displayItems, err := store.listWorkItems(workItemListOptions{
+				Limit:         10,
+				IncludeHidden: false,
+				OnlyHidden:    false,
+			})
+			if err != nil {
+				return startUIOverviewWorkItemsSection{}, err
+			}
+			rawItems, err := store.listWorkItems(workItemListOptions{
+				Limit:         200,
+				IncludeHidden: false,
+				OnlyHidden:    false,
+			})
+			if err != nil {
+				return startUIOverviewWorkItemsSection{}, err
+			}
+			hiddenCount := 0
+			if err := store.db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE hidden = 1`).Scan(&hiddenCount); err != nil {
+				return startUIOverviewWorkItemsSection{}, err
+			}
+			pendingCount := 0
+			if err := store.db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE hidden = 0 AND status IN (?, ?, ?, ?, ?)`,
+				workItemStatusQueued,
+				workItemStatusRunning,
+				workItemStatusDraftReady,
+				workItemStatusNeedsRouting,
+				workItemStatusFailed,
+			).Scan(&pendingCount); err != nil {
+				return startUIOverviewWorkItemsSection{}, err
+			}
+			items := make([]startUIWorkItem, 0, len(displayItems))
+			for _, item := range displayItems {
+				items = append(items, startUIWorkItemFromItem(item))
+			}
+			return startUIOverviewWorkItemsSection{
+				raw:          rawItems,
+				items:        items,
+				hiddenCount:  hiddenCount,
+				pendingCount: pendingCount,
+			}, nil
+		})
+	})
+}
+
+func (h *startUIAPI) loadOverviewInvestigationCountSection() (int, error) {
+	return startUILoadCachedSection(&h.sectionCacheMu, &h.sectionCaches.investigationCount, startUISectionCacheProbeInterval, func() []string {
+		return listStartUIInvestigationCountDependencies(h.cwd)
+	}, func() (int, error) {
+		items, err := listStartUIInvestigations(h.cwd)
+		if err != nil {
+			return 0, err
+		}
+		return len(items), nil
+	})
+}
+
+func (h *startUIAPI) loadOverviewHUDSection() (HUDRenderContext, error) {
+	return startUILoadCachedSection(&h.sectionCacheMu, &h.sectionCaches.hud, startUISectionCacheProbeInterval, func() []string {
+		return listStartUIHUDSectionDependencies(h.cwd)
+	}, func() (HUDRenderContext, error) {
+		return h.loadHUD()
+	})
+}
+
+func startUIStripRepoSummaryState(repos []startUIRepoSummary) []startUIRepoSummary {
+	if len(repos) == 0 {
+		return nil
+	}
+	out := make([]startUIRepoSummary, 0, len(repos))
+	for _, repo := range repos {
+		cloned := repo
+		cloned.State = nil
+		out = append(out, cloned)
+	}
+	return out
+}
+
+func startUICountFeedbackItems(items []workItem) (int, int) {
+	reviewCount := 0
+	replyCount := 0
+	for _, item := range items {
+		if startUIFeedbackItemMatches("review", item) {
+			reviewCount++
+		}
+		if startUIFeedbackItemMatches("reply", item) {
+			replyCount++
+		}
+	}
+	return reviewCount, replyCount
+}
+
+func startUICountApprovals(runs []startUIWorkRun, items []workItem, repos []startUIRepoSummary) int {
+	count := 0
+	for _, run := range runs {
+		if run.AttentionState != "blocked" {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(run.Status), "paused") {
+			continue
+		}
+		count++
+	}
+	for _, item := range items {
+		if item.Hidden || item.Status != workItemStatusDraftReady || item.LatestDraft == nil {
+			continue
+		}
+		count++
+	}
+	for _, repo := range repos {
+		if repo.State == nil {
+			continue
+		}
+		for _, task := range repo.State.ServiceTasks {
+			if task.Kind == startTaskKindPreflight && task.Status == startWorkServiceTaskFailed && strings.TrimSpace(task.LastError) != "" {
+				count++
+			}
+		}
+		for _, job := range repo.State.ScoutJobs {
+			if job.Status == startScoutJobFailed {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func startUIOverviewVersion(overview startUIOverview) string {
+	clone := overview
+	clone.GeneratedAt = ""
+	return hashJSON(clone)
+}
+
+func cloneStartUIEventPayload(payload map[string]any) map[string]any {
+	if len(payload) == 0 {
+		return map[string]any{}
+	}
+	cloned := make(map[string]any, len(payload))
+	for key, value := range payload {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func listStartUIOverviewDependencies(cwd string) []string {
@@ -1709,6 +2375,155 @@ func listStartUIOverviewDependencies(cwd string) []string {
 	return paths
 }
 
+func listStartUIRepoSummaryDependencies(cwd string) []string {
+	seen := map[string]bool{}
+	paths := []string{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		clean := filepath.Clean(path)
+		if seen[clean] {
+			return
+		}
+		seen[clean] = true
+		paths = append(paths, clean)
+	}
+	addStartUIRepoTreeDependencies(githubWorkReposRoot(), "start-state.json", add)
+	addStartUIRepoTreeDependencies(githubWorkReposRoot(), "settings.json", add)
+	addStartUIScoutPolicyDependencies(add)
+	repoSlugs, err := listStartUIRepoSlugs()
+	if err == nil {
+		for _, repoSlug := range repoSlugs {
+			sourcePath := strings.TrimSpace(githubManagedPaths(repoSlug).SourcePath)
+			add(sourcePath)
+			addStartUIRepoLockDependencies(sourcePath, add)
+		}
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func listStartUIWorkRunDependencies(cwd string) []string {
+	seen := map[string]bool{}
+	paths := []string{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		clean := filepath.Clean(path)
+		if seen[clean] {
+			return
+		}
+		seen[clean] = true
+		paths = append(paths, clean)
+	}
+	addStartUILocalWorkDBDependencies(add)
+	addStartUIIndexedGithubManifestDependencies(add)
+	addStartUIRepoTreeDependencies(githubWorkReposRoot(), "start-state.json", add)
+	addStartUIRepoTreeDependencies(githubWorkReposRoot(), "settings.json", add)
+	sort.Strings(paths)
+	return paths
+}
+
+func listStartUIWorkItemDependencies() []string {
+	seen := map[string]bool{}
+	paths := []string{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		clean := filepath.Clean(path)
+		if seen[clean] {
+			return
+		}
+		seen[clean] = true
+		paths = append(paths, clean)
+	}
+	addStartUILocalWorkDBDependencies(add)
+	sort.Strings(paths)
+	return paths
+}
+
+func listStartUIInvestigationCountDependencies(cwd string) []string {
+	seen := map[string]bool{}
+	paths := []string{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		clean := filepath.Clean(path)
+		if seen[clean] {
+			return
+		}
+		seen[clean] = true
+		paths = append(paths, clean)
+	}
+	addStartUIInvestigationDependencies(cwd, add)
+	sort.Strings(paths)
+	return paths
+}
+
+func listStartUIHUDSectionDependencies(cwd string) []string {
+	seen := map[string]bool{}
+	paths := []string{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		clean := filepath.Clean(path)
+		if seen[clean] {
+			return
+		}
+		seen[clean] = true
+		paths = append(paths, clean)
+	}
+	addStartUIHUDDependencies(cwd, add)
+	sort.Strings(paths)
+	return paths
+}
+
+func addStartUILocalWorkDBDependencies(add func(string)) {
+	dbPath := localWorkDBPath()
+	add(dbPath)
+	add(dbPath + "-wal")
+	add(dbPath + "-shm")
+}
+
+func addStartUIRepoLockDependencies(repoPath string, add func(string)) {
+	normalized, err := normalizeRepoAccessLockPath(repoPath)
+	if err != nil {
+		return
+	}
+	lockRoot := repoAccessLockRoot(normalized)
+	add(lockRoot)
+	_ = filepath.WalkDir(lockRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if path == lockRoot {
+			return nil
+		}
+		if entry.IsDir() {
+			rel, err := filepath.Rel(lockRoot, path)
+			if err == nil && strings.Count(filepath.ToSlash(rel), "/") >= 1 {
+				return filepath.SkipDir
+			}
+			add(path)
+			return nil
+		}
+		if strings.HasSuffix(entry.Name(), ".json") {
+			add(path)
+		}
+		return nil
+	})
+}
+
 func addStartUIScoutPolicyDependencies(add func(string)) {
 	repoSlugs, err := listStartUIRepoSlugs()
 	if err != nil {
@@ -1727,15 +2542,25 @@ func addStartUIScoutPolicyDependencies(add func(string)) {
 	}
 }
 
-func snapshotStartUIOverviewDependencies(cwd string) startUIOverviewDependencySnapshot {
+func snapshotStartUIOverviewDependencies(cwd string) startUIDependencySnapshot {
 	deps := listStartUIOverviewDependencies(cwd)
-	return startUIOverviewDependencySnapshot{
-		deps:  deps,
-		token: fingerprintStartUIOverviewDependencies(deps),
+	return snapshotStartUIDependencies(deps)
+}
+
+func sameStartUIOverviewDependencySnapshot(left startUIDependencySnapshot, right startUIDependencySnapshot) bool {
+	return sameStartUIDependencySnapshot(left, right)
+}
+
+func snapshotStartUIDependencies(deps []string) startUIDependencySnapshot {
+	sorted := append([]string(nil), deps...)
+	sort.Strings(sorted)
+	return startUIDependencySnapshot{
+		deps:  sorted,
+		token: fingerprintStartUIOverviewDependencies(sorted),
 	}
 }
 
-func sameStartUIOverviewDependencySnapshot(left startUIOverviewDependencySnapshot, right startUIOverviewDependencySnapshot) bool {
+func sameStartUIDependencySnapshot(left startUIDependencySnapshot, right startUIDependencySnapshot) bool {
 	if left.token != right.token || len(left.deps) != len(right.deps) {
 		return false
 	}
@@ -1745,6 +2570,63 @@ func sameStartUIOverviewDependencySnapshot(left startUIOverviewDependencySnapsho
 		}
 	}
 	return true
+}
+
+func startUILoadCachedSection[T any](mu *sync.Mutex, cache *startUISectionCache[T], probeInterval time.Duration, depsFn func() []string, loadFn func() (T, error)) (T, error) {
+	var zero T
+	now := time.Now()
+	mu.Lock()
+	if cache.valid {
+		if probeInterval > 0 && now.Sub(cache.checkedAt) < probeInterval {
+			value := cache.value
+			mu.Unlock()
+			return value, nil
+		}
+		snapshot := snapshotStartUIDependencies(depsFn())
+		if snapshot.token == cache.token {
+			cache.checkedAt = now
+			value := cache.value
+			mu.Unlock()
+			return value, nil
+		}
+	}
+	mu.Unlock()
+
+	value, snapshot, stable, err := startUIBuildCachedSectionWithStableSnapshot(depsFn, loadFn)
+	if err != nil {
+		return zero, err
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !stable {
+		cache.valid = false
+		return value, nil
+	}
+	cache.valid = true
+	cache.token = snapshot.token
+	cache.checkedAt = time.Now()
+	cache.deps = snapshot.deps
+	cache.value = value
+	return value, nil
+}
+
+func startUIBuildCachedSectionWithStableSnapshot[T any](depsFn func() []string, loadFn func() (T, error)) (T, startUIDependencySnapshot, bool, error) {
+	var zero T
+	before := snapshotStartUIDependencies(depsFn())
+	value, err := loadFn()
+	if err != nil {
+		return zero, startUIDependencySnapshot{}, false, err
+	}
+	after := snapshotStartUIDependencies(depsFn())
+	if sameStartUIDependencySnapshot(before, after) {
+		return value, after, true, nil
+	}
+	value, err = loadFn()
+	if err != nil {
+		return zero, startUIDependencySnapshot{}, false, err
+	}
+	finalSnapshot := snapshotStartUIDependencies(depsFn())
+	return value, finalSnapshot, sameStartUIDependencySnapshot(after, finalSnapshot), nil
 }
 
 func addStartUIIndexedGithubManifestDependencies(add func(string)) {

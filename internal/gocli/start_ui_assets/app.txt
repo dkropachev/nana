@@ -7,9 +7,13 @@
     queued: 3,
     completed: 4,
   };
+  const USAGE_AUTO_REFRESH_INTERVAL_MS = 30 * 1000;
+  let usageRefreshTimer = 0;
 
   const state = {
     overview: null,
+    overviewError: "",
+    liveVersions: defaultLiveVersions(),
     currentView: "home",
     repoTab: "overview",
     feedbackTab: "reviews",
@@ -173,6 +177,7 @@
       loading: false,
       loaded: false,
       error: "",
+      lastLoadedAt: 0,
       filters: {
         since: "30d",
         root: "all",
@@ -200,6 +205,58 @@
       feedback: defaultViewFilter(),
       approvals: defaultViewFilter(),
     };
+  }
+
+  function defaultLiveVersions() {
+    return {
+      generatedAt: "",
+      overview: "",
+      usage: "",
+    };
+  }
+
+  function clearUsageRefreshTimer() {
+    if (!usageRefreshTimer) return;
+    window.clearInterval(usageRefreshTimer);
+    usageRefreshTimer = 0;
+  }
+
+  function shouldAutoRefreshUsage() {
+    return state.currentView === "usage" && document.visibilityState === "visible";
+  }
+
+  function usageRefreshAgeMs() {
+    return state.usage.lastLoadedAt ? (Date.now() - state.usage.lastLoadedAt) : Number.POSITIVE_INFINITY;
+  }
+
+  function syncUsageAutoRefresh() {
+    if (!shouldAutoRefreshUsage()) {
+      clearUsageRefreshTimer();
+      return;
+    }
+    if (usageRefreshTimer) return;
+    usageRefreshTimer = window.setInterval(() => {
+      if (!shouldAutoRefreshUsage()) {
+        clearUsageRefreshTimer();
+        return;
+      }
+      if (state.usage.loading) return;
+      if (!state.usage.loaded || usageRefreshAgeMs() >= USAGE_AUTO_REFRESH_INTERVAL_MS) {
+        loadUsage({ silent: true });
+      }
+    }, USAGE_AUTO_REFRESH_INTERVAL_MS);
+  }
+
+  function refreshUsageIfStale() {
+    if (!shouldAutoRefreshUsage() || state.usage.loading) {
+      syncUsageAutoRefresh();
+      return;
+    }
+    if (!state.usage.loaded || usageRefreshAgeMs() >= USAGE_AUTO_REFRESH_INTERVAL_MS) {
+      loadUsage({ silent: true });
+      return;
+    }
+    syncUsageAutoRefresh();
   }
 
   function api(path, options = {}) {
@@ -1243,6 +1300,83 @@
     return params.toString();
   }
 
+  function fetchUsageReport() {
+    const query = usageQueryString();
+    const path = query ? `/api/v1/usage?${query}` : "/api/v1/usage";
+    return api(path);
+  }
+
+  function fetchOverview() {
+    return api("/api/v1/overview");
+  }
+
+  function applyOverviewPayload(payload) {
+    state.overview = payload;
+    state.overviewError = "";
+    renderApp();
+  }
+
+  function applyOverviewError(error, options = {}) {
+    state.overviewError = error.message;
+    if (state.currentView === "usage") {
+      renderApp();
+    } else if (!state.overview && error && error.code === "work_db_repair_required") {
+      announce(error.message);
+      document.getElementById("page-body").innerHTML = buildMaintenanceNotice(error.message, error.repairCommand);
+    } else if (!state.overview) {
+      document.getElementById("page-body").innerHTML = `
+        <section class="surface empty-surface">
+          <div class="status-pill">${escapeHTML(error.message)}</div>
+        </section>
+      `;
+    }
+    if (!options.silent) {
+      toast("danger", "Overview failed", error.message);
+    }
+  }
+
+  function loadOverview(options = {}) {
+    return fetchOverview().then((payload) => {
+      applyOverviewPayload(payload);
+      return payload;
+    }).catch((error) => {
+      applyOverviewError(error, options);
+      throw error;
+    });
+  }
+
+  function applyUsagePayload(payload) {
+    state.usage.report = payload;
+    state.usage.loading = false;
+    state.usage.loaded = true;
+    state.usage.error = "";
+    state.usage.lastLoadedAt = Date.now();
+    if (!state.overview && state.currentView === "usage") {
+      renderApp();
+      return;
+    }
+    renderSidebar();
+    if (state.currentView === "usage") {
+      renderUsagePage();
+    }
+  }
+
+  function applyUsageError(error, options = {}) {
+    state.usage.loading = false;
+    state.usage.error = error.message;
+    if (!state.overview && state.currentView === "usage") {
+      renderApp();
+    } else {
+      renderSidebar();
+      if (state.currentView === "usage") {
+        renderUsagePage();
+      }
+    }
+    if (!options.silent) {
+      toast("danger", "Usage failed", error.message);
+    }
+  }
+
   function loadUsage(options = {}) {
     state.usage.loading = true;
     if (!options.silent) {
@@ -1251,27 +1385,10 @@
     if (state.currentView === "usage") {
       renderUsagePage();
     }
-    const query = usageQueryString();
-    const path = query ? `/api/v1/usage?${query}` : "/api/v1/usage";
-    return api(path).then((payload) => {
-      state.usage.report = payload;
-      state.usage.loading = false;
-      state.usage.loaded = true;
-      state.usage.error = "";
-      renderSidebar();
-      if (state.currentView === "usage") {
-        renderUsagePage();
-      }
+    return fetchUsageReport().then((payload) => {
+      applyUsagePayload(payload);
     }).catch((error) => {
-      state.usage.loading = false;
-      state.usage.error = error.message;
-      renderSidebar();
-      if (state.currentView === "usage") {
-        renderUsagePage();
-      }
-      if (!options.silent) {
-        toast("danger", "Usage failed", error.message);
-      }
+      applyUsageError(error, options);
     });
   }
 
@@ -1298,8 +1415,13 @@
         }
         break;
       case "usage":
-        if (!state.usage.loaded && !state.usage.loading) {
-          loadUsage({ silent: true });
+        {
+          const liveUsageVersion = defaultString(state.liveVersions.usage, "");
+          const currentUsageVersion = defaultString(state.usage.report && state.usage.report.version, "");
+          const staleUsage = liveUsageVersion && liveUsageVersion !== currentUsageVersion;
+          if ((!state.usage.loaded || staleUsage) && !state.usage.loading) {
+            loadUsage({ silent: true });
+          }
         }
         break;
       default:
@@ -1762,9 +1884,25 @@
     const updated = document.getElementById("overview-updated");
 
     if (!state.overview) {
-      title.textContent = "Home";
-      subtitle.textContent = "Waiting for state...";
-      updated.textContent = "Waiting for state...";
+      title.textContent = state.currentView === "usage" ? "Usage" : "Home";
+      if (state.currentView === "usage") {
+        if (state.overviewError) {
+          subtitle.textContent = "Usage data can still load while the workspace overview is unavailable.";
+          updated.textContent = "Overview unavailable.";
+        } else if (state.usage.error) {
+          subtitle.textContent = "Usage data failed while the workspace overview is still loading.";
+          updated.textContent = "Overview still loading.";
+        } else if (state.usage.loaded) {
+          subtitle.textContent = "Usage data is ready while the workspace overview is still loading.";
+          updated.textContent = "Overview still loading.";
+        } else {
+          subtitle.textContent = "Loading usage data and workspace overview.";
+          updated.textContent = "Waiting for state...";
+        }
+      } else {
+        subtitle.textContent = state.overviewError ? "Workspace overview is unavailable." : "Waiting for state...";
+        updated.textContent = state.overviewError ? "Overview unavailable." : "Waiting for state...";
+      }
       return;
     }
 
@@ -5032,7 +5170,10 @@
   }
 
   function renderApp() {
-    if (!state.overview) return;
+    if (!state.overview && state.currentView !== "usage") {
+      syncUsageAutoRefresh();
+      return;
+    }
     ensureSelection();
     renderSidebar();
     renderHeader();
@@ -5042,6 +5183,7 @@
     renderBody();
     renderConfirmDialog();
     syncHashState();
+    syncUsageAutoRefresh();
     refreshOpenLogDrawerIfNeeded();
     refreshOpenWorkItemDrawerIfNeeded();
   }
@@ -5049,7 +5191,9 @@
   function attachHandlers() {
     document.getElementById("refresh-button").addEventListener("click", () => {
       load();
-      refreshCurrentView({ silent: true });
+      if (state.currentView !== "usage") {
+        refreshCurrentView({ silent: true });
+      }
       if (state.currentView === "repo" && state.repoTab === "scouts" && state.selectedRepo) {
         loadScoutItems(state.selectedRepo, { silent: true });
       }
@@ -5873,6 +6017,14 @@
       renderApp();
     });
 
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        refreshUsageIfStale();
+        return;
+      }
+      syncUsageAutoRefresh();
+    });
+
     document.body.addEventListener("change", (event) => {
       if (event.target.id === "log-file-select") {
         const filePath = String(event.target.value || "");
@@ -5998,14 +6150,31 @@
     const source = new EventSource(apiBase + "/api/v1/events");
     source.addEventListener("state", (event) => {
       const payload = JSON.parse(event.data);
-      const previousGeneratedAt = state.overview && state.overview.generated_at;
-      state.overview = payload;
-      if (!state.overview.generated_at) {
-        state.overview.generated_at = new Date().toISOString();
+      const previousGeneratedAt = state.liveVersions.generatedAt;
+      const previousOverviewVersion = state.liveVersions.overview;
+      const previousUsageVersion = state.liveVersions.usage;
+      const currentOverviewGeneratedAt = defaultString(state.overview && state.overview.generated_at, "");
+      const currentUsageVersion = defaultString(state.usage.report && state.usage.report.version, "");
+      state.liveVersions = {
+        generatedAt: defaultString(payload.generated_at, previousGeneratedAt || new Date().toISOString()),
+        overview: defaultString(payload.overview_version, previousOverviewVersion),
+        usage: defaultString(payload.usage_version, previousUsageVersion),
+      };
+      const overviewChanged = Boolean(
+        (previousOverviewVersion && state.liveVersions.overview && previousOverviewVersion !== state.liveVersions.overview)
+        || (!previousOverviewVersion && currentOverviewGeneratedAt && currentOverviewGeneratedAt !== state.liveVersions.generatedAt)
+      );
+      const usageChanged = Boolean(
+        (previousUsageVersion && state.liveVersions.usage && previousUsageVersion !== state.liveVersions.usage)
+        || (!previousUsageVersion && currentUsageVersion && state.liveVersions.usage && currentUsageVersion !== state.liveVersions.usage)
+      );
+      if (overviewChanged) {
+        loadOverview({ silent: true });
       }
-      renderApp();
-      refreshCurrentView({ silent: true });
-      if (previousGeneratedAt && previousGeneratedAt !== state.overview.generated_at) {
+      if (state.currentView === "usage" && usageChanged) {
+        loadUsage({ silent: true });
+      }
+      if (overviewChanged || usageChanged || (previousGeneratedAt && previousGeneratedAt !== state.liveVersions.generatedAt)) {
         announce("Workspace data updated.");
       }
     });
@@ -6016,23 +6185,16 @@
   }
 
   function load() {
-    return api("/api/v1/overview").then((overview) => {
-      state.overview = overview;
+    if (state.currentView === "usage") {
+      state.usage.loading = true;
+      state.usage.error = "";
       renderApp();
-      return refreshCurrentView({ silent: true });
-    }).catch((error) => {
-      if (error && error.code === "work_db_repair_required") {
-        announce(error.message);
-        document.getElementById("page-body").innerHTML = buildMaintenanceNotice(error.message, error.repairCommand);
-        return;
-      }
-      toast("danger", "Overview failed", error.message);
-      document.getElementById("page-body").innerHTML = `
-        <section class="surface empty-surface">
-          <div class="status-pill">${escapeHTML(error.message)}</div>
-        </section>
-      `;
-    });
+      return Promise.allSettled([
+        loadOverview(),
+        loadUsage({ silent: true }),
+      ]);
+    }
+    return loadOverview().then(() => refreshCurrentView({ silent: true })).catch(() => {});
   }
 
   initLogDrawer();

@@ -8,6 +8,14 @@ Use this checklist when validating the `nana start` assistant workspace in a bro
 - Confirm the sidebar shows `Home`, `Issues`, `Investigations`, `Work`, `Feedback`, `Approvals`, and `Repos`.
 - Confirm the page loads without console syntax errors.
 
+## Latency
+
+- Restart `nana start`, then open the printed `[start-ui] Web` URL immediately.
+- Confirm `Home` or `Usage` renders without a long blank wait while the process is still warming caches.
+- Reload the page once and confirm the second load is visibly faster than the first.
+- Leave the workspace open on `Usage` for at least 30 seconds and confirm it refreshes only while the Usage view is visible.
+- Switch away from `Usage` or hide the tab and confirm Usage polling stops while overview SSE updates continue.
+
 ## Home
 
 - Confirm totals update after refresh.

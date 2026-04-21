@@ -31,7 +31,7 @@
         </p>
         <pre><code>[start-ui] API: http://127.0.0.1:17653
 [start-ui] Web: http://127.0.0.1:17654</code></pre>
-        <p>Open the printed Web URL in your browser. Keep the terminal process running while you operate the console.</p>
+        <p>Open the printed Web URL in your browser. Keep the terminal process running while you operate the console. Start UI now reuses local warm-state artifacts under <code>~/.nana/start/ui/</code> so the first open after a restart can avoid a cold overview rebuild when nothing relevant changed.</p>
         <pre><code>nana repo onboard owner/repo
 nana repo config owner/repo --repo-mode fork --issue-pick label --pr-forward approve
 nana start</code></pre>
@@ -81,6 +81,7 @@ nana start</code></pre>
           <thead><tr><th>Endpoint</th><th>Use</th></tr></thead>
           <tbody>
             <tr><td><code>GET /api/v1/overview</code></td><td>Global totals, repo summaries, recent runs, work items, and HUD payload.</td></tr>
+            <tr><td><code>GET /api/v1/usage</code></td><td>Usage breakdowns, top sessions, and a usage-data <code>version</code> for the current filter set. The Usage view refreshes on entry, on manual/filter actions, and periodically while that view stays visible.</td></tr>
             <tr><td><code>GET /api/v1/attention</code></td><td>Ranked attention queue plus the single best next item and recommended command.</td></tr>
             <tr><td><code>GET /api/v1/issues</code></td><td>Flattened tracked-issue queue with triage and publication state.</td></tr>
             <tr><td><code>GET /api/v1/investigations</code></td><td>Investigation runs discovered across the workspace and managed repo checkouts, including paused retry timing.</td></tr>
@@ -102,7 +103,7 @@ nana start</code></pre>
             <tr><td><code>POST /api/v1/work/runs/&lt;run-id&gt;/sync</code></td><td>Run the safe GitHub feedback-sync flow for a GitHub-backed run.</td></tr>
             <tr><td><code>GET /api/v1/work/runs/&lt;run-id&gt;/logs</code></td><td>List log files for a run.</td></tr>
             <tr><td><code>GET /api/v1/work-items</code></td><td>List queued, paused, draft, hidden, or actionable work items.</td></tr>
-            <tr><td><code>GET /api/v1/events</code></td><td>Server-sent events stream for live overview refreshes.</td></tr>
+            <tr><td><code>GET /api/v1/events</code></td><td>Server-sent events stream that publishes only <code>generated_at</code>, <code>overview_version</code>, and the last known <code>usage_version</code>; the browser fetches full overview payloads on overview changes and refreshes Usage separately while the Usage view is active.</td></tr>
           </tbody>
         </table>
       </section>
