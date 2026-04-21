@@ -1,7 +1,6 @@
 package gocli
 
 import (
-	"bufio"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -5248,24 +5247,54 @@ func persistLocalWorkTokenUsage(runID string) error {
 }
 
 func writeLocalWorkThreadUsageArtifact(runDir string, sandboxPath string, sessionsRoot string) (*localWorkThreadUsageArtifact, error) {
+	historyArtifact, err := writeLocalWorkThreadUsageHistoryArtifact(runDir, sandboxPath, sessionsRoot)
+	if err != nil {
+		return nil, err
+	}
 	artifact := &localWorkThreadUsageArtifact{
 		Version:     1,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		SandboxPath: sandboxPath,
 	}
-	rows, err := readLocalWorkThreadUsageRowsFromRollouts(sessionsRoot)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return artifact, nil
+	rows := make([]localWorkThreadUsageRow, 0, len(historyArtifact.Threads))
+	for _, row := range historyArtifact.Threads {
+		converted, ok := localWorkThreadUsageRowFromHistory(row)
+		if ok {
+			rows = append(rows, converted)
 		}
-		return nil, err
 	}
 	artifact.Threads = rows
 	artifact.Totals = localWorkTokenUsageTotalsFromRows(rows, artifact.GeneratedAt)
 
 	path := filepath.Join(runDir, "thread-usage.json")
-	if existing, err := readLocalWorkThreadUsageArtifact(path); err == nil {
-		artifact = mergeLocalWorkThreadUsageArtifacts(existing, artifact)
+	if err := writeLocalWorkJSONAtomically(path, artifact); err != nil {
+		return nil, err
+	}
+	return artifact, nil
+}
+
+func writeLocalWorkThreadUsageHistoryArtifact(runDir string, sandboxPath string, sessionsRoot string) (*localWorkThreadUsageHistoryArtifact, error) {
+	artifact := &localWorkThreadUsageHistoryArtifact{
+		Version:     1,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		SandboxPath: sandboxPath,
+	}
+	rows, err := usageHistoryRowsFromRollouts(sessionsRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			path := usageHistoryArtifactPath(runDir)
+			if existing, readErr := readLocalWorkThreadUsageHistoryArtifact(path); readErr == nil {
+				return existing, nil
+			}
+			return artifact, nil
+		}
+		return nil, err
+	}
+	artifact.Threads = rows
+
+	path := usageHistoryArtifactPath(runDir)
+	if existing, err := readLocalWorkThreadUsageHistoryArtifact(path); err == nil {
+		artifact = mergeLocalWorkThreadUsageHistoryArtifacts(existing, artifact)
 	} else if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
@@ -5362,6 +5391,33 @@ func mergeLocalWorkThreadUsageArtifacts(existing *localWorkThreadUsageArtifact, 
 	return artifact
 }
 
+func readLocalWorkThreadUsageHistoryArtifact(path string) (*localWorkThreadUsageHistoryArtifact, error) {
+	var artifact localWorkThreadUsageHistoryArtifact
+	if err := readGithubJSON(path, &artifact); err != nil {
+		return nil, err
+	}
+	return &artifact, nil
+}
+
+func mergeLocalWorkThreadUsageHistoryArtifacts(existing *localWorkThreadUsageHistoryArtifact, current *localWorkThreadUsageHistoryArtifact) *localWorkThreadUsageHistoryArtifact {
+	if existing == nil {
+		return current
+	}
+	if current == nil {
+		return existing
+	}
+	generatedAt := current.GeneratedAt
+	if strings.TrimSpace(generatedAt) == "" {
+		generatedAt = existing.GeneratedAt
+	}
+	return &localWorkThreadUsageHistoryArtifact{
+		Version:     max(existing.Version, current.Version),
+		GeneratedAt: generatedAt,
+		SandboxPath: defaultString(strings.TrimSpace(current.SandboxPath), existing.SandboxPath),
+		Threads:     mergeUsageHistoryRows(append(append([]usageHistoryRow{}, existing.Threads...), current.Threads...)),
+	}
+}
+
 func localWorkThreadUsageRowKey(row localWorkThreadUsageRow) string {
 	if strings.TrimSpace(row.SessionID) != "" {
 		return strings.TrimSpace(row.SessionID)
@@ -5383,103 +5439,54 @@ func localWorkTokenUsageTotalsFromRows(rows []localWorkThreadUsageRow, updatedAt
 }
 
 func readLocalWorkThreadUsageRowsFromRollouts(sessionsRoot string) ([]localWorkThreadUsageRow, error) {
-	files := []string{}
-	err := filepath.Walk(sessionsRoot, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info != nil && !info.IsDir() && strings.HasSuffix(path, ".jsonl") {
-			files = append(files, path)
-		}
-		return nil
-	})
+	historyRows, err := usageHistoryRowsFromRollouts(sessionsRoot)
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(files)
-	rows := make([]localWorkThreadUsageRow, 0, len(files))
-	for _, path := range files {
-		row, ok, err := readLocalWorkThreadUsageRow(path)
-		if err != nil {
-			return nil, err
-		}
+	rows := make([]localWorkThreadUsageRow, 0, len(historyRows))
+	for _, row := range historyRows {
+		converted, ok := localWorkThreadUsageRowFromHistory(row)
 		if ok {
-			rows = append(rows, row)
+			rows = append(rows, converted)
 		}
 	}
 	return rows, nil
 }
 
 func readLocalWorkThreadUsageRow(filePath string) (localWorkThreadUsageRow, bool, error) {
-	file, err := os.Open(filePath)
+	historyRow, ok, err := readUsageHistoryRow(filePath)
 	if err != nil {
 		return localWorkThreadUsageRow{}, false, err
 	}
-	defer file.Close()
-
-	row := localWorkThreadUsageRow{}
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		var parsed map[string]any
-		_ = json.Unmarshal([]byte(line), &parsed)
-
-		if row.SessionID == "" {
-			meta := extractSessionMeta(parsed, filePath)
-			row.SessionID = meta.SessionID
-		}
-		if timestamp, ok := parsed["timestamp"].(string); ok {
-			if parsedTime, err := time.Parse(time.RFC3339Nano, timestamp); err == nil {
-				if row.StartedAt == 0 || parsedTime.Unix() < row.StartedAt {
-					row.StartedAt = parsedTime.Unix()
-				}
-				if parsedTime.Unix() > row.UpdatedAt {
-					row.UpdatedAt = parsedTime.Unix()
-				}
-			}
-		}
-		if parsed["type"] == "session_meta" {
-			if payload, ok := parsed["payload"].(map[string]any); ok {
-				if cwd, ok := payload["cwd"].(string); ok && strings.TrimSpace(row.CWD) == "" {
-					row.CWD = strings.TrimSpace(cwd)
-				}
-				if nickname, ok := payload["agent_nickname"].(string); ok && strings.TrimSpace(row.Nickname) == "" {
-					row.Nickname = strings.TrimSpace(nickname)
-				}
-				if role, ok := payload["agent_role"].(string); ok && strings.TrimSpace(row.Role) == "" {
-					row.Role = strings.TrimSpace(role)
-				}
-			}
-		}
-		if parsed["type"] == "turn_context" {
-			if payload, ok := parsed["payload"].(map[string]any); ok {
-				if model, ok := payload["model"].(string); ok && strings.TrimSpace(row.Model) == "" {
-					row.Model = strings.TrimSpace(model)
-				}
-			}
-		}
-		if parsed["type"] == "event_msg" {
-			if payload, ok := parsed["payload"].(map[string]any); ok && payload["type"] == "token_count" {
-				if info, ok := payload["info"].(map[string]any); ok {
-					if usage, ok := info["total_token_usage"].(map[string]any); ok {
-						row.InputTokens = max(row.InputTokens, usageIntValue(usage["input_tokens"]))
-						row.CachedInputTokens = max(row.CachedInputTokens, usageIntValue(usage["cached_input_tokens"]))
-						row.OutputTokens = max(row.OutputTokens, usageIntValue(usage["output_tokens"]))
-						row.ReasoningOutputTokens = max(row.ReasoningOutputTokens, usageIntValue(usage["reasoning_output_tokens"]))
-						row.TotalTokens = max(row.TotalTokens, usageIntValue(usage["total_tokens"]))
-					}
-				}
-			}
-		}
+	if !ok {
+		return localWorkThreadUsageRow{}, false, nil
 	}
-	if err := scanner.Err(); err != nil {
-		return localWorkThreadUsageRow{}, false, err
-	}
-	if row.TotalTokens == 0 && row.InputTokens == 0 && row.CachedInputTokens == 0 && row.OutputTokens == 0 && row.ReasoningOutputTokens == 0 {
+	row, ok := localWorkThreadUsageRowFromHistory(historyRow)
+	if !ok {
 		return localWorkThreadUsageRow{}, false, nil
 	}
 	return row, true, nil
+}
+
+func localWorkThreadUsageRowFromHistory(row usageHistoryRow) (localWorkThreadUsageRow, bool) {
+	latest, ok := usageHistoryLatestCheckpoint(row)
+	if !ok {
+		return localWorkThreadUsageRow{}, false
+	}
+	return localWorkThreadUsageRow{
+		SessionID:             strings.TrimSpace(row.SessionID),
+		Nickname:              strings.TrimSpace(row.Nickname),
+		Role:                  strings.TrimSpace(row.Role),
+		Model:                 strings.TrimSpace(row.Model),
+		CWD:                   strings.TrimSpace(row.CWD),
+		InputTokens:           latest.InputTokens,
+		CachedInputTokens:     latest.CachedInputTokens,
+		OutputTokens:          latest.OutputTokens,
+		ReasoningOutputTokens: latest.ReasoningOutputTokens,
+		TotalTokens:           latest.TotalTokens,
+		StartedAt:             row.StartedAt,
+		UpdatedAt:             row.UpdatedAt,
+	}, true
 }
 
 func writeLocalWorkManifest(manifest localWorkManifest) error {

@@ -2616,6 +2616,13 @@ func TestWriteThreadUsageArtifactReadsScopedGithubCodexHome(t *testing.T) {
 	if artifact.TotalTokens != 321 || len(artifact.Rows) != 1 || artifact.Rows[0].Nickname != "RoundOne" {
 		t.Fatalf("unexpected thread usage artifact: %+v", artifact)
 	}
+	var history githubThreadUsageHistoryArtifact
+	if err := readGithubJSON(filepath.Join(runDir, threadUsageHistoryArtifactName), &history); err != nil {
+		t.Fatalf("read thread-usage-history artifact: %v", err)
+	}
+	if len(history.Rows) != 1 || len(history.Rows[0].Checkpoints) != 1 || history.Rows[0].Checkpoints[0].TotalTokens != 321 {
+		t.Fatalf("unexpected thread-usage-history artifact: %+v", history)
+	}
 }
 
 func TestGithubPublisherBlocksDraftPROpenWhenPolicyDisablesIt(t *testing.T) {

@@ -587,6 +587,7 @@ func githubWorkLogFiles(runDir string) ([]string, error) {
 		"feedback-instructions.md",
 		"retrospective.md",
 		"thread-usage.json",
+		"thread-usage-history.json",
 		"completion/*",
 		"completion/*/*",
 		"lane-runtime/*",

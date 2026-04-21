@@ -4425,6 +4425,13 @@ func TestRunLocalWorkCodexPromptPersistsTokenUsageArtifactAndManifest(t *testing
 	if artifact.Totals.TotalTokens != 135 || artifact.Totals.SessionsAccounted != 1 || len(artifact.Threads) != 1 {
 		t.Fatalf("unexpected thread-usage artifact: %#v", artifact)
 	}
+	var history localWorkThreadUsageHistoryArtifact
+	if err := readGithubJSON(filepath.Join(runDir, threadUsageHistoryArtifactName), &history); err != nil {
+		t.Fatalf("read thread-usage-history artifact: %v", err)
+	}
+	if len(history.Threads) != 1 || len(history.Threads[0].Checkpoints) != 1 || history.Threads[0].Checkpoints[0].TotalTokens != 135 {
+		t.Fatalf("unexpected thread-usage-history artifact: %#v", history)
+	}
 
 	stale := manifest
 	stale.Status = "completed"
@@ -4522,6 +4529,13 @@ func TestRunLocalWorkCodexPromptPersistsTokenUsageWhenCodexFails(t *testing.T) {
 	}
 	if artifact.Totals.TotalTokens != 266 || artifact.Totals.SessionsAccounted != 1 {
 		t.Fatalf("unexpected failed thread-usage artifact: %#v", artifact)
+	}
+	var history localWorkThreadUsageHistoryArtifact
+	if err := readGithubJSON(filepath.Join(runDir, threadUsageHistoryArtifactName), &history); err != nil {
+		t.Fatalf("read failed thread-usage-history artifact: %v", err)
+	}
+	if len(history.Threads) != 1 || len(history.Threads[0].Checkpoints) != 1 || history.Threads[0].Checkpoints[0].TotalTokens != 266 {
+		t.Fatalf("unexpected failed thread-usage-history artifact: %#v", history)
 	}
 }
 

@@ -190,6 +190,8 @@ type usageGroupRow struct {
 
 type usageSummaryReport struct {
 	SessionRootsScanned int             `json:"session_roots_scanned"`
+	TimeBasis           string          `json:"time_basis,omitempty"`
+	Coverage            string          `json:"coverage,omitempty"`
 	Totals              usageRollup     `json:"totals"`
 	Roots               []usageGroupRow `json:"roots"`
 	Activities          []usageGroupRow `json:"activities"`
@@ -200,6 +202,8 @@ type usageTopReport struct {
 	By                  string          `json:"by"`
 	Limit               int             `json:"limit"`
 	SessionRootsScanned int             `json:"session_roots_scanned"`
+	TimeBasis           string          `json:"time_basis,omitempty"`
+	Coverage            string          `json:"coverage,omitempty"`
 	Totals              usageRollup     `json:"totals"`
 	Sessions            []usageRecord   `json:"sessions,omitempty"`
 	Groups              []usageGroupRow `json:"groups,omitempty"`
@@ -213,6 +217,8 @@ type usageAnalyticsInsight struct {
 
 type usageAnalyticsReport struct {
 	SessionRootsScanned int                     `json:"session_roots_scanned"`
+	TimeBasis           string                  `json:"time_basis,omitempty"`
+	Coverage            string                  `json:"coverage,omitempty"`
 	Totals              usageRollup             `json:"totals"`
 	Insights            []usageAnalyticsInsight `json:"insights"`
 }
@@ -239,14 +245,14 @@ func usageWithIO(cwd string, args []string, stdout io.Writer) error {
 	}
 	options.CWD = cwd
 
-	records, sessionRootsScanned, err := loadUsageRecordsShared(options)
+	source, err := loadUsageReportSource(options)
 	if err != nil {
 		return err
 	}
 
 	switch options.View {
 	case "summary":
-		report := buildUsageSummaryReport(records, sessionRootsScanned)
+		report := buildUsageSummaryReportFromSource(source)
 		if options.JSON {
 			payload, err := json.MarshalIndent(report, "", "  ")
 			if err != nil {
@@ -258,7 +264,7 @@ func usageWithIO(cwd string, args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout, formatUsageSummaryReport(report))
 		return nil
 	case "top":
-		report := buildUsageTopReport(records, sessionRootsScanned, options.By, options.Limit)
+		report := buildUsageTopReportFromSource(source, options.By, options.Limit)
 		if options.JSON {
 			payload, err := json.MarshalIndent(report, "", "  ")
 			if err != nil {
@@ -270,7 +276,7 @@ func usageWithIO(cwd string, args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout, formatUsageTopReport(report))
 		return nil
 	case "group":
-		report := buildUsageGroupReport(records, sessionRootsScanned, options.By)
+		report := buildUsageGroupReportFromSource(source, options.By)
 		if options.JSON {
 			payload, err := json.MarshalIndent(report, "", "  ")
 			if err != nil {
@@ -282,7 +288,7 @@ func usageWithIO(cwd string, args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout, formatUsageGroupReport(report))
 		return nil
 	case "analytics":
-		report := buildUsageAnalyticsReport(records, sessionRootsScanned)
+		report := buildUsageAnalyticsReportFromSource(source)
 		if options.JSON {
 			payload, err := json.MarshalIndent(report, "", "  ")
 			if err != nil {
@@ -871,6 +877,13 @@ func buildUsageSummaryReport(records []usageRecord, sessionRootsScanned int) usa
 	}
 }
 
+func buildUsageSummaryReportFromSource(source usageReportSource) usageSummaryReport {
+	report := buildUsageSummaryReport(source.Records, source.SessionRootsScanned)
+	report.TimeBasis = source.TimeBasis
+	report.Coverage = source.Coverage
+	return report
+}
+
 func buildUsageTopReport(records []usageRecord, sessionRootsScanned int, by string, limit int) usageTopReport {
 	report := usageTopReport{
 		By:                  by,
@@ -903,6 +916,29 @@ func buildUsageTopReport(records []usageRecord, sessionRootsScanned int, by stri
 	return report
 }
 
+func buildUsageTopReportFromSource(source usageReportSource, by string, limit int) usageTopReport {
+	if by == "day" {
+		report := usageTopReport{
+			By:                  by,
+			Limit:               limit,
+			SessionRootsScanned: source.SessionRootsScanned,
+			TimeBasis:           source.TimeBasis,
+			Coverage:            source.Coverage,
+			Totals:              buildUsageRollup(source.Records),
+		}
+		groups := append([]usageGroupRow(nil), source.DayGroups...)
+		if len(groups) > limit {
+			groups = groups[:limit]
+		}
+		report.Groups = groups
+		return report
+	}
+	report := buildUsageTopReport(source.Records, source.SessionRootsScanned, by, limit)
+	report.TimeBasis = source.TimeBasis
+	report.Coverage = source.Coverage
+	return report
+}
+
 func buildUsageGroupReport(records []usageRecord, sessionRootsScanned int, by string) usageTopReport {
 	return usageTopReport{
 		By:                  by,
@@ -912,7 +948,28 @@ func buildUsageGroupReport(records []usageRecord, sessionRootsScanned int, by st
 	}
 }
 
+func buildUsageGroupReportFromSource(source usageReportSource, by string) usageTopReport {
+	if by == "day" {
+		return usageTopReport{
+			By:                  by,
+			SessionRootsScanned: source.SessionRootsScanned,
+			TimeBasis:           source.TimeBasis,
+			Coverage:            source.Coverage,
+			Totals:              buildUsageRollup(source.Records),
+			Groups:              append([]usageGroupRow(nil), source.DayGroups...),
+		}
+	}
+	report := buildUsageGroupReport(source.Records, source.SessionRootsScanned, by)
+	report.TimeBasis = source.TimeBasis
+	report.Coverage = source.Coverage
+	return report
+}
+
 func buildUsageAnalyticsReport(records []usageRecord, sessionRootsScanned int) usageAnalyticsReport {
+	return buildUsageAnalyticsReportWithDayGroups(records, buildUsageGroups(records, "day"), sessionRootsScanned)
+}
+
+func buildUsageAnalyticsReportWithDayGroups(records []usageRecord, dayGroups []usageGroupRow, sessionRootsScanned int) usageAnalyticsReport {
 	insights := []usageAnalyticsInsight{}
 	totals := buildUsageRollup(records)
 	topSessions := buildUsageTopReport(records, sessionRootsScanned, "session", 1).Sessions
@@ -932,8 +989,8 @@ func buildUsageAnalyticsReport(records []usageRecord, sessionRootsScanned int) u
 			CommandHint: "nana usage group --by activity",
 		})
 	}
-	if groups := buildUsageGroups(records, "day"); len(groups) > 0 {
-		top := groups[0]
+	if len(dayGroups) > 0 {
+		top := dayGroups[0]
 		insights = append(insights, usageAnalyticsInsight{
 			Title:       "Most expensive day",
 			Summary:     fmt.Sprintf("%s accounts for %s tokens across %d session(s).", top.Key, formatGithubTokenCount(top.TotalTokens), top.Sessions),
@@ -983,6 +1040,13 @@ func buildUsageAnalyticsReport(records []usageRecord, sessionRootsScanned int) u
 		Totals:              totals,
 		Insights:            insights,
 	}
+}
+
+func buildUsageAnalyticsReportFromSource(source usageReportSource) usageAnalyticsReport {
+	report := buildUsageAnalyticsReportWithDayGroups(source.Records, source.DayGroups, source.SessionRootsScanned)
+	report.TimeBasis = source.TimeBasis
+	report.Coverage = source.Coverage
+	return report
 }
 
 func buildUsageRollup(records []usageRecord) usageRollup {
@@ -1079,13 +1143,16 @@ func usageSharePercent(part int, total int) float64 {
 func formatUsageSummaryReport(report usageSummaryReport) string {
 	lines := []string{
 		fmt.Sprintf("Scanned %d session root(s); found %d session(s).", report.SessionRootsScanned, report.Totals.Sessions),
+	}
+	lines = append(lines, usageReportMetadataLines(report.TimeBasis, report.Coverage)...)
+	lines = append(lines,
 		fmt.Sprintf("Total tokens: %d (%s)", report.Totals.TotalTokens, formatGithubTokenCount(report.Totals.TotalTokens)),
 		fmt.Sprintf("Input tokens: %d (%s)", report.Totals.InputTokens, formatGithubTokenCount(report.Totals.InputTokens)),
 		fmt.Sprintf("Cached input tokens: %d (%s)", report.Totals.CachedInputTokens, formatGithubTokenCount(report.Totals.CachedInputTokens)),
 		fmt.Sprintf("Output tokens: %d (%s)", report.Totals.OutputTokens, formatGithubTokenCount(report.Totals.OutputTokens)),
 		fmt.Sprintf("Reasoning output tokens: %d (%s)", report.Totals.ReasoningOutputTokens, formatGithubTokenCount(report.Totals.ReasoningOutputTokens)),
 		fmt.Sprintf("Missing token telemetry: %d", report.Totals.MissingTelemetry),
-	}
+	)
 	lines = append(lines, "", "Top roots:")
 	lines = append(lines, formatUsageGroupLines(report.Roots, 5)...)
 	lines = append(lines, "", "Top activities:")
@@ -1098,8 +1165,11 @@ func formatUsageSummaryReport(report usageSummaryReport) string {
 func formatUsageTopReport(report usageTopReport) string {
 	lines := []string{
 		fmt.Sprintf("Scanned %d session root(s); found %d session(s).", report.SessionRootsScanned, report.Totals.Sessions),
-		fmt.Sprintf("Top %d by %s:", report.Limit, report.By),
 	}
+	lines = append(lines, usageReportMetadataLines(report.TimeBasis, report.Coverage)...)
+	lines = append(lines,
+		fmt.Sprintf("Top %d by %s:", report.Limit, report.By),
+	)
 	if report.By == "session" {
 		if len(report.Sessions) == 0 {
 			lines = append(lines, "- no matching sessions")
@@ -1133,8 +1203,11 @@ func formatUsageTopReport(report usageTopReport) string {
 func formatUsageGroupReport(report usageTopReport) string {
 	lines := []string{
 		fmt.Sprintf("Scanned %d session root(s); found %d session(s).", report.SessionRootsScanned, report.Totals.Sessions),
-		fmt.Sprintf("Grouped by %s:", report.By),
 	}
+	lines = append(lines, usageReportMetadataLines(report.TimeBasis, report.Coverage)...)
+	lines = append(lines,
+		fmt.Sprintf("Grouped by %s:", report.By),
+	)
 	if len(report.Groups) == 0 {
 		lines = append(lines, "- no matching groups")
 		return strings.Join(lines, "\n")
@@ -1148,10 +1221,13 @@ func formatUsageGroupReport(report usageTopReport) string {
 func formatUsageAnalyticsReport(report usageAnalyticsReport) string {
 	lines := []string{
 		fmt.Sprintf("Scanned %d session root(s); found %d session(s).", report.SessionRootsScanned, report.Totals.Sessions),
+	}
+	lines = append(lines, usageReportMetadataLines(report.TimeBasis, report.Coverage)...)
+	lines = append(lines,
 		fmt.Sprintf("Total tokens: %d (%s)", report.Totals.TotalTokens, formatGithubTokenCount(report.Totals.TotalTokens)),
 		"",
 		"Analytics:",
-	}
+	)
 	if len(report.Insights) == 0 {
 		lines = append(lines, "- no insights available")
 		return strings.Join(lines, "\n")
@@ -1176,6 +1252,20 @@ func formatUsageGroupLines(groups []usageGroupRow, limit int) []string {
 	lines := make([]string, 0, len(groups))
 	for _, group := range groups {
 		lines = append(lines, fmt.Sprintf("- %s: tokens=%d (%s) sessions=%d missing=%d", group.Key, group.TotalTokens, formatGithubTokenCount(group.TotalTokens), group.Sessions, group.MissingTelemetry))
+	}
+	return lines
+}
+
+func usageReportMetadataLines(timeBasis string, coverage string) []string {
+	lines := []string{}
+	switch strings.TrimSpace(timeBasis) {
+	case usageTimeBasisWindowDelta:
+		lines = append(lines, "Time basis: exact window delta")
+	case usageTimeBasisCumulative:
+		lines = append(lines, "Time basis: cumulative")
+	}
+	if strings.TrimSpace(coverage) == usageCoveragePartial {
+		lines = append(lines, "Coverage: partial exact history")
 	}
 	return lines
 }

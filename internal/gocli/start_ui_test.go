@@ -529,6 +529,194 @@ func TestStartUIAPIUsage(t *testing.T) {
 	}
 }
 
+func TestStartUIUsageSinceUsesWindowDeltasForLocalWorkHistory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repo := createLocalWorkRepo(t)
+	repoID := localWorkRepoID(repo)
+	runID := "usage-work-window"
+	sandboxPath := filepath.Join(home, "sandboxes", runID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
+		t.Fatalf("mkdir sandbox repo: %v", err)
+	}
+	now := time.Now().UTC()
+	manifest := localWorkManifest{
+		Version:           4,
+		RunID:             runID,
+		CreatedAt:         now.Add(-2 * time.Hour).Format(time.RFC3339),
+		UpdatedAt:         now.Add(-10 * time.Minute).Format(time.RFC3339),
+		Status:            "running",
+		RepoRoot:          repo,
+		RepoName:          filepath.Base(repo),
+		RepoSlug:          "acme/widget",
+		RepoID:            repoID,
+		SourceBranch:      "main",
+		BaselineSHA:       strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:       sandboxPath,
+		SandboxRepoPath:   sandboxRepoPath,
+		InputPath:         filepath.Join(home, "task.md"),
+		InputMode:         "task",
+		IntegrationPolicy: "final",
+		GroupingPolicy:    localWorkDefaultGroupingPolicy,
+		MaxIterations:     1,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	history := localWorkThreadUsageHistoryArtifact{
+		Version:     1,
+		GeneratedAt: now.Format(time.RFC3339),
+		SandboxPath: sandboxPath,
+		Threads: []usageHistoryRow{{
+			SessionID: "usage-work-window",
+			Nickname:  "lane-1",
+			Role:      "leader",
+			Model:     "gpt-5.4",
+			CWD:       sandboxRepoPath,
+			StartedAt: now.Add(-2 * time.Hour).Unix(),
+			UpdatedAt: now.Add(-10 * time.Minute).Unix(),
+			Checkpoints: []usageTokenCheckpoint{
+				{Timestamp: now.Add(-90 * time.Minute).Unix(), InputTokens: 100, TotalTokens: 100},
+				{Timestamp: now.Add(-15 * time.Minute).Unix(), InputTokens: 170, TotalTokens: 170},
+			},
+		}},
+	}
+	if err := writeLocalWorkJSONAtomically(filepath.Join(runDir, threadUsageHistoryArtifactName), history); err != nil {
+		t.Fatalf("write thread-usage-history artifact: %v", err)
+	}
+	if err := writeLocalWorkJSONAtomically(filepath.Join(runDir, "thread-usage.json"), localWorkThreadUsageArtifact{
+		Version:     1,
+		GeneratedAt: now.Format(time.RFC3339),
+		SandboxPath: sandboxPath,
+		Totals: localWorkTokenUsageTotals{
+			InputTokens:       170,
+			TotalTokens:       170,
+			SessionsAccounted: 1,
+			UpdatedAt:         now.Format(time.RFC3339),
+		},
+		Threads: []localWorkThreadUsageRow{{
+			SessionID:   "usage-work-window",
+			Nickname:    "lane-1",
+			Role:        "leader",
+			Model:       "gpt-5.4",
+			CWD:         sandboxRepoPath,
+			InputTokens: 170,
+			TotalTokens: 170,
+			StartedAt:   now.Add(-2 * time.Hour).Unix(),
+			UpdatedAt:   now.Add(-10 * time.Minute).Unix(),
+		}},
+	}); err != nil {
+		t.Fatalf("write thread-usage artifact: %v", err)
+	}
+
+	api := &startUIAPI{cwd: repo}
+	report, err := api.buildUsageReport(url.Values{"root": {"work"}, "since": {"1h"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(): %v", err)
+	}
+	if report.TimeBasis != usageTimeBasisWindowDelta || report.Coverage != usageCoverageFull {
+		t.Fatalf("unexpected usage report metadata: %+v", report)
+	}
+	if report.Summary.Totals.TotalTokens != 70 || report.Summary.Totals.InputTokens != 70 || report.Summary.Totals.Sessions != 1 {
+		t.Fatalf("unexpected exact window totals: %+v", report.Summary.Totals)
+	}
+	if len(report.TopSessions) != 1 || report.TopSessions[0].SessionID != "usage-work-window" {
+		t.Fatalf("unexpected top sessions: %+v", report.TopSessions)
+	}
+}
+
+func TestStartUIUsageSinceReportsPartialCoverageWithoutHistory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repo := createLocalWorkRepo(t)
+	repoID := localWorkRepoID(repo)
+	runID := "usage-work-partial"
+	sandboxPath := filepath.Join(home, "sandboxes", runID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
+		t.Fatalf("mkdir sandbox repo: %v", err)
+	}
+	now := time.Now().UTC()
+	manifest := localWorkManifest{
+		Version:           4,
+		RunID:             runID,
+		CreatedAt:         now.Add(-2 * time.Hour).Format(time.RFC3339),
+		UpdatedAt:         now.Add(-5 * time.Minute).Format(time.RFC3339),
+		Status:            "running",
+		RepoRoot:          repo,
+		RepoName:          filepath.Base(repo),
+		RepoSlug:          "acme/widget",
+		RepoID:            repoID,
+		SourceBranch:      "main",
+		BaselineSHA:       strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:       sandboxPath,
+		SandboxRepoPath:   sandboxRepoPath,
+		InputPath:         filepath.Join(home, "task.md"),
+		InputMode:         "task",
+		IntegrationPolicy: "final",
+		GroupingPolicy:    localWorkDefaultGroupingPolicy,
+		MaxIterations:     1,
+		TokenUsage: &localWorkTokenUsageTotals{
+			InputTokens:       200,
+			TotalTokens:       200,
+			SessionsAccounted: 1,
+			UpdatedAt:         now.Format(time.RFC3339),
+		},
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	if err := writeLocalWorkJSONAtomically(filepath.Join(runDir, "thread-usage.json"), localWorkThreadUsageArtifact{
+		Version:     1,
+		GeneratedAt: now.Format(time.RFC3339),
+		SandboxPath: sandboxPath,
+		Totals: localWorkTokenUsageTotals{
+			InputTokens:       200,
+			TotalTokens:       200,
+			SessionsAccounted: 1,
+			UpdatedAt:         now.Format(time.RFC3339),
+		},
+		Threads: []localWorkThreadUsageRow{{
+			SessionID:   "usage-work-partial",
+			Nickname:    "lane-1",
+			Role:        "leader",
+			Model:       "gpt-5.4",
+			CWD:         sandboxRepoPath,
+			InputTokens: 200,
+			TotalTokens: 200,
+			StartedAt:   now.Add(-2 * time.Hour).Unix(),
+			UpdatedAt:   now.Add(-5 * time.Minute).Unix(),
+		}},
+	}); err != nil {
+		t.Fatalf("write thread-usage artifact: %v", err)
+	}
+
+	api := &startUIAPI{cwd: repo}
+	report, err := api.buildUsageReport(url.Values{"root": {"work"}, "since": {"1h"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(): %v", err)
+	}
+	if report.Coverage != usageCoveragePartial || report.TimeBasis != usageTimeBasisWindowDelta {
+		t.Fatalf("unexpected partial usage metadata: %+v", report)
+	}
+	if report.Summary.Totals.TotalTokens != 0 || len(report.TopSessions) != 0 {
+		t.Fatalf("expected no exact spend without history, got %+v", report)
+	}
+}
+
 func TestStartUIUsageCacheReusesRecentReportAndRefreshesAfterTTL(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

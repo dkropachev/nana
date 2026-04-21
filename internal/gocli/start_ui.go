@@ -222,6 +222,8 @@ type startUIUsageFilters struct {
 type startUIUsageReport struct {
 	GeneratedAt string                  `json:"generated_at"`
 	Version     string                  `json:"version"`
+	TimeBasis   string                  `json:"time_basis,omitempty"`
+	Coverage    string                  `json:"coverage,omitempty"`
 	Filters     startUIUsageFilters     `json:"filters"`
 	Summary     usageSummaryReport      `json:"summary"`
 	ByRoot      []usageGroupRow         `json:"by_root"`
@@ -1833,21 +1835,26 @@ func (h *startUIAPI) buildUsageReport(query url.Values) (startUIUsageReport, err
 		h.usageCacheMu.Unlock()
 	}
 
-	records := startUIUsageRecordsForReport(index, options)
-	summary := buildUsageSummaryReport(records, index.SessionRootsScanned)
-	analytics := buildUsageAnalyticsReport(records, index.SessionRootsScanned)
+	source, err := startUIUsageSourceForReport(index, options)
+	if err != nil {
+		return startUIUsageReport{}, err
+	}
+	summary := buildUsageSummaryReportFromSource(source)
+	analytics := buildUsageAnalyticsReportFromSource(source)
 	report := startUIUsageReport{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		Version:     index.Version,
+		TimeBasis:   source.TimeBasis,
+		Coverage:    source.Coverage,
 		Filters:     filters,
 		Summary:     summary,
-		ByRoot:      buildUsageGroups(records, "root"),
-		ByActivity:  buildUsageGroups(records, "activity"),
-		ByPhase:     buildUsageGroups(records, "phase"),
-		ByLane:      buildUsageGroups(records, "lane"),
-		ByDay:       buildUsageGroups(records, "day"),
-		ByModel:     buildUsageGroups(records, "model"),
-		TopSessions: buildUsageTopReport(records, index.SessionRootsScanned, "session", 10).Sessions,
+		ByRoot:      buildUsageGroups(source.Records, "root"),
+		ByActivity:  buildUsageGroups(source.Records, "activity"),
+		ByPhase:     buildUsageGroups(source.Records, "phase"),
+		ByLane:      buildUsageGroups(source.Records, "lane"),
+		ByDay:       append([]usageGroupRow(nil), source.DayGroups...),
+		ByModel:     buildUsageGroups(source.Records, "model"),
+		TopSessions: buildUsageTopReportFromSource(source, "session", 10).Sessions,
 		Insights:    analytics.Insights,
 	}
 	if startUIUsageCacheTTL > 0 {
@@ -2061,8 +2068,23 @@ func startUIUsageIndexVersion(entries []startUIUsageIndexEntry, sessionRootsScan
 	})
 }
 
-func startUIUsageRecordsForReport(index startUIUsageIndexState, options usageOptions) []usageRecord {
-	return usageRecordsForState(index, options)
+func startUIUsageSourceForReport(index startUIUsageIndexState, options usageOptions) (usageReportSource, error) {
+	if strings.TrimSpace(options.Since) == "" {
+		records := usageRecordsForState(index, options)
+		return usageReportSource{
+			Records:             records,
+			DayGroups:           buildUsageGroups(records, "day"),
+			SessionRootsScanned: index.SessionRootsScanned,
+			TimeBasis:           usageTimeBasisCumulative,
+			Coverage:            usageCoverageFull,
+		}, nil
+	}
+	source, err := loadWindowedUsageReportSource(options)
+	if err != nil {
+		return usageReportSource{}, err
+	}
+	source.SessionRootsScanned = index.SessionRootsScanned
+	return source, nil
 }
 
 func (h *startUIAPI) buildEventsPayload() (map[string]any, error) {

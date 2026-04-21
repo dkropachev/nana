@@ -223,6 +223,90 @@ func TestUsageSummaryAndTopJSON(t *testing.T) {
 	}
 }
 
+func TestUsageSinceUsesWindowDeltas(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "repo")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatalf("mkdir cwd: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".nana", "codex-home"))
+
+	now := time.Now().UTC()
+	writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID: "window-delta",
+		Timestamp: now.Add(-2 * time.Hour).Format(time.RFC3339),
+		CWD:       cwd,
+		Model:     "gpt-5.4",
+		TokenSnapshots: []usageTokenSnapshot{
+			{Timestamp: now.Add(-2 * time.Hour).Format(time.RFC3339), Input: 100, Total: 100},
+			{Timestamp: now.Add(-30 * time.Minute).Format(time.RFC3339), Input: 150, Total: 150},
+			{Timestamp: now.Add(-10 * time.Minute).Format(time.RFC3339), Input: 190, Total: 190},
+		},
+	})
+
+	output, err := captureStdout(t, func() error { return Usage(cwd, []string{"summary", "--since", "1h", "--json"}) })
+	if err != nil {
+		t.Fatalf("Usage(summary --since): %v", err)
+	}
+	var summary usageSummaryReport
+	if err := json.Unmarshal([]byte(output), &summary); err != nil {
+		t.Fatalf("unmarshal summary output: %v\n%s", err, output)
+	}
+	if summary.TimeBasis != usageTimeBasisWindowDelta || summary.Coverage != usageCoverageFull {
+		t.Fatalf("unexpected usage metadata: %+v", summary)
+	}
+	if summary.Totals.TotalTokens != 90 || summary.Totals.InputTokens != 90 || summary.Totals.Sessions != 1 {
+		t.Fatalf("unexpected windowed summary totals: %+v", summary.Totals)
+	}
+}
+
+func TestUsageGroupByDayUsesCheckpointTimestamps(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "repo")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatalf("mkdir cwd: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".nana", "codex-home"))
+
+	now := time.Now().UTC()
+	firstCheckpoint := now.Add(-26 * time.Hour)
+	secondCheckpoint := now.Add(-2 * time.Hour)
+	writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID: "window-day",
+		Timestamp: firstCheckpoint.Add(-time.Hour).Format(time.RFC3339),
+		CWD:       cwd,
+		Model:     "gpt-5.4",
+		TokenSnapshots: []usageTokenSnapshot{
+			{Timestamp: firstCheckpoint.Format(time.RFC3339), Input: 100, Total: 100},
+			{Timestamp: secondCheckpoint.Format(time.RFC3339), Input: 240, Total: 240},
+		},
+	})
+
+	output, err := captureStdout(t, func() error { return Usage(cwd, []string{"group", "--by", "day", "--since", "48h", "--json"}) })
+	if err != nil {
+		t.Fatalf("Usage(group --by day --since): %v", err)
+	}
+	var report usageTopReport
+	if err := json.Unmarshal([]byte(output), &report); err != nil {
+		t.Fatalf("unmarshal day-group output: %v\n%s", err, output)
+	}
+	if report.TimeBasis != usageTimeBasisWindowDelta {
+		t.Fatalf("unexpected time basis: %+v", report)
+	}
+	byDay := map[string]int{}
+	for _, group := range report.Groups {
+		byDay[group.Key] = group.TotalTokens
+	}
+	if len(byDay) != 2 {
+		t.Fatalf("expected 2 day buckets, got %+v", report.Groups)
+	}
+	if byDay[firstCheckpoint.Format("2006-01-02")] != 100 || byDay[secondCheckpoint.Format("2006-01-02")] != 140 {
+		t.Fatalf("unexpected day buckets: %+v", report.Groups)
+	}
+}
+
 type usageRolloutFixture struct {
 	SessionID      string
 	Timestamp      string
@@ -235,6 +319,7 @@ type usageRolloutFixture struct {
 }
 
 type usageTokenSnapshot struct {
+	Timestamp       string
 	Input           int
 	CachedInput     int
 	Output          int
@@ -278,9 +363,14 @@ func writeUsageRollout(t testing.TB, sessionsRoot string, fixture usageRolloutFi
 		},
 	}
 	lines = append(lines, fixture.ExtraLines...)
-	for _, snapshot := range fixture.TokenSnapshots {
+	for index, snapshot := range fixture.TokenSnapshots {
+		eventTimestamp := strings.TrimSpace(snapshot.Timestamp)
+		if eventTimestamp == "" {
+			eventTimestamp = timestamp.Add(time.Duration(index+1) * time.Second).UTC().Format(time.RFC3339)
+		}
 		lines = append(lines, map[string]any{
-			"type": "event_msg",
+			"timestamp": eventTimestamp,
+			"type":      "event_msg",
 			"payload": map[string]any{
 				"type": "token_count",
 				"info": map[string]any{
