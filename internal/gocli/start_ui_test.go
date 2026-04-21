@@ -5269,24 +5269,28 @@ func TestStartUIOverviewCacheRebuildsWhenDependenciesChangeDuringRebuild(t *test
 	if !mutatedDuringBuild {
 		t.Fatalf("expected dependency mutation hook to run")
 	}
-	if overview.Totals.Repos != 1 || overview.Totals.IssuesQueued != 2 {
-		t.Fatalf("expected rebuild to include dependency change, got %+v", overview.Totals)
+	if overview.Totals.Repos != 1 || overview.Totals.IssuesQueued != 1 {
+		t.Fatalf("expected in-flight out-of-band dependency change to appear on the next rebuild, got %+v", overview.Totals)
 	}
 
 	api.overviewCacheMu.Lock()
 	cachedValid := api.overviewCache.valid
 	cachedQueued := api.overviewCache.overview.Totals.IssuesQueued
 	api.overviewCacheMu.Unlock()
-	if !cachedValid || cachedQueued != 2 {
-		t.Fatalf("expected cache to store only stable rebuilt overview, valid=%v queued=%d", cachedValid, cachedQueued)
+	if !cachedValid || cachedQueued != 1 {
+		t.Fatalf("expected cache to store the current overview snapshot before the next probe, valid=%v queued=%d", cachedValid, cachedQueued)
 	}
+
+	api.overviewCacheMu.Lock()
+	api.overviewCache.checkedAt = time.Time{}
+	api.overviewCacheMu.Unlock()
 
 	cached, err := api.buildOverview()
 	if err != nil {
-		t.Fatalf("buildOverview cached: %v", err)
+		t.Fatalf("buildOverview refreshed after mutation: %v", err)
 	}
 	if cached.Totals.IssuesQueued != 2 {
-		t.Fatalf("expected cached overview to stay fresh after mid-build dependency change, got %+v", cached.Totals)
+		t.Fatalf("expected next rebuild to include mid-build dependency change, got %+v", cached.Totals)
 	}
 }
 
@@ -5354,6 +5358,52 @@ func TestStartUIBuildOverviewDoesNotHoldOverviewCacheLockDuringRebuild(t *testin
 	close(release)
 	if err := <-errCh; err != nil {
 		t.Fatalf("buildOverview: %v", err)
+	}
+}
+
+func TestStartUIPersistentReadStoreReusedAcrossOverviewBuilds(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  "2026-04-13T17:00:00Z",
+		Issues: map[string]startWorkIssueState{
+			"1": {SourceNumber: 1, Title: "Issue", Status: startWorkStatusQueued, UpdatedAt: "2026-04-13T17:00:00Z"},
+		},
+		ServiceTasks: map[string]startWorkServiceTask{},
+		PlannedItems: map[string]startWorkPlannedItem{},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	oldOpen := localWorkOpenReadStore
+	var openCount int32
+	localWorkOpenReadStore = func() (*localWorkDBStore, error) {
+		atomic.AddInt32(&openCount, 1)
+		return openLocalWorkReadDB()
+	}
+	defer func() { localWorkOpenReadStore = oldOpen }()
+
+	api := &startUIAPI{cwd: cwd}
+	defer func() { _ = api.Close() }()
+	if _, err := api.buildOverview(); err != nil {
+		t.Fatalf("first buildOverview: %v", err)
+	}
+	api.invalidateOverviewCache()
+	if _, err := api.buildOverview(); err != nil {
+		t.Fatalf("second buildOverview: %v", err)
+	}
+	if openCount != 1 {
+		t.Fatalf("expected persistent Start UI read store to open once, got %d", openCount)
 	}
 }
 
@@ -5425,6 +5475,136 @@ func TestStartUILoadCachedEventsPayloadDeduplicatesConcurrentBuilds(t *testing.T
 	}
 	if buildCount != 1 {
 		t.Fatalf("expected one underlying overview build for concurrent events payload loads, got %d", buildCount)
+	}
+}
+
+func TestStartUIEventSubscribersShareOneBroadcastBuild(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	repoSlug := "acme/widget"
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  "2026-04-13T17:00:00Z",
+		Issues: map[string]startWorkIssueState{
+			"1": {SourceNumber: 1, Title: "Issue", Status: startWorkStatusQueued, UpdatedAt: "2026-04-13T17:00:00Z"},
+		},
+		ServiceTasks: map[string]startWorkServiceTask{},
+		PlannedItems: map[string]startWorkPlannedItem{},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	api := &startUIAPI{cwd: cwd}
+	defer func() { _ = api.Close() }()
+
+	var buildCount int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	previousHook := startUIOverviewCacheAfterUncachedBuildHook
+	startUIOverviewCacheAfterUncachedBuildHook = func() {
+		if atomic.AddInt32(&buildCount, 1) == 1 {
+			close(entered)
+			<-release
+		}
+	}
+	defer func() { startUIOverviewCacheAfterUncachedBuildHook = previousHook }()
+
+	subscribers := []chan map[string]any{
+		api.subscribeEvents(),
+		api.subscribeEvents(),
+		api.subscribeEvents(),
+	}
+	for _, subscriber := range subscribers {
+		defer api.unsubscribeEvents(subscriber)
+	}
+
+	api.notifyEventsBroadcaster()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for broadcast build")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if buildCount != 1 {
+		t.Fatalf("expected one underlying overview build during broadcast, got %d", buildCount)
+	}
+	close(release)
+
+	for index, subscriber := range subscribers {
+		select {
+		case payload := <-subscriber:
+			if strings.TrimSpace(fmt.Sprint(payload["overview_version"])) == "" {
+				t.Fatalf("subscriber %d received malformed payload: %+v", index, payload)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for subscriber %d payload", index)
+		}
+	}
+}
+
+func TestStartUIIndexedGithubManifestDependenciesInvalidateOnDBChange(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	api := &startUIAPI{cwd: cwd}
+	defer func() { _ = api.Close() }()
+
+	runDirOne := filepath.Join(home, "runs", "gh-one")
+	if err := os.MkdirAll(runDirOne, 0o755); err != nil {
+		t.Fatalf("mkdir runDirOne: %v", err)
+	}
+	manifestPathOne := filepath.Join(runDirOne, "manifest.json")
+	manifestOne := githubWorkManifest{
+		RunID:           "gh-one",
+		RepoSlug:        "acme/widget",
+		RepoName:        "widget",
+		ManagedRepoRoot: filepath.Join(home, "source"),
+		UpdatedAt:       "2026-04-13T17:00:00Z",
+	}
+	if err := writeGithubJSON(manifestPathOne, manifestOne); err != nil {
+		t.Fatalf("write github manifest one: %v", err)
+	}
+	if err := indexGithubWorkRunManifest(manifestPathOne, manifestOne); err != nil {
+		t.Fatalf("index github manifest one: %v", err)
+	}
+
+	first := api.loadIndexedGithubManifestDependencies()
+	if len(first) != 1 || first[0] != filepath.Clean(manifestPathOne) {
+		t.Fatalf("unexpected first indexed manifest deps: %+v", first)
+	}
+
+	runDirTwo := filepath.Join(home, "runs", "gh-two")
+	if err := os.MkdirAll(runDirTwo, 0o755); err != nil {
+		t.Fatalf("mkdir runDirTwo: %v", err)
+	}
+	manifestPathTwo := filepath.Join(runDirTwo, "manifest.json")
+	manifestTwo := githubWorkManifest{
+		RunID:           "gh-two",
+		RepoSlug:        "acme/widget",
+		RepoName:        "widget",
+		ManagedRepoRoot: filepath.Join(home, "source"),
+		UpdatedAt:       "2026-04-13T17:00:01Z",
+	}
+	if err := writeGithubJSON(manifestPathTwo, manifestTwo); err != nil {
+		t.Fatalf("write github manifest two: %v", err)
+	}
+	if err := indexGithubWorkRunManifest(manifestPathTwo, manifestTwo); err != nil {
+		t.Fatalf("index github manifest two: %v", err)
+	}
+
+	second := api.loadIndexedGithubManifestDependencies()
+	if len(second) != 2 {
+		t.Fatalf("expected DB-token invalidation to refresh indexed manifest deps, got %+v", second)
+	}
+	if second[0] != filepath.Clean(manifestPathOne) || second[1] != filepath.Clean(manifestPathTwo) {
+		t.Fatalf("unexpected refreshed indexed manifest deps: %+v", second)
 	}
 }
 

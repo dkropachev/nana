@@ -43,6 +43,7 @@ type startUISupervisor struct {
 	runtimePath   string
 	apiServer     *http.Server
 	webServer     *http.Server
+	api           *startUIAPI
 	apiURL        string
 	webURL        string
 	prewarmCancel context.CancelFunc
@@ -50,20 +51,32 @@ type startUISupervisor struct {
 }
 
 type startUIAPI struct {
-	cwd              string
-	allowedWebOrigin string
-	overviewCacheMu  sync.Mutex
-	overviewCache    startUIOverviewCache
-	overviewBuildCh  chan struct{}
-	sectionCacheMu   sync.Mutex
-	sectionCaches    startUIOverviewSectionCaches
-	eventsCacheMu    sync.Mutex
-	eventsCache      startUIEventsPayloadCache
-	eventsBuildCh    chan struct{}
-	usageIndexMu     sync.Mutex
-	usageIndexCache  startUISectionCache[startUIUsageIndexState]
-	usageCacheMu     sync.Mutex
-	usageCache       map[string]startUIUsageCacheEntry
+	cwd                  string
+	allowedWebOrigin     string
+	overviewCacheMu      sync.Mutex
+	overviewCache        startUIOverviewCache
+	overviewBuildCh      chan struct{}
+	sectionCacheMu       sync.Mutex
+	sectionCaches        startUIOverviewSectionCaches
+	eventsCacheMu        sync.Mutex
+	eventsCache          startUIEventsPayloadCache
+	eventsBuildCh        chan struct{}
+	eventsStreamMu       sync.Mutex
+	eventsNotifyCh       chan struct{}
+	eventsStopCh         chan struct{}
+	eventsDoneCh         chan struct{}
+	eventsClients        map[chan map[string]any]struct{}
+	eventsLastHash       string
+	eventsLastPayload    map[string]any
+	localWorkReadMu      sync.Mutex
+	localWorkRead        *localWorkDBStore
+	localWorkReadBuildCh chan struct{}
+	localWorkToken       string
+	workMetaCache        startUIWorkMetadataCache
+	usageIndexMu         sync.Mutex
+	usageIndexCache      startUISectionCache[startUIUsageIndexState]
+	usageCacheMu         sync.Mutex
+	usageCache           map[string]startUIUsageCacheEntry
 }
 
 type startUIOverviewCache struct {
@@ -84,6 +97,11 @@ type startUIEventsPayloadCache struct {
 	checkedAt time.Time
 	hash      string
 	payload   map[string]any
+}
+
+type startUIWorkMetadataCache struct {
+	indexedGithubManifestDepsToken string
+	indexedGithubManifestDeps      []string
 }
 
 type startUIDependencySnapshot struct {
@@ -772,6 +790,7 @@ func launchStartUISupervisor(cwd string, options startOptions) (*startUISupervis
 		runtimePath:   filepath.Join(githubNanaHome(), "start", "ui", "runtime.json"),
 		apiServer:     apiServer,
 		webServer:     webServer,
+		api:           api,
 		apiURL:        apiURL,
 		webURL:        webURL,
 		prewarmCancel: prewarmCancel,
@@ -855,6 +874,9 @@ func (s *startUISupervisor) Close() error {
 	if s.webServer != nil {
 		_ = s.webServer.Shutdown(ctx)
 	}
+	if s.api != nil {
+		_ = s.api.Close()
+	}
 	runtime := startUIRuntimeState{}
 	_ = readGithubJSON(s.runtimePath, &runtime)
 	runtime.ProcessID = os.Getpid()
@@ -862,6 +884,14 @@ func (s *startUISupervisor) Close() error {
 	runtime.WebURL = s.webURL
 	runtime.StoppedAt = time.Now().UTC().Format(time.RFC3339)
 	return writeGithubJSON(s.runtimePath, runtime)
+}
+
+func (h *startUIAPI) Close() error {
+	if h == nil {
+		return nil
+	}
+	h.stopEventsBroadcaster()
+	return h.closePersistentLocalWorkReadStore()
 }
 
 func listenLoopbackPort(host string, preferredPort int) (net.Listener, string, error) {
@@ -1613,23 +1643,34 @@ func (h *startUIAPI) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	lastHash := ""
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+
+	payload, hash, err := h.loadCachedEventsPayload()
+	if err == nil {
+		data, _ := json.Marshal(payload)
+		fmt.Fprintf(w, "event: state\ndata: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	subscriber := h.subscribeEvents()
+	defer h.unsubscribeEvents(subscriber)
+	lastHash := hash
+	h.notifyEventsBroadcaster()
 	for {
-		payload, hash, err := h.loadCachedEventsPayload()
-		if err == nil {
-			if hash != lastHash {
-				lastHash = hash
-				data, _ := json.Marshal(payload)
-				fmt.Fprintf(w, "event: state\ndata: %s\n\n", data)
-				flusher.Flush()
-			}
-		}
 		select {
 		case <-r.Context().Done():
 			return
-		case <-ticker.C:
+		case payload, ok := <-subscriber:
+			if !ok {
+				return
+			}
+			hash := hashStartUIEventPayload(payload)
+			if hash == lastHash {
+				continue
+			}
+			lastHash = hash
+			data, _ := json.Marshal(payload)
+			fmt.Fprintf(w, "event: state\ndata: %s\n\n", data)
+			flusher.Flush()
 		}
 	}
 }
@@ -1656,31 +1697,10 @@ func (h *startUIAPI) buildCachedOverview() (startUIOverview, error) {
 
 		buildCh := make(chan struct{})
 		h.overviewBuildCh = buildCh
-		cacheValid := h.overviewCache.valid
-		cacheToken := h.overviewCache.token
 		cacheDeps := append([]string(nil), h.overviewCache.deps...)
 		h.overviewCacheMu.Unlock()
 
-		if cacheValid {
-			token := fingerprintStartUIOverviewDependencies(cacheDeps)
-			if token == cacheToken {
-				h.overviewCacheMu.Lock()
-				if h.overviewCache.valid && h.overviewCache.token == cacheToken {
-					h.overviewCache.checkedAt = now
-					overview := h.overviewCache.overview
-					h.overviewBuildCh = nil
-					close(buildCh)
-					h.overviewCacheMu.Unlock()
-					return overview, nil
-				}
-				h.overviewBuildCh = nil
-				close(buildCh)
-				h.overviewCacheMu.Unlock()
-				continue
-			}
-		}
-
-		overview, err := h.rebuildOverviewCache()
+		overview, err := h.rebuildOverviewCache(cacheDeps)
 		h.overviewCacheMu.Lock()
 		h.overviewBuildCh = nil
 		close(buildCh)
@@ -1689,47 +1709,35 @@ func (h *startUIAPI) buildCachedOverview() (startUIOverview, error) {
 	}
 }
 
-func (h *startUIAPI) rebuildOverviewCache() (startUIOverview, error) {
-	h.expireOverviewSectionCaches()
-	overview, snapshot, stable, err := h.buildOverviewWithStableDependencySnapshot()
+func (h *startUIAPI) rebuildOverviewCache(previousDeps []string) (startUIOverview, error) {
+	if len(previousDeps) > 0 {
+		h.expireOverviewSectionsForChangedDependencies(previousDeps)
+	}
+	overview, err := h.buildOverviewUncached()
 	if err != nil {
 		h.overviewCacheMu.Lock()
 		h.overviewCache.valid = false
 		h.overviewCache.events = nil
+		h.overviewCache.token = ""
+		h.overviewCache.deps = nil
 		h.overviewCacheMu.Unlock()
 		h.invalidateEventsCache()
 		return startUIOverview{}, err
 	}
-	if !stable {
-		h.expireOverviewSectionCaches()
-		overview, snapshot, stable, err = h.buildOverviewWithStableDependencySnapshot()
-		if err != nil {
-			h.overviewCacheMu.Lock()
-			h.overviewCache.valid = false
-			h.overviewCache.events = nil
-			h.overviewCacheMu.Unlock()
-			h.invalidateEventsCache()
-			return startUIOverview{}, err
-		}
+	if startUIOverviewCacheAfterUncachedBuildHook != nil {
+		startUIOverviewCacheAfterUncachedBuildHook()
 	}
-	if !stable {
-		h.overviewCacheMu.Lock()
-		h.overviewCache.valid = false
-		h.overviewCache.events = nil
-		h.overviewCacheMu.Unlock()
-		h.invalidateEventsCache()
-		return overview, nil
-	}
-
 	version := startUIOverviewVersion(overview)
 	events := startUIOverviewEventsPayload(overview, version, "")
+	token := h.currentOverviewSectionCacheToken()
+	persistedSnapshot := snapshotStartUIDependencies(h.listStartUIOverviewDependencies())
 	h.overviewCacheMu.Lock()
 	h.overviewCache = startUIOverviewCache{
 		valid:     true,
-		token:     snapshot.token,
+		token:     token,
 		version:   version,
 		checkedAt: time.Now(),
-		deps:      snapshot.deps,
+		deps:      persistedSnapshot.deps,
 		overview:  overview,
 		events:    events,
 	}
@@ -1740,23 +1748,10 @@ func (h *startUIAPI) rebuildOverviewCache() (startUIOverview, error) {
 		OverviewVersion: version,
 		GeneratedAt:     overview.GeneratedAt,
 		Overview:        overview,
-		Dependencies:    append([]string(nil), snapshot.deps...),
-		DependencyToken: snapshot.token,
+		Dependencies:    append([]string(nil), persistedSnapshot.deps...),
+		DependencyToken: persistedSnapshot.token,
 	})
 	return overview, nil
-}
-
-func (h *startUIAPI) buildOverviewWithStableDependencySnapshot() (startUIOverview, startUIDependencySnapshot, bool, error) {
-	before := snapshotStartUIOverviewDependencies(h.cwd)
-	overview, err := h.buildOverviewUncached()
-	if err != nil {
-		return startUIOverview{}, startUIDependencySnapshot{}, false, err
-	}
-	if startUIOverviewCacheAfterUncachedBuildHook != nil {
-		startUIOverviewCacheAfterUncachedBuildHook()
-	}
-	after := snapshotStartUIOverviewDependencies(h.cwd)
-	return overview, after, sameStartUIOverviewDependencySnapshot(before, after), nil
 }
 
 func (h *startUIAPI) buildOverviewUncached() (startUIOverview, error) {
@@ -2066,10 +2061,15 @@ func (h *startUIAPI) loadUsageIndex() (startUIUsageIndexState, error) {
 	}
 
 	h.usageIndexMu.Lock()
+	previousVersion := strings.TrimSpace(h.usageIndexCache.value.Version)
 	h.usageIndexCache.valid = true
 	h.usageIndexCache.checkedAt = time.Now()
 	h.usageIndexCache.value = index
 	h.usageIndexMu.Unlock()
+	if strings.TrimSpace(index.Version) != previousVersion {
+		h.invalidateEventsCache()
+		h.notifyEventsBroadcaster()
+	}
 	return index, nil
 }
 
@@ -2080,10 +2080,15 @@ func (h *startUIAPI) loadUsageIndexForReport(options usageOptions) (startUIUsage
 			return startUIUsageIndexState{}, err
 		}
 		h.usageIndexMu.Lock()
+		previousVersion := strings.TrimSpace(h.usageIndexCache.value.Version)
 		h.usageIndexCache.valid = true
 		h.usageIndexCache.checkedAt = time.Now()
 		h.usageIndexCache.value = index
 		h.usageIndexMu.Unlock()
+		if strings.TrimSpace(index.Version) != previousVersion {
+			h.invalidateEventsCache()
+			h.notifyEventsBroadcaster()
+		}
 		return index, nil
 	}
 	return h.loadUsageIndex()
@@ -2260,6 +2265,124 @@ func (h *startUIAPI) loadCachedEventsPayload() (map[string]any, string, error) {
 	}
 }
 
+func (h *startUIAPI) ensureEventsBroadcasterStarted() {
+	h.eventsStreamMu.Lock()
+	defer h.eventsStreamMu.Unlock()
+	if h.eventsNotifyCh != nil {
+		return
+	}
+	h.eventsNotifyCh = make(chan struct{}, 1)
+	h.eventsStopCh = make(chan struct{})
+	h.eventsDoneCh = make(chan struct{})
+	h.eventsClients = map[chan map[string]any]struct{}{}
+	go h.runEventsBroadcaster(h.eventsNotifyCh, h.eventsStopCh, h.eventsDoneCh)
+}
+
+func (h *startUIAPI) runEventsBroadcaster(notifyCh <-chan struct{}, stopCh <-chan struct{}, doneCh chan<- struct{}) {
+	defer close(doneCh)
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-notifyCh:
+		case <-ticker.C:
+		}
+		payload, hash, err := h.loadCachedEventsPayload()
+		if err != nil {
+			continue
+		}
+
+		h.eventsStreamMu.Lock()
+		if hash == h.eventsLastHash {
+			h.eventsStreamMu.Unlock()
+			continue
+		}
+		h.eventsLastHash = hash
+		h.eventsLastPayload = cloneStartUIEventPayload(payload)
+		subscribers := make([]chan map[string]any, 0, len(h.eventsClients))
+		for subscriber := range h.eventsClients {
+			subscribers = append(subscribers, subscriber)
+		}
+		h.eventsStreamMu.Unlock()
+
+		for _, subscriber := range subscribers {
+			cloned := cloneStartUIEventPayload(payload)
+			select {
+			case subscriber <- cloned:
+			default:
+				select {
+				case <-subscriber:
+				default:
+				}
+				select {
+				case subscriber <- cloned:
+				default:
+				}
+			}
+		}
+	}
+}
+
+func (h *startUIAPI) subscribeEvents() chan map[string]any {
+	h.ensureEventsBroadcasterStarted()
+	subscriber := make(chan map[string]any, 1)
+	h.eventsStreamMu.Lock()
+	h.eventsClients[subscriber] = struct{}{}
+	if h.eventsLastPayload != nil {
+		subscriber <- cloneStartUIEventPayload(h.eventsLastPayload)
+	}
+	h.eventsStreamMu.Unlock()
+	return subscriber
+}
+
+func (h *startUIAPI) unsubscribeEvents(subscriber chan map[string]any) {
+	if subscriber == nil {
+		return
+	}
+	h.eventsStreamMu.Lock()
+	if h.eventsClients != nil {
+		delete(h.eventsClients, subscriber)
+	}
+	h.eventsStreamMu.Unlock()
+}
+
+func (h *startUIAPI) notifyEventsBroadcaster() {
+	h.ensureEventsBroadcasterStarted()
+	h.eventsStreamMu.Lock()
+	notifyCh := h.eventsNotifyCh
+	h.eventsStreamMu.Unlock()
+	select {
+	case notifyCh <- struct{}{}:
+	default:
+	}
+}
+
+func (h *startUIAPI) stopEventsBroadcaster() {
+	h.eventsStreamMu.Lock()
+	stopCh := h.eventsStopCh
+	doneCh := h.eventsDoneCh
+	clients := h.eventsClients
+	h.eventsNotifyCh = nil
+	h.eventsStopCh = nil
+	h.eventsDoneCh = nil
+	h.eventsClients = nil
+	h.eventsLastHash = ""
+	h.eventsLastPayload = nil
+	h.eventsStreamMu.Unlock()
+
+	for subscriber := range clients {
+		close(subscriber)
+	}
+	if stopCh != nil {
+		close(stopCh)
+	}
+	if doneCh != nil {
+		<-doneCh
+	}
+}
+
 func startUIOverviewEventsPayload(overview startUIOverview, overviewVersion string, usageVersion string) map[string]any {
 	return map[string]any{
 		"generated_at":     overview.GeneratedAt,
@@ -2276,6 +2399,7 @@ func (h *startUIAPI) invalidateOverviewCache() {
 	h.sectionCaches = startUIOverviewSectionCaches{}
 	h.sectionCacheMu.Unlock()
 	h.invalidateEventsCache()
+	h.notifyEventsBroadcaster()
 }
 
 func (h *startUIAPI) expireOverviewSectionCaches() {
@@ -2295,6 +2419,218 @@ func (h *startUIAPI) invalidateEventsCache() {
 	h.eventsCache = startUIEventsPayloadCache{}
 }
 
+func (h *startUIAPI) currentOverviewSectionCacheToken() string {
+	h.sectionCacheMu.Lock()
+	defer h.sectionCacheMu.Unlock()
+	parts := []string{
+		h.sectionCaches.repos.token,
+		h.sectionCaches.workRuns.token,
+		h.sectionCaches.workItems.token,
+		h.sectionCaches.investigationCount.token,
+		h.sectionCaches.hud.token,
+		h.sectionCaches.hudGitBranch.token,
+	}
+	if strings.TrimSpace(strings.Join(parts, "")) == "" {
+		return ""
+	}
+	return strings.Join(parts, "\x00")
+}
+
+func (h *startUIAPI) expireOverviewSectionsForChangedDependencies(previousDeps []string) {
+	if len(previousDeps) == 0 {
+		h.expireOverviewSectionCaches()
+		return
+	}
+	h.sectionCacheMu.Lock()
+	defer h.sectionCacheMu.Unlock()
+	if snapshotStartUIDependencies(listStartUIRepoSummaryDependencies(h.cwd)).token != h.sectionCaches.repos.token {
+		h.sectionCaches.repos.checkedAt = time.Time{}
+	}
+	if snapshotStartUIDependencies(h.listStartUIWorkRunDependencies()).token != h.sectionCaches.workRuns.token {
+		h.sectionCaches.workRuns.checkedAt = time.Time{}
+	}
+	if snapshotStartUIDependencies(listStartUIWorkItemDependencies()).token != h.sectionCaches.workItems.token {
+		h.sectionCaches.workItems.checkedAt = time.Time{}
+	}
+	if snapshotStartUIDependencies(listStartUIInvestigationCountDependencies(h.cwd)).token != h.sectionCaches.investigationCount.token {
+		h.sectionCaches.investigationCount.checkedAt = time.Time{}
+	}
+	if snapshotStartUIDependencies(listStartUIHUDSectionDependencies(h.cwd)).token != h.sectionCaches.hud.token {
+		h.sectionCaches.hud.checkedAt = time.Time{}
+	}
+	if snapshotStartUIDependencies(listStartUIHUDGitDependencies(h.cwd)).token != h.sectionCaches.hudGitBranch.token {
+		h.sectionCaches.hudGitBranch.checkedAt = time.Time{}
+	}
+}
+
+func (h *startUIAPI) closePersistentLocalWorkReadStore() error {
+	h.localWorkReadMu.Lock()
+	store := h.localWorkRead
+	h.localWorkRead = nil
+	h.localWorkReadBuildCh = nil
+	h.localWorkToken = ""
+	h.workMetaCache = startUIWorkMetadataCache{}
+	h.localWorkReadMu.Unlock()
+	if store == nil {
+		return nil
+	}
+	return store.Close()
+}
+
+func (h *startUIAPI) persistentLocalWorkReadSnapshot() startUIDependencySnapshot {
+	return snapshotStartUIDependencies(listStartUILocalWorkDBDependencies())
+}
+
+func (h *startUIAPI) persistentLocalWorkReadStore(snapshot startUIDependencySnapshot) (*localWorkDBStore, error) {
+	for {
+		h.localWorkReadMu.Lock()
+		if h.localWorkRead != nil {
+			store := h.localWorkRead
+			h.localWorkReadMu.Unlock()
+			return store, nil
+		}
+		if h.localWorkReadBuildCh != nil {
+			waitCh := h.localWorkReadBuildCh
+			h.localWorkReadMu.Unlock()
+			<-waitCh
+			continue
+		}
+		buildCh := make(chan struct{})
+		h.localWorkReadBuildCh = buildCh
+		h.localWorkReadMu.Unlock()
+
+		store, err := localWorkOpenReadStore()
+		h.localWorkReadMu.Lock()
+		if err == nil && h.localWorkRead == nil {
+			h.localWorkRead = store
+			h.localWorkToken = snapshot.token
+		}
+		existing := h.localWorkRead
+		h.localWorkReadBuildCh = nil
+		close(buildCh)
+		h.localWorkReadMu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+		if existing != store {
+			_ = store.Close()
+		}
+		return existing, nil
+	}
+}
+
+func (h *startUIAPI) resetPersistentLocalWorkReadStore() {
+	_ = h.closePersistentLocalWorkReadStore()
+}
+
+func startUIWithPersistentLocalWorkReadStore[T any](h *startUIAPI, readFn func(*localWorkDBStore) (T, error)) (T, error) {
+	var zero T
+	attempts := localWorkReadRetryAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	for attempt := 1; attempt <= attempts; attempt++ {
+		snapshot := h.persistentLocalWorkReadSnapshot()
+		store, err := h.persistentLocalWorkReadStore(snapshot)
+		if err != nil {
+			if !isLocalWorkDBLockError(err) || attempt == attempts {
+				return zero, err
+			}
+			localWorkRetrySleep(localWorkReadRetryDelay)
+			continue
+		}
+		value, readErr := readFn(store)
+		if readErr == nil {
+			return value, nil
+		}
+		if !isLocalWorkDBLockError(readErr) || attempt == attempts {
+			return zero, readErr
+		}
+		h.resetPersistentLocalWorkReadStore()
+		localWorkRetrySleep(localWorkReadRetryDelay)
+	}
+	return zero, fmt.Errorf("persistent local work DB read retry exhausted")
+}
+
+func (h *startUIAPI) loadIndexedGithubManifestDependencies() []string {
+	snapshot := h.persistentLocalWorkReadSnapshot()
+
+	h.localWorkReadMu.Lock()
+	if h.workMetaCache.indexedGithubManifestDepsToken == snapshot.token {
+		cached := append([]string(nil), h.workMetaCache.indexedGithubManifestDeps...)
+		h.localWorkReadMu.Unlock()
+		return cached
+	}
+	h.localWorkReadMu.Unlock()
+
+	deps, err := startUIWithPersistentLocalWorkReadStore(h, func(store *localWorkDBStore) ([]string, error) {
+		rows, err := store.db.Query(`SELECT backend, manifest_path FROM work_run_index ORDER BY updated_at DESC LIMIT ?`, startUIOverviewRunLimit)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		seen := map[string]bool{}
+		paths := []string{}
+		for rows.Next() {
+			var backend string
+			var manifestPath sql.NullString
+			if err := rows.Scan(&backend, &manifestPath); err != nil {
+				continue
+			}
+			if backend != "github" || !manifestPath.Valid {
+				continue
+			}
+			path := filepath.Clean(strings.TrimSpace(manifestPath.String))
+			if path == "" || seen[path] {
+				continue
+			}
+			seen[path] = true
+			paths = append(paths, path)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		sort.Strings(paths)
+		return paths, nil
+	})
+	if err != nil {
+		return nil
+	}
+
+	h.localWorkReadMu.Lock()
+	if h.localWorkToken == snapshot.token {
+		h.workMetaCache.indexedGithubManifestDepsToken = snapshot.token
+		h.workMetaCache.indexedGithubManifestDeps = append([]string(nil), deps...)
+	}
+	h.localWorkReadMu.Unlock()
+	return deps
+}
+
+func (h *startUIAPI) listStartUIWorkRunDependencies() []string {
+	seen := map[string]bool{}
+	paths := []string{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		clean := filepath.Clean(path)
+		if seen[clean] {
+			return
+		}
+		seen[clean] = true
+		paths = append(paths, clean)
+	}
+	addStartUILocalWorkDBDependencies(add)
+	for _, path := range h.loadIndexedGithubManifestDependencies() {
+		add(path)
+	}
+	addStartUIRepoTreeDependencies(githubWorkReposRoot(), "start-state.json", add)
+	addStartUIRepoTreeDependencies(githubWorkReposRoot(), "settings.json", add)
+	sort.Strings(paths)
+	return paths
+}
+
 func (h *startUIAPI) loadOverviewReposSection() (startUIOverviewReposSection, error) {
 	return startUILoadCachedSection(&h.sectionCacheMu, &h.sectionCaches.repos, startUISectionCacheProbeInterval, func() []string {
 		return listStartUIRepoSummaryDependencies(h.cwd)
@@ -2309,15 +2645,15 @@ func (h *startUIAPI) loadOverviewReposSection() (startUIOverviewReposSection, er
 
 func (h *startUIAPI) loadOverviewWorkRunsSection() ([]startUIWorkRun, error) {
 	return startUILoadCachedSection(&h.sectionCacheMu, &h.sectionCaches.workRuns, startUISectionCacheProbeInterval, func() []string {
-		return listStartUIWorkRunDependencies(h.cwd)
+		return h.listStartUIWorkRunDependencies()
 	}, func() ([]startUIWorkRun, error) {
-		return loadStartUIWorkRuns(startUIOverviewRunLimit)
+		return h.loadStartUIWorkRunsPersistent(startUIOverviewRunLimit)
 	})
 }
 
 func (h *startUIAPI) loadOverviewWorkItemsSection() (startUIOverviewWorkItemsSection, error) {
 	return startUILoadCachedSection(&h.sectionCacheMu, &h.sectionCaches.workItems, startUISectionCacheProbeInterval, listStartUIWorkItemDependencies, func() (startUIOverviewWorkItemsSection, error) {
-		return withLocalWorkReadStore(func(store *localWorkDBStore) (startUIOverviewWorkItemsSection, error) {
+		return startUIWithPersistentLocalWorkReadStore(h, func(store *localWorkDBStore) (startUIOverviewWorkItemsSection, error) {
 			displayItems, err := store.listWorkItems(workItemListOptions{
 				Limit:         10,
 				IncludeHidden: false,
@@ -2546,6 +2882,35 @@ func listStartUIWorkRunDependencies(cwd string) []string {
 	return paths
 }
 
+func (h *startUIAPI) listStartUIOverviewDependencies() []string {
+	seen := map[string]bool{}
+	paths := []string{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		clean := filepath.Clean(path)
+		if seen[clean] {
+			return
+		}
+		seen[clean] = true
+		paths = append(paths, clean)
+	}
+
+	addStartUILocalWorkDBDependencies(add)
+	for _, path := range h.loadIndexedGithubManifestDependencies() {
+		add(path)
+	}
+	addStartUIRepoTreeDependencies(githubWorkReposRoot(), "start-state.json", add)
+	addStartUIRepoTreeDependencies(githubWorkReposRoot(), "settings.json", add)
+	addStartUIScoutPolicyDependencies(add)
+	addStartUIInvestigationDependencies(h.cwd, add)
+	addStartUIHUDDependencies(h.cwd, add)
+	sort.Strings(paths)
+	return paths
+}
+
 func listStartUIWorkItemDependencies() []string {
 	seen := map[string]bool{}
 	paths := []string{}
@@ -2632,6 +2997,20 @@ func addStartUILocalWorkDBDependencies(add func(string)) {
 	add(dbPath)
 	add(dbPath + "-wal")
 	add(dbPath + "-shm")
+}
+
+func listStartUILocalWorkDBDependencies() []string {
+	paths := []string{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		paths = append(paths, filepath.Clean(path))
+	}
+	addStartUILocalWorkDBDependencies(add)
+	sort.Strings(paths)
+	return paths
 }
 
 func addStartUIRepoLockDependencies(repoPath string, add func(string)) {
@@ -3960,63 +4339,77 @@ func startUIRepoScoutPolicyPath(repoPath string, role string, scope string) stri
 	return repoScoutPolicyPath(repoPath, role, false)
 }
 
+func (h *startUIAPI) loadStartUIWorkRunsPersistent(limit int) ([]startUIWorkRun, error) {
+	sourcePathIndex, err := listStartUIRepoSourcePathIndex()
+	if err != nil {
+		return nil, err
+	}
+	return startUIWithPersistentLocalWorkReadStore(h, func(store *localWorkDBStore) ([]startUIWorkRun, error) {
+		return loadStartUIWorkRunsFromStore(store, limit, sourcePathIndex)
+	})
+}
+
 func loadStartUIWorkRuns(limit int) ([]startUIWorkRun, error) {
 	sourcePathIndex, err := listStartUIRepoSourcePathIndex()
 	if err != nil {
 		return nil, err
 	}
 	return withLocalWorkReadStore(func(store *localWorkDBStore) ([]startUIWorkRun, error) {
-		rows, err := store.db.Query(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index ORDER BY updated_at DESC LIMIT ?`, limit)
+		return loadStartUIWorkRunsFromStore(store, limit, sourcePathIndex)
+	})
+}
+
+func loadStartUIWorkRunsFromStore(store *localWorkDBStore, limit int, sourcePathIndex map[string]string) ([]startUIWorkRun, error) {
+	rows, err := store.db.Query(`SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index ORDER BY updated_at DESC LIMIT ?`, limit)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	entries := []workRunIndexEntry{}
+	for rows.Next() {
+		entry, err := scanWorkRunIndexEntry(rows)
 		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return nil, nil
-			}
 			return nil, err
 		}
-		entries := []workRunIndexEntry{}
-		for rows.Next() {
-			entry, err := scanWorkRunIndexEntry(rows)
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	runs := []startUIWorkRun{}
+	for _, entry := range entries {
+		if entry.Backend == "local" {
+			manifest, err := store.readManifest(entry.RunID)
+			if err != nil {
+				continue
+			}
+			skip, err := startUIShouldHideLocalWorkRun(store, manifest)
 			if err != nil {
 				return nil, err
 			}
-			entries = append(entries, entry)
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, err
-		}
-		if err := rows.Close(); err != nil {
-			return nil, err
-		}
-		runs := []startUIWorkRun{}
-		for _, entry := range entries {
-			if entry.Backend == "local" {
-				manifest, err := store.readManifest(entry.RunID)
-				if err != nil {
-					continue
-				}
-				skip, err := startUIShouldHideLocalWorkRun(store, manifest)
-				if err != nil {
-					return nil, err
-				}
-				if skip {
-					continue
-				}
-				run, err := startUIWorkRunFromLocalManifest(entry, manifest, sourcePathIndex)
-				if err != nil {
-					continue
-				}
-				runs = append(runs, run)
+			if skip {
 				continue
 			}
-			run, err := startUIWorkRunFromIndex(entry, sourcePathIndex)
+			run, err := startUIWorkRunFromLocalManifest(entry, manifest, sourcePathIndex)
 			if err != nil {
 				continue
 			}
 			runs = append(runs, run)
+			continue
 		}
-		return runs, nil
-	})
+		run, err := startUIWorkRunFromIndex(entry, sourcePathIndex)
+		if err != nil {
+			continue
+		}
+		runs = append(runs, run)
+	}
+	return runs, nil
 }
 
 func loadStartUIWorkItems(limit int, includeHidden bool, onlyHidden bool) ([]startUIWorkItem, error) {
