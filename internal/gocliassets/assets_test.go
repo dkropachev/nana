@@ -197,7 +197,7 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 	if !strings.Contains(string(diskContent), "## Lazy Runtime Skills") {
 		t.Fatalf("template AGENTS.md should route rarely used modes through lazy runtime skills")
 	}
-	activationNeedle := "When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md."
+	activationNeedle := "A listed keyword invokes that `$skill` by reading its RUNTIME.md."
 	if !strings.Contains(string(diskContent), activationNeedle) {
 		t.Fatalf("template AGENTS.md should explicitly activate runtime skills for keyword matches")
 	}
@@ -248,11 +248,8 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 		{name: "templates/AGENTS.md", content: string(diskContent)},
 		{name: "root AGENTS.md", content: string(rootAgents)},
 	} {
-		if !strings.Contains(source.content, "`nana route --explain \"<prompt>\"` to preview routing") {
-			t.Fatalf("%s missing route preview CLI guidance", source.name)
-		}
-		if strings.Contains(source.content, "Preview: `nana route --explain <prompt>`") {
-			t.Fatalf("%s should not use stale inline route preview guidance", source.name)
+		if strings.Contains(source.content, "nana route --explain") {
+			t.Fatalf("%s should not require route preview CLI guidance", source.name)
 		}
 	}
 	for _, needle := range []string{
@@ -269,6 +266,12 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 		if !strings.Contains(string(rootAgents), strings.ReplaceAll(needle, "~/.codex", "./.codex")) {
 			t.Fatalf("root AGENTS.md missing expected guidance %q", needle)
 		}
+	}
+	if strings.Contains(string(diskContent), "nana route --explain") {
+		t.Fatalf("template AGENTS.md should not advertise route preview from generated runtime guidance")
+	}
+	if strings.Contains(string(rootAgents), "nana route --explain") {
+		t.Fatalf("root AGENTS.md should not advertise route preview from generated runtime guidance")
 	}
 }
 
@@ -345,9 +348,9 @@ func TestGeneratedAgentsFinalReportChecklistIsEmbedded(t *testing.T) {
 		{name: "root AGENTS.md", content: string(rootAgents)},
 	} {
 		for _, needle := range []string{
-			"final-report checklist",
+			"final reports include",
 			"changed files",
-			"verification evidence",
+			"verification",
 			"simplifications made",
 			"remaining risks",
 		} {
@@ -420,6 +423,43 @@ func TestGeneratedAgentsSkillTriggerGuidancePreservesExplicitPrecedenceContract(
 	} {
 		if !strings.Contains(source.content, needle) {
 			t.Fatalf("%s must preserve explicit skill precedence guidance", source.name)
+		}
+	}
+}
+
+func TestGeneratedAgentsCancellationSemanticsDisambiguatesStopTrigger(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	templates, err := Templates()
+	if err != nil {
+		t.Fatalf("Templates(): %v", err)
+	}
+	diskContent, err := os.ReadFile(filepath.Join(repoRoot, "templates", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read template AGENTS.md: %v", err)
+	}
+	rootAgents, err := os.ReadFile(filepath.Join(repoRoot, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read root AGENTS.md: %v", err)
+	}
+	for _, source := range []struct {
+		name    string
+		content string
+	}{
+		{name: "templates/AGENTS.md", content: string(diskContent)},
+		{name: "generated template AGENTS.md", content: templates["AGENTS.md"]},
+		{name: "root AGENTS.md", content: string(rootAgents)},
+	} {
+		for _, needle := range []string{
+			"the user requests `stop`/`cancel`/`abort`",
+			"internal completion checks do not invoke `$cancel`",
+		} {
+			if !strings.Contains(source.content, needle) {
+				t.Fatalf("%s missing cancellation semantics guidance %q", source.name, needle)
+			}
 		}
 	}
 }
