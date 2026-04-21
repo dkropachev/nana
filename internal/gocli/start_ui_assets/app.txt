@@ -13,6 +13,7 @@
   const state = {
     overview: null,
     overviewError: "",
+    repoList: defaultRepoListState(),
     liveVersions: defaultLiveVersions(),
     currentView: "home",
     repoTab: "overview",
@@ -119,6 +120,15 @@
     return {
       items: [],
       selectedID: "",
+      loading: false,
+      loaded: false,
+      error: "",
+    };
+  }
+
+  function defaultRepoListState() {
+    return {
+      items: [],
       loading: false,
       loaded: false,
       error: "",
@@ -504,7 +514,10 @@
   }
 
   function sortedRepos() {
-    return [ ...((state.overview && state.overview.repos) || []) ].sort((left, right) => {
+    const source = (state.overview && Array.isArray(state.overview.repos) && state.overview.repos.length)
+      ? state.overview.repos
+      : (state.repoList.items || []);
+    return [ ...source ].sort((left, right) => {
       return left.repo_slug.localeCompare(right.repo_slug);
     });
   }
@@ -1310,9 +1323,19 @@
     return api("/api/v1/overview");
   }
 
+  function fetchRepos() {
+    return api("/api/v1/repos").then((payload) => payload.repos || []);
+  }
+
   function applyOverviewPayload(payload) {
     state.overview = payload;
     state.overviewError = "";
+    if (Array.isArray(payload && payload.repos)) {
+      state.repoList.items = payload.repos;
+      state.repoList.loading = false;
+      state.repoList.loaded = true;
+      state.repoList.error = "";
+    }
     renderApp();
   }
 
@@ -1341,6 +1364,41 @@
       return payload;
     }).catch((error) => {
       applyOverviewError(error, options);
+      throw error;
+    });
+  }
+
+  function applyRepoListPayload(repos) {
+    state.repoList.items = Array.isArray(repos) ? repos : [];
+    state.repoList.loading = false;
+    state.repoList.loaded = true;
+    state.repoList.error = "";
+    if (state.overview) {
+      renderApp();
+    }
+  }
+
+  function applyRepoListError(error, options = {}) {
+    state.repoList.loading = false;
+    state.repoList.error = error.message;
+    if (state.overview) {
+      renderApp();
+    }
+    if (!options.silent) {
+      toast("danger", "Repos failed", error.message);
+    }
+  }
+
+  function loadRepos(options = {}) {
+    state.repoList.loading = true;
+    if (!options.silent) {
+      state.repoList.error = "";
+    }
+    return fetchRepos().then((repos) => {
+      applyRepoListPayload(repos);
+      return repos;
+    }).catch((error) => {
+      applyRepoListError(error, options);
       throw error;
     });
   }
@@ -1393,6 +1451,9 @@
   }
 
   function ensureViewData(view) {
+    if ((!state.overview || !Array.isArray(state.overview.repos) || !state.overview.repos.length) && !state.repoList.loaded && !state.repoList.loading) {
+      loadRepos({ silent: true });
+    }
     switch (view) {
       case "issues":
         if (!state.issueQueue.loaded && !state.issueQueue.loading) {
@@ -6264,10 +6325,14 @@
       renderApp();
       return Promise.allSettled([
         loadOverview(),
+        loadRepos({ silent: true }),
         loadUsage({ silent: true }),
       ]);
     }
-    return loadOverview().then(() => refreshCurrentView({ silent: true })).catch(() => {});
+    return Promise.allSettled([
+      loadOverview(),
+      loadRepos({ silent: true }),
+    ]).then(() => refreshCurrentView({ silent: true })).catch(() => {});
   }
 
   initLogDrawer();

@@ -4574,6 +4574,18 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `data-nav-view="investigations"`) {
 		t.Fatalf("expected investigations navigation in app.js, got %s", string(appBody))
 	}
+	if !strings.Contains(string(appBody), `repoList: defaultRepoListState()`) {
+		t.Fatalf("expected repo list fallback state in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `function defaultRepoListState()`) {
+		t.Fatalf("expected repo list fallback helper in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `api("/api/v1/repos")`) {
+		t.Fatalf("expected repo summaries fetch in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `state.repoList.items || []`) {
+		t.Fatalf("expected sorted repos fallback to repo list cache in app.js, got %s", string(appBody))
+	}
 	if !strings.Contains(string(appBody), `renderStatePillWithPause(`) {
 		t.Fatalf("expected paused-state rendering helper in app.js, got %s", string(appBody))
 	}
