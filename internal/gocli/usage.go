@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const UsageHelp = `nana usage - Report token spend across NANA-managed sessions
@@ -123,6 +125,54 @@ type usageRecord struct {
 	HasTokenUsage         bool   `json:"has_token_usage"`
 }
 
+type usageRolloutEnvelope struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+type usageSessionMetaPayload struct {
+	ID            string `json:"id"`
+	Timestamp     string `json:"timestamp"`
+	CWD           string `json:"cwd"`
+	AgentRole     string `json:"agent_role"`
+	AgentNickname string `json:"agent_nickname"`
+}
+
+type usageTurnContextPayload struct {
+	Model string `json:"model"`
+}
+
+type usageEventPayload struct {
+	Type string         `json:"type"`
+	Info usageEventInfo `json:"info"`
+}
+
+type usageEventInfo struct {
+	TotalTokenUsage usageTokenUsage `json:"total_token_usage"`
+}
+
+type usageTokenUsage struct {
+	InputTokens           int `json:"input_tokens"`
+	CachedInputTokens     int `json:"cached_input_tokens"`
+	OutputTokens          int `json:"output_tokens"`
+	ReasoningOutputTokens int `json:"reasoning_output_tokens"`
+	TotalTokens           int `json:"total_tokens"`
+}
+
+type usageRolloutCacheEntry struct {
+	RootName         string
+	Size             int64
+	ModifiedUnixNano int64
+	Record           usageRecord
+}
+
+var usageRolloutCache = struct {
+	mu    sync.RWMutex
+	items map[string]usageRolloutCacheEntry
+}{
+	items: map[string]usageRolloutCacheEntry{},
+}
+
 type usageRollup struct {
 	Sessions              int `json:"sessions"`
 	MissingTelemetry      int `json:"missing_telemetry"`
@@ -168,13 +218,17 @@ type usageAnalyticsReport struct {
 }
 
 func Usage(cwd string, args []string) error {
+	return usageWithIO(cwd, args, os.Stdout)
+}
+
+func usageWithIO(cwd string, args []string, stdout io.Writer) error {
 	if len(args) > 0 {
 		if isHelpToken(args[0]) || args[0] == "help" {
-			fmt.Fprint(os.Stdout, UsageHelp)
+			fmt.Fprint(stdout, UsageHelp)
 			return nil
 		}
 		if usageViews[args[0]] && len(args) > 1 && isHelpToken(args[1]) {
-			fmt.Fprint(os.Stdout, UsageHelp)
+			fmt.Fprint(stdout, UsageHelp)
 			return nil
 		}
 	}
@@ -198,10 +252,10 @@ func Usage(cwd string, args []string) error {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(os.Stdout, string(payload))
+			fmt.Fprintln(stdout, string(payload))
 			return nil
 		}
-		fmt.Fprintln(os.Stdout, formatUsageSummaryReport(report))
+		fmt.Fprintln(stdout, formatUsageSummaryReport(report))
 		return nil
 	case "top":
 		report := buildUsageTopReport(records, sessionRootsScanned, options.By, options.Limit)
@@ -210,10 +264,10 @@ func Usage(cwd string, args []string) error {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(os.Stdout, string(payload))
+			fmt.Fprintln(stdout, string(payload))
 			return nil
 		}
-		fmt.Fprintln(os.Stdout, formatUsageTopReport(report))
+		fmt.Fprintln(stdout, formatUsageTopReport(report))
 		return nil
 	case "group":
 		report := buildUsageGroupReport(records, sessionRootsScanned, options.By)
@@ -222,10 +276,10 @@ func Usage(cwd string, args []string) error {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(os.Stdout, string(payload))
+			fmt.Fprintln(stdout, string(payload))
 			return nil
 		}
-		fmt.Fprintln(os.Stdout, formatUsageGroupReport(report))
+		fmt.Fprintln(stdout, formatUsageGroupReport(report))
 		return nil
 	case "analytics":
 		report := buildUsageAnalyticsReport(records, sessionRootsScanned)
@@ -234,10 +288,10 @@ func Usage(cwd string, args []string) error {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(os.Stdout, string(payload))
+			fmt.Fprintln(stdout, string(payload))
 			return nil
 		}
-		fmt.Fprintln(os.Stdout, formatUsageAnalyticsReport(report))
+		fmt.Fprintln(stdout, formatUsageAnalyticsReport(report))
 		return nil
 	default:
 		return fmt.Errorf("unknown usage view %q\n%s", options.View, UsageHelp)
@@ -384,7 +438,7 @@ func collectUsageRecords(options usageOptions) ([]usageRecord, int, error) {
 			continue
 		}
 		err := walkRolloutFiles(root.SessionsDir, sinceCutoff, func(path string) (bool, error) {
-			record, err := parseUsageRollout(path, root.Name)
+			record, err := loadUsageRollout(path, root.Name)
 			if err != nil {
 				return false, err
 			}
@@ -411,6 +465,7 @@ func collectUsageRecords(options usageOptions) ([]usageRecord, int, error) {
 func discoverUsageSessionRoots(cwd string) ([]usageSessionRoot, error) {
 	roots := []usageSessionRoot{}
 	seen := map[string]bool{}
+	seenBases := map[string]bool{}
 	addDirect := func(name string, sessionsDir string) {
 		sessionsDir = filepath.Clean(strings.TrimSpace(sessionsDir))
 		if sessionsDir == "" || seen[sessionsDir] {
@@ -435,6 +490,11 @@ func discoverUsageSessionRoots(cwd string) ([]usageSessionRoot, error) {
 		localWorkHomeRoot(),
 		filepath.Join(cwd, ".nana", "state", "investigate-probes"),
 	} {
+		base = filepath.Clean(strings.TrimSpace(base))
+		if base == "" || seenBases[base] {
+			continue
+		}
+		seenBases[base] = true
 		if err := discoverUsageSessionRootsRecursive(base, &roots, seen); err != nil {
 			return nil, err
 		}
@@ -447,6 +507,44 @@ func discoverUsageSessionRoots(cwd string) ([]usageSessionRoot, error) {
 		return roots[i].Name < roots[j].Name
 	})
 	return roots, nil
+}
+
+func loadUsageRollout(filePath string, rootName string) (usageRecord, error) {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return usageRecord{}, err
+	}
+	key := filepath.Clean(filePath)
+	modified := info.ModTime().UnixNano()
+	size := info.Size()
+
+	usageRolloutCache.mu.RLock()
+	cached, ok := usageRolloutCache.items[key]
+	usageRolloutCache.mu.RUnlock()
+	if ok && cached.RootName == rootName && cached.Size == size && cached.ModifiedUnixNano == modified {
+		return cached.Record, nil
+	}
+
+	record, err := parseUsageRollout(filePath, rootName)
+	if err != nil {
+		return usageRecord{}, err
+	}
+
+	usageRolloutCache.mu.Lock()
+	usageRolloutCache.items[key] = usageRolloutCacheEntry{
+		RootName:         rootName,
+		Size:             size,
+		ModifiedUnixNano: modified,
+		Record:           record,
+	}
+	usageRolloutCache.mu.Unlock()
+	return record, nil
+}
+
+func resetUsageRolloutCache() {
+	usageRolloutCache.mu.Lock()
+	defer usageRolloutCache.mu.Unlock()
+	usageRolloutCache.items = map[string]usageRolloutCacheEntry{}
 }
 
 func discoverUsageSessionRootsRecursive(base string, roots *[]usageSessionRoot, seen map[string]bool) error {
@@ -511,63 +609,68 @@ func parseUsageRollout(filePath string, rootName string) (usageRecord, error) {
 	defer file.Close()
 
 	record := usageRecord{
+		SessionID:      strings.TrimSuffix(strings.TrimPrefix(filepath.Base(filePath), "rollout-"), ".jsonl"),
 		TranscriptPath: filePath,
 		Root:           rootName,
 	}
 	scoutSignals := usageScoutSignals{}
+	scanScoutSignals := rootName == "main"
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
-		var parsed map[string]any
-		_ = json.Unmarshal([]byte(line), &parsed)
-
-		if record.SessionID == "" {
-			meta := extractSessionMeta(parsed, filePath)
-			record.SessionID = meta.SessionID
-			record.Timestamp = meta.Timestamp
-			record.CWD = meta.CWD
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
 		}
 
-		if parsed["type"] == "session_meta" {
-			if payload, ok := parsed["payload"].(map[string]any); ok {
-				if value, ok := payload["agent_role"].(string); ok && strings.TrimSpace(record.AgentRole) == "" {
-					record.AgentRole = strings.TrimSpace(value)
-				}
-				if value, ok := payload["agent_nickname"].(string); ok && strings.TrimSpace(record.AgentNickname) == "" {
-					record.AgentNickname = strings.TrimSpace(value)
-				}
-				if value, ok := payload["cwd"].(string); ok && strings.TrimSpace(record.CWD) == "" {
-					record.CWD = strings.TrimSpace(value)
-				}
-			}
-		}
-
-		if parsed["type"] == "turn_context" {
-			if payload, ok := parsed["payload"].(map[string]any); ok {
-				if value, ok := payload["model"].(string); ok && strings.TrimSpace(record.Model) == "" {
-					record.Model = strings.TrimSpace(value)
-				}
-			}
-		}
-
-		if parsed["type"] == "event_msg" {
-			payload, _ := parsed["payload"].(map[string]any)
-			if payload != nil && payload["type"] == "token_count" {
-				if info, ok := payload["info"].(map[string]any); ok {
-					if usage, ok := info["total_token_usage"].(map[string]any); ok {
-						record.InputTokens = usageIntValue(usage["input_tokens"])
-						record.CachedInputTokens = usageIntValue(usage["cached_input_tokens"])
-						record.OutputTokens = usageIntValue(usage["output_tokens"])
-						record.ReasoningOutputTokens = usageIntValue(usage["reasoning_output_tokens"])
-						record.TotalTokens = usageIntValue(usage["total_tokens"])
-						record.HasTokenUsage = true
+		var envelope usageRolloutEnvelope
+		if err := json.Unmarshal(line, &envelope); err == nil {
+			switch envelope.Type {
+			case "session_meta":
+				payload := usageSessionMetaPayload{}
+				if err := json.Unmarshal(envelope.Payload, &payload); err == nil {
+					if value := strings.TrimSpace(payload.ID); value != "" {
+						record.SessionID = value
+					}
+					if record.Timestamp == "" {
+						record.Timestamp = strings.TrimSpace(payload.Timestamp)
+					}
+					if record.CWD == "" {
+						record.CWD = strings.TrimSpace(payload.CWD)
+					}
+					if record.AgentRole == "" {
+						record.AgentRole = strings.TrimSpace(payload.AgentRole)
+					}
+					if record.AgentNickname == "" {
+						record.AgentNickname = strings.TrimSpace(payload.AgentNickname)
 					}
 				}
+			case "turn_context":
+				if record.Model == "" {
+					payload := usageTurnContextPayload{}
+					if err := json.Unmarshal(envelope.Payload, &payload); err == nil {
+						record.Model = strings.TrimSpace(payload.Model)
+					}
+				}
+			case "event_msg":
+				payload := usageEventPayload{}
+				if err := json.Unmarshal(envelope.Payload, &payload); err == nil && payload.Type == "token_count" {
+					record.InputTokens = payload.Info.TotalTokenUsage.InputTokens
+					record.CachedInputTokens = payload.Info.TotalTokenUsage.CachedInputTokens
+					record.OutputTokens = payload.Info.TotalTokenUsage.OutputTokens
+					record.ReasoningOutputTokens = payload.Info.TotalTokenUsage.ReasoningOutputTokens
+					record.TotalTokens = payload.Info.TotalTokenUsage.TotalTokens
+					record.HasTokenUsage = true
+				}
 			}
 		}
 
-		markUsageScoutSignals(strings.ToLower(line), &scoutSignals)
+		if scanScoutSignals {
+			markUsageScoutSignals(strings.ToLower(string(line)), &scoutSignals)
+			if usageScoutSignalsResolved(scoutSignals) {
+				scanScoutSignals = false
+			}
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return usageRecord{}, err
@@ -578,6 +681,10 @@ func parseUsageRollout(filePath string, rootName string) (usageRecord, error) {
 	record.Activity = classifyUsageActivity(rootName, record, scoutSignals)
 	record.Phase = classifyUsagePhase(record)
 	return record, nil
+}
+
+func usageScoutSignalsResolved(signals usageScoutSignals) bool {
+	return signals.UIPreflight || (signals.InspectRepo && signals.MaxFindings && (signals.Improvement || signals.Enhancement || signals.UIScout))
 }
 
 func markUsageScoutSignals(lowerLine string, signals *usageScoutSignals) {
