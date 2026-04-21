@@ -211,9 +211,23 @@ type preparedStartRepoCycle struct {
 
 func prepareStartRepoCycle(repoSlug string, options startOptions) (*preparedStartRepoCycle, error) {
 	settings, _ := readGithubRepoSettings(githubRepoSettingsPath(repoSlug))
-	if cleaned, err := cleanupStaleLocalWorkRunsForRepo(githubManagedPaths(repoSlug).SourcePath); err != nil {
+	if cleaned, manifests, err := cleanupStaleLocalWorkRunsForRepoDetailed(githubManagedPaths(repoSlug).SourcePath); err != nil {
 		fmt.Fprintf(os.Stdout, "[start] %s: stale local work cleanup skipped: %v\n", repoSlug, err)
 	} else if cleaned > 0 {
+		if state, stateErr := readStartWorkState(repoSlug); stateErr == nil {
+			resumed, requeued, _, updated, recoverErr := recoverStartWorkScoutJobsFromStaleManifests(repoSlug, state, manifests, options.CodexArgs)
+			if recoverErr != nil {
+				fmt.Fprintf(os.Stdout, "[start] %s: stale scout recovery skipped: %v\n", repoSlug, recoverErr)
+			} else if updated {
+				state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+				if writeErr := writeStartWorkStatePreservingPlannedItems(*state); writeErr != nil {
+					fmt.Fprintf(os.Stdout, "[start] %s: failed to persist stale scout recovery: %v\n", repoSlug, writeErr)
+				}
+				fmt.Fprintf(os.Stdout, "[start] %s: recovered stale scout jobs resumed=%d requeued=%d\n", repoSlug, resumed, requeued)
+			}
+		} else if !os.IsNotExist(stateErr) {
+			fmt.Fprintf(os.Stdout, "[start] %s: stale scout recovery skipped: %v\n", repoSlug, stateErr)
+		}
 		fmt.Fprintf(os.Stdout, "[start] %s: cleaned stale local work runs=%d\n", repoSlug, cleaned)
 	}
 	forkMode := "manual"

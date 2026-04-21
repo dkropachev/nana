@@ -381,7 +381,33 @@ func (c *startRepoCoordinator) reconcileStaleLocalRuns() error {
 	if err != nil {
 		return err
 	}
+	handled := map[string]bool{}
+	if cleaned > 0 {
+		if err := c.withPersistedStateLock(func() error {
+			resumed, requeued, recoveredRunIDs, updated, err := recoverStartWorkScoutJobsFromStaleManifests(c.repoSlug, c.state, manifests, c.workOptions.CodexArgs)
+			if err != nil {
+				return err
+			}
+			for runID := range recoveredRunIDs {
+				handled[runID] = true
+			}
+			if !updated {
+				return nil
+			}
+			c.state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			if err := writeStartWorkStateUnlocked(*c.state); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stdout, "[start] %s: recovered stale scout jobs resumed=%d requeued=%d\n", c.repoSlug, resumed, requeued)
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
 	for _, manifest := range manifests {
+		if handled[strings.TrimSpace(manifest.RunID)] {
+			continue
+		}
 		fmt.Fprintf(
 			os.Stdout,
 			"[start] %s: stale local work run %s marked failed unexpectedly (phase=%s updated_at=%s reason=%s).\n",

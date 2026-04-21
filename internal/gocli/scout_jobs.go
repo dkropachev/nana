@@ -688,6 +688,130 @@ func startWorkScoutJobShouldAutoRetryStaleStartup(job *startWorkScoutJob, manife
 	return localWorkManifestEndedBeforeFirstIteration(manifest)
 }
 
+func startWorkScoutJobCanResumeAfterStaleCleanup(job *startWorkScoutJob, manifest localWorkManifest) bool {
+	if job == nil {
+		return false
+	}
+	if normalizeScoutDestination(job.Destination) != improvementDestinationLocal {
+		return false
+	}
+	if strings.TrimSpace(job.RunID) == "" || strings.TrimSpace(job.RunID) != strings.TrimSpace(manifest.RunID) {
+		return false
+	}
+	if !localWorkIsStaleCleanupError(manifest.LastError) {
+		return false
+	}
+	if strings.TrimSpace(manifest.Status) == "completed" {
+		return false
+	}
+	if len(manifest.Iterations) >= manifest.MaxIterations {
+		return false
+	}
+	return true
+}
+
+func startWorkScoutJobRecordRecoveredRun(job *startWorkScoutJob, manifest localWorkManifest, now time.Time) {
+	if job == nil {
+		return
+	}
+	recoveryReason := defaultString(strings.TrimSpace(manifest.LastError), localWorkStaleCleanupError)
+	job.Status = startScoutJobRunning
+	job.RunID = strings.TrimSpace(manifest.RunID)
+	job.LastError = ""
+	job.PauseReason = ""
+	job.PauseUntil = ""
+	job.RecoveryCount++
+	job.LastRecoveryReason = recoveryReason
+	job.LastRecoveryAt = now.Format(time.RFC3339Nano)
+	job.LastRecoveredRunID = strings.TrimSpace(manifest.RunID)
+	job.UpdatedAt = now.Format(time.RFC3339Nano)
+}
+
+func startWorkScoutJobRequeueAfterStaleCleanup(job *startWorkScoutJob, manifest localWorkManifest, now time.Time) {
+	if job == nil {
+		return
+	}
+	recoveryReason := defaultString(strings.TrimSpace(manifest.LastError), localWorkStaleCleanupError)
+	job.Status = startScoutJobQueued
+	job.RunID = ""
+	job.LastError = recoveryReason
+	job.PauseReason = ""
+	job.PauseUntil = ""
+	job.RecoveryCount++
+	job.LastRecoveryReason = recoveryReason
+	job.LastRecoveryAt = now.Format(time.RFC3339Nano)
+	job.LastRecoveredRunID = strings.TrimSpace(manifest.RunID)
+	job.UpdatedAt = now.Format(time.RFC3339Nano)
+}
+
+func resumeStartWorkScoutJobDetached(manifest localWorkManifest, codexArgs []string) error {
+	original := manifest
+	manifest.Status = "running"
+	manifest.CompletedAt = ""
+	manifest.LastError = ""
+	manifest.UpdatedAt = ISOTimeNow()
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		return err
+	}
+	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
+	logPath := filepath.Join(runDir, "runtime.log")
+	if err := localWorkStartDetachedRunner(manifest.RepoRoot, manifest.RunID, codexArgs, logPath); err != nil {
+		if restoreErr := writeLocalWorkManifest(original); restoreErr != nil {
+			return fmt.Errorf("%w (additionally failed to restore stale manifest: %v)", err, restoreErr)
+		}
+		return err
+	}
+	return nil
+}
+
+func recoverStartWorkScoutJobsFromStaleManifests(repoSlug string, state *startWorkState, manifests []localWorkManifest, codexArgs []string) (int, int, map[string]bool, bool, error) {
+	if state == nil || len(manifests) == 0 || len(state.ScoutJobs) == 0 {
+		return 0, 0, nil, false, nil
+	}
+	manifestByRunID := make(map[string]localWorkManifest, len(manifests))
+	for _, manifest := range manifests {
+		runID := strings.TrimSpace(manifest.RunID)
+		if runID == "" {
+			continue
+		}
+		manifestByRunID[runID] = manifest
+	}
+	if len(manifestByRunID) == 0 {
+		return 0, 0, nil, false, nil
+	}
+
+	now := time.Now().UTC()
+	resumed := 0
+	requeued := 0
+	handled := map[string]bool{}
+	updated := false
+
+	for jobID, job := range state.ScoutJobs {
+		manifest, ok := manifestByRunID[strings.TrimSpace(job.RunID)]
+		if !ok {
+			continue
+		}
+		if startWorkScoutJobCanResumeAfterStaleCleanup(&job, manifest) {
+			if err := resumeStartWorkScoutJobDetached(manifest, codexArgs); err == nil {
+				startWorkScoutJobRecordRecoveredRun(&job, manifest, now)
+				state.ScoutJobs[jobID] = job
+				handled[manifest.RunID] = true
+				resumed++
+				updated = true
+				fmt.Fprintf(os.Stdout, "[start] %s: scout job %s resumed stale local work run %s.\n", repoSlug, job.ID, manifest.RunID)
+				continue
+			}
+		}
+		startWorkScoutJobRequeueAfterStaleCleanup(&job, manifest, now)
+		state.ScoutJobs[jobID] = job
+		handled[manifest.RunID] = true
+		requeued++
+		updated = true
+		fmt.Fprintf(os.Stdout, "[start] %s: scout job %s requeued after stale local work run %s cleanup.\n", repoSlug, job.ID, manifest.RunID)
+	}
+	return resumed, requeued, handled, updated, nil
+}
+
 func reconcileStartWorkScoutJobRunState(job *startWorkScoutJob) {
 	if !startWorkScoutJobShouldReconcileRunState(job) {
 		return

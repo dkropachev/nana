@@ -1052,6 +1052,260 @@ func TestPrepareStartRepoCycleCleansStaleLocalRuns(t *testing.T) {
 	}
 }
 
+func TestPrepareStartRepoCycleResumesRecoverableStaleScoutRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+	now := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+
+	manifest := localWorkManifest{
+		Version:          1,
+		RunID:            "lw-start-scout-resume",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		Status:           "running",
+		CurrentPhase:     "review",
+		CurrentIteration: 1,
+		MaxIterations:    8,
+		RepoRoot:         sourcePath,
+		RepoName:         filepath.Base(sourcePath),
+		RepoID:           localWorkRepoID(sourcePath),
+		SourceBranch:     "main",
+		BaselineSHA:      strings.TrimSpace(runLocalWorkTestGitOutput(t, sourcePath, "rev-parse", "HEAD")),
+		SandboxPath:      filepath.Join(home, "sandboxes", "lw-start-scout-resume"),
+		SandboxRepoPath:  filepath.Join(home, "sandboxes", "lw-start-scout-resume", "repo"),
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  now,
+		Issues:     map[string]startWorkIssueState{},
+		ScoutJobs: map[string]startWorkScoutJob{
+			"proposal-1": {
+				ID:          "proposal-1",
+				Role:        improvementScoutRole,
+				Title:       "Improve help text",
+				Summary:     "Make help clearer",
+				Destination: improvementDestinationLocal,
+				TaskBody:    "Implement local scout proposal: Improve help text",
+				WorkType:    workTypeFeature,
+				Status:      startScoutJobRunning,
+				RunID:       manifest.RunID,
+				UpdatedAt:   now,
+				CreatedAt:   now,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("writeStartWorkState: %v", err)
+	}
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) { return "", nil }
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	oldDetachedRunner := localWorkStartDetachedRunner
+	resumeCalls := []string{}
+	localWorkStartDetachedRunner = func(repoRoot string, runID string, codexArgs []string, logPath string) error {
+		resumeCalls = append(resumeCalls, repoRoot+"|"+runID+"|"+logPath)
+		return nil
+	}
+	defer func() { localWorkStartDetachedRunner = oldDetachedRunner }()
+
+	if _, err := prepareStartRepoCycle(repoSlug, startOptions{}); err != nil {
+		t.Fatalf("prepareStartRepoCycle: %v", err)
+	}
+	if len(resumeCalls) != 1 || !strings.Contains(resumeCalls[0], manifest.RunID) {
+		t.Fatalf("expected detached resume launch for stale scout run, got %+v", resumeCalls)
+	}
+
+	updatedManifest, err := readLocalWorkManifestByRunID(manifest.RunID)
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
+	}
+	if updatedManifest.Status != "running" || updatedManifest.CompletedAt != "" || updatedManifest.LastError != "" {
+		t.Fatalf("expected manifest to return to running after stale recovery, got %+v", updatedManifest)
+	}
+
+	state, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("readStartWorkState: %v", err)
+	}
+	job := state.ScoutJobs["proposal-1"]
+	if job.Status != startScoutJobRunning || job.RunID != manifest.RunID || job.LastError != "" {
+		t.Fatalf("expected scout job to return to running after stale recovery, got %+v", job)
+	}
+}
+
+func TestPrepareStartRepoCycleRequeuesUnrecoverableStaleScoutRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+	now := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+
+	manifest := localWorkManifest{
+		Version:          1,
+		RunID:            "lw-start-scout-requeue",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		Status:           "running",
+		CurrentPhase:     "review",
+		CurrentIteration: 1,
+		MaxIterations:    1,
+		RepoRoot:         sourcePath,
+		RepoName:         filepath.Base(sourcePath),
+		RepoID:           localWorkRepoID(sourcePath),
+		SourceBranch:     "main",
+		BaselineSHA:      strings.TrimSpace(runLocalWorkTestGitOutput(t, sourcePath, "rev-parse", "HEAD")),
+		SandboxPath:      filepath.Join(home, "sandboxes", "lw-start-scout-requeue"),
+		SandboxRepoPath:  filepath.Join(home, "sandboxes", "lw-start-scout-requeue", "repo"),
+		Iterations:       []localWorkIterationSummary{{Iteration: 1, Status: "failed"}},
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  now,
+		Issues:     map[string]startWorkIssueState{},
+		ScoutJobs: map[string]startWorkScoutJob{
+			"proposal-1": {
+				ID:          "proposal-1",
+				Role:        improvementScoutRole,
+				Title:       "Improve help text",
+				Summary:     "Make help clearer",
+				Destination: improvementDestinationLocal,
+				TaskBody:    "Implement local scout proposal: Improve help text",
+				WorkType:    workTypeFeature,
+				Status:      startScoutJobRunning,
+				RunID:       manifest.RunID,
+				UpdatedAt:   now,
+				CreatedAt:   now,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("writeStartWorkState: %v", err)
+	}
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) { return "", nil }
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	oldDetachedRunner := localWorkStartDetachedRunner
+	localWorkStartDetachedRunner = func(repoRoot string, runID string, codexArgs []string, logPath string) error {
+		t.Fatalf("did not expect detached resume launch for unrecoverable stale scout run")
+		return nil
+	}
+	defer func() { localWorkStartDetachedRunner = oldDetachedRunner }()
+
+	if _, err := prepareStartRepoCycle(repoSlug, startOptions{}); err != nil {
+		t.Fatalf("prepareStartRepoCycle: %v", err)
+	}
+
+	state, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("readStartWorkState: %v", err)
+	}
+	job := state.ScoutJobs["proposal-1"]
+	if job.Status != startScoutJobQueued || job.RunID != "" || !strings.Contains(job.LastError, localWorkStaleCleanupError) {
+		t.Fatalf("expected scout job to return to queued after unrecoverable stale cleanup, got %+v", job)
+	}
+}
+
+func TestPrepareStartRepoCycleKeepsRecoveredStaleScoutRunOutOfApprovals(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+	now := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+
+	manifest := localWorkManifest{
+		Version:          1,
+		RunID:            "lw-start-scout-approval",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		Status:           "running",
+		CurrentPhase:     "review",
+		CurrentIteration: 1,
+		MaxIterations:    8,
+		RepoRoot:         sourcePath,
+		RepoName:         filepath.Base(sourcePath),
+		RepoID:           localWorkRepoID(sourcePath),
+		SourceBranch:     "main",
+		BaselineSHA:      strings.TrimSpace(runLocalWorkTestGitOutput(t, sourcePath, "rev-parse", "HEAD")),
+		SandboxPath:      filepath.Join(home, "sandboxes", "lw-start-scout-approval"),
+		SandboxRepoPath:  filepath.Join(home, "sandboxes", "lw-start-scout-approval", "repo"),
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  now,
+		Issues:     map[string]startWorkIssueState{},
+		ScoutJobs: map[string]startWorkScoutJob{
+			"proposal-1": {
+				ID:          "proposal-1",
+				Role:        improvementScoutRole,
+				Title:       "Improve help text",
+				Summary:     "Make help clearer",
+				Destination: improvementDestinationLocal,
+				TaskBody:    "Implement local scout proposal: Improve help text",
+				WorkType:    workTypeFeature,
+				Status:      startScoutJobRunning,
+				RunID:       manifest.RunID,
+				UpdatedAt:   now,
+				CreatedAt:   now,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("writeStartWorkState: %v", err)
+	}
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) { return "", nil }
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	oldDetachedRunner := localWorkStartDetachedRunner
+	localWorkStartDetachedRunner = func(repoRoot string, runID string, codexArgs []string, logPath string) error { return nil }
+	defer func() { localWorkStartDetachedRunner = oldDetachedRunner }()
+
+	if _, err := prepareStartRepoCycle(repoSlug, startOptions{}); err != nil {
+		t.Fatalf("prepareStartRepoCycle: %v", err)
+	}
+
+	approvals, err := loadStartUIApprovals()
+	if err != nil {
+		t.Fatalf("loadStartUIApprovals: %v", err)
+	}
+	for _, item := range approvals {
+		if item.ScoutJobID == "proposal-1" {
+			t.Fatalf("expected recovered stale scout run to stay out of approvals, got %+v", item)
+		}
+	}
+}
+
 func TestStartRepoCoordinatorCapacitySnapshotCountsRunnableAndBlockedServiceTasks(t *testing.T) {
 	coordinator := &startRepoCoordinator{
 		repoSlug: "acme/widget",
@@ -1158,6 +1412,120 @@ func TestStartRepoCoordinatorLogsUnexpectedlyDeadStaleRunDuringCycle(t *testing.
 	}
 	if updated.Status != "failed" {
 		t.Fatalf("expected stale run to be failed, got %+v", updated)
+	}
+}
+
+func TestStartRepoCoordinatorRecoversStaleScoutRunDuringCycle(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+	now := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+
+	manifest := localWorkManifest{
+		Version:          1,
+		RunID:            "lw-dead-scout-during-cycle",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		Status:           "running",
+		CurrentPhase:     "review",
+		CurrentIteration: 1,
+		MaxIterations:    8,
+		RepoRoot:         sourcePath,
+		RepoName:         filepath.Base(sourcePath),
+		RepoID:           localWorkRepoID(sourcePath),
+		SourceBranch:     "main",
+		BaselineSHA:      strings.TrimSpace(runLocalWorkTestGitOutput(t, sourcePath, "rev-parse", "HEAD")),
+		SandboxPath:      filepath.Join(home, "sandboxes", "lw-dead-scout-during-cycle"),
+		SandboxRepoPath:  filepath.Join(home, "sandboxes", "lw-dead-scout-during-cycle", "repo"),
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  now,
+		Issues:     map[string]startWorkIssueState{},
+		ScoutJobs: map[string]startWorkScoutJob{
+			"proposal-1": {
+				ID:          "proposal-1",
+				Role:        improvementScoutRole,
+				Title:       "Improve help text",
+				Summary:     "Make help clearer",
+				Destination: improvementDestinationLocal,
+				TaskBody:    "Implement local scout proposal: Improve help text",
+				WorkType:    workTypeFeature,
+				Status:      startScoutJobRunning,
+				RunID:       manifest.RunID,
+				UpdatedAt:   now,
+				CreatedAt:   now,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("writeStartWorkState: %v", err)
+	}
+
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) { return "", nil }
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	oldSync := startSyncRepoState
+	startSyncRepoState = func(options startWorkOptions) (startWorkOptions, *startWorkState, int, bool, error) {
+		return options, &startWorkState{
+			Version:       startWorkStateVersion,
+			SourceRepo:    repoSlug,
+			DefaultBranch: "main",
+			UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+			Issues:        map[string]startWorkIssueState{},
+			ServiceTasks:  map[string]startWorkServiceTask{},
+			PlannedItems:  map[string]startWorkPlannedItem{},
+		}, 0, false, nil
+	}
+	defer func() { startSyncRepoState = oldSync }()
+
+	oldDetachedRunner := localWorkStartDetachedRunner
+	resumeCalls := []string{}
+	localWorkStartDetachedRunner = func(repoRoot string, runID string, codexArgs []string, logPath string) error {
+		resumeCalls = append(resumeCalls, repoRoot+"|"+runID+"|"+logPath)
+		return nil
+	}
+	defer func() { localWorkStartDetachedRunner = oldDetachedRunner }()
+
+	output, err := captureStdout(t, func() error {
+		return runStartRepoSchedulerCycle(".", repoSlug, startWorkOptions{RepoSlug: repoSlug, Parallel: 1}, startOptions{Parallel: 1})
+	})
+	if err != nil {
+		t.Fatalf("runStartRepoSchedulerCycle: %v\n%s", err, output)
+	}
+	if len(resumeCalls) != 1 || !strings.Contains(resumeCalls[0], manifest.RunID) {
+		t.Fatalf("expected detached resume launch for stale scout run during cycle, got %+v", resumeCalls)
+	}
+	if strings.Contains(output, "marked failed unexpectedly") {
+		t.Fatalf("expected stale scout recovery to suppress unexpected-failure log, got %q", output)
+	}
+
+	updatedManifest, err := readLocalWorkManifestByRunID(manifest.RunID)
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
+	}
+	if updatedManifest.Status != "running" || updatedManifest.LastError != "" {
+		t.Fatalf("expected resumed scout manifest to be running, got %+v", updatedManifest)
+	}
+
+	state, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("readStartWorkState: %v", err)
+	}
+	job := state.ScoutJobs["proposal-1"]
+	if job.Status != startScoutJobRunning || job.RunID != manifest.RunID || job.LastError != "" {
+		t.Fatalf("expected scout job to return to running during cycle recovery, got %+v", job)
 	}
 }
 
