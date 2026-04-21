@@ -296,6 +296,11 @@ func appendContextTelemetry(cwd string, event map[string]any) {
 			payload["run_id"] = runID
 		}
 	}
+	if _, ok := payload["turn_id"]; !ok {
+		if turnID := currentContextTelemetryTurnID(); turnID != "" {
+			payload["turn_id"] = turnID
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return
 	}
@@ -310,6 +315,15 @@ func appendContextTelemetry(cwd string, event map[string]any) {
 func contextTelemetryDisabled() bool {
 	value := strings.ToLower(strings.TrimSpace(os.Getenv("NANA_CONTEXT_TELEMETRY")))
 	return value == "0" || value == "false" || value == "off"
+}
+
+func currentContextTelemetryTurnID() string {
+	for _, key := range []string{"NANA_CONTEXT_TELEMETRY_TURN_ID", "NANA_TURN_ID", "CODEX_TURN_ID"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func formatLoadedSkillRuntimeDocs(docs []loadedSkillRuntimeDoc) string {

@@ -261,7 +261,7 @@ func validateContextTelemetryEvent(content []byte) error {
 }
 
 func validateKnownTelemetryFields(fields map[string]json.RawMessage) error {
-	for _, field := range []string{"run_id", "skill", "command_name", "error"} {
+	for _, field := range []string{"run_id", "turn_id", "skill", "command_name", "error"} {
 		if raw, ok := fields[field]; ok {
 			if _, err := schemaString(raw, field); err != nil {
 				return err

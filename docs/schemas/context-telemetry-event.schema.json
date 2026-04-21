@@ -17,6 +17,10 @@
     "run_id": {
       "type": "string"
     },
+    "turn_id": {
+      "type": "string",
+      "description": "Optional turn/session slice used for advisory skill-context budget summaries."
+    },
     "tool": {
       "type": "string",
       "minLength": 1,
