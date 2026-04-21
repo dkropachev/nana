@@ -1811,7 +1811,7 @@ func (h *startUIAPI) buildUsageReport(query url.Values) (startUIUsageReport, err
 	if _, err := parseSinceSpec(options.Since); err != nil {
 		return startUIUsageReport{}, err
 	}
-	index, err := h.loadUsageIndex()
+	index, err := h.loadUsageIndexForReport(options)
 	if err != nil {
 		return startUIUsageReport{}, err
 	}
@@ -1823,7 +1823,7 @@ func (h *startUIAPI) buildUsageReport(query url.Values) (startUIUsageReport, err
 		Phase:    options.Phase,
 		Model:    options.Model,
 	}
-	cacheKey := startUIUsageCacheKey(filters, index.Version)
+	cacheKey := startUIUsageCacheKey(filters, startUIUsageCacheVersion(index, options))
 	now := startUIUsageCacheNow()
 	if startUIUsageCacheTTL > 0 {
 		h.usageCacheMu.Lock()
@@ -1880,6 +1880,17 @@ func startUIUsageCacheKey(filters startUIUsageFilters, version string) string {
 		strings.TrimSpace(filters.Activity),
 		strings.TrimSpace(filters.Phase),
 		strings.TrimSpace(filters.Model),
+	}, "\x00")
+}
+
+func startUIUsageCacheVersion(index startUIUsageIndexState, options usageOptions) string {
+	if strings.TrimSpace(options.Since) == "" {
+		return strings.TrimSpace(index.Version)
+	}
+	return strings.Join([]string{
+		strings.TrimSpace(index.Version),
+		strings.TrimSpace(index.UpdatedAt),
+		strings.TrimSpace(index.WorkSyncUpdatedAt),
 	}, "\x00")
 }
 
@@ -1979,6 +1990,22 @@ func (h *startUIAPI) loadUsageIndex() (startUIUsageIndexState, error) {
 	h.usageIndexCache.value = index
 	h.usageIndexMu.Unlock()
 	return index, nil
+}
+
+func (h *startUIAPI) loadUsageIndexForReport(options usageOptions) (startUIUsageIndexState, error) {
+	if strings.TrimSpace(options.Since) != "" {
+		index, err := refreshStartUIUsageIndex(h.cwd, startUIUsageIndexPath())
+		if err != nil {
+			return startUIUsageIndexState{}, err
+		}
+		h.usageIndexMu.Lock()
+		h.usageIndexCache.valid = true
+		h.usageIndexCache.checkedAt = time.Now()
+		h.usageIndexCache.value = index
+		h.usageIndexMu.Unlock()
+		return index, nil
+	}
+	return h.loadUsageIndex()
 }
 
 func refreshStartUIUsageIndex(cwd string, path string) (startUIUsageIndexState, error) {

@@ -717,6 +717,223 @@ func TestStartUIUsageSinceReportsPartialCoverageWithoutHistory(t *testing.T) {
 	}
 }
 
+func TestStartUIUsageSinceReportsPartialCoverageForCorruptHistory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repo := createLocalWorkRepo(t)
+	repoID := localWorkRepoID(repo)
+	runID := "usage-work-corrupt-history"
+	sandboxPath := filepath.Join(home, "sandboxes", runID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
+		t.Fatalf("mkdir sandbox repo: %v", err)
+	}
+	now := time.Now().UTC()
+	manifest := localWorkManifest{
+		Version:           4,
+		RunID:             runID,
+		CreatedAt:         now.Add(-2 * time.Hour).Format(time.RFC3339),
+		UpdatedAt:         now.Add(-5 * time.Minute).Format(time.RFC3339),
+		Status:            "running",
+		RepoRoot:          repo,
+		RepoName:          filepath.Base(repo),
+		RepoSlug:          "acme/widget",
+		RepoID:            repoID,
+		SourceBranch:      "main",
+		BaselineSHA:       strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:       sandboxPath,
+		SandboxRepoPath:   sandboxRepoPath,
+		InputPath:         filepath.Join(home, "task.md"),
+		InputMode:         "task",
+		IntegrationPolicy: "final",
+		GroupingPolicy:    localWorkDefaultGroupingPolicy,
+		MaxIterations:     1,
+		TokenUsage: &localWorkTokenUsageTotals{
+			InputTokens:       200,
+			TotalTokens:       200,
+			SessionsAccounted: 1,
+			UpdatedAt:         now.Format(time.RFC3339),
+		},
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	if err := writeLocalWorkJSONAtomically(filepath.Join(runDir, "thread-usage.json"), localWorkThreadUsageArtifact{
+		Version:     1,
+		GeneratedAt: now.Format(time.RFC3339),
+		SandboxPath: sandboxPath,
+		Totals: localWorkTokenUsageTotals{
+			InputTokens:       200,
+			TotalTokens:       200,
+			SessionsAccounted: 1,
+			UpdatedAt:         now.Format(time.RFC3339),
+		},
+		Threads: []localWorkThreadUsageRow{{
+			SessionID:   "usage-work-corrupt-history",
+			Nickname:    "lane-1",
+			Role:        "leader",
+			Model:       "gpt-5.4",
+			CWD:         sandboxRepoPath,
+			InputTokens: 200,
+			TotalTokens: 200,
+			StartedAt:   now.Add(-2 * time.Hour).Unix(),
+			UpdatedAt:   now.Add(-5 * time.Minute).Unix(),
+		}},
+	}); err != nil {
+		t.Fatalf("write thread-usage artifact: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, threadUsageHistoryArtifactName), []byte("{not-json\n"), 0o644); err != nil {
+		t.Fatalf("write corrupt thread-usage-history: %v", err)
+	}
+
+	api := &startUIAPI{cwd: repo}
+	report, err := api.buildUsageReport(url.Values{"root": {"work"}, "since": {"1h"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(): %v", err)
+	}
+	if report.Coverage != usageCoveragePartial || report.TimeBasis != usageTimeBasisWindowDelta {
+		t.Fatalf("unexpected corrupt-history usage metadata: %+v", report)
+	}
+	if report.Summary.Totals.TotalTokens != 0 || len(report.TopSessions) != 0 {
+		t.Fatalf("expected no exact spend with corrupt history, got %+v", report)
+	}
+}
+
+func TestStartUIUsageSinceCacheRefreshesWhenHistoryChanges(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repo := createLocalWorkRepo(t)
+	repoID := localWorkRepoID(repo)
+	runID := "usage-work-cache-window"
+	sandboxPath := filepath.Join(home, "sandboxes", runID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
+		t.Fatalf("mkdir sandbox repo: %v", err)
+	}
+	now := time.Now().UTC()
+	manifest := localWorkManifest{
+		Version:           4,
+		RunID:             runID,
+		CreatedAt:         now.Add(-2 * time.Hour).Format(time.RFC3339),
+		UpdatedAt:         now.Add(-10 * time.Minute).Format(time.RFC3339),
+		Status:            "running",
+		RepoRoot:          repo,
+		RepoName:          filepath.Base(repo),
+		RepoSlug:          "acme/widget",
+		RepoID:            repoID,
+		SourceBranch:      "main",
+		BaselineSHA:       strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:       sandboxPath,
+		SandboxRepoPath:   sandboxRepoPath,
+		InputPath:         filepath.Join(home, "task.md"),
+		InputMode:         "task",
+		IntegrationPolicy: "final",
+		GroupingPolicy:    localWorkDefaultGroupingPolicy,
+		MaxIterations:     1,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	writeHistory := func(total int, updatedAt time.Time) {
+		t.Helper()
+		history := localWorkThreadUsageHistoryArtifact{
+			Version:     1,
+			GeneratedAt: updatedAt.Format(time.RFC3339),
+			SandboxPath: sandboxPath,
+			Threads: []usageHistoryRow{{
+				SessionID: "usage-work-cache-window",
+				Nickname:  "lane-1",
+				Role:      "leader",
+				Model:     "gpt-5.4",
+				CWD:       sandboxRepoPath,
+				StartedAt: now.Add(-2 * time.Hour).Unix(),
+				UpdatedAt: updatedAt.Unix(),
+				Checkpoints: []usageTokenCheckpoint{
+					{Timestamp: now.Add(-90 * time.Minute).Unix(), InputTokens: 100, TotalTokens: 100},
+					{Timestamp: updatedAt.Unix(), InputTokens: total, TotalTokens: total},
+				},
+			}},
+		}
+		if err := writeLocalWorkJSONAtomically(filepath.Join(runDir, threadUsageHistoryArtifactName), history); err != nil {
+			t.Fatalf("write thread-usage-history artifact: %v", err)
+		}
+		if err := writeLocalWorkJSONAtomically(filepath.Join(runDir, "thread-usage.json"), localWorkThreadUsageArtifact{
+			Version:     1,
+			GeneratedAt: updatedAt.Format(time.RFC3339),
+			SandboxPath: sandboxPath,
+			Totals: localWorkTokenUsageTotals{
+				InputTokens:       total,
+				TotalTokens:       total,
+				SessionsAccounted: 1,
+				UpdatedAt:         updatedAt.Format(time.RFC3339),
+			},
+			Threads: []localWorkThreadUsageRow{{
+				SessionID:   "usage-work-cache-window",
+				Nickname:    "lane-1",
+				Role:        "leader",
+				Model:       "gpt-5.4",
+				CWD:         sandboxRepoPath,
+				InputTokens: total,
+				TotalTokens: total,
+				StartedAt:   now.Add(-2 * time.Hour).Unix(),
+				UpdatedAt:   updatedAt.Unix(),
+			}},
+		}); err != nil {
+			t.Fatalf("write thread-usage artifact: %v", err)
+		}
+	}
+
+	writeHistory(160, now.Add(-10*time.Minute))
+
+	previousTTL := startUIUsageCacheTTL
+	previousNow := startUIUsageCacheNow
+	previousIndexProbe := startUIUsageIndexProbeInterval
+	startUIUsageCacheTTL = time.Hour
+	startUIUsageIndexProbeInterval = time.Hour
+	fakeNow := now
+	startUIUsageCacheNow = func() time.Time { return fakeNow }
+	defer func() {
+		startUIUsageCacheTTL = previousTTL
+		startUIUsageCacheNow = previousNow
+		startUIUsageIndexProbeInterval = previousIndexProbe
+	}()
+
+	api := &startUIAPI{cwd: repo}
+	first, err := api.buildUsageReport(url.Values{"root": {"work"}, "since": {"1h"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(first): %v", err)
+	}
+	if first.Summary.Totals.TotalTokens != 60 {
+		t.Fatalf("unexpected first exact window totals: %+v", first.Summary.Totals)
+	}
+
+	manifest.UpdatedAt = now.Add(-2 * time.Minute).Format(time.RFC3339)
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("rewrite manifest updated_at: %v", err)
+	}
+	writeHistory(180, now.Add(-2*time.Minute))
+
+	second, err := api.buildUsageReport(url.Values{"root": {"work"}, "since": {"1h"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(second): %v", err)
+	}
+	if second.Summary.Totals.TotalTokens != 80 {
+		t.Fatalf("expected exact cache refresh after history change, got %+v", second.Summary.Totals)
+	}
+}
+
 func TestStartUIUsageCacheReusesRecentReportAndRefreshesAfterTTL(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -5016,6 +5233,7 @@ func BenchmarkStartUIBuildEventsPayloadSyntheticMultiRepo(b *testing.B) {
 func BenchmarkStartUIBuildUsageReportSyntheticSessions(b *testing.B) {
 	api := setupStartUISyntheticUsageBenchmark(b, 800)
 	query := url.Values{"root": {"all"}}
+	windowQuery := url.Values{"root": {"all"}, "since": {"2020-01-01"}}
 	indexPath := startUIUsageIndexPath()
 
 	b.Run("full-refresh", func(b *testing.B) {
@@ -5097,6 +5315,66 @@ func BenchmarkStartUIBuildUsageReportSyntheticSessions(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			if _, err := api.buildUsageReport(query); err != nil {
 				b.Fatalf("buildUsageReport(warm): %v", err)
+			}
+		}
+	})
+
+	b.Run("windowed-indexed-cold", func(b *testing.B) {
+		previousTTL := startUIUsageCacheTTL
+		previousIndexProbe := startUIUsageIndexProbeInterval
+		startUIUsageCacheTTL = 0
+		startUIUsageIndexProbeInterval = 0
+		defer func() {
+			startUIUsageCacheTTL = previousTTL
+			startUIUsageIndexProbeInterval = previousIndexProbe
+		}()
+
+		resetUsageRolloutCache()
+		api.usageCache = nil
+		api.usageIndexCache = startUISectionCache[startUIUsageIndexState]{}
+		_ = os.Remove(indexPath)
+		if _, err := api.buildUsageReport(windowQuery); err != nil {
+			b.Fatalf("seed windowed usage index: %v", err)
+		}
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			resetUsageRolloutCache()
+			api.usageCache = nil
+			api.usageIndexCache = startUISectionCache[startUIUsageIndexState]{}
+			if _, err := api.buildUsageReport(windowQuery); err != nil {
+				b.Fatalf("buildUsageReport(windowed-indexed-cold): %v", err)
+			}
+		}
+	})
+
+	b.Run("windowed-warm", func(b *testing.B) {
+		previousTTL := startUIUsageCacheTTL
+		previousNow := startUIUsageCacheNow
+		previousIndexProbe := startUIUsageIndexProbeInterval
+		startUIUsageCacheTTL = time.Hour
+		startUIUsageIndexProbeInterval = time.Hour
+		now := time.Now()
+		startUIUsageCacheNow = func() time.Time { return now }
+		defer func() {
+			startUIUsageCacheTTL = previousTTL
+			startUIUsageCacheNow = previousNow
+			startUIUsageIndexProbeInterval = previousIndexProbe
+		}()
+
+		resetUsageRolloutCache()
+		api.usageCache = nil
+		api.usageIndexCache = startUISectionCache[startUIUsageIndexState]{}
+		if _, err := api.buildUsageReport(windowQuery); err != nil {
+			b.Fatalf("warm windowed usage seed: %v", err)
+		}
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, err := api.buildUsageReport(windowQuery); err != nil {
+				b.Fatalf("buildUsageReport(windowed-warm): %v", err)
 			}
 		}
 	})

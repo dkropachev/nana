@@ -307,6 +307,40 @@ func TestUsageGroupByDayUsesCheckpointTimestamps(t *testing.T) {
 	}
 }
 
+func TestUsageSinceIncludesSessionsStartedBeforeWindow(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "repo")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatalf("mkdir cwd: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".nana", "codex-home"))
+
+	now := time.Now().UTC()
+	writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID: "old-session-window",
+		Timestamp: now.Add(-72 * time.Hour).Format(time.RFC3339),
+		CWD:       cwd,
+		Model:     "gpt-5.4",
+		TokenSnapshots: []usageTokenSnapshot{
+			{Timestamp: now.Add(-72 * time.Hour).Format(time.RFC3339), Input: 50, Total: 50},
+			{Timestamp: now.Add(-30 * time.Minute).Format(time.RFC3339), Input: 90, Total: 90},
+		},
+	})
+
+	output, err := captureStdout(t, func() error { return Usage(cwd, []string{"summary", "--since", "1h", "--json"}) })
+	if err != nil {
+		t.Fatalf("Usage(summary --since old-session): %v", err)
+	}
+	var summary usageSummaryReport
+	if err := json.Unmarshal([]byte(output), &summary); err != nil {
+		t.Fatalf("unmarshal old-session summary: %v\n%s", err, output)
+	}
+	if summary.Totals.TotalTokens != 40 || summary.Totals.InputTokens != 40 || summary.Totals.Sessions != 1 {
+		t.Fatalf("unexpected old-session window totals: %+v", summary.Totals)
+	}
+}
+
 type usageRolloutFixture struct {
 	SessionID      string
 	Timestamp      string

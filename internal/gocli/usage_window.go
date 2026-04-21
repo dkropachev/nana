@@ -64,7 +64,7 @@ func loadWindowedUsageReportSource(options usageOptions) (usageReportSource, err
 		if options.Root != "all" && root.Name != options.Root {
 			continue
 		}
-		err := walkRolloutFiles(root.SessionsDir, sinceCutoff, func(path string) (bool, error) {
+		err := walkRolloutFiles(root.SessionsDir, 0, func(path string) (bool, error) {
 			base, err := loadUsageRollout(path, root.Name)
 			if err != nil {
 				return false, err
@@ -232,7 +232,10 @@ func usageHistoryRowsForLocalWorkRun(manifest localWorkManifest, runDir string) 
 	if history, err := readLocalWorkThreadUsageHistoryArtifact(historyPath); err == nil && len(history.Threads) > 0 {
 		return history.Threads, historyPath, false, nil
 	} else if err != nil && !os.IsNotExist(err) {
-		return nil, historyPath, false, err
+		if historyMissingForUsedLocalRun(manifest, filepath.Join(runDir, "thread-usage.json")) {
+			return nil, historyPath, true, nil
+		}
+		return nil, historyPath, false, nil
 	}
 
 	roots := usageLocalWorkHistoryRoots(manifest.SandboxPath)
@@ -258,7 +261,10 @@ func usageHistoryRowsForGithubWorkRun(runDir string, manifest githubWorkManifest
 	if history, err := readGithubThreadUsageHistoryArtifact(historyPath); err == nil && len(history.Rows) > 0 {
 		return history.Rows, historyPath, false, nil
 	} else if err != nil && !os.IsNotExist(err) {
-		return nil, historyPath, false, err
+		if historyMissingForUsedGithubRun(filepath.Join(runDir, "thread-usage.json")) {
+			return nil, historyPath, true, nil
+		}
+		return nil, historyPath, false, nil
 	}
 
 	rows, err := usageHistoryRowsFromRoots(githubThreadUsageRoots(manifest.SandboxPath))
