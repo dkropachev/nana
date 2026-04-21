@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -5199,6 +5201,144 @@ func TestStartUIOverviewCacheRebuildsWhenDependenciesChangeDuringRebuild(t *test
 	}
 	if cached.Totals.IssuesQueued != 2 {
 		t.Fatalf("expected cached overview to stay fresh after mid-build dependency change, got %+v", cached.Totals)
+	}
+}
+
+func TestStartUIBuildOverviewDoesNotHoldOverviewCacheLockDuringRebuild(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	repoSlug := "acme/widget"
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  "2026-04-13T17:00:00Z",
+		Issues: map[string]startWorkIssueState{
+			"1": {SourceNumber: 1, Title: "Issue", Status: startWorkStatusQueued, UpdatedAt: "2026-04-13T17:00:00Z"},
+		},
+		ServiceTasks: map[string]startWorkServiceTask{},
+		PlannedItems: map[string]startWorkPlannedItem{},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	previousHook := startUIOverviewCacheAfterUncachedBuildHook
+	startUIOverviewCacheAfterUncachedBuildHook = func() {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-release
+	}
+	defer func() { startUIOverviewCacheAfterUncachedBuildHook = previousHook }()
+
+	api := &startUIAPI{cwd: cwd}
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := api.buildOverview()
+		errCh <- err
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for overview rebuild hook")
+	}
+
+	lockAcquired := make(chan struct{})
+	go func() {
+		api.overviewCacheMu.Lock()
+		api.overviewCacheMu.Unlock()
+		close(lockAcquired)
+	}()
+
+	select {
+	case <-lockAcquired:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatalf("expected overview cache mutex to stay unlocked while rebuild work runs")
+	}
+
+	close(release)
+	if err := <-errCh; err != nil {
+		t.Fatalf("buildOverview: %v", err)
+	}
+}
+
+func TestStartUILoadCachedEventsPayloadDeduplicatesConcurrentBuilds(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	repoSlug := "acme/widget"
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  "2026-04-13T17:00:00Z",
+		Issues: map[string]startWorkIssueState{
+			"1": {SourceNumber: 1, Title: "Issue", Status: startWorkStatusQueued, UpdatedAt: "2026-04-13T17:00:00Z"},
+		},
+		ServiceTasks: map[string]startWorkServiceTask{},
+		PlannedItems: map[string]startWorkPlannedItem{},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	previousEventsInterval := startUIEventsCacheProbeInterval
+	startUIEventsCacheProbeInterval = time.Hour
+	defer func() { startUIEventsCacheProbeInterval = previousEventsInterval }()
+
+	var buildCount int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	previousHook := startUIOverviewCacheAfterUncachedBuildHook
+	startUIOverviewCacheAfterUncachedBuildHook = func() {
+		if atomic.AddInt32(&buildCount, 1) == 1 {
+			close(entered)
+			<-release
+		}
+	}
+	defer func() { startUIOverviewCacheAfterUncachedBuildHook = previousHook }()
+
+	api := &startUIAPI{cwd: cwd}
+	var wg sync.WaitGroup
+	errCh := make(chan error, 3)
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, err := api.loadCachedEventsPayload()
+			errCh <- err
+		}()
+	}
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for first events payload build")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("loadCachedEventsPayload: %v", err)
+		}
+	}
+	if buildCount != 1 {
+		t.Fatalf("expected one underlying overview build for concurrent events payload loads, got %d", buildCount)
 	}
 }
 

@@ -4158,7 +4158,7 @@ func createLocalWorkRepo(t *testing.T) string {
 	return createLocalWorkRepoAt(t, t.TempDir())
 }
 
-func createLocalWorkRepoAt(t *testing.T, repo string) string {
+func createLocalWorkRepoAt(t testing.TB, repo string) string {
 	t.Helper()
 	if err := os.MkdirAll(repo, 0o755); err != nil {
 		t.Fatalf("mkdir repo: %v", err)

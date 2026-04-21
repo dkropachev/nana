@@ -323,6 +323,10 @@ func readHUDConfig(cwd string) (ResolvedHUDConfig, error) {
 }
 
 func readAllHUDState(cwd string, config ResolvedHUDConfig) (HUDRenderContext, error) {
+	return readAllHUDStateWithGitBranch(cwd, config, buildGitBranchLabel(cwd, config))
+}
+
+func readAllHUDStateWithGitBranch(cwd string, config ResolvedHUDConfig, gitBranch string) (HUDRenderContext, error) {
 	verifyLoop, _ := readHUDModeState(cwd, "verify-loop")
 	ultrawork, _ := readHUDModeState(cwd, "ultrawork")
 	autopilot, _ := readHUDModeState(cwd, "autopilot")
@@ -339,7 +343,7 @@ func readAllHUDState(cwd string, config ResolvedHUDConfig) (HUDRenderContext, er
 
 	ctx := HUDRenderContext{
 		Version:       readHUDVersion(),
-		GitBranch:     buildGitBranchLabel(cwd, config),
+		GitBranch:     gitBranch,
 		VerifyLoop:    verifyLoop,
 		Ultrawork:     ultrawork,
 		Autopilot:     autopilot,

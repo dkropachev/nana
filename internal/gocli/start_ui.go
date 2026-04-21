@@ -54,8 +54,12 @@ type startUIAPI struct {
 	allowedWebOrigin string
 	overviewCacheMu  sync.Mutex
 	overviewCache    startUIOverviewCache
+	overviewBuildCh  chan struct{}
 	sectionCacheMu   sync.Mutex
 	sectionCaches    startUIOverviewSectionCaches
+	eventsCacheMu    sync.Mutex
+	eventsCache      startUIEventsPayloadCache
+	eventsBuildCh    chan struct{}
 	usageIndexMu     sync.Mutex
 	usageIndexCache  startUISectionCache[startUIUsageIndexState]
 	usageCacheMu     sync.Mutex
@@ -73,6 +77,14 @@ type startUIOverviewCache struct {
 }
 
 var startUIOverviewCacheProbeInterval = 5 * time.Second
+var startUIEventsCacheProbeInterval = 2 * time.Second
+
+type startUIEventsPayloadCache struct {
+	valid     bool
+	checkedAt time.Time
+	hash      string
+	payload   map[string]any
+}
 
 type startUIDependencySnapshot struct {
 	deps  []string
@@ -93,6 +105,7 @@ type startUIOverviewSectionCaches struct {
 	workItems          startUISectionCache[startUIOverviewWorkItemsSection]
 	investigationCount startUISectionCache[int]
 	hud                startUISectionCache[HUDRenderContext]
+	hudGitBranch       startUISectionCache[string]
 }
 
 type startUIOverviewReposSection struct {
@@ -1604,9 +1617,8 @@ func (h *startUIAPI) handleEvents(w http.ResponseWriter, r *http.Request) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
-		payload, err := h.buildEventsPayload()
+		payload, hash, err := h.loadCachedEventsPayload()
 		if err == nil {
-			hash := hashStartUIEventPayload(payload)
 			if hash != lastHash {
 				lastHash = hash
 				data, _ := json.Marshal(payload)
@@ -1627,40 +1639,91 @@ func (h *startUIAPI) buildOverview() (startUIOverview, error) {
 }
 
 func (h *startUIAPI) buildCachedOverview() (startUIOverview, error) {
-	now := time.Now()
-	h.overviewCacheMu.Lock()
-	defer h.overviewCacheMu.Unlock()
-	if h.overviewCache.valid {
-		if startUIOverviewCacheProbeInterval > 0 && now.Sub(h.overviewCache.checkedAt) < startUIOverviewCacheProbeInterval {
-			return h.overviewCache.overview, nil
+	for {
+		now := time.Now()
+		h.overviewCacheMu.Lock()
+		if h.overviewCache.valid && startUIOverviewCacheProbeInterval > 0 && now.Sub(h.overviewCache.checkedAt) < startUIOverviewCacheProbeInterval {
+			overview := h.overviewCache.overview
+			h.overviewCacheMu.Unlock()
+			return overview, nil
 		}
-		token := fingerprintStartUIOverviewDependencies(h.overviewCache.deps)
-		if token == h.overviewCache.token {
-			h.overviewCache.checkedAt = now
-			return h.overviewCache.overview, nil
+		if h.overviewBuildCh != nil {
+			waitCh := h.overviewBuildCh
+			h.overviewCacheMu.Unlock()
+			<-waitCh
+			continue
 		}
-		h.expireOverviewSectionCaches()
-	}
 
+		buildCh := make(chan struct{})
+		h.overviewBuildCh = buildCh
+		cacheValid := h.overviewCache.valid
+		cacheToken := h.overviewCache.token
+		cacheDeps := append([]string(nil), h.overviewCache.deps...)
+		h.overviewCacheMu.Unlock()
+
+		if cacheValid {
+			token := fingerprintStartUIOverviewDependencies(cacheDeps)
+			if token == cacheToken {
+				h.overviewCacheMu.Lock()
+				if h.overviewCache.valid && h.overviewCache.token == cacheToken {
+					h.overviewCache.checkedAt = now
+					overview := h.overviewCache.overview
+					h.overviewBuildCh = nil
+					close(buildCh)
+					h.overviewCacheMu.Unlock()
+					return overview, nil
+				}
+				h.overviewBuildCh = nil
+				close(buildCh)
+				h.overviewCacheMu.Unlock()
+				continue
+			}
+		}
+
+		overview, err := h.rebuildOverviewCache()
+		h.overviewCacheMu.Lock()
+		h.overviewBuildCh = nil
+		close(buildCh)
+		h.overviewCacheMu.Unlock()
+		return overview, err
+	}
+}
+
+func (h *startUIAPI) rebuildOverviewCache() (startUIOverview, error) {
+	h.expireOverviewSectionCaches()
 	overview, snapshot, stable, err := h.buildOverviewWithStableDependencySnapshot()
 	if err != nil {
+		h.overviewCacheMu.Lock()
+		h.overviewCache.valid = false
+		h.overviewCache.events = nil
+		h.overviewCacheMu.Unlock()
+		h.invalidateEventsCache()
 		return startUIOverview{}, err
 	}
 	if !stable {
 		h.expireOverviewSectionCaches()
 		overview, snapshot, stable, err = h.buildOverviewWithStableDependencySnapshot()
 		if err != nil {
+			h.overviewCacheMu.Lock()
 			h.overviewCache.valid = false
+			h.overviewCache.events = nil
+			h.overviewCacheMu.Unlock()
+			h.invalidateEventsCache()
 			return startUIOverview{}, err
 		}
 	}
 	if !stable {
+		h.overviewCacheMu.Lock()
 		h.overviewCache.valid = false
+		h.overviewCache.events = nil
+		h.overviewCacheMu.Unlock()
+		h.invalidateEventsCache()
 		return overview, nil
 	}
 
 	version := startUIOverviewVersion(overview)
 	events := startUIOverviewEventsPayload(overview, version, "")
+	h.overviewCacheMu.Lock()
 	h.overviewCache = startUIOverviewCache{
 		valid:     true,
 		token:     snapshot.token,
@@ -1670,6 +1733,8 @@ func (h *startUIAPI) buildCachedOverview() (startUIOverview, error) {
 		overview:  overview,
 		events:    events,
 	}
+	h.overviewCacheMu.Unlock()
+	h.invalidateEventsCache()
 	_ = writeStartUIPersistedOverviewCacheState(startUIOverviewCachePath(), startUIPersistedOverviewCacheState{
 		SchemaVersion:   startUIOverviewCacheSchemaVersion,
 		OverviewVersion: version,
@@ -1945,6 +2010,7 @@ func (h *startUIAPI) loadPersistedOverviewCache() {
 		overview:  overview,
 		events:    startUIOverviewEventsPayload(overview, state.OverviewVersion, ""),
 	}
+	h.invalidateEventsCache()
 }
 
 func (h *startUIAPI) loadPersistedUsageIndex() {
@@ -2146,6 +2212,54 @@ func (h *startUIAPI) buildEventsPayload() (map[string]any, error) {
 	return startUIOverviewEventsPayload(overview, startUIOverviewVersion(overview), usageVersion), nil
 }
 
+func (h *startUIAPI) loadCachedEventsPayload() (map[string]any, string, error) {
+	for {
+		now := time.Now()
+		h.eventsCacheMu.Lock()
+		if h.eventsCache.valid && startUIEventsCacheProbeInterval > 0 && now.Sub(h.eventsCache.checkedAt) < startUIEventsCacheProbeInterval {
+			payload := cloneStartUIEventPayload(h.eventsCache.payload)
+			hash := h.eventsCache.hash
+			h.eventsCacheMu.Unlock()
+			return payload, hash, nil
+		}
+		if h.eventsBuildCh != nil {
+			waitCh := h.eventsBuildCh
+			h.eventsCacheMu.Unlock()
+			<-waitCh
+			continue
+		}
+		buildCh := make(chan struct{})
+		h.eventsBuildCh = buildCh
+		h.eventsCacheMu.Unlock()
+
+		payload, err := h.buildEventsPayload()
+		hash := ""
+		if err == nil {
+			hash = hashStartUIEventPayload(payload)
+		}
+
+		h.eventsCacheMu.Lock()
+		if err == nil {
+			h.eventsCache = startUIEventsPayloadCache{
+				valid:     true,
+				checkedAt: time.Now(),
+				hash:      hash,
+				payload:   cloneStartUIEventPayload(payload),
+			}
+		} else {
+			h.eventsCache.valid = false
+			h.eventsCache.checkedAt = time.Time{}
+		}
+		h.eventsBuildCh = nil
+		close(buildCh)
+		h.eventsCacheMu.Unlock()
+		if err != nil {
+			return nil, "", err
+		}
+		return payload, hash, nil
+	}
+}
+
 func startUIOverviewEventsPayload(overview startUIOverview, overviewVersion string, usageVersion string) map[string]any {
 	return map[string]any{
 		"generated_at":     overview.GeneratedAt,
@@ -2161,6 +2275,7 @@ func (h *startUIAPI) invalidateOverviewCache() {
 	h.sectionCacheMu.Lock()
 	h.sectionCaches = startUIOverviewSectionCaches{}
 	h.sectionCacheMu.Unlock()
+	h.invalidateEventsCache()
 }
 
 func (h *startUIAPI) expireOverviewSectionCaches() {
@@ -2171,6 +2286,13 @@ func (h *startUIAPI) expireOverviewSectionCaches() {
 	h.sectionCaches.workItems.checkedAt = time.Time{}
 	h.sectionCaches.investigationCount.checkedAt = time.Time{}
 	h.sectionCaches.hud.checkedAt = time.Time{}
+	h.sectionCaches.hudGitBranch.checkedAt = time.Time{}
+}
+
+func (h *startUIAPI) invalidateEventsCache() {
+	h.eventsCacheMu.Lock()
+	defer h.eventsCacheMu.Unlock()
+	h.eventsCache = startUIEventsPayloadCache{}
 }
 
 func (h *startUIAPI) loadOverviewReposSection() (startUIOverviewReposSection, error) {
@@ -2480,6 +2602,27 @@ func listStartUIHUDSectionDependencies(cwd string) []string {
 		paths = append(paths, clean)
 	}
 	addStartUIHUDDependencies(cwd, add)
+	sort.Strings(paths)
+	return paths
+}
+
+func listStartUIHUDGitDependencies(cwd string) []string {
+	seen := map[string]bool{}
+	paths := []string{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		clean := filepath.Clean(path)
+		if seen[clean] {
+			return
+		}
+		seen[clean] = true
+		paths = append(paths, clean)
+	}
+	add(filepath.Join(cwd, ".nana", "hud-config.json"))
+	addStartUIGitHUDDependencies(cwd, add)
 	sort.Strings(paths)
 	return paths
 }
@@ -2842,7 +2985,15 @@ func (h *startUIAPI) loadHUD() (HUDRenderContext, error) {
 	if err != nil {
 		return HUDRenderContext{}, err
 	}
-	return readAllHUDState(h.cwd, config)
+	gitBranch, err := startUILoadCachedSection(&h.sectionCacheMu, &h.sectionCaches.hudGitBranch, startUISectionCacheProbeInterval, func() []string {
+		return listStartUIHUDGitDependencies(h.cwd)
+	}, func() (string, error) {
+		return buildGitBranchLabel(h.cwd, config), nil
+	})
+	if err != nil {
+		return HUDRenderContext{}, err
+	}
+	return readAllHUDStateWithGitBranch(h.cwd, config, gitBranch)
 }
 
 func listStartUIIssueQueue() ([]startUIIssueQueueItem, error) {
