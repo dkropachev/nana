@@ -5282,6 +5282,69 @@ func TestStartUIRepoSummarySectionCacheStabilizesAfterWarmRead(t *testing.T) {
 	}
 }
 
+func TestStartUIOverviewRetainsRepoSectionCacheAcrossHUDDependencyChanges(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	previousInterval := startUIOverviewCacheProbeInterval
+	startUIOverviewCacheProbeInterval = time.Hour
+	defer func() { startUIOverviewCacheProbeInterval = previousInterval }()
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	state := startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  "2026-04-13T17:00:00Z",
+		Issues: map[string]startWorkIssueState{
+			"1": {SourceNumber: 1, Title: "First", Status: startWorkStatusQueued, UpdatedAt: "2026-04-13T17:00:00Z"},
+		},
+		ServiceTasks: map[string]startWorkServiceTask{},
+		PlannedItems: map[string]startWorkPlannedItem{},
+	}
+	if err := writeStartWorkState(state); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	api := &startUIAPI{cwd: cwd}
+	overview, err := api.buildOverview()
+	if err != nil {
+		t.Fatalf("buildOverview: %v", err)
+	}
+	if len(overview.Repos) != 1 || overview.Repos[0].RepoSlug != repoSlug {
+		t.Fatalf("unexpected initial overview repos: %+v", overview.Repos)
+	}
+
+	api.sectionCacheMu.Lock()
+	api.sectionCaches.repos.value.summaries[0].RepoSlug = "cached/widget"
+	api.sectionCaches.repos.checkedAt = time.Time{}
+	api.sectionCacheMu.Unlock()
+	api.overviewCacheMu.Lock()
+	api.overviewCache.checkedAt = time.Time{}
+	api.overviewCacheMu.Unlock()
+
+	metricsPath := filepath.Join(cwd, ".nana", "metrics.json")
+	if err := os.MkdirAll(filepath.Dir(metricsPath), 0o755); err != nil {
+		t.Fatalf("mkdir metrics dir: %v", err)
+	}
+	if err := os.WriteFile(metricsPath, []byte("{\"tokens_used\":1}\n"), 0o644); err != nil {
+		t.Fatalf("write metrics: %v", err)
+	}
+
+	refreshed, err := api.buildOverview()
+	if err != nil {
+		t.Fatalf("buildOverview refreshed: %v", err)
+	}
+	if len(refreshed.Repos) != 1 || refreshed.Repos[0].RepoSlug != "cached/widget" {
+		t.Fatalf("expected HUD-only dependency change to reuse cached repo section, got %+v", refreshed.Repos)
+	}
+}
+
 func TestStartUIOverviewCacheInvalidatesWhenWorkDBChanges(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -1639,9 +1639,7 @@ func (h *startUIAPI) buildCachedOverview() (startUIOverview, error) {
 			h.overviewCache.checkedAt = now
 			return h.overviewCache.overview, nil
 		}
-		h.sectionCacheMu.Lock()
-		h.sectionCaches = startUIOverviewSectionCaches{}
-		h.sectionCacheMu.Unlock()
+		h.expireOverviewSectionCaches()
 	}
 
 	overview, snapshot, stable, err := h.buildOverviewWithStableDependencySnapshot()
@@ -1649,9 +1647,7 @@ func (h *startUIAPI) buildCachedOverview() (startUIOverview, error) {
 		return startUIOverview{}, err
 	}
 	if !stable {
-		h.sectionCacheMu.Lock()
-		h.sectionCaches = startUIOverviewSectionCaches{}
-		h.sectionCacheMu.Unlock()
+		h.expireOverviewSectionCaches()
 		overview, snapshot, stable, err = h.buildOverviewWithStableDependencySnapshot()
 		if err != nil {
 			h.overviewCache.valid = false
@@ -2165,6 +2161,16 @@ func (h *startUIAPI) invalidateOverviewCache() {
 	h.sectionCacheMu.Lock()
 	h.sectionCaches = startUIOverviewSectionCaches{}
 	h.sectionCacheMu.Unlock()
+}
+
+func (h *startUIAPI) expireOverviewSectionCaches() {
+	h.sectionCacheMu.Lock()
+	defer h.sectionCacheMu.Unlock()
+	h.sectionCaches.repos.checkedAt = time.Time{}
+	h.sectionCaches.workRuns.checkedAt = time.Time{}
+	h.sectionCaches.workItems.checkedAt = time.Time{}
+	h.sectionCaches.investigationCount.checkedAt = time.Time{}
+	h.sectionCaches.hud.checkedAt = time.Time{}
 }
 
 func (h *startUIAPI) loadOverviewReposSection() (startUIOverviewReposSection, error) {
