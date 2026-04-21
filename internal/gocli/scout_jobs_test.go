@@ -202,7 +202,7 @@ func TestReconcileStartWorkScoutJobRunStateRequeuesStaleCleanupWhenManifestMissi
 	}
 }
 
-func TestReconcileStartWorkScoutJobRunStateKeepsRepeatedStaleStartupCleanupFailed(t *testing.T) {
+func TestReconcileStartWorkScoutJobRunStateRequeuesRepeatedStaleStartupCleanup(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -241,14 +241,14 @@ func TestReconcileStartWorkScoutJobRunStateKeepsRepeatedStaleStartupCleanupFaile
 		UpdatedAt:   now,
 	}
 	reconcileStartWorkScoutJobRunState(&job)
-	if job.Status != startScoutJobFailed || job.RunID != manifest.RunID {
-		t.Fatalf("expected repeated stale cleanup to remain failed, got %+v", job)
+	if job.Status != startScoutJobQueued || job.RunID != "" {
+		t.Fatalf("expected repeated stale cleanup to return to queued, got %+v", job)
 	}
 	if job.PauseReason != "" || job.PauseUntil != "" {
 		t.Fatalf("expected repeated stale cleanup to avoid auto-pause, got %+v", job)
 	}
-	if job.RecoveryCount != 0 || job.LastRecoveryReason != "" || job.LastRecoveredRunID != "" || job.LastRecoveryAt != "" {
-		t.Fatalf("expected repeated stale cleanup to avoid recovery metadata, got %+v", job)
+	if job.RecoveryCount != 1 || job.LastRecoveryReason != localWorkStaleCleanupError || job.LastRecoveredRunID != manifest.RunID || job.LastRecoveryAt == "" {
+		t.Fatalf("expected repeated stale cleanup to record recovery metadata, got %+v", job)
 	}
 }
 
@@ -344,14 +344,14 @@ func TestReconcileStartWorkScoutJobRunStateKeepsProgressedStaleCleanupFailed(t *
 		UpdatedAt:   now,
 	}
 	reconcileStartWorkScoutJobRunState(&job)
-	if job.Status != startScoutJobFailed || job.RunID != manifest.RunID {
-		t.Fatalf("expected progressed stale cleanup to remain failed, got %+v", job)
+	if job.Status != startScoutJobQueued || job.RunID != "" {
+		t.Fatalf("expected progressed stale cleanup to return to queued, got %+v", job)
 	}
 	if job.PauseReason != "" || job.PauseUntil != "" {
 		t.Fatalf("expected progressed stale cleanup to avoid auto-pause, got %+v", job)
 	}
-	if startWorkScoutJobHasRecoveryMetadata(job) {
-		t.Fatalf("expected progressed stale cleanup to avoid recovery metadata, got %+v", job)
+	if !startWorkScoutJobHasRecoveryMetadata(job) || job.LastRecoveredRunID != manifest.RunID {
+		t.Fatalf("expected progressed stale cleanup to record recovery metadata, got %+v", job)
 	}
 }
 

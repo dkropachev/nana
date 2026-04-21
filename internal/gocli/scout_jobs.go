@@ -830,6 +830,10 @@ func reconcileStartWorkScoutJobRunState(job *startWorkScoutJob) {
 		startWorkScoutJobRecordStaleRecovery(job, manifest, time.Now().UTC())
 		return
 	}
+	if localWorkIsStaleCleanupError(manifest.LastError) {
+		startWorkScoutJobRequeueAfterStaleCleanup(job, manifest, time.Now().UTC())
+		return
+	}
 	switch strings.TrimSpace(manifest.Status) {
 	case "running":
 		job.LastError = ""
