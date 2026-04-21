@@ -242,7 +242,7 @@ type usageTokenSnapshot struct {
 	Total           int
 }
 
-func writeUsageRollout(t *testing.T, sessionsRoot string, fixture usageRolloutFixture) string {
+func writeUsageRollout(t testing.TB, sessionsRoot string, fixture usageRolloutFixture) string {
 	t.Helper()
 	timestamp, err := time.Parse(time.RFC3339, fixture.Timestamp)
 	if err != nil {
