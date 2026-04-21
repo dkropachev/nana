@@ -106,3 +106,52 @@ func TestReconcileStartWorkScoutJobRunStateHealsStaleFailureWhenRunCompletes(t *
 		t.Fatalf("expected stale error to be cleared, got %+v", job)
 	}
 }
+
+func TestReconcileStartWorkScoutJobRunStateKeepsPausedRunBoundToRunningJob(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	repoRoot := createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+	now := time.Now().UTC().Format(time.RFC3339)
+	pauseUntil := time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339)
+	manifest := localWorkManifest{
+		Version:         1,
+		RunID:           "lw-scout-paused",
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		Status:          "paused",
+		CurrentPhase:    "review",
+		RepoRoot:        repoRoot,
+		RepoName:        filepath.Base(repoRoot),
+		RepoID:          localWorkRepoID(repoRoot),
+		SourceBranch:    "main",
+		BaselineSHA:     strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
+		SandboxPath:     filepath.Join(home, "sandboxes", "lw-scout-paused"),
+		SandboxRepoPath: filepath.Join(home, "sandboxes", "lw-scout-paused", "repo"),
+		LastError:       "usage limit reached",
+		PauseReason:     "rate limited",
+		PauseUntil:      pauseUntil,
+		PausedAt:        now,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	job := startWorkScoutJob{
+		ID:        "proposal-1",
+		Status:    startScoutJobRunning,
+		RunID:     manifest.RunID,
+		UpdatedAt: now,
+	}
+	reconcileStartWorkScoutJobRunState(&job)
+	if job.Status != startScoutJobRunning {
+		t.Fatalf("expected paused run to stay attached to running scout job, got %+v", job)
+	}
+	if job.PauseReason != manifest.PauseReason || job.PauseUntil != manifest.PauseUntil {
+		t.Fatalf("expected pause fields to mirror manifest, got %+v", job)
+	}
+	if job.LastError != manifest.LastError {
+		t.Fatalf("expected paused run error to be preserved, got %+v", job)
+	}
+}

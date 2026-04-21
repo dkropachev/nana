@@ -2772,6 +2772,103 @@ func TestListStartUIScoutItemsReconcilesRunningScoutJobFromManifest(t *testing.T
 	}
 }
 
+func TestListStartUIScoutItemsKeepsPausedScoutRunBoundToRunningJob(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	repo := createLocalWorkRepoAt(t, sourcePath)
+	writeScoutPickupFixture(t, repo, improvementScoutRole, "Improve help text", "Make help clearer")
+	if err := writeGithubJSON(filepath.Join(repo, ".nana", "improvements", "improve-test", "policy.json"), improvementPolicy{
+		Version:          1,
+		IssueDestination: improvementDestinationLocal,
+		Labels:           []string{"improvement"},
+	}); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	proposalID := localScoutProposalID(improvementScoutRole, scoutFinding{
+		Title:             "Improve help text",
+		Area:              "UX",
+		Summary:           "Make help clearer",
+		Rationale:         "Users need this.",
+		Evidence:          "README.md",
+		Impact:            "Better workflow.",
+		SuggestedNextStep: "Make the smallest change.",
+		Files:             []string{"README.md"},
+	})
+	runID := "lw-scout-paused"
+	now := time.Now().UTC().Format(time.RFC3339)
+	pauseUntil := time.Now().UTC().Add(45 * time.Minute).Format(time.RFC3339)
+	manifest := localWorkManifest{
+		Version:         1,
+		RunID:           runID,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		Status:          "paused",
+		CurrentPhase:    "review",
+		RepoRoot:        repo,
+		RepoName:        filepath.Base(repo),
+		RepoID:          localWorkRepoID(repo),
+		SourceBranch:    "main",
+		BaselineSHA:     strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:     filepath.Join(home, "sandboxes", runID),
+		SandboxRepoPath: filepath.Join(home, "sandboxes", runID, "repo"),
+		LastError:       "usage limit reached",
+		PauseReason:     "rate limited",
+		PauseUntil:      pauseUntil,
+		PausedAt:        now,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write local work manifest: %v", err)
+	}
+	artifactPath := filepath.ToSlash(filepath.Join(".nana", "improvements", "improve-test"))
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  now,
+		ScoutJobs: map[string]startWorkScoutJob{
+			proposalID: {
+				ID:           proposalID,
+				Role:         improvementScoutRole,
+				Title:        "Improve help text",
+				Summary:      "Make help clearer",
+				ArtifactPath: artifactPath,
+				ProposalPath: filepath.ToSlash(filepath.Join(artifactPath, "proposals.json")),
+				Destination:  improvementDestinationLocal,
+				TaskBody:     "Implement local scout proposal: Improve help text",
+				Status:       startScoutJobRunning,
+				RunID:        runID,
+				UpdatedAt:    now,
+				CreatedAt:    now,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	items, err := listStartUIScoutItems(repoSlug)
+	if err != nil {
+		t.Fatalf("list scout items: %v", err)
+	}
+	if len(items) != 1 || items[0].Status != startScoutJobRunning || items[0].RunID != runID {
+		t.Fatalf("expected paused scout run to remain attached to running scout job, got %+v", items)
+	}
+	if items[0].PauseReason != manifest.PauseReason || items[0].PauseUntil != manifest.PauseUntil {
+		t.Fatalf("expected paused scout item to surface pause metadata, got %+v", items[0])
+	}
+	workState, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("read start state: %v", err)
+	}
+	if workState.ScoutJobs[proposalID].Status != startScoutJobRunning || workState.ScoutJobs[proposalID].RunID != runID {
+		t.Fatalf("expected running scout job to keep the paused run bound, got %+v", workState.ScoutJobs[proposalID])
+	}
+	if workState.ScoutJobs[proposalID].PauseReason != manifest.PauseReason || workState.ScoutJobs[proposalID].PauseUntil != manifest.PauseUntil {
+		t.Fatalf("expected pause metadata to persist in state, got %+v", workState.ScoutJobs[proposalID])
+	}
+}
+
 func TestListStartUIScoutItemsDoesNotDowngradeRunningScoutJobFromPickupStateWithoutRunID(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

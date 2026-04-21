@@ -555,7 +555,7 @@ func reconcileStartWorkScoutJobRunState(job *startWorkScoutJob) {
 		job.PauseUntil = ""
 		job.PauseReason = ""
 	case "paused":
-		job.Status = startScoutJobQueued
+		job.Status = startScoutJobRunning
 		job.LastError = defaultString(strings.TrimSpace(manifest.LastError), "rate limited")
 		job.PauseReason = defaultString(strings.TrimSpace(manifest.PauseReason), "rate limited")
 		job.PauseUntil = strings.TrimSpace(manifest.PauseUntil)
