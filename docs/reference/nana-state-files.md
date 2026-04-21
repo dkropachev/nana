@@ -48,9 +48,9 @@ Structured memory can add known arrays while remaining extension-friendly:
 
 Telemetry events intentionally store `command_name` and counts instead of full
 commands, arguments, stdout, stderr, or raw output. `tool` is optional for
-skill/reference events so existing local logs remain valid. `nana telemetry
-summary` also uses these events to warn when a run exceeds the default
-skill/reference load budget.
+skill/reference events so existing local logs remain valid.
+Use `nana telemetry summary --run-id <id>` to inspect privacy-preserving
+skill/reference counts and single-run context-budget warnings.
 
 ### `.nana/notepad.md`
 

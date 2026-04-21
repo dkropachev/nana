@@ -318,39 +318,6 @@ func TestGeneratedAgentsVerifyGuidanceRequiresRepoProfileOrDocumentedFallback(t 
 	}
 }
 
-func TestGeneratedAgentsCancellationSemanticsDistinguishExplicitStops(t *testing.T) {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
-	templates, err := Templates()
-	if err != nil {
-		t.Fatalf("Templates(): %v", err)
-	}
-	diskContent, err := os.ReadFile(filepath.Join(repoRoot, "templates", "AGENTS.md"))
-	if err != nil {
-		t.Fatalf("read template AGENTS.md: %v", err)
-	}
-	rootAgents, err := os.ReadFile(filepath.Join(repoRoot, "AGENTS.md"))
-	if err != nil {
-		t.Fatalf("read root AGENTS.md: %v", err)
-	}
-	needle := "user explicitly says `stop`/`cancel`/`abort` (routes to `$cancel`; internal completion checks do not)"
-	for _, source := range []struct {
-		name    string
-		content string
-	}{
-		{name: "templates/AGENTS.md", content: string(diskContent)},
-		{name: "generated template AGENTS.md", content: templates["AGENTS.md"]},
-		{name: "root AGENTS.md", content: string(rootAgents)},
-	} {
-		if !strings.Contains(source.content, needle) {
-			t.Fatalf("%s missing explicit cancellation semantics note %q", source.name, needle)
-		}
-	}
-}
-
 func TestGeneratedAgentsFinalReportChecklistIsEmbedded(t *testing.T) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
@@ -420,6 +387,44 @@ func TestGeneratedAgentsSkillTriggerGuidancePreservesCaseInsensitiveContract(t *
 	} {
 		if !strings.Contains(source.content, needle) {
 			t.Fatalf("%s must preserve case-insensitive skill trigger guidance", source.name)
+		}
+	}
+}
+
+func TestGeneratedAgentsOverrideGuidancePreservesNonConflictingInstructions(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	templates, err := Templates()
+	if err != nil {
+		t.Fatalf("Templates(): %v", err)
+	}
+	diskContent, err := os.ReadFile(filepath.Join(repoRoot, "templates", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read template AGENTS.md: %v", err)
+	}
+	rootAgents, err := os.ReadFile(filepath.Join(repoRoot, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read root AGENTS.md: %v", err)
+	}
+
+	needle := "treat newer user task updates as local overrides while preserving non-conflicting prior instructions"
+	staleNeedle := "treat newer user task updates as local overrides while preserving prior instructions"
+	for _, source := range []struct {
+		name    string
+		content string
+	}{
+		{name: "templates/AGENTS.md", content: string(diskContent)},
+		{name: "generated template AGENTS.md", content: templates["AGENTS.md"]},
+		{name: "root AGENTS.md", content: string(rootAgents)},
+	} {
+		if !strings.Contains(source.content, needle) {
+			t.Fatalf("%s must preserve non-conflicting override guidance", source.name)
+		}
+		if strings.Contains(source.content, staleNeedle) {
+			t.Fatalf("%s should not preserve conflicting stale override guidance", source.name)
 		}
 	}
 }

@@ -2,6 +2,7 @@ package gocli
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,7 +28,7 @@ func TestTelemetrySummaryFiltersCurrentRunAndRedactsRawFields(t *testing.T) {
 	t.Setenv("NANA_RUN_ID", "")
 	t.Setenv("NANA_SESSION_ID", "")
 
-	output, err := captureStdout(t, func() error { return Telemetry(cwd, []string{"summary"}) })
+	output, err := captureTelemetryStdout(t, func() error { return Telemetry(cwd, []string{"summary"}) })
 	if err != nil {
 		t.Fatalf("Telemetry(summary): %v", err)
 	}
@@ -72,7 +73,7 @@ func TestTelemetrySummaryJSONAllRuns(t *testing.T) {
 	t.Setenv("NANA_RUN_ID", "")
 	t.Setenv("NANA_SESSION_ID", "")
 
-	output, err := captureStdout(t, func() error { return Telemetry(cwd, []string{"summary", "--all", "--json"}) })
+	output, err := captureTelemetryStdout(t, func() error { return Telemetry(cwd, []string{"summary", "--all", "--json"}) })
 	if err != nil {
 		t.Fatalf("Telemetry(summary --all --json): %v", err)
 	}
@@ -96,9 +97,6 @@ func TestTelemetrySummaryJSONAllRuns(t *testing.T) {
 	if report.Shell.Compactions != 1 || report.Shell.CapturedBytes != 500 || len(report.Shell.Commands) != 1 || report.Shell.Commands[0].Command != "go" {
 		t.Fatalf("unexpected shell summary: %+v", report.Shell)
 	}
-	if report.ContextBudget.Status != "n/a" || len(report.ContextBudget.Warnings) != 0 {
-		t.Fatalf("expected all-runs context budget to be non-applicable without warnings, got %+v", report.ContextBudget)
-	}
 }
 
 func TestTelemetrySummaryReportsSkillRuntimeCacheStatus(t *testing.T) {
@@ -114,7 +112,7 @@ func TestTelemetrySummaryReportsSkillRuntimeCacheStatus(t *testing.T) {
 	t.Setenv("NANA_RUN_ID", "")
 	t.Setenv("NANA_SESSION_ID", "")
 
-	output, err := captureStdout(t, func() error { return Telemetry(cwd, []string{"summary"}) })
+	output, err := captureTelemetryStdout(t, func() error { return Telemetry(cwd, []string{"summary"}) })
 	if err != nil {
 		t.Fatalf("Telemetry(summary): %v", err)
 	}
@@ -127,77 +125,144 @@ func TestTelemetrySummaryReportsSkillRuntimeCacheStatus(t *testing.T) {
 func TestTelemetrySummaryWarnsWhenSkillLoadBudgetExceeded(t *testing.T) {
 	cwd := t.TempDir()
 	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
-	lines := []string{}
-	for i := 0; i < telemetrySkillDocLoadBudget+1; i++ {
-		lines = append(lines, `{"timestamp":"2026-04-20T11:00:00Z","run_id":"run-current","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`)
-	}
-	for i := 0; i < telemetrySkillReferenceLoadBudget+1; i++ {
-		lines = append(lines, `{"timestamp":"2026-04-20T11:01:00Z","run_id":"run-current","event":"skill_reference_load","skill":"plan","path":"skills/plan/references/checklist.md"}`)
-	}
-	writeTelemetryLog(t, logPath, lines)
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T12:00:00Z","run_id":"run-budget","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md","cache":"miss"}`,
+		`{"timestamp":"2026-04-20T12:00:01Z","run_id":"run-budget","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md","cache":"hit"}`,
+		`{"timestamp":"2026-04-20T12:00:02Z","run_id":"run-budget","event":"skill_doc_load","skill":"tdd","path":"skills/tdd/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:00:03Z","run_id":"run-budget","event":"skill_doc_load","skill":"build-fix","path":"skills/build-fix/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:00:04Z","run_id":"run-budget","event":"skill_doc_load","skill":"code-review","path":"skills/code-review/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:00:05Z","run_id":"run-budget","event":"skill_reference_load","skill":"plan","path":"skills/plan/references/a.md"}`,
+		`{"timestamp":"2026-04-20T12:00:06Z","run_id":"run-budget","event":"skill_reference_load","skill":"plan","path":"skills/plan/references/b.md"}`,
+		`{"timestamp":"2026-04-20T12:00:07Z","run_id":"run-budget","event":"skill_reference_load","skill":"plan","path":"skills/plan/references/c.md"}`,
+		`{"timestamp":"2026-04-20T12:00:08Z","run_id":"run-budget","event":"skill_reference_load","skill":"plan","path":"skills/plan/references/d.md"}`,
+		`{"timestamp":"2026-04-20T12:00:09Z","run_id":"run-budget","event":"skill_reference_load","skill":"plan","path":"skills/plan/references/e.md"}`,
+		`{"timestamp":"2026-04-20T12:00:10Z","run_id":"run-budget","event":"skill_reference_load","skill":"plan","path":"skills/plan/references/f.md"}`,
+	})
 
-	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-current")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-budget")
 	t.Setenv("NANA_WORK_RUN_ID", "")
 	t.Setenv("NANA_RUN_ID", "")
 	t.Setenv("NANA_SESSION_ID", "")
 
-	output, err := captureStdout(t, func() error { return Telemetry(cwd, []string{"summary"}) })
+	output, err := captureTelemetryStdout(t, func() error { return Telemetry(cwd, []string{"summary"}) })
 	if err != nil {
 		t.Fatalf("Telemetry(summary): %v", err)
 	}
 	for _, want := range []string{
-		"Context budget:",
-		"skill_doc_load: 5/4",
-		"skill_reference_load: 7/6",
-		"total skill/reference loads: 12/8",
-		"warning: skill_doc_load budget exceeded: 5 > 4",
-		"warning: skill_reference_load budget exceeded: 7 > 6",
-		"warning: total skill/reference load budget exceeded: 12 > 8",
+		"Skill/reference budget:",
+		"docs: 4/3 unique files",
+		"references: 6/5 unique files",
+		"total: 10/8 unique files",
+		"warning: skill runtime docs loaded 4 unique files (budget 3)",
+		"warning: skill references loaded 6 unique files (budget 5)",
+		"warning: skill/reference context loaded 10 unique files (budget 8)",
 	} {
 		if !strings.Contains(output, want) {
-			t.Fatalf("expected %q in telemetry budget output:\n%s", want, output)
+			t.Fatalf("expected budget output %q in:\n%s", want, output)
 		}
+	}
+
+	jsonOutput, err := captureTelemetryStdout(t, func() error { return Telemetry(cwd, []string{"summary", "--json"}) })
+	if err != nil {
+		t.Fatalf("Telemetry(summary --json): %v", err)
+	}
+	var report telemetrySummaryReport
+	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
+		t.Fatalf("unmarshal telemetry JSON: %v\n%s", err, jsonOutput)
+	}
+	if report.SkillBudget.DocFiles != 4 || report.SkillBudget.ReferenceFiles != 6 || report.SkillBudget.TotalFiles != 10 {
+		t.Fatalf("unexpected skill budget counts: %+v", report.SkillBudget)
+	}
+	if len(report.SkillBudget.Warnings) != 3 {
+		t.Fatalf("expected 3 budget warnings, got %+v", report.SkillBudget.Warnings)
 	}
 }
 
-func TestTelemetrySummaryAllRunsDoesNotWarnFromAggregateSkillLoadCounts(t *testing.T) {
+func TestTelemetrySummarySkillBudgetDedupesSharedPathsAcrossSkillLabels(t *testing.T) {
 	cwd := t.TempDir()
 	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T12:30:00Z","run_id":"run-dedupe","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:30:01Z","run_id":"run-dedupe","event":"skill_doc_load","path":"skills/plan/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:30:02Z","run_id":"run-dedupe","event":"skill_reference_load","skill":"plan","path":"skills/plan/references/checklist.md"}`,
+		`{"timestamp":"2026-04-20T12:30:03Z","run_id":"run-dedupe","event":"skill_reference_load","skill":"renamed-plan","path":"skills/plan/references/checklist.md"}`,
+	})
 
-	lines := []string{}
-	for _, runID := range []string{"run-a", "run-b"} {
-		for i := 0; i < telemetrySkillDocLoadBudget; i++ {
-			lines = append(lines, `{"timestamp":"2026-04-20T11:00:00Z","run_id":"`+runID+`","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`)
-		}
-		for i := 0; i < 4; i++ {
-			lines = append(lines, `{"timestamp":"2026-04-20T11:01:00Z","run_id":"`+runID+`","event":"skill_reference_load","skill":"plan","path":"skills/plan/references/checklist.md"}`)
-		}
-	}
-	writeTelemetryLog(t, logPath, lines)
-
-	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-dedupe")
 	t.Setenv("NANA_WORK_RUN_ID", "")
 	t.Setenv("NANA_RUN_ID", "")
 	t.Setenv("NANA_SESSION_ID", "")
 
-	output, err := captureStdout(t, func() error { return Telemetry(cwd, []string{"summary", "--all"}) })
+	output, err := captureTelemetryStdout(t, func() error { return Telemetry(cwd, []string{"summary"}) })
 	if err != nil {
-		t.Fatalf("Telemetry(summary --all): %v", err)
+		t.Fatalf("Telemetry(summary): %v", err)
 	}
-	if !strings.Contains(output, "Scope: all runs") {
-		t.Fatalf("expected all-runs scope in telemetry output:\n%s", output)
-	}
-	for _, forbidden := range []string{
-		"warning: skill_doc_load budget exceeded",
-		"warning: skill_reference_load budget exceeded",
-		"warning: total skill/reference load budget exceeded",
+	for _, want := range []string{
+		"Skill/reference budget:",
+		"docs: 1/3 unique files",
+		"references: 1/5 unique files",
+		"total: 2/8 unique files",
 	} {
-		if strings.Contains(output, forbidden) {
-			t.Fatalf("expected no aggregate budget warning %q in telemetry output:\n%s", forbidden, output)
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected deduped budget output %q in:\n%s", want, output)
 		}
 	}
-	if !strings.Contains(output, "status: n/a") {
-		t.Fatalf("expected aggregate all-runs budget status to be marked n/a:\n%s", output)
+
+	jsonOutput, err := captureTelemetryStdout(t, func() error { return Telemetry(cwd, []string{"summary", "--json"}) })
+	if err != nil {
+		t.Fatalf("Telemetry(summary --json): %v", err)
+	}
+	var report telemetrySummaryReport
+	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
+		t.Fatalf("unmarshal telemetry JSON: %v\n%s", err, jsonOutput)
+	}
+	if report.SkillBudget.DocFiles != 1 || report.SkillBudget.ReferenceFiles != 1 || report.SkillBudget.TotalFiles != 2 {
+		t.Fatalf("unexpected deduped skill budget counts: %+v", report.SkillBudget)
+	}
+}
+
+func TestTelemetrySummarySkillBudgetDedupesSharedPathsAcrossLoadTypes(t *testing.T) {
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T12:45:00Z","run_id":"run-shared-path","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:45:01Z","run_id":"run-shared-path","event":"skill_reference_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+	})
+
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-shared-path")
+	t.Setenv("NANA_WORK_RUN_ID", "")
+	t.Setenv("NANA_RUN_ID", "")
+	t.Setenv("NANA_SESSION_ID", "")
+
+	output, err := captureTelemetryStdout(t, func() error { return Telemetry(cwd, []string{"summary"}) })
+	if err != nil {
+		t.Fatalf("Telemetry(summary): %v", err)
+	}
+	for _, want := range []string{
+		"Skill/reference budget:",
+		"docs: 1/3 unique files",
+		"references: 1/5 unique files",
+		"total: 1/8 unique files",
+		"warnings: (none)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected shared-path budget output %q in:\n%s", want, output)
+		}
+	}
+
+	jsonOutput, err := captureTelemetryStdout(t, func() error { return Telemetry(cwd, []string{"summary", "--json"}) })
+	if err != nil {
+		t.Fatalf("Telemetry(summary --json): %v", err)
+	}
+	var report telemetrySummaryReport
+	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
+		t.Fatalf("unmarshal telemetry JSON: %v\n%s", err, jsonOutput)
+	}
+	if report.SkillBudget.DocFiles != 1 || report.SkillBudget.ReferenceFiles != 1 || report.SkillBudget.TotalFiles != 1 {
+		t.Fatalf("unexpected shared-path skill budget counts: %+v", report.SkillBudget)
+	}
+	if len(report.SkillBudget.Warnings) != 0 {
+		t.Fatalf("expected no budget warnings for shared-path union count, got %+v", report.SkillBudget.Warnings)
 	}
 }
 
@@ -214,6 +279,22 @@ func TestSafeTelemetryPathOmitsUnsafeAbsolutePaths(t *testing.T) {
 	if got := safeTelemetryPath("notes/private.md"); got != "" {
 		t.Fatalf("expected arbitrary relative path to be omitted, got %q", got)
 	}
+}
+
+func captureTelemetryStdout(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	runErr := fn()
+	_ = w.Close()
+	os.Stdout = old
+	defer r.Close()
+	data, _ := io.ReadAll(r)
+	return string(data), runErr
 }
 
 func writeTelemetryLog(t *testing.T, path string, lines []string) {
