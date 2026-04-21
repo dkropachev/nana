@@ -239,7 +239,7 @@ func usageWithIO(cwd string, args []string, stdout io.Writer) error {
 	}
 	options.CWD = cwd
 
-	records, sessionRootsScanned, err := collectUsageRecords(options)
+	records, sessionRootsScanned, err := loadUsageRecordsShared(options)
 	if err != nil {
 		return err
 	}

@@ -440,14 +440,67 @@ func TestStartUIAPIUsage(t *testing.T) {
 		Model:          "gpt-5.4",
 		TokenSnapshots: []usageTokenSnapshot{{Input: 100, CachedInput: 25, Output: 10, ReasoningOutput: 5, Total: 140}},
 	})
-	writeUsageRollout(t, filepath.Join(home, ".nana", "work", "sandboxes", "repo-1", "lw-1", ".nana", "work", "codex-home", "leader", "sessions"), usageRolloutFixture{
-		SessionID:      "usage-work",
-		Timestamp:      "2026-04-15T13:00:00Z",
-		CWD:            filepath.Join(home, ".nana", "work", "sandboxes", "repo-1", "lw-1", "repo"),
-		Model:          "gpt-5.4",
-		AgentRole:      "leader",
-		TokenSnapshots: []usageTokenSnapshot{{Input: 200, Output: 20, Total: 220}},
-	})
+	repo := createLocalWorkRepo(t)
+	repoID := localWorkRepoID(repo)
+	runID := "usage-work-run"
+	sandboxPath := filepath.Join(home, "sandboxes", runID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
+		t.Fatalf("mkdir sandbox repo: %v", err)
+	}
+	manifest := localWorkManifest{
+		Version:           4,
+		RunID:             runID,
+		CreatedAt:         "2026-04-15T13:00:00Z",
+		UpdatedAt:         "2026-04-15T13:00:00Z",
+		Status:            "running",
+		RepoRoot:          repo,
+		RepoName:          filepath.Base(repo),
+		RepoSlug:          "acme/widget",
+		RepoID:            repoID,
+		SourceBranch:      "main",
+		BaselineSHA:       strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:       sandboxPath,
+		SandboxRepoPath:   sandboxRepoPath,
+		InputPath:         filepath.Join(home, "task.md"),
+		InputMode:         "task",
+		IntegrationPolicy: "final",
+		GroupingPolicy:    localWorkDefaultGroupingPolicy,
+		MaxIterations:     1,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	if err := writeLocalWorkJSONAtomically(filepath.Join(runDir, "thread-usage.json"), localWorkThreadUsageArtifact{
+		Version:     1,
+		GeneratedAt: "2026-04-15T13:00:00Z",
+		SandboxPath: sandboxPath,
+		Totals: localWorkTokenUsageTotals{
+			InputTokens:       200,
+			OutputTokens:      20,
+			TotalTokens:       220,
+			SessionsAccounted: 1,
+			UpdatedAt:         "2026-04-15T13:00:00Z",
+		},
+		Threads: []localWorkThreadUsageRow{{
+			SessionID:    "usage-work",
+			Nickname:     "lane-1",
+			Role:         "leader",
+			Model:        "gpt-5.4",
+			CWD:          sandboxRepoPath,
+			InputTokens:  200,
+			OutputTokens: 20,
+			TotalTokens:  220,
+			StartedAt:    time.Date(2026, time.April, 15, 13, 0, 0, 0, time.UTC).Unix(),
+			UpdatedAt:    time.Date(2026, time.April, 15, 13, 0, 0, 0, time.UTC).Unix(),
+		}},
+	}); err != nil {
+		t.Fatalf("write thread-usage artifact: %v", err)
+	}
 
 	server := httptest.NewServer((&startUIAPI{cwd: cwd, allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
 	defer server.Close()
@@ -593,6 +646,145 @@ func TestStartUIUsageIndexWritesPersistentState(t *testing.T) {
 	}
 	if _, err := os.Stat(startUIUsageIndexPath() + ".tmp"); !os.IsNotExist(err) {
 		t.Fatalf("expected no lingering temp index file, got err=%v", err)
+	}
+}
+
+func TestStartUIUsageIndexImportsLegacyStartUIIndex(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	legacy := startUIUsageIndexState{
+		SchemaVersion:       startUIUsageIndexSchemaVersion,
+		Version:             "legacy-version",
+		UpdatedAt:           "2026-04-15T12:00:00Z",
+		SessionRootsScanned: 17,
+		Entries: []startUIUsageIndexEntry{{
+			Path: filepath.Join(home, "legacy", "rollout-legacy.jsonl"),
+			Root: "work",
+			Record: usageRecord{
+				SessionID:      "legacy-work",
+				Timestamp:      "2026-04-15T12:00:00Z",
+				Day:            "2026-04-15",
+				CWD:            cwd,
+				TranscriptPath: filepath.Join(home, "legacy", "rollout-legacy.jsonl"),
+				Root:           "work",
+				Lane:           "leader",
+				Activity:       "work",
+				Phase:          "implementation",
+				TotalTokens:    77,
+				HasTokenUsage:  true,
+			},
+		}},
+	}
+	if err := writeStartUIUsageIndexState(legacyStartUIUsageIndexPath(), legacy); err != nil {
+		t.Fatalf("write legacy usage index: %v", err)
+	}
+
+	api := &startUIAPI{cwd: cwd}
+	report, err := api.buildUsageReport(url.Values{"root": {"all"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(): %v", err)
+	}
+	if report.Summary.Totals.TotalTokens != 77 || len(report.TopSessions) != 1 || report.TopSessions[0].SessionID != "legacy-work" {
+		t.Fatalf("expected imported legacy usage data, got %+v", report)
+	}
+
+	persisted := readStartUIUsageIndexState(startUIUsageIndexPath())
+	if len(persisted.Entries) != 1 || persisted.Entries[0].Record.SessionID != "legacy-work" {
+		t.Fatalf("expected shared usage store to import legacy entries, got %+v", persisted)
+	}
+	if strings.TrimSpace(persisted.LegacyImportedFrom) != legacyStartUIUsageIndexPath() {
+		t.Fatalf("expected legacy import marker, got %+v", persisted)
+	}
+}
+
+func TestStartUIUsageIndexSyncsLocalWorkRunFromArtifact(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repo := createLocalWorkRepo(t)
+	runID := "lw-usage-store"
+	repoID := localWorkRepoID(repo)
+	sandboxPath := filepath.Join(home, "sandboxes", runID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
+		t.Fatalf("mkdir sandbox repo: %v", err)
+	}
+	manifest := localWorkManifest{
+		Version:           4,
+		RunID:             runID,
+		CreatedAt:         "2026-04-15T12:00:00Z",
+		UpdatedAt:         "2026-04-15T12:30:00Z",
+		Status:            "running",
+		RepoRoot:          repo,
+		RepoName:          filepath.Base(repo),
+		RepoSlug:          "acme/widget",
+		RepoID:            repoID,
+		SourceBranch:      "main",
+		BaselineSHA:       strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:       sandboxPath,
+		SandboxRepoPath:   sandboxRepoPath,
+		InputPath:         filepath.Join(home, "task.md"),
+		InputMode:         "task",
+		IntegrationPolicy: "final",
+		GroupingPolicy:    localWorkDefaultGroupingPolicy,
+		MaxIterations:     1,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	artifact := localWorkThreadUsageArtifact{
+		Version:     1,
+		GeneratedAt: "2026-04-15T12:30:00Z",
+		SandboxPath: sandboxPath,
+		Totals: localWorkTokenUsageTotals{
+			InputTokens:           100,
+			CachedInputTokens:     10,
+			OutputTokens:          20,
+			ReasoningOutputTokens: 5,
+			TotalTokens:           135,
+			SessionsAccounted:     1,
+			UpdatedAt:             "2026-04-15T12:30:00Z",
+		},
+		Threads: []localWorkThreadUsageRow{{
+			SessionID:             "sess-work-1",
+			Nickname:              "lane-1",
+			Role:                  "leader",
+			Model:                 "gpt-5.4",
+			CWD:                   sandboxRepoPath,
+			InputTokens:           100,
+			CachedInputTokens:     10,
+			OutputTokens:          20,
+			ReasoningOutputTokens: 5,
+			TotalTokens:           135,
+			StartedAt:             time.Date(2026, time.April, 15, 12, 0, 0, 0, time.UTC).Unix(),
+			UpdatedAt:             time.Date(2026, time.April, 15, 12, 30, 0, 0, time.UTC).Unix(),
+		}},
+	}
+	if err := writeLocalWorkJSONAtomically(filepath.Join(runDir, "thread-usage.json"), artifact); err != nil {
+		t.Fatalf("writeLocalWorkJSONAtomically(thread-usage): %v", err)
+	}
+
+	api := &startUIAPI{cwd: repo}
+	report, err := api.buildUsageReport(url.Values{"root": {"work"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(): %v", err)
+	}
+	if report.Summary.Totals.TotalTokens != 135 || len(report.TopSessions) != 1 || report.TopSessions[0].SessionID != "sess-work-1" {
+		t.Fatalf("expected local work usage to come from persisted artifact, got %+v", report)
+	}
+	if len(report.ByModel) != 1 || report.ByModel[0].Key != "gpt-5.4" {
+		t.Fatalf("expected model breakdown from persisted artifact, got %+v", report.ByModel)
+	}
+	persisted := readStartUIUsageIndexState(startUIUsageIndexPath())
+	if strings.TrimSpace(persisted.WorkSyncUpdatedAt) == "" {
+		t.Fatalf("expected work sync watermark, got %+v", persisted)
 	}
 }
 

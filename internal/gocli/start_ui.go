@@ -116,6 +116,8 @@ type startUIUsageIndexEntry struct {
 	Root             string      `json:"root"`
 	Size             int64       `json:"size"`
 	ModifiedUnixNano int64       `json:"modified_unix_nano"`
+	SourceKind       string      `json:"source_kind,omitempty"`
+	SourceUpdatedAt  string      `json:"source_updated_at,omitempty"`
 	Record           usageRecord `json:"record"`
 }
 
@@ -124,6 +126,9 @@ type startUIUsageIndexState struct {
 	Version             string                   `json:"version"`
 	UpdatedAt           string                   `json:"updated_at"`
 	SessionRootsScanned int                      `json:"session_roots_scanned"`
+	WorkSyncUpdatedAt   string                   `json:"work_sync_updated_at,omitempty"`
+	LegacyImportedAt    string                   `json:"legacy_imported_at,omitempty"`
+	LegacyImportedFrom  string                   `json:"legacy_imported_from,omitempty"`
 	Entries             []startUIUsageIndexEntry `json:"entries"`
 }
 
@@ -1872,6 +1877,10 @@ func startUIUsageCacheKey(filters startUIUsageFilters, version string) string {
 }
 
 func startUIUsageIndexPath() string {
+	return filepath.Join(githubNanaHome(), "usage", "state.json")
+}
+
+func legacyStartUIUsageIndexPath() string {
 	return filepath.Join(githubNanaHome(), "start", "ui", "usage-index.json")
 }
 
@@ -1966,73 +1975,7 @@ func (h *startUIAPI) loadUsageIndex() (startUIUsageIndexState, error) {
 }
 
 func refreshStartUIUsageIndex(cwd string, path string) (startUIUsageIndexState, error) {
-	previous := readStartUIUsageIndexState(path)
-	previousByPath := map[string]startUIUsageIndexEntry{}
-	for _, entry := range previous.Entries {
-		previousByPath[filepath.Clean(entry.Path)] = entry
-	}
-
-	sessionRoots, err := discoverUsageSessionRoots(cwd)
-	if err != nil {
-		return startUIUsageIndexState{}, err
-	}
-	currentByPath := map[string]startUIUsageIndexEntry{}
-	for _, root := range sessionRoots {
-		err := walkRolloutFiles(root.SessionsDir, 0, func(path string) (bool, error) {
-			info, err := os.Stat(path)
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					return false, nil
-				}
-				return false, err
-			}
-			cleanPath := filepath.Clean(path)
-			size := info.Size()
-			modified := info.ModTime().UnixNano()
-			if entry, ok := previousByPath[cleanPath]; ok && entry.Root == root.Name && entry.Size == size && entry.ModifiedUnixNano == modified {
-				currentByPath[cleanPath] = entry
-				return false, nil
-			}
-			record, err := loadUsageRollout(cleanPath, root.Name)
-			if err != nil {
-				return false, err
-			}
-			currentByPath[cleanPath] = startUIUsageIndexEntry{
-				Path:             cleanPath,
-				Root:             root.Name,
-				Size:             size,
-				ModifiedUnixNano: modified,
-				Record:           record,
-			}
-			return false, nil
-		})
-		if err != nil {
-			return startUIUsageIndexState{}, err
-		}
-	}
-
-	entries := make([]startUIUsageIndexEntry, 0, len(currentByPath))
-	for _, entry := range currentByPath {
-		entries = append(entries, entry)
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Path < entries[j].Path
-	})
-
-	next := startUIUsageIndexState{
-		SchemaVersion:       startUIUsageIndexSchemaVersion,
-		Version:             startUIUsageIndexVersion(entries, len(sessionRoots)),
-		UpdatedAt:           time.Now().UTC().Format(time.RFC3339),
-		SessionRootsScanned: len(sessionRoots),
-		Entries:             entries,
-	}
-	if previous.SchemaVersion == next.SchemaVersion && previous.Version == next.Version && previous.SessionRootsScanned == next.SessionRootsScanned && len(previous.Entries) == len(next.Entries) {
-		return previous, nil
-	}
-	if err := writeStartUIUsageIndexState(path, next); err != nil {
-		return startUIUsageIndexState{}, err
-	}
-	return next, nil
+	return refreshUsageStore(cwd, path)
 }
 
 func readStartUIUsageIndexState(path string) startUIUsageIndexState {
@@ -2119,28 +2062,7 @@ func startUIUsageIndexVersion(entries []startUIUsageIndexEntry, sessionRootsScan
 }
 
 func startUIUsageRecordsForReport(index startUIUsageIndexState, options usageOptions) []usageRecord {
-	projectFilter := normalizeUsageProjectFilter(options.Project, options.CWD)
-	projectRepoID := ""
-	if projectFilter != "" {
-		if info, err := os.Stat(projectFilter); err == nil && info.IsDir() {
-			projectRepoID = localWorkRepoID(projectFilter)
-		}
-	}
-	records := make([]usageRecord, 0, len(index.Entries))
-	for _, entry := range index.Entries {
-		record := entry.Record
-		if !usageRecordMatchesFilters(record, options, projectFilter, projectRepoID) {
-			continue
-		}
-		records = append(records, record)
-	}
-	sort.Slice(records, func(i, j int) bool {
-		if records[i].Timestamp == records[j].Timestamp {
-			return records[i].SessionID < records[j].SessionID
-		}
-		return records[i].Timestamp > records[j].Timestamp
-	})
-	return records
+	return usageRecordsForState(index, options)
 }
 
 func (h *startUIAPI) buildEventsPayload() (map[string]any, error) {

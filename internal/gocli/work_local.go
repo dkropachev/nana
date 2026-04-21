@@ -208,6 +208,8 @@ type localWorkThreadUsageRow struct {
 	SessionID             string `json:"session_id,omitempty"`
 	Nickname              string `json:"nickname,omitempty"`
 	Role                  string `json:"role,omitempty"`
+	Model                 string `json:"model,omitempty"`
+	CWD                   string `json:"cwd,omitempty"`
 	InputTokens           int    `json:"input_tokens"`
 	CachedInputTokens     int    `json:"cached_input_tokens"`
 	OutputTokens          int    `json:"output_tokens"`
@@ -2565,9 +2567,9 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 		manifest.FinalGateRoleResults = finalGateRoleResults
 		manifest.CandidateAuditStatus = candidateAuditStatus
 		manifest.CandidateBlockedPaths = append([]string{}, candidateBlockedPaths...)
-			if strings.TrimSpace(followupReviewDecision) != "" {
-				manifest.FollowupDecision = followupReviewDecision
-			}
+		if strings.TrimSpace(followupReviewDecision) != "" {
+			manifest.FollowupDecision = followupReviewDecision
+		}
 		if followupMaxRoundsExceeded {
 			summary.Status = "failed"
 			manifest.Status = "failed"
@@ -5339,6 +5341,12 @@ func mergeLocalWorkThreadUsageArtifacts(existing *localWorkThreadUsageArtifact, 
 		if merged.Role == "" {
 			merged.Role = row.Role
 		}
+		if merged.Model == "" {
+			merged.Model = row.Model
+		}
+		if merged.CWD == "" {
+			merged.CWD = row.CWD
+		}
 		merged.InputTokens = max(merged.InputTokens, row.InputTokens)
 		merged.CachedInputTokens = max(merged.CachedInputTokens, row.CachedInputTokens)
 		merged.OutputTokens = max(merged.OutputTokens, row.OutputTokens)
@@ -5467,11 +5475,21 @@ func readLocalWorkThreadUsageRow(filePath string) (localWorkThreadUsageRow, bool
 		}
 		if parsed["type"] == "session_meta" {
 			if payload, ok := parsed["payload"].(map[string]any); ok {
+				if cwd, ok := payload["cwd"].(string); ok && strings.TrimSpace(row.CWD) == "" {
+					row.CWD = strings.TrimSpace(cwd)
+				}
 				if nickname, ok := payload["agent_nickname"].(string); ok && strings.TrimSpace(row.Nickname) == "" {
 					row.Nickname = strings.TrimSpace(nickname)
 				}
 				if role, ok := payload["agent_role"].(string); ok && strings.TrimSpace(row.Role) == "" {
 					row.Role = strings.TrimSpace(role)
+				}
+			}
+		}
+		if parsed["type"] == "turn_context" {
+			if payload, ok := parsed["payload"].(map[string]any); ok {
+				if model, ok := payload["model"].(string); ok && strings.TrimSpace(row.Model) == "" {
+					row.Model = strings.TrimSpace(model)
 				}
 			}
 		}
