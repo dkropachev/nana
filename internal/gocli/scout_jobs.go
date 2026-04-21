@@ -818,6 +818,12 @@ func reconcileStartWorkScoutJobRunState(job *startWorkScoutJob) {
 	}
 	manifest, err := readLocalWorkManifestByRunID(job.RunID)
 	if err != nil {
+		if localWorkIsStaleCleanupError(job.LastError) && normalizeScoutDestination(job.Destination) == improvementDestinationLocal {
+			startWorkScoutJobRequeueAfterStaleCleanup(job, localWorkManifest{
+				RunID:     job.RunID,
+				LastError: defaultString(strings.TrimSpace(job.LastError), localWorkStaleCleanupError),
+			}, time.Now().UTC())
+		}
 		return
 	}
 	if startWorkScoutJobShouldAutoRetryStaleStartup(job, manifest) {

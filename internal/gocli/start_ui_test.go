@@ -4406,6 +4406,92 @@ func TestLoadStartUIApprovalsSkipsAutoRecoveredStaleScoutStartupCleanup(t *testi
 	}
 }
 
+func TestLoadStartUIApprovalsSkipsStaleScoutCleanupWhenManifestMissing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	repo := createLocalWorkRepoAt(t, sourcePath)
+	writeScoutPickupFixture(t, repo, improvementScoutRole, "Improve help text", "Make help clearer")
+	if err := writeGithubJSON(filepath.Join(repo, ".nana", "improvements", "improve-test", "policy.json"), improvementPolicy{
+		Version:          1,
+		IssueDestination: improvementDestinationLocal,
+		Labels:           []string{"improvement"},
+	}); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	proposal := scoutFinding{
+		Title:             "Improve help text",
+		Area:              "UX",
+		Summary:           "Make help clearer",
+		Rationale:         "Users need this.",
+		Evidence:          "README.md",
+		Impact:            "Better workflow.",
+		SuggestedNextStep: "Make the smallest change.",
+		Files:             []string{"README.md"},
+	}
+	proposalID := localScoutProposalID(improvementScoutRole, proposal)
+	runID := "lw-missing-stale-scout-approval"
+	now := time.Now().UTC().Format(time.RFC3339)
+	artifactPath := filepath.ToSlash(filepath.Join(".nana", "improvements", "improve-test"))
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  now,
+		ScoutJobs: map[string]startWorkScoutJob{
+			proposalID: {
+				ID:           proposalID,
+				Role:         improvementScoutRole,
+				Title:        proposal.Title,
+				Summary:      proposal.Summary,
+				ArtifactPath: artifactPath,
+				ProposalPath: filepath.ToSlash(filepath.Join(artifactPath, "proposals.json")),
+				Destination:  improvementDestinationLocal,
+				TaskBody:     "Implement local scout proposal: Improve help text",
+				Status:       startScoutJobFailed,
+				RunID:        runID,
+				Attempts:     79,
+				LastError:    localWorkStaleCleanupError,
+				UpdatedAt:    now,
+				CreatedAt:    now,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	summary, err := loadStartUIRepoSummary(repoSlug, true)
+	if err != nil {
+		t.Fatalf("load repo summary: %v", err)
+	}
+	if summary.ScoutJobCounts[startScoutJobFailed] != 0 || summary.ScoutJobCounts[startScoutJobQueued] != 1 {
+		t.Fatalf("expected missing-manifest stale scout job to count as queued not failed, got %+v", summary.ScoutJobCounts)
+	}
+
+	approvals, err := loadStartUIApprovals()
+	if err != nil {
+		t.Fatalf("load approvals: %v", err)
+	}
+	for _, item := range approvals {
+		if item.ScoutJobID == proposalID {
+			t.Fatalf("expected missing-manifest stale scout cleanup to stay out of approvals, got %+v", item)
+		}
+	}
+
+	workState, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("read start state: %v", err)
+	}
+	job := workState.ScoutJobs[proposalID]
+	if job.Status != startScoutJobQueued || job.RunID != "" {
+		t.Fatalf("expected missing-manifest stale scout job to be requeued, got %+v", job)
+	}
+	if job.RecoveryCount != 1 || job.LastRecoveryReason != localWorkStaleCleanupError || job.LastRecoveredRunID != runID || strings.TrimSpace(job.LastRecoveryAt) == "" {
+		t.Fatalf("expected persisted recovery metadata for missing-manifest stale scout job, got %+v", job)
+	}
+}
+
 func TestLoadStartUIApprovalsSkipsFailedScoutJobStillInRecoveryCooldown(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

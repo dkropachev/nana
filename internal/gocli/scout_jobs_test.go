@@ -176,6 +176,32 @@ func TestReconcileStartWorkScoutJobRunStateAutoRequeuesStaleStartupCleanupOnce(t
 	}
 }
 
+func TestReconcileStartWorkScoutJobRunStateRequeuesStaleCleanupWhenManifestMissing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	job := startWorkScoutJob{
+		ID:          "proposal-1",
+		Destination: improvementDestinationLocal,
+		Status:      startScoutJobFailed,
+		RunID:       "lw-missing-stale-manifest",
+		Attempts:    79,
+		LastError:   localWorkStaleCleanupError,
+		UpdatedAt:   now,
+	}
+	reconcileStartWorkScoutJobRunState(&job)
+	if job.Status != startScoutJobQueued || job.RunID != "" {
+		t.Fatalf("expected missing-manifest stale scout job to requeue, got %+v", job)
+	}
+	if job.LastError != localWorkStaleCleanupError {
+		t.Fatalf("expected stale cleanup error to remain visible, got %+v", job)
+	}
+	if job.RecoveryCount != 1 || job.LastRecoveryReason != localWorkStaleCleanupError || job.LastRecoveredRunID != "lw-missing-stale-manifest" || strings.TrimSpace(job.LastRecoveryAt) == "" {
+		t.Fatalf("expected recovery metadata for missing-manifest stale scout job, got %+v", job)
+	}
+}
+
 func TestReconcileStartWorkScoutJobRunStateKeepsRepeatedStaleStartupCleanupFailed(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
