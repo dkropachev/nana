@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -472,6 +473,109 @@ func TestAccountStatusShowsUsageState(t *testing.T) {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("expected %q in output, got %q", needle, output)
 		}
+	}
+}
+
+func TestAccountLimitsShowsLiveWindowsAndAdditionalRateLimits(t *testing.T) {
+	location := time.FixedZone("AST", -4*60*60)
+	now := time.Date(2026, time.April, 20, 23, 43, 59, 0, location)
+	reset5h := time.Date(2026, time.April, 21, 0, 35, 9, 0, location)
+	resetWeekly := time.Date(2026, time.April, 27, 19, 35, 9, 0, location)
+	resetSpark5h := time.Date(2026, time.April, 21, 4, 43, 59, 0, location)
+	resetSparkWeekly := time.Date(2026, time.April, 27, 23, 43, 59, 0, location)
+
+	oldNow := managedAuthNow
+	oldLocation := managedAuthDisplayLocation
+	managedAuthNow = func() time.Time { return now }
+	managedAuthDisplayLocation = func() *time.Location { return location }
+	defer func() {
+		managedAuthNow = oldNow
+		managedAuthDisplayLocation = oldLocation
+	}()
+
+	server := newManagedAccountTestServer(t, managedAccountTestResponses{
+		usage: map[string]managedAccountUsageReply{
+			"main-token": {
+				statusCode: http.StatusOK,
+				body:       `{"plan_type":"pro","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":96,"limit_window_seconds":18000,"reset_at":` + strconv.FormatInt(reset5h.UTC().Unix(), 10) + `},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_at":` + strconv.FormatInt(resetWeekly.UTC().Unix(), 10) + `}},"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":` + strconv.FormatInt(resetSpark5h.UTC().Unix(), 10) + `},"secondary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_at":` + strconv.FormatInt(resetSparkWeekly.UTC().Unix(), 10) + `}}}],"credits":{"has_credits":false,"unlimited":false,"overage_limit_reached":false,"balance":"0"},"spend_control":{"reached":false}}`,
+			},
+		},
+	})
+	withManagedAccountEndpoints(t, server)
+
+	codexHome := filepath.Join(t.TempDir(), ".codex")
+	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
+		Preferred: "main",
+		Accounts: map[string]managedAccountFixtureEntry{
+			"main": {
+				Profile: chatgptProfileJSONWithIdentity(
+					"main-token",
+					"main-refresh",
+					"a125b746-163d-4fc4-865f-b42e358c7d85",
+					"dmitry.kropachev@gmail.com",
+					"dmitry",
+				),
+			},
+		},
+		Active: "main",
+	})
+	t.Setenv("CODEX_HOME", codexHome)
+
+	output, err := captureStdout(t, func() error { return Account([]string{"limits"}) })
+	if err != nil {
+		t.Fatalf("Account(limits): %v", err)
+	}
+
+	for _, needle := range []string{
+		"main",
+		"  email: dmitry.kropachev@gmail.com",
+		"  account_id: a125b746-163d-4fc4-865f-b42e358c7d85",
+		"  plan: pro",
+		"  Codex: available",
+		"    5h: 96% used; refreshes 2026-04-21 00:35:09 AST (in 51m 10s)",
+		"    weekly: 20% used; refreshes 2026-04-27 19:35:09 AST (in 6d 19h 51m)",
+		"  GPT-5.3-Codex-Spark: available",
+		"    5h: 0% used; refreshes 2026-04-21 04:43:59 AST (in 5h)",
+		"    weekly: 0% used; refreshes 2026-04-27 23:43:59 AST (in 1w)",
+	} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("expected %q in output, got %q", needle, output)
+		}
+	}
+
+	state, err := loadManagedAuthRuntimeState(codexHome)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if state.Accounts["main"].FiveHourUsedPct == nil || *state.Accounts["main"].FiveHourUsedPct != 96 {
+		t.Fatalf("expected refreshed runtime state, got %#v", state.Accounts["main"])
+	}
+}
+
+func TestAccountLimitsReturnsErrorWhenUsageFetchFails(t *testing.T) {
+	server := newManagedAccountTestServer(t, managedAccountTestResponses{
+		usage: map[string]managedAccountUsageReply{
+			"primary-token": {statusCode: http.StatusServiceUnavailable, body: `{"error":"busy"}`},
+		},
+	})
+	withManagedAccountEndpoints(t, server)
+
+	codexHome := filepath.Join(t.TempDir(), ".codex")
+	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
+		Preferred: "primary",
+		Accounts: map[string]managedAccountFixtureEntry{
+			"primary": {Profile: chatgptProfileJSON("primary-token", "primary-refresh", "primary-acct")},
+		},
+		Active: "primary",
+	})
+	t.Setenv("CODEX_HOME", codexHome)
+
+	_, err := captureStdout(t, func() error { return Account([]string{"limits"}) })
+	if err == nil {
+		t.Fatal("expected limits command to fail")
+	}
+	if !strings.Contains(err.Error(), `managed account "primary" usage check failed:`) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -1272,7 +1376,12 @@ func writeManagedAccountFixture(t *testing.T, codexHome string, fixture managedA
 		Preferred: fixture.Preferred,
 		Accounts:  []ManagedAuthAccount{},
 	}
-	for _, name := range []string{"primary", "secondary", "tertiary"} {
+	names := make([]string, 0, len(fixture.Accounts))
+	for name := range fixture.Accounts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
 		entry, ok := fixture.Accounts[name]
 		if !ok {
 			continue

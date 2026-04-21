@@ -173,6 +173,11 @@ func Account(args []string) error {
 		return listManagedAccounts(CodexHome())
 	case "status":
 		return statusManagedAccounts(CodexHome())
+	case "limits":
+		if len(args) > 1 {
+			return fmt.Errorf("nana account limits does not accept extra arguments\n%s", accountUsage())
+		}
+		return limitsManagedAccounts(CodexHome())
 	case "activate":
 		if len(args) < 2 {
 			return fmt.Errorf("nana account activate requires an account name\n%s", accountUsage())
@@ -214,6 +219,7 @@ func accountUsage() string {
   nana account export <name> --to <path>
   nana account list
   nana account status
+  nana account limits
   nana account activate <name>
   nana account enable <name>
   nana account disable <name>
@@ -224,6 +230,7 @@ Notes:
   - nana account add launches codex login --device-auth in an isolated temporary CODEX_HOME unless --from is provided.
   - nana account import adds a managed profile from an explicit auth.json path.
   - nana account export copies a managed profile to an explicit auth.json path.
+  - nana account limits fetches the live usage windows for each managed account.
   - When no account name is provided, NANA picks one automatically.
   - The preferred profile is tried first. When it is cooling down, NANA falls back to the next enabled profile.
   - Live sessions only queue account changes; fallback and switch-back apply on the next NANA-managed restart boundary.`

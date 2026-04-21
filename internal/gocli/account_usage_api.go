@@ -57,7 +57,10 @@ const (
 	accountUsageResultPermanent = "permanent_auth_error"
 )
 
-var managedAuthRetrySleep = time.Sleep
+var (
+	managedAuthRetrySleep = time.Sleep
+	managedAuthNow        = time.Now
+)
 
 type managedAuthSettings struct {
 	usageThresholdPct    int
@@ -148,6 +151,7 @@ type managedAccountUsageSnapshot struct {
 
 type managedAccountUsageCheck struct {
 	authMode string
+	payload  *codexUsageResponse
 	snapshot *managedAccountUsageSnapshot
 	result   string
 	err      error
@@ -359,6 +363,7 @@ func fetchManagedAccountUsage(account ManagedAuthAccount, settings managedAuthSe
 	}
 	return managedAccountUsageCheck{
 		authMode: profile.AuthMode,
+		payload:  &payload,
 		result:   accountUsageResultOK,
 		snapshot: buildUsageSnapshot(&payload, settings),
 	}
@@ -526,7 +531,7 @@ func usageWindowRetryAt(window *codexUsageWindow) time.Time {
 		return time.Unix(window.ResetAt, 0).UTC()
 	}
 	if window.ResetAfterSeconds > 0 {
-		return time.Now().UTC().Add(time.Duration(window.ResetAfterSeconds) * time.Second)
+		return managedAuthNow().UTC().Add(time.Duration(window.ResetAfterSeconds) * time.Second)
 	}
 	return time.Time{}
 }
