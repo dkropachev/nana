@@ -26,45 +26,6 @@ type doctorRemediation struct {
 	ManualFallback   string
 }
 
-func setupFixCommand(scope string) string {
-	return setupCommand(scope, false)
-}
-
-func setupForceFixCommand(scope string) string {
-	return setupCommand(scope, true)
-}
-
-func setupCommand(scope string, force bool) string {
-	scope = strings.TrimSpace(scope)
-	parts := []string{"nana", "setup"}
-	if force {
-		parts = append(parts, "--force")
-	}
-	if scope != "" {
-		parts = append(parts, "--scope", scope)
-	}
-	return strings.Join(parts, " ")
-}
-
-func setupDoctorRemediation(scope string, path string, manualFallback string) *doctorRemediation {
-	if manualFallback == "" {
-		manualFallback = fmt.Sprintf("inspect %s, then run `%s`", path, setupFixCommand(scope))
-	}
-	return &doctorRemediation{
-		Path:             path,
-		SafeAutomaticFix: fmt.Sprintf("yes — run `%s`", setupFixCommand(scope)),
-		ManualFallback:   manualFallback,
-	}
-}
-
-func manualDoctorRemediation(path string, manualFallback string) *doctorRemediation {
-	return &doctorRemediation{
-		Path:             path,
-		SafeAutomaticFix: "no — manual review required",
-		ManualFallback:   manualFallback,
-	}
-}
-
 func Doctor(cwd string, repoRoot string) error {
 	scope, source := resolveDoctorScope(cwd)
 	paths := resolveDoctorPaths(cwd, scope)
@@ -137,6 +98,31 @@ func Doctor(cwd string, repoRoot string) error {
 		fmt.Fprintln(os.Stdout, "\nAll checks passed! nana is ready.")
 	}
 	return nil
+}
+
+func checkWorkSQLiteState() doctorCheck {
+	report, err := inspectLocalWorkDB()
+	if err != nil {
+		return doctorCheck{Name: "Work SQLite state", Status: "warn", Message: err.Error()}
+	}
+	if !report.Exists || report.Empty {
+		return doctorCheck{Name: "Work SQLite state", Status: "pass", Message: "state DB not created yet"}
+	}
+	if !report.Healthy {
+		return doctorCheck{
+			Name:    "Work SQLite state",
+			Status:  "fail",
+			Message: "work DB integrity requires repair; run `nana work db-repair`",
+		}
+	}
+	if report.RepairRequired {
+		return doctorCheck{
+			Name:    "Work SQLite state",
+			Status:  "warn",
+			Message: "work DB schema or logical state requires repair; run `nana work db-repair`",
+		}
+	}
+	return doctorCheck{Name: "Work SQLite state", Status: "pass", Message: "healthy"}
 }
 
 type teamDoctorIssue struct {
