@@ -2315,6 +2315,41 @@
     `).join("")}</ul>`;
   }
 
+  function syncUsageFilterControl(id, value) {
+    const control = document.getElementById(id);
+    if (!control || document.activeElement === control) return;
+    const nextValue = String(value ?? "");
+    if (control.value !== nextValue) {
+      control.value = nextValue;
+    }
+  }
+
+  function syncUsagePageState(filters) {
+    const statusPill = document.getElementById("usage-status-pill");
+    if (statusPill) {
+      statusPill.textContent = state.usage.loading ? "Refreshing" : "Ready";
+    }
+
+    const submitButton = document.getElementById("usage-apply-button");
+    if (submitButton) {
+      submitButton.textContent = state.usage.loading ? "Refreshing..." : "Apply Filters";
+      submitButton.disabled = Boolean(state.usage.loading);
+    }
+
+    const errorHost = document.getElementById("usage-error-host");
+    if (errorHost) {
+      errorHost.innerHTML = state.usage.error
+        ? `<div class="config-notice">${escapeHTML(state.usage.error)}</div>`
+        : "";
+    }
+
+    syncUsageFilterControl("usage-filter-since", defaultString(filters.since, "30d"));
+    syncUsageFilterControl("usage-filter-root", defaultString(filters.root, "all"));
+    syncUsageFilterControl("usage-filter-activity", filters.activity || "");
+    syncUsageFilterControl("usage-filter-phase", filters.phase || "");
+    syncUsageFilterControl("usage-filter-model", filters.model || "");
+  }
+
   function renderRepoCards(target, repos) {
     const host = document.getElementById(target);
     if (!host) return;
@@ -2485,7 +2520,7 @@
             <h3>Usage Filters</h3>
             <p>Focus the charts by time window, root, activity, phase, or model.</p>
           </div>
-          <span class="status-pill">${escapeHTML(state.usage.loading ? "Refreshing" : "Ready")}</span>
+          <span id="usage-status-pill" class="status-pill">${escapeHTML(state.usage.loading ? "Refreshing" : "Ready")}</span>
         </div>
         <form id="usage-filters-form" class="usage-filter-form">
           <div class="config-grid usage-filter-grid">
@@ -2528,11 +2563,11 @@
             </label>
           </div>
           <div class="config-actions">
-            <button class="tx-btn tx-btn-primary" type="submit">${escapeHTML(state.usage.loading ? "Refreshing..." : "Apply Filters")}</button>
+            <button id="usage-apply-button" class="tx-btn tx-btn-primary" type="submit" ${state.usage.loading ? "disabled" : ""}>${escapeHTML(state.usage.loading ? "Refreshing..." : "Apply Filters")}</button>
             <button class="tx-btn tx-btn-secondary" type="button" data-usage-reset="true">Reset</button>
           </div>
         </form>
-        ${state.usage.error ? `<div class="config-notice">${escapeHTML(state.usage.error)}</div>` : ""}
+        <div id="usage-error-host">${state.usage.error ? `<div class="config-notice">${escapeHTML(state.usage.error)}</div>` : ""}</div>
       </section>
       <section id="usage-metrics" class="metrics-grid metrics-grid-wide"></section>
       <section class="layout-two-col">
@@ -2606,6 +2641,8 @@
         <div id="usage-sessions-grid"></div>
       </section>
     `);
+
+    syncUsagePageState(filters);
 
     document.getElementById("usage-metrics").innerHTML = buildMetricCards([
       { label: "Total Tokens", value: formatTokenCompact(totals && totals.total_tokens || 0), note: "All token spend in the current filter scope." },
