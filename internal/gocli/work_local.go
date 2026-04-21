@@ -25,7 +25,7 @@ import (
 const LocalWorkHelp = `nana work - Local implementation runtime for git-backed repos
 
 Usage:
-  nana work start [--detach] [--repo <path>] [--task <text> | --plan-file <path>] [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [-- codex-args...]
+  nana work start [--detach] [--repo <path>] [--task <text> | --plan-file <path>] --work-type <bug_fix|refactor|feature|test_only> [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [-- codex-args...]
   nana work resume [--run-id <id> | --last | --global-last] [--repo <path>] [-- codex-args...]
   nana work resolve [--run-id <id> | --last | --global-last] [--repo <path>]
   nana work status [--run-id <id> | --last | --global-last] [--repo <path>] [--json]
@@ -36,6 +36,7 @@ Usage:
 Behavior:
   - runs only against a local git repo in an isolated managed sandbox
   - infers a task from the current branch when --task and --plan-file are omitted
+  - requires an explicit --work-type for all local launches
   - refreshes managed source checkouts before sandbox start, syncs the local source branch before final apply, commits verified sandbox changes after completion, and pushes to the tracked remote when one exists
   - resolve retries blocked final-apply runs after Nana refreshes the managed source checkout or completes a pending commit/push
   - never submits, publishes, opens PRs, or calls GitHub APIs
@@ -81,6 +82,7 @@ type localWorkStartOptions struct {
 	RepoPath              string
 	Task                  string
 	PlanFile              string
+	WorkType              string
 	MaxIterations         int
 	IntegrationPolicy     string
 	GroupingPolicy        string
@@ -150,6 +152,7 @@ type localWorkManifest struct {
 	VerificationScriptsDir         string                         `json:"verification_scripts_dir,omitempty"`
 	InputPath                      string                         `json:"input_path"`
 	InputMode                      string                         `json:"input_mode"`
+	WorkType                       string                         `json:"work_type,omitempty"`
 	IntegrationPolicy              string                         `json:"integration_policy"`
 	GroupingPolicy                 string                         `json:"grouping_policy,omitempty"`
 	ValidationParallelism          int                            `json:"validation_parallelism,omitempty"`
@@ -176,6 +179,8 @@ type localWorkManifest struct {
 	RejectedFindingFingerprints    []string                       `json:"rejected_finding_fingerprints,omitempty"`
 	PreexistingFindingFingerprints []string                       `json:"preexisting_finding_fingerprints,omitempty"`
 	PreexistingFindings            []localWorkRememberedFinding   `json:"preexisting_findings,omitempty"`
+	FollowupDecision               string                         `json:"followup_decision,omitempty"`
+	FollowupRounds                 []workFollowupRoundSummary     `json:"followup_rounds,omitempty"`
 	Iterations                     []localWorkIterationSummary    `json:"iterations,omitempty"`
 	APIBaseURL                     string                         `json:"-"`
 	PauseManifestPath              string                         `json:"-"`
@@ -255,6 +260,15 @@ type localWorkIterationSummary struct {
 	CandidateAuditStatus                  string                         `json:"candidate_audit_status,omitempty"`
 	CandidateBlockedPaths                 []string                       `json:"candidate_blocked_paths,omitempty"`
 	IntegrationRan                        bool                           `json:"integration_ran,omitempty"`
+	FollowupRound                         int                            `json:"followup_round,omitempty"`
+	FollowupPlannerDecision               string                         `json:"followup_planner_decision,omitempty"`
+	FollowupReviewDecision                string                         `json:"followup_review_decision,omitempty"`
+	FollowupProposedItems                 int                            `json:"followup_proposed_items,omitempty"`
+	FollowupApprovedItems                 int                            `json:"followup_approved_items,omitempty"`
+	FollowupRejectedItems                 int                            `json:"followup_rejected_items,omitempty"`
+	FollowupApprovedKinds                 []string                       `json:"followup_approved_kinds,omitempty"`
+	ApprovedFollowupItems                 []workFollowupItem             `json:"approved_followup_items,omitempty"`
+	RejectedFollowupItems                 []workFollowupRejectedItem     `json:"rejected_followup_items,omitempty"`
 }
 
 type localWorkVerificationCommandResult struct {
@@ -1279,6 +1293,15 @@ func parseLocalWorkStartArgs(args []string) (localWorkStartOptions, error) {
 			index++
 		case strings.HasPrefix(token, "--plan-file="):
 			options.PlanFile = strings.TrimSpace(strings.TrimPrefix(token, "--plan-file="))
+		case token == "--work-type":
+			value, err := requireLocalWorkFlagValue(parseArgs, index, "--work-type")
+			if err != nil {
+				return localWorkStartOptions{}, err
+			}
+			options.WorkType = value
+			index++
+		case strings.HasPrefix(token, "--work-type="):
+			options.WorkType = strings.TrimSpace(strings.TrimPrefix(token, "--work-type="))
 		case token == "--max-iterations":
 			value, err := requireLocalWorkFlagValue(parseArgs, index, "--max-iterations")
 			if err != nil {
@@ -1340,6 +1363,9 @@ func parseLocalWorkStartArgs(args []string) (localWorkStartOptions, error) {
 
 	if strings.TrimSpace(options.Task) != "" && strings.TrimSpace(options.PlanFile) != "" {
 		return localWorkStartOptions{}, fmt.Errorf("Specify at most one of --task or --plan-file.\n%s", LocalWorkHelp)
+	}
+	if _, err := parseRequiredWorkType(options.WorkType, "--work-type"); err != nil {
+		return localWorkStartOptions{}, fmt.Errorf("%w.\n%s", err, LocalWorkHelp)
 	}
 	switch options.IntegrationPolicy {
 	case "final", "always", "never":
@@ -1583,7 +1609,7 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 
 	now := ISOTimeNow()
 	manifest := localWorkManifest{
-		Version:                4,
+		Version:                5,
 		RunID:                  runID,
 		CreatedAt:              now,
 		UpdatedAt:              now,
@@ -1602,6 +1628,7 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 		VerificationScriptsDir: verificationScriptsDir,
 		InputPath:              inputPath,
 		InputMode:              inputMode,
+		WorkType:               normalizeWorkType(options.WorkType),
 		IntegrationPolicy:      options.IntegrationPolicy,
 		GroupingPolicy:         options.GroupingPolicy,
 		ValidationParallelism:  options.ValidationParallelism,
@@ -1616,6 +1643,7 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 	fmt.Fprintf(os.Stdout, "[local] Run artifacts: %s\n", runDir)
 	fmt.Fprintf(os.Stdout, "[local] Verification policy: lint=%d compile=%d unit=%d integration=%d benchmark=%d integration_policy=%s\n",
 		len(verificationPlan.Lint), len(verificationPlan.Compile), len(verificationPlan.Unit), len(verificationPlan.Integration), len(verificationPlan.Benchmarks), options.IntegrationPolicy)
+	fmt.Fprintf(os.Stdout, "[local] Work type: %s\n", workTypeDisplayName(manifest.WorkType))
 	fmt.Fprintf(os.Stdout, "[local] Validation policy: grouping=%s parallelism=%d\n", options.GroupingPolicy, options.ValidationParallelism)
 	for _, warning := range verificationPlan.Warnings {
 		fmt.Fprintf(os.Stdout, "[local] Verification warning: %s\n", warning)
@@ -2405,8 +2433,49 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 			}
 		}
 
+		followupRound := 0
+		followupPlannerDecision := ""
+		followupReviewDecision := ""
+		followupProposedItems := 0
+		followupApprovedItems := []workFollowupItem{}
+		followupRejectedItems := []workFollowupRejectedItem{}
+		followupApprovedKinds := []string{}
+		followupMaxRoundsExceeded := false
+		if finalVerification.Passed && len(finalFindings) == 0 && candidateAuditStatus != "blocked-candidate-files" {
+			nextFollowupRound := len(manifest.FollowupRounds) + 1
+			setLocalWorkProgress(&manifest, &state, "followup-plan", "followup-plan", nextFollowupRound)
+			if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
+				return err
+			}
+			followupSummary, approvedItems, rejectedItems, err := runLocalWorkFollowupRound(manifest, codexArgs, iterationDir, nextFollowupRound, finalVerification)
+			if err != nil {
+				manifest.Status = "failed"
+				manifest.LastError = err.Error()
+				manifest.UpdatedAt = ISOTimeNow()
+				if writeErr := writeLocalWorkActiveState(runDir, &manifest, &state); writeErr != nil {
+					return writeErr
+				}
+				return err
+			}
+			manifest.FollowupRounds = append(manifest.FollowupRounds, followupSummary)
+			manifest.FollowupDecision = followupSummary.ReviewDecision
+			if err := writeLocalWorkManifest(manifest); err != nil {
+				return err
+			}
+			followupRound = followupSummary.Round
+			followupPlannerDecision = followupSummary.PlannerDecision
+			followupReviewDecision = followupSummary.ReviewDecision
+			followupProposedItems = followupSummary.ProposedItems
+			followupApprovedItems = append([]workFollowupItem{}, approvedItems...)
+			followupRejectedItems = append([]workFollowupRejectedItem{}, rejectedItems...)
+			followupApprovedKinds = append([]string{}, followupSummary.ApprovedKinds...)
+			if followupReviewDecision == workFollowupDecisionApprovedFollowup && followupRound >= workFollowupMaxRounds {
+				followupMaxRoundsExceeded = true
+			}
+		}
+
 		integrationRan := manifest.IntegrationPolicy == "always" && len(plan.Integration) > 0
-		if finalVerification.Passed && len(finalFindings) == 0 && manifest.IntegrationPolicy == "final" {
+		if finalVerification.Passed && len(finalFindings) == 0 && len(followupApprovedItems) == 0 && manifest.IntegrationPolicy == "final" {
 			setLocalWorkProgress(&manifest, &state, "integration", "integration", roundsUsed)
 			if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 				return err
@@ -2482,13 +2551,32 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 			CandidateAuditStatus:                  candidateAuditStatus,
 			CandidateBlockedPaths:                 append([]string{}, candidateBlockedPaths...),
 			IntegrationRan:                        integrationRan,
+			FollowupRound:                         followupRound,
+			FollowupPlannerDecision:               followupPlannerDecision,
+			FollowupReviewDecision:                followupReviewDecision,
+			FollowupProposedItems:                 followupProposedItems,
+			FollowupApprovedItems:                 len(followupApprovedItems),
+			FollowupRejectedItems:                 len(followupRejectedItems),
+			FollowupApprovedKinds:                 append([]string{}, followupApprovedKinds...),
+			ApprovedFollowupItems:                 append([]workFollowupItem{}, followupApprovedItems...),
+			RejectedFollowupItems:                 append([]workFollowupRejectedItem{}, followupRejectedItems...),
 		}
 		manifest.FinalGateStatus = finalGateStatus
 		manifest.FinalGateRoleResults = finalGateRoleResults
 		manifest.CandidateAuditStatus = candidateAuditStatus
 		manifest.CandidateBlockedPaths = append([]string{}, candidateBlockedPaths...)
-		if finalVerification.Passed && len(finalFindings) == 0 {
-			if candidateAuditStatus == "blocked-candidate-files" {
+			if strings.TrimSpace(followupReviewDecision) != "" {
+				manifest.FollowupDecision = followupReviewDecision
+			}
+		if followupMaxRoundsExceeded {
+			summary.Status = "failed"
+			manifest.Status = "failed"
+			manifest.LastError = fmt.Sprintf("work run %s exhausted followup rounds (%d) with approved followups still remaining", manifest.RunID, workFollowupMaxRounds)
+			setLocalWorkProgress(&manifest, &state, "followup-max-rounds", "followup-review", followupRound)
+		} else if finalVerification.Passed && len(finalFindings) == 0 {
+			if len(followupApprovedItems) > 0 {
+				setLocalWorkProgress(&manifest, &state, "followup-next-iteration", "followup-review", followupRound)
+			} else if candidateAuditStatus == "blocked-candidate-files" {
 				summary.Status = "blocked"
 				manifest.Status = "blocked"
 				manifest.LastError = localWorkCandidateBlockedMessage(candidateBlockedPaths)
@@ -2527,6 +2615,9 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 		}
 		if err := writeLocalWorkManifest(manifest); err != nil {
 			return err
+		}
+		if summary.Status == "failed" {
+			return errors.New(manifest.LastError)
 		}
 		if summary.Status == "completed" {
 			if err := markSupersededLocalWorkRuns(manifest); err != nil {
@@ -2740,6 +2831,7 @@ type localWorkStatusSnapshot struct {
 	Phase                    string                           `json:"phase,omitempty"`
 	Subphase                 string                           `json:"subphase,omitempty"`
 	Round                    int                              `json:"round,omitempty"`
+	WorkType                 string                           `json:"work_type,omitempty"`
 	LastVerification         string                           `json:"last_verification,omitempty"`
 	LastReviewFindings       int                              `json:"last_review_findings,omitempty"`
 	LastIteration            *localWorkIterationSummary       `json:"last_iteration,omitempty"`
@@ -2753,6 +2845,8 @@ type localWorkStatusSnapshot struct {
 	FinalGateRoleResults     []localWorkFinalGateRoleResult   `json:"final_gate_role_results,omitempty"`
 	CandidateAuditStatus     string                           `json:"candidate_audit_status,omitempty"`
 	CandidateBlockedPaths    []string                         `json:"candidate_blocked_paths,omitempty"`
+	FollowupDecision         string                           `json:"followup_decision,omitempty"`
+	FollowupRounds           []workFollowupRoundSummary       `json:"followup_rounds,omitempty"`
 	NextAction               string                           `json:"next_action,omitempty"`
 	LastError                string                           `json:"last_error,omitempty"`
 	PauseReason              string                           `json:"pause_reason,omitempty"`
@@ -2778,6 +2872,9 @@ func localWorkStatus(cwd string, options localWorkStatusOptions) error {
 	fmt.Fprintf(os.Stdout, "[local] Run artifacts: %s\n", snapshot.RunArtifacts)
 	fmt.Fprintf(os.Stdout, "[local] Sandbox: %s\n", snapshot.Sandbox)
 	fmt.Fprintf(os.Stdout, "[local] Status: %s\n", snapshot.Status)
+	if strings.TrimSpace(snapshot.WorkType) != "" {
+		fmt.Fprintf(os.Stdout, "[local] Work type: %s\n", workTypeDisplayName(snapshot.WorkType))
+	}
 	if strings.TrimSpace(snapshot.PauseUntil) != "" {
 		fmt.Fprintf(os.Stdout, "[local] Pause until: %s", snapshot.PauseUntil)
 		if strings.TrimSpace(snapshot.PauseReason) != "" {
@@ -2815,6 +2912,9 @@ func localWorkStatus(cwd string, options localWorkStatusOptions) error {
 	}
 	if strings.TrimSpace(snapshot.NextAction) != "" {
 		fmt.Fprintf(os.Stdout, "[local] Next action: %s\n", snapshot.NextAction)
+	}
+	if strings.TrimSpace(snapshot.FollowupDecision) != "" {
+		fmt.Fprintf(os.Stdout, "[local] Followups: %s (rounds=%d)\n", snapshot.FollowupDecision, len(snapshot.FollowupRounds))
 	}
 	fmt.Fprintf(os.Stdout, "[local] Iteration: %d/%d (phase=%s", snapshot.Iteration, snapshot.MaxIterations, defaultString(snapshot.Phase, "n/a"))
 	if strings.TrimSpace(snapshot.Subphase) != "" {
@@ -2909,6 +3009,7 @@ func localWorkBuildStatusSnapshot(manifest localWorkManifest, runDir string) (lo
 		Phase:                    manifest.CurrentPhase,
 		Subphase:                 manifest.CurrentSubphase,
 		Round:                    manifest.CurrentRound,
+		WorkType:                 manifest.WorkType,
 		ActiveValidationContext:  activeContext,
 		RejectedFingerprintCount: len(manifest.RejectedFindingFingerprints),
 		PreexistingFindingCount:  len(manifest.PreexistingFindings),
@@ -2919,6 +3020,8 @@ func localWorkBuildStatusSnapshot(manifest localWorkManifest, runDir string) (lo
 		FinalGateRoleResults:     append([]localWorkFinalGateRoleResult{}, manifest.FinalGateRoleResults...),
 		CandidateAuditStatus:     manifest.CandidateAuditStatus,
 		CandidateBlockedPaths:    append([]string{}, manifest.CandidateBlockedPaths...),
+		FollowupDecision:         manifest.FollowupDecision,
+		FollowupRounds:           append([]workFollowupRoundSummary{}, manifest.FollowupRounds...),
 		NextAction:               localWorkBlockedNextAction(manifest),
 		LastError:                manifest.LastError,
 		PauseReason:              manifest.PauseReason,
@@ -3218,6 +3321,7 @@ func normalizeLocalWorkManifest(manifest *localWorkManifest) {
 	if manifest.Version == 0 {
 		manifest.Version = 5
 	}
+	manifest.WorkType = normalizeWorkType(manifest.WorkType)
 	manifest.RepoSlug = localWorkResolvedRepoSlug(manifest.RepoRoot, manifest.RepoSlug)
 	if strings.TrimSpace(manifest.GroupingPolicy) == "" {
 		manifest.GroupingPolicy = localWorkDefaultGroupingPolicy
@@ -4807,6 +4911,7 @@ func buildLocalWorkImplementPrompt(manifest localWorkManifest, iteration int) (s
 		fmt.Sprintf("Baseline SHA: %s", manifest.BaselineSHA),
 		fmt.Sprintf("Source branch: %s", manifest.SourceBranch),
 		fmt.Sprintf("Iteration: %d/%d", iteration, manifest.MaxIterations),
+		fmt.Sprintf("Work type: %s", workTypeDisplayName(manifest.WorkType)),
 		fmt.Sprintf("Integration policy: %s", manifest.IntegrationPolicy),
 		"",
 		"Contract:",
@@ -4826,6 +4931,12 @@ func buildLocalWorkImplementPrompt(manifest localWorkManifest, iteration int) (s
 			fmt.Sprintf("- Verification: %s", defaultString(last.VerificationSummary, "(none)")),
 			fmt.Sprintf("- Final review findings: %d", last.ReviewFindings),
 		)
+		if len(last.ApprovedFollowupItems) > 0 {
+			lines = append(lines, fmt.Sprintf("- Approved followups from round %d: %d", last.FollowupRound, len(last.ApprovedFollowupItems)))
+			for _, item := range last.ApprovedFollowupItems {
+				lines = append(lines, fmt.Sprintf("- Followup item: [%s] %s", item.Kind, item.Title))
+			}
+		}
 		for _, title := range limitPromptList(last.ReviewFindingTitles, 10) {
 			lines = append(lines, "- Review item: "+title)
 		}

@@ -90,6 +90,7 @@ type githubExplainPayload struct {
 	RunID                   string                             `json:"run_id"`
 	RepoSlug                string                             `json:"repo_slug"`
 	TargetURL               string                             `json:"target_url"`
+	WorkType                string                             `json:"work_type,omitempty"`
 	CurrentPhase            string                             `json:"current_phase,omitempty"`
 	CurrentRound            int                                `json:"current_round,omitempty"`
 	Policy                  *githubResolvedWorkPolicy          `json:"policy,omitempty"`
@@ -731,6 +732,7 @@ func buildGithubExplainPayload(manifest githubWorkManifest) githubExplainPayload
 		RunID:                   manifest.RunID,
 		RepoSlug:                manifest.RepoSlug,
 		TargetURL:               manifest.TargetURL,
+		WorkType:                manifest.WorkType,
 		CurrentPhase:            manifest.CurrentPhase,
 		CurrentRound:            manifest.CurrentRound,
 		Policy:                  manifest.Policy,
@@ -772,6 +774,7 @@ func hydrateGithubWorkManifestDefaults(manifest *githubWorkManifest) {
 	if manifest == nil {
 		return
 	}
+	manifest.WorkType = normalizeWorkType(manifest.WorkType)
 	if manifest.Policy == nil {
 		policy := defaultGithubResolvedWorkPolicy()
 		manifest.Policy = &policy

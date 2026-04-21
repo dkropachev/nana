@@ -853,6 +853,8 @@ func TestGithubWorkCommandStartExecutesNatively(t *testing.T) {
 		_, err := GithubWorkCommand(".", []string{
 			"start",
 			"https://github.com/acme/widget/issues/42",
+			"--work-type",
+			workTypeFeature,
 			"--reviewer",
 			"@me",
 			"--considerations",
@@ -2689,7 +2691,7 @@ func TestGithubWorkCommandStartHonorsRepoPublishTarget(t *testing.T) {
 		case "/repos/acme/widget":
 			_, _ = w.Write([]byte(fmt.Sprintf(`{"name":"widget","full_name":"acme/widget","clone_url":%q,"default_branch":"main","html_url":"https://github.com/acme/widget"}`, originRepo)))
 		case "/repos/acme/widget/issues/42":
-			_, _ = w.Write([]byte(`{"title":"Start me","state":"open"}`))
+			_, _ = w.Write([]byte(`{"title":"Start me","body":"Add the requested feature","state":"open","labels":[{"name":"enhancement"}]}`))
 		default:
 			http.Error(w, fmt.Sprintf("unexpected route: %s", r.URL.Path), http.StatusInternalServerError)
 		}
@@ -2697,7 +2699,7 @@ func TestGithubWorkCommandStartHonorsRepoPublishTarget(t *testing.T) {
 	defer server.Close()
 	t.Setenv("GITHUB_API_URL", server.URL)
 	_, err := captureStdout(t, func() error {
-		_, err := GithubWorkCommand(".", []string{"start", "https://github.com/acme/widget/issues/42"})
+		_, err := GithubWorkCommand(".", []string{"start", "https://github.com/acme/widget/issues/42", "--work-type", workTypeFeature})
 		return err
 	})
 	if err != nil {
@@ -2746,7 +2748,7 @@ func TestGithubWorkCommandStartRejectsDisabledRepoModeFromSettings(t *testing.T)
 		case "/repos/acme/widget":
 			_, _ = w.Write([]byte(fmt.Sprintf(`{"name":"widget","full_name":"acme/widget","clone_url":%q,"default_branch":"main","html_url":"https://github.com/acme/widget"}`, originRepo)))
 		case "/repos/acme/widget/issues/42":
-			_, _ = w.Write([]byte(`{"title":"Start me","state":"open"}`))
+			_, _ = w.Write([]byte(`{"title":"Start me","body":"Add the requested feature","state":"open","labels":[{"name":"enhancement"}]}`))
 		default:
 			http.Error(w, fmt.Sprintf("unexpected route: %s", r.URL.Path), http.StatusInternalServerError)
 		}
@@ -2755,7 +2757,7 @@ func TestGithubWorkCommandStartRejectsDisabledRepoModeFromSettings(t *testing.T)
 	t.Setenv("GITHUB_API_URL", server.URL)
 
 	_, err := captureStdout(t, func() error {
-		_, err := GithubWorkCommand(".", []string{"start", "https://github.com/acme/widget/issues/42"})
+		_, err := GithubWorkCommand(".", []string{"start", "https://github.com/acme/widget/issues/42", "--work-type", workTypeFeature})
 		return err
 	})
 	if err == nil {

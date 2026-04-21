@@ -49,8 +49,8 @@ func TestStartWorkStartCreatesForkCopiesIssuesPrioritizesAndStartsWithinCaps(t *
 			_, _ = w.Write([]byte(`{}`))
 		case "GET /repos/acme/widget/issues?state=all&per_page=100&page=1":
 			_, _ = w.Write([]byte(`[
-{"number":1,"title":"Hard P2","body":"hard body","state":"open","html_url":"https://github.com/acme/widget/issues/1","labels":[{"name":"P2"},{"name":"hard"}]},
-{"number":2,"title":"Easy P1","body":"easy body","state":"open","html_url":"https://github.com/acme/widget/issues/2","labels":[{"name":"P1"},{"name":"easy"}]},
+{"number":1,"title":"Hard P2","body":"hard body","state":"open","html_url":"https://github.com/acme/widget/issues/1","labels":[{"name":"P2"},{"name":"hard"},{"name":"refactor"}]},
+{"number":2,"title":"Easy P1","body":"easy body","state":"open","html_url":"https://github.com/acme/widget/issues/2","labels":[{"name":"P1"},{"name":"easy"},{"name":"bug"}]},
 {"number":3,"title":"PR masquerading as issue","state":"open","html_url":"https://github.com/acme/widget/issues/3","labels":[{"name":"P1"}],"pull_request":{}}
 ]`))
 		case "POST /repos/me/widget/issues?":
@@ -182,6 +182,7 @@ func TestStartWorkBuildImplementationQueueRequiresFreshPriorityAndHonorsManualP0
 				State:          "open",
 				Status:         startWorkStatusQueued,
 				Labels:         []string{"nana", "P0"},
+				WorkType:       workTypeBugFix,
 				Priority:       0,
 				PrioritySource: "manual_label",
 				Complexity:     3,
@@ -192,6 +193,7 @@ func TestStartWorkBuildImplementationQueueRequiresFreshPriorityAndHonorsManualP0
 				State:             "open",
 				Status:            startWorkStatusQueued,
 				Labels:            []string{"nana"},
+				WorkType:          workTypeFeature,
 				Priority:          2,
 				PrioritySource:    "triage",
 				Complexity:        2,
@@ -205,6 +207,7 @@ func TestStartWorkBuildImplementationQueueRequiresFreshPriorityAndHonorsManualP0
 				State:             "open",
 				Status:            startWorkStatusQueued,
 				Labels:            []string{"nana"},
+				WorkType:          workTypeFeature,
 				Priority:          1,
 				PrioritySource:    "triage",
 				Complexity:        1,
@@ -232,6 +235,7 @@ func TestStartWorkBuildImplementationQueueSkipsFutureScheduledIssues(t *testing.
 				State:             "open",
 				Status:            startWorkStatusQueued,
 				Labels:            []string{"nana"},
+				WorkType:          workTypeFeature,
 				Priority:          1,
 				PrioritySource:    "triage",
 				Complexity:        1,
@@ -246,6 +250,7 @@ func TestStartWorkBuildImplementationQueueSkipsFutureScheduledIssues(t *testing.
 				State:             "open",
 				Status:            startWorkStatusQueued,
 				Labels:            []string{"nana"},
+				WorkType:          workTypeFeature,
 				Priority:          2,
 				PrioritySource:    "triage",
 				Complexity:        2,

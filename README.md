@@ -183,8 +183,11 @@ $deep-interview "clarify the authentication change"
 $ralplan "approve the safest implementation path"
 nana review https://github.com/acme/widget/pull/77
 nana work start https://github.com/acme/widget/issues/42
-nana work start --task "execute the approved local refactor plan"
+nana work start --task "execute the approved local refactor plan" --work-type refactor
 ```
+
+Local work always requires `--work-type`. GitHub issue/PR work can infer the
+type from labels when available, or accept an explicit `--work-type`.
 
 ## A simple mental model
 
@@ -227,8 +230,8 @@ Most users should think of NANA as **better task routing + better workflow + bet
 | `nana start` | run onboarded repo automation, including issue pickup, scouts, a post-scout pickup pass, and the default loopback assistant workspace; with scout flags or policy-backed local repos, run supported scout startup automation |
 | `nana improve [owner/repo]` | run the improvement-scout role for UX/perf proposals and route them by repo policy |
 | `nana enhance [owner/repo]` | run the enhancement-scout role for forward-looking repo proposals with the same policy routing |
-| `nana work start --task "..."` | long-running local plan execution in a managed sandbox, ending with verified changes committed to the local branch |
-| `nana work start --task "..." --grouping-policy path` | force deterministic path-based validation grouping |
+| `nana work start --task "..." --work-type <bug_fix|refactor|feature|test_only>` | long-running local plan execution in a managed sandbox, ending with verified changes committed to the local branch |
+| `nana work start --task "..." --work-type refactor --grouping-policy path` | force deterministic path-based validation grouping |
 | `nana work logs --last` | inspect the current iteration logs and verification artifacts in one view |
 | `nana work status --last --json` | inspect machine-readable run and validation state from SQLite, including publication state/detail for GitHub-backed runs |
 | `nana review <pr-url>` | reviewing external pull requests with persisted findings |
@@ -393,7 +396,7 @@ Use `--github` to write shareable `.github/nana-*-policy.json` files instead of 
 
 `.nana/...` takes precedence. Improvement labels are normalized to include `improvement` and `improvement-scout` while excluding `enhancement`. Enhancement labels include `enhancement` and `enhancement-scout`. Scouts return and publish every grounded proposal or finding they produce.
 
-For GitHub targets, `issue_destination: "repo"` publishes to the target repo and `issue_destination: "fork"` publishes to `fork_repo`. For local repos, `nana start` treats `mode: "auto"` in every supported scout policy as permission to switch to the repo's default branch, commit generated scout artifacts there, and run `nana work start --task ...` for one pending local discovered item per cycle. Auto mode requires a clean worktree and a resolvable local default branch.
+For GitHub targets, `issue_destination: "repo"` publishes to the target repo and `issue_destination: "fork"` publishes to `fork_repo`. For local repos, `nana start` treats `mode: "auto"` in every supported scout policy as permission to switch to the repo's default branch, commit generated scout artifacts there, and run `nana work start --task ... --work-type ...` for one pending local discovered item per cycle. Auto mode requires a clean worktree and a resolvable local default branch.
 
 ## Start Automation
 

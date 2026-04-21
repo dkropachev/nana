@@ -1,11 +1,11 @@
 # Work
 
-`nana work` is the unified implementation runtime for both local repo work and GitHub-backed issue/PR work.
+`nana work` is the unified implementation runtime for both local repo work and GitHub-backed issue/PR work. Every launch now carries a work type: `bug_fix`, `refactor`, `feature`, or `test_only`.
 
 ## Commands
 
 ```bash
-nana work start [<github-issue-or-pr-url>] [--repo <path>] [--task <text> | --plan-file <path>] [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [--considerations <list>] [--role-layout <split|reviewer+executor>] [--new-pr] [--create-pr | --local-only] [--reviewer <login|@me>] [-- codex-args...]
+nana work start [<github-issue-or-pr-url>] [--repo <path>] [--task <text> | --plan-file <path>] [--work-type <bug_fix|refactor|feature|test_only>] [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [--considerations <list>] [--role-layout <split|reviewer+executor>] [--new-pr] [--create-pr | --local-only] [--reviewer <login|@me>] [-- codex-args...]
 nana work resume [--run-id <id> | --last | --global-last] [--repo <path>] [-- codex-args...]
 nana work resolve [--run-id <id> | --last | --global-last] [--repo <path>]
 nana work status [--run-id <id> | --last | --global-last] [--repo <path>] [--json]
@@ -26,8 +26,8 @@ nana ui-scout [owner/repo|github-url] [--repo <path>] [--focus <ui,ux,a11y,perf>
 Selection rules:
 
 - local mode is selected when `start` does not receive a GitHub issue/PR URL
-- local mode uses `--task`, `--plan-file`, or an inferred task from the current branch
-- GitHub mode is selected when `start` receives a GitHub issue/PR URL
+- local mode uses `--task`, `--plan-file`, or an inferred task from the current branch, and always requires `--work-type`
+- GitHub mode is selected when `start` receives a GitHub issue/PR URL; `--work-type` is optional there only when issue labels or metadata resolve it
 - `sync` and `lane-exec` are GitHub-only run controls
 - top-level `nana start` has two modes and prints a one-line `[start] Mode: ...` banner before work begins
 - `nana start` automation mode mirrors issues, starts eligible work, runs scouts, and refreshes issue pickup for onboarded GitHub repos
@@ -79,7 +79,15 @@ Local-backed runs keep this loop:
 5. post-hardening verification
 6. post-hardening review
 7. expanded final quality/security/performance review gate
-8. source-checkout apply and local commit
+8. followup planner -> separate followup reviewer -> leader followup implementation loop while approved followups remain
+9. source-checkout apply and local commit
+
+Followup rules:
+
+- followups may only be `functional_change` or `test_coverage`
+- the followup reviewer is the stop/go signal for the loop
+- unrelated cleanup, docs-only work, style-only churn, infra work, and scope expansion are rejected
+- `test_only` work may only produce `test_coverage` followups
 
 Repo lock behavior:
 
@@ -159,7 +167,7 @@ GitHub target behavior:
 - scouts return and publish every grounded proposal or finding they produce
 - `ui-scout` also accepts `session_limit` to cap parallel page-audit sessions
 - direct `nana ui-scout` runs perform a short preflight first and persist `preflight.json` beside the findings artifact
-- local `mode: "auto"` in every supported scout policy makes `nana start` switch to the repo's default branch, commit generated scout artifacts there, and run `nana work start --task ...` for one pending local discovered item per cycle; this requires a clean worktree and a resolvable local default branch
+- local `mode: "auto"` in every supported scout policy makes `nana start` switch to the repo's default branch, commit generated scout artifacts there, and run `nana work start --task ... --work-type ...` for one pending local discovered item per cycle; this requires a clean worktree and a resolvable local default branch
 - `nana repo scout enable` creates or updates these policy files; by default it writes `.nana` policies for improvement and enhancement, and `--role ui` or `--role all` adds `ui-scout`
 
 Policy examples:

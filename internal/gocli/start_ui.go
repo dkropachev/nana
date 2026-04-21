@@ -168,6 +168,7 @@ type startUIWorkRun struct {
 	UpdatedAt        string `json:"updated_at"`
 	TargetKind       string `json:"target_kind,omitempty"`
 	TargetURL        string `json:"target_url,omitempty"`
+	WorkType         string `json:"work_type,omitempty"`
 	ArtifactPath     string `json:"artifact_path,omitempty"`
 	PublicationState string `json:"publication_state,omitempty"`
 	PauseReason      string `json:"pause_reason,omitempty"`
@@ -220,6 +221,7 @@ type startUIIssuePatchRequest struct {
 type startUIPlannedItemRequest struct {
 	Title       string `json:"title"`
 	Description string `json:"description,omitempty"`
+	WorkType    string `json:"work_type,omitempty"`
 	Priority    *int   `json:"priority,omitempty"`
 	ScheduleAt  string `json:"schedule_at,omitempty"`
 	LaunchKind  string `json:"launch_kind,omitempty"`
@@ -253,6 +255,7 @@ type startUIIssueSearchResult struct {
 	Title         string   `json:"title"`
 	TargetURL     string   `json:"target_url"`
 	Labels        []string `json:"labels,omitempty"`
+	WorkType      string   `json:"work_type,omitempty"`
 	Priority      int      `json:"priority"`
 	PriorityLabel string   `json:"priority_label"`
 	UpdatedAt     string   `json:"updated_at,omitempty"`
@@ -267,6 +270,7 @@ type startUITrackedIssueScheduleRequest struct {
 	Title      string   `json:"title,omitempty"`
 	TargetURL  string   `json:"target_url,omitempty"`
 	Labels     []string `json:"labels,omitempty"`
+	WorkType   string   `json:"work_type,omitempty"`
 	Priority   *int     `json:"priority,omitempty"`
 	ScheduleAt string   `json:"schedule_at,omitempty"`
 }
@@ -274,6 +278,7 @@ type startUITrackedIssueScheduleRequest struct {
 type startUIPlannedItemPatchRequest struct {
 	Title         *string `json:"title,omitempty"`
 	Description   *string `json:"description,omitempty"`
+	WorkType      *string `json:"work_type,omitempty"`
 	Priority      *int    `json:"priority,omitempty"`
 	ScheduleAt    *string `json:"schedule_at,omitempty"`
 	ClearSchedule bool    `json:"clear_schedule,omitempty"`
@@ -413,6 +418,7 @@ type startUIScoutItem struct {
 	ID                string   `json:"id"`
 	Role              string   `json:"role"`
 	Title             string   `json:"title"`
+	WorkType          string   `json:"work_type,omitempty"`
 	Area              string   `json:"area,omitempty"`
 	Summary           string   `json:"summary"`
 	Rationale         string   `json:"rationale,omitempty"`
@@ -480,6 +486,7 @@ type startUIIssueQueueItem struct {
 	SourceNumber      int      `json:"source_number"`
 	SourceURL         string   `json:"source_url,omitempty"`
 	Title             string   `json:"title"`
+	WorkType          string   `json:"work_type,omitempty"`
 	State             string   `json:"state,omitempty"`
 	Status            string   `json:"status"`
 	Priority          int      `json:"priority"`
@@ -2032,12 +2039,16 @@ func startUIIssueQueueItemFromState(repoSlug string, issue startWorkIssueState) 
 	if strings.TrimSpace(issue.TriageError) != "" {
 		attention = "failed"
 	}
+	if strings.TrimSpace(issue.BlockedReason) == "work type unresolved" {
+		attention = "blocked"
+	}
 	return startUIIssueQueueItem{
 		ID:                fmt.Sprintf("%s#%d", repoSlug, issue.SourceNumber),
 		RepoSlug:          repoSlug,
 		SourceNumber:      issue.SourceNumber,
 		SourceURL:         issue.SourceURL,
 		Title:             issue.Title,
+		WorkType:          issue.WorkType,
 		State:             issue.State,
 		Status:            issue.Status,
 		Priority:          priority,
@@ -2629,6 +2640,7 @@ func launchStartUITrackedIssueWork(repoSlug string, issue startWorkIssueState) (
 	state, item, err := createStartUIPlannedItem(repoSlug, startUIPlannedItemRequest{
 		Title:       fmt.Sprintf("Implement tracked issue #%d: %s", issue.SourceNumber, strings.TrimSpace(issue.Title)),
 		Description: startUITrackedIssuePlannedItemDescription(issue),
+		WorkType:    issue.WorkType,
 		Priority:    &priority,
 		LaunchKind:  "tracked_issue",
 		TargetURL:   issue.SourceURL,
@@ -2649,6 +2661,7 @@ func launchStartUITrackedIssueWork(repoSlug string, issue startWorkIssueState) (
 func startUITrackedIssuePlannedItemDescription(issue startWorkIssueState) string {
 	lines := []string{
 		fmt.Sprintf("Tracked issue: %s", defaultString(strings.TrimSpace(issue.SourceURL), "(missing url)")),
+		fmt.Sprintf("Work type: %s", defaultString(strings.TrimSpace(issue.WorkType), "(missing work type)")),
 		fmt.Sprintf("Priority: %s", startWorkPriorityLabel(issue.Priority)),
 	}
 	if strings.TrimSpace(issue.TriageRationale) != "" {
@@ -3118,6 +3131,7 @@ func startUIWorkRunFromIndex(entry workRunIndexEntry, sourcePathIndex map[string
 			UpdatedAt:        manifest.UpdatedAt,
 			TargetKind:       manifest.TargetKind,
 			TargetURL:        manifest.TargetURL,
+			WorkType:         manifest.WorkType,
 			ArtifactPath:     filepath.Dir(entry.ManifestPath),
 			PublicationState: manifest.PublicationState,
 			PauseReason:      manifest.PauseReason,
@@ -3151,6 +3165,7 @@ func startUIWorkRunFromLocalManifest(entry workRunIndexEntry, manifest localWork
 		CurrentRound:     manifest.CurrentRound,
 		CurrentIteration: manifest.CurrentIteration,
 		UpdatedAt:        manifest.UpdatedAt,
+		WorkType:         manifest.WorkType,
 		ArtifactPath:     localWorkRunDirByID(manifest.RepoID, manifest.RunID),
 		PauseReason:      manifest.PauseReason,
 		PauseUntil:       manifest.PauseUntil,
@@ -3743,6 +3758,7 @@ func mutateStartUIScoutItem(repoSlug string, itemID string, action string) (star
 			_, plannedItem, err := createStartUIPlannedItem(repoSlug, startUIPlannedItemRequest{
 				Title:       startUIScoutPlannedItemTitle(*selected),
 				Description: startUIScoutPlannedItemDescription(*selected),
+				WorkType:    selected.WorkType,
 				Priority:    &priority,
 				LaunchKind:  "local_work",
 			})
@@ -4179,6 +4195,7 @@ func searchStartUIRepoIssues(repoSlug string, rawQuery string) (startUIIssueSear
 			Title:         strings.TrimSpace(item.Title),
 			TargetURL:     strings.TrimSpace(item.HTMLURL),
 			Labels:        labels,
+			WorkType:      inferIssueWorkType(labels, item.Title, item.Body).WorkType,
 			Priority:      priority,
 			PriorityLabel: startWorkPriorityLabel(priority),
 			UpdatedAt:     strings.TrimSpace(item.UpdatedAt),
@@ -4188,6 +4205,9 @@ func searchStartUIRepoIssues(repoSlug string, rawQuery string) (startUIIssueSear
 			result.PlannedItemID = tracked.ID
 			result.PlannedState = tracked.State
 			result.ScheduleAt = tracked.ScheduleAt
+			if strings.TrimSpace(tracked.WorkType) != "" {
+				result.WorkType = tracked.WorkType
+			}
 		}
 		results = append(results, result)
 	}
@@ -4259,8 +4279,12 @@ func upsertStartUITrackedIssuePlannedItem(repoSlug string, payload startUITracke
 	if title == "" {
 		title = fmt.Sprintf("Issue #%d", issueNumber)
 	}
+	workType, err := inferTrackedIssueWorkType(payload.WorkType, payload.Labels, title)
+	if err != nil {
+		return nil, startWorkPlannedItem{}, err
+	}
 	plannedTitle := startUITrackedIssuePlannedItemTitle(issueNumber, title)
-	description := startUITrackedIssuePlannedItemDescriptionFromSearch(repoSlug, targetURL, payload.Labels, priority)
+	description := startUITrackedIssuePlannedItemDescriptionFromSearch(repoSlug, targetURL, payload.Labels, priority, workType)
 
 	startWorkStateFileMu.Lock()
 	defer startWorkStateFileMu.Unlock()
@@ -4273,6 +4297,7 @@ func upsertStartUITrackedIssuePlannedItem(repoSlug string, payload startUITracke
 	if found {
 		item.Title = plannedTitle
 		item.Description = description
+		item.WorkType = workType
 		item.Priority = priority
 		item.ScheduleAt = scheduleAt
 		item.State = startPlannedItemQueued
@@ -4290,6 +4315,7 @@ func upsertStartUITrackedIssuePlannedItem(repoSlug string, payload startUITracke
 			RepoSlug:    repoSlug,
 			Title:       plannedTitle,
 			Description: description,
+			WorkType:    workType,
 			LaunchKind:  "tracked_issue",
 			TargetURL:   targetURL,
 			Priority:    priority,
@@ -4342,10 +4368,11 @@ func startUITrackedIssuePlannedItemTitle(issueNumber int, title string) string {
 	return fmt.Sprintf("Implement tracked issue #%d: %s", issueNumber, trimmedTitle)
 }
 
-func startUITrackedIssuePlannedItemDescriptionFromSearch(repoSlug string, targetURL string, labels []string, priority int) string {
+func startUITrackedIssuePlannedItemDescriptionFromSearch(repoSlug string, targetURL string, labels []string, priority int, workType string) string {
 	lines := []string{
 		fmt.Sprintf("Tracked issue: %s", strings.TrimSpace(targetURL)),
 		fmt.Sprintf("Source repo: %s", repoSlug),
+		fmt.Sprintf("Work type: %s", normalizeWorkType(workType)),
 		fmt.Sprintf("Priority: %s", startWorkPriorityLabel(priority)),
 	}
 	cleanLabels := uniqueStrings(labels)
@@ -4361,6 +4388,10 @@ func createStartUIPlannedItem(repoSlug string, payload startUIPlannedItemRequest
 	title := strings.TrimSpace(payload.Title)
 	if title == "" {
 		return nil, startWorkPlannedItem{}, fmt.Errorf("title is required")
+	}
+	workType, err := parseRequiredWorkType(payload.WorkType, "work_type")
+	if err != nil {
+		return nil, startWorkPlannedItem{}, err
 	}
 	scheduleAt := strings.TrimSpace(payload.ScheduleAt)
 	if scheduleAt != "" {
@@ -4388,6 +4419,7 @@ func createStartUIPlannedItem(repoSlug string, payload startUIPlannedItemRequest
 		RepoSlug:    repoSlug,
 		Title:       title,
 		Description: strings.TrimSpace(payload.Description),
+		WorkType:    workType,
 		LaunchKind:  strings.TrimSpace(payload.LaunchKind),
 		TargetURL:   strings.TrimSpace(payload.TargetURL),
 		Priority:    priority,
@@ -4457,6 +4489,13 @@ func patchStartUIPlannedItem(itemID string, payload startUIPlannedItemPatchReque
 	}
 	if payload.Description != nil {
 		item.Description = strings.TrimSpace(*payload.Description)
+	}
+	if payload.WorkType != nil {
+		workType, err := parseRequiredWorkType(*payload.WorkType, "work_type")
+		if err != nil {
+			return nil, startWorkPlannedItem{}, err
+		}
+		item.WorkType = workType
 	}
 	if payload.Priority != nil {
 		item.Priority = *payload.Priority
@@ -4725,6 +4764,7 @@ func startUIScoutPlannedItemDescription(item startUIScoutItem) string {
 	lines := []string{
 		fmt.Sprintf("Source artifact: %s", defaultString(strings.TrimSpace(item.ArtifactPath), "(unknown)")),
 		fmt.Sprintf("Scout role: %s", defaultString(strings.TrimSpace(item.Role), "(unknown)")),
+		fmt.Sprintf("Work type: %s", defaultString(strings.TrimSpace(item.WorkType), "(unknown)")),
 		fmt.Sprintf("Area: %s", defaultString(strings.TrimSpace(item.Area), scoutIssueHeading(item.Role))),
 		"",
 		"Summary:",

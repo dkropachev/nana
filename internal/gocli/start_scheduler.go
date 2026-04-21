@@ -707,6 +707,9 @@ func (c *startRepoCoordinator) buildScoutJobQueue() []startRepoTask {
 		if job.Status != startScoutJobQueued || job.Destination != improvementDestinationLocal {
 			continue
 		}
+		if strings.TrimSpace(job.WorkType) == "" {
+			continue
+		}
 		if scoutJobPausePending(job, time.Now().UTC()) {
 			continue
 		}

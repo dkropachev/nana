@@ -26,6 +26,7 @@ type scoutReport struct {
 
 type scoutFinding struct {
 	Title             string   `json:"title"`
+	WorkType          string   `json:"work_type,omitempty"`
 	Area              string   `json:"area,omitempty"`
 	Summary           string   `json:"summary"`
 	Rationale         string   `json:"rationale,omitempty"`

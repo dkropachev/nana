@@ -608,7 +608,7 @@ func TestBinaryGithubWorkStartRunsNatively(t *testing.T) {
 		case "/repos/acme/widget":
 			_, _ = w.Write([]byte(fmt.Sprintf(`{"name":"widget","full_name":"acme/widget","clone_url":%q,"default_branch":"main","html_url":"https://github.com/acme/widget"}`, originRepo)))
 		case "/repos/acme/widget/issues/42":
-			_, _ = w.Write([]byte(`{"title":"Start me","state":"open"}`))
+			_, _ = w.Write([]byte(`{"title":"Start me","body":"Add the requested feature","state":"open","labels":[{"name":"enhancement"}]}`))
 		default:
 			http.Error(w, fmt.Sprintf("unexpected route: %s", r.URL.Path), http.StatusInternalServerError)
 		}
@@ -703,7 +703,7 @@ func TestBinaryLocalWorkStartCommitsVerifiedSandboxResult(t *testing.T) {
 	runGit(sourceRepo, "push", "-u", "origin", "main")
 	originBefore := runGit(originBare, "rev-parse", "refs/heads/main")
 
-	cmd := runCommand(t, binaryPath, "work", "start", "--task", "Update README")
+	cmd := runCommand(t, binaryPath, "work", "start", "--task", "Update README", "--work-type", "feature")
 	cmd.Dir = sourceRepo
 	cmd.Env = append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),

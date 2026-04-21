@@ -1870,6 +1870,7 @@
       const row = {
         run_id: run.run_id,
         backend: defaultString(run.backend, "-"),
+        work_type: workTypeLabel(run.work_type),
         status: defaultString(run.status, "active"),
         attention_state: defaultString(run.attention_state, "active"),
         pause_reason: defaultString(run.pause_reason, ""),
@@ -1917,6 +1918,7 @@
     }
     columns.push(
       { field: "backend", label: "Backend" },
+      { field: "work_type", label: "Work Type" },
       { field: "status", label: "Status", render: (row) => renderStatePillWithPause(row.attention_state, row.status, row.pause_until, row.pause_reason) },
       { field: "current_phase", label: "Phase" },
       { field: "updated_at", label: "Updated" },
@@ -2629,6 +2631,7 @@
       { field: "repo_slug", label: "Repo" },
       { field: "source_number", label: "#" },
       { field: "title", label: "Title" },
+      { field: "work_type", label: "Work Type" },
       { field: "priority_label", label: "Priority" },
       { field: "status", label: "Status", render: (row) => renderStatePill(row.attention_state, row.status) },
       { field: "triage_status", label: "Triage" },
@@ -2667,6 +2670,7 @@
         </div>
         <div class="drawer-summary-grid">
           <div class="drawer-summary-card"><span class="drawer-label">Priority</span><span class="drawer-value">${escapeHTML(selected.priority_label)}</span></div>
+          <div class="drawer-summary-card"><span class="drawer-label">Work Type</span><span class="drawer-value">${escapeHTML(workTypeLabel(selected.work_type))}</span></div>
           <div class="drawer-summary-card"><span class="drawer-label">Status</span><span class="drawer-value">${renderStatePill(selected.attention_state, selected.status)}</span></div>
           <div class="drawer-summary-card"><span class="drawer-label">Triage</span><span class="drawer-value">${escapeHTML(defaultString(selected.triage_status, "-"))}</span></div>
           <div class="drawer-summary-card"><span class="drawer-label">Updated</span><span class="drawer-value">${escapeHTML(formatDateTime(selected.updated_at))}</span></div>
@@ -2707,6 +2711,7 @@
       </div>
       <div class="queue-summary">
         <article class="queue-item"><span class="queue-label">Priority Source</span><p class="queue-copy">${escapeHTML(defaultString(selected.priority_source, "(none)"))}</p></article>
+        <article class="queue-item"><span class="queue-label">Work Type</span><p class="queue-copy">${escapeHTML(workTypeLabel(selected.work_type))}</p></article>
         <article class="queue-item"><span class="queue-label">Schedule</span><p class="queue-copy">${escapeHTML(defaultString(selected.schedule_at ? formatDateTime(selected.schedule_at) : "", "Not scheduled"))}</p></article>
         <article class="queue-item"><span class="queue-label">Deferred Reason</span><p class="queue-copy">${escapeHTML(defaultString(selected.deferred_reason, "(none)"))}</p></article>
         <article class="queue-item"><span class="queue-label">Blocked Reason</span><p class="queue-copy">${escapeHTML(defaultString(selected.blocked_reason, "(none)"))}</p></article>
@@ -3269,6 +3274,7 @@
     }).map((issue) => ({
       source_number: issue.source_number,
       title: issue.title,
+      work_type: workTypeLabel(issue.work_type),
       priority: issue.manual_priority_updated_at ? `P${issue.manual_priority}` : `P${issue.priority ?? 5}`,
       status: defaultString(issue.status, "-"),
       triage: defaultString(issue.triage_status, "-"),
@@ -3296,6 +3302,7 @@
     }).map((item) => ({
       id: item.id,
       title: item.title,
+      work_type: workTypeLabel(item.work_type),
       launch_kind: defaultString(item.launch_kind, "-"),
       priority: `P${item.priority}`,
       schedule_at: item.schedule_at ? formatDateTime(item.schedule_at) : "Not scheduled",
@@ -3311,6 +3318,7 @@
       number: item.number,
       title: item.title,
       labels: Array.isArray(item.labels) && item.labels.length ? item.labels.join(", ") : "-",
+      work_type: workTypeLabel(item.work_type),
       priority_label: defaultString(item.priority_label, `P${item.priority ?? 3}`),
       updated_at: item.updated_at ? formatDateTime(item.updated_at) : "No update yet",
       target_url: defaultString(item.target_url, ""),
@@ -3338,6 +3346,7 @@
       { field: "number", label: "#" },
       { field: "title", label: "Title" },
       { field: "labels", label: "Labels" },
+      { field: "work_type", label: "Work Type" },
       { field: "priority_label", label: "Priority" },
       { field: "updated_at", label: "Updated" },
       {
@@ -3445,6 +3454,7 @@
         </div>
         <div class="drawer-summary-grid">
           <div class="drawer-summary-card"><span class="drawer-label">State</span><span class="drawer-value">${renderStatePill(item.state === "failed" ? "failed" : "queued", item.state)}</span></div>
+          <div class="drawer-summary-card"><span class="drawer-label">Work Type</span><span class="drawer-value">${escapeHTML(workTypeLabel(item.work_type))}</span></div>
           <div class="drawer-summary-card"><span class="drawer-label">Priority</span><span class="drawer-value">${escapeHTML(`P${Number(item.priority ?? 5)}`)}</span></div>
           <div class="drawer-summary-card"><span class="drawer-label">Schedule</span><span class="drawer-value">${escapeHTML(defaultString(item.schedule_at ? formatDateTime(item.schedule_at) : "", "Ready now"))}</span></div>
           <div class="drawer-summary-card"><span class="drawer-label">Updated</span><span class="drawer-value">${escapeHTML(formatDateTime(item.updated_at))}</span></div>
@@ -3461,6 +3471,12 @@
             <span>Priority</span>
             <select id="repo-scheduler-detail-priority">
               ${[0, 1, 2, 3, 4, 5].map((priority) => `<option value="${priority}" ${Number(item.priority ?? 5) === priority ? "selected" : ""}>P${priority}</option>`).join("")}
+            </select>
+          </label>
+          <label class="selector">
+            <span>Work Type</span>
+            <select id="repo-scheduler-detail-work-type">
+              ${["bug_fix", "refactor", "feature", "test_only"].map((value) => `<option value="${value}" ${defaultString(item.work_type, "feature") === value ? "selected" : ""}>${escapeHTML(workTypeLabel(value))}</option>`).join("")}
             </select>
           </label>
           <label class="selector">
@@ -3539,8 +3555,9 @@
     if (repoIssues.length) {
       renderGrid("repo-issues-grid", [
         { field: "source_number", label: "#" },
-        { field: "title", label: "Title" },
-        { field: "priority", label: "Priority" },
+      { field: "title", label: "Title" },
+      { field: "work_type", label: "Work Type" },
+      { field: "priority", label: "Priority" },
         { field: "status", label: "Status" },
         { field: "triage", label: "Triage" },
         { field: "schedule_at", label: "Scheduled" },
@@ -3563,8 +3580,9 @@
     }
     if (repoPlannedItems.length) {
       renderGrid("repo-planned-grid", [
-        { field: "title", label: "Title" },
-        { field: "launch_kind", label: "Launch" },
+      { field: "title", label: "Title" },
+      { field: "work_type", label: "Work Type" },
+      { field: "launch_kind", label: "Launch" },
         { field: "priority", label: "Priority" },
         { field: "schedule_at", label: "Schedule" },
         { field: "state", label: "State" },
@@ -3696,6 +3714,13 @@
         { name: "title", label: "Title", required: true, placeholder: "Schedule a maintenance task" },
         { name: "description", label: "Description", type: "textarea", rows: 4, placeholder: "Describe what Nana should do." },
         {
+          name: "work_type",
+          label: "Work Type",
+          type: "select",
+          value: "feature",
+          options: ["bug_fix", "refactor", "feature", "test_only"].map((value) => ({ label: workTypeLabel(value), value })),
+        },
+        {
           name: "priority",
           label: "Priority",
           type: "select",
@@ -3720,6 +3745,7 @@
           body: JSON.stringify({
             title: data.title,
             description: data.description,
+            work_type: data.work_type,
             priority: Number(data.priority),
             schedule_at: fromDateTimeLocal(data.schedule_at),
             launch_kind: data.launch_kind,
@@ -3770,11 +3796,18 @@
     return repoScoutMeta(String(roleKey || "").replace("-scout", "")).label;
   }
 
+  function workTypeLabel(value) {
+    const normalized = String(value || "").trim();
+    if (!normalized) return "(untyped)";
+    return normalized.replace(/_/g, " ");
+  }
+
   function scoutItemRows(items) {
     return items.map((item) => ({
       id: item.id,
       title: item.title,
       role: scoutRoleLabel(item.role),
+      work_type: workTypeLabel(item.work_type),
       page: defaultString(item.page || item.route, ""),
       severity: defaultString(item.severity, ""),
       audit_mode: defaultString(item.audit_mode, ""),
@@ -3824,6 +3857,7 @@
         <span><strong>Target:</strong> ${escapeHTML(defaultString(item.surface_target, "(none)"))}</span>
         <span><strong>Page:</strong> ${escapeHTML(defaultString(item.page, "(none)"))}</span>
         <span><strong>Route:</strong> ${escapeHTML(defaultString(item.route, "(none)"))}</span>
+        <span><strong>Work type:</strong> ${escapeHTML(workTypeLabel(item.work_type))}</span>
         <span><strong>Severity:</strong> ${escapeHTML(defaultString(item.severity, "unknown"))}</span>
         <span><strong>Target kind:</strong> ${escapeHTML(defaultString(item.target_kind, "unknown"))}</span>
       </div>
@@ -3921,6 +3955,7 @@
         },
       },
       { field: "title", label: "Title" },
+      { field: "work_type", label: "Work Type" },
       { field: "role", label: "Role" },
       { field: "page", label: "Page" },
       { field: "severity", label: "Severity" },
@@ -4637,6 +4672,7 @@
         </div>
         <div class="queue-summary">
           <article class="queue-item"><span class="queue-label">Backend</span><p class="queue-copy">${escapeHTML(defaultString(summary.backend, "unknown"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Work Type</span><p class="queue-copy">${escapeHTML(workTypeLabel(summary.work_type))}</p></article>
           <article class="queue-item"><span class="queue-label">Publication</span><p class="queue-copy">${escapeHTML(defaultString(summary.publication_state, typedDetail.backend === "github" && manifest && manifest.publication_state || "(none)"))}</p></article>
           <article class="queue-item"><span class="queue-label">Repo</span><p class="queue-copy">${escapeHTML(runRepoDisplay(summary))}</p></article>
           <article class="queue-item"><span class="queue-label">Current Phase</span><p class="queue-copy">${escapeHTML(phaseSummary)}</p></article>
@@ -5237,6 +5273,7 @@
             title: result.title,
             target_url: result.target_url,
             labels: result.labels || [],
+            work_type: result.work_type || "",
             priority: result.priority,
           }),
         }).then((payload) => {
@@ -5254,6 +5291,7 @@
         const itemID = schedulerSaveButton.getAttribute("data-scheduler-save") || "";
         const titleInput = document.getElementById("repo-scheduler-detail-title");
         const priorityInput = document.getElementById("repo-scheduler-detail-priority");
+        const workTypeInput = document.getElementById("repo-scheduler-detail-work-type");
         const scheduleInput = document.getElementById("repo-scheduler-detail-schedule");
         const descriptionInput = document.getElementById("repo-scheduler-detail-description");
         api(`/api/v1/planned-items/${encodeURIComponent(itemID)}`, {
@@ -5261,6 +5299,7 @@
           body: JSON.stringify({
             title: titleInput ? String(titleInput.value || "").trim() : "",
             description: descriptionInput ? String(descriptionInput.value || "") : "",
+            work_type: workTypeInput ? String(workTypeInput.value || "").trim() : "",
             priority: priorityInput ? Number.parseInt(String(priorityInput.value || "3"), 10) : 3,
             schedule_at: fromDateTimeLocal(scheduleInput ? String(scheduleInput.value || "") : ""),
             clear_schedule: !(scheduleInput && String(scheduleInput.value || "").trim()),

@@ -337,6 +337,7 @@ func formatLocalScoutWorkTask(item localScoutDiscoveredItem) string {
 		"",
 		fmt.Sprintf("Source artifact: %s", item.Artifact),
 		fmt.Sprintf("Scout role: %s", item.Role),
+		fmt.Sprintf("Work type: %s", defaultString(inferScoutWorkType(item.Role, proposal).WorkType, workTypeFeature)),
 		fmt.Sprintf("Area: %s", defaultString(proposal.Area, scoutIssueHeading(item.Role))),
 		"",
 		"Summary:",

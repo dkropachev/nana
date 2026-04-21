@@ -53,9 +53,11 @@ type githubRepositoryPayload struct {
 }
 
 type githubIssuePayload struct {
-	Title       string      `json:"title"`
-	State       string      `json:"state"`
-	User        githubActor `json:"user"`
+	Title       string        `json:"title"`
+	Body        string        `json:"body,omitempty"`
+	State       string        `json:"state"`
+	Labels      []githubLabel `json:"labels,omitempty"`
+	User        githubActor   `json:"user"`
 	PullRequest *struct {
 		URL string `json:"url"`
 	} `json:"pull_request,omitempty"`

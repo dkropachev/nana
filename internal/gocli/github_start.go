@@ -73,6 +73,10 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 	if repoMode == "disabled" {
 		return githubWorkManifest{}, fmt.Errorf("repo %s is configured with repo-mode disabled; change it with `nana repo config %s --repo-mode <local|fork|repo>` or pass --repo-mode for this run", repoMeta.RepoSlug, repoMeta.RepoSlug)
 	}
+	workType, err := resolveExplicitOrInferredWorkType(options.WorkType, inferIssueWorkType(startWorkIssueLabelNames(target.Issue.Labels), target.Issue.Title, target.Issue.Body), "GitHub work start")
+	if err != nil {
+		return githubWorkManifest{}, err
+	}
 	if publishTarget == "" {
 		publishTarget = repoModeToPublishTarget(repoMode)
 	}
@@ -108,7 +112,7 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 	pipeline := buildGithubPipeline(activeConsiderations, roleLayout)
 	convertedPipeline := convertGithubLanes(pipeline)
 	manifest := githubWorkManifest{
-		Version:                 4,
+		Version:                 5,
 		RunID:                   runID,
 		CreatedAt:               now.Format(time.RFC3339),
 		UpdatedAt:               now.Format(time.RFC3339),
@@ -136,6 +140,7 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 		TargetNumber:            options.Target.number,
 		TargetTitle:             target.Issue.Title,
 		TargetURL:               githubCanonicalTargetURL(options.Target),
+		WorkType:                workType,
 		TargetState:             target.Issue.State,
 		TargetAuthor:            target.Issue.User.Login,
 		ReviewReviewer:          reviewer,
@@ -237,7 +242,7 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 	manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	completionErr := error(nil)
 	if runErr == nil {
-		completionErr = runGithubWorkCompletionLoop(manifestPath, runDir, &manifest, options.CodexArgs)
+		completionErr = runGithubWorkFollowupLoop(manifestPath, runDir, &manifest, options.CodexArgs)
 	}
 	if pauseErr, ok := isCodexRateLimitPauseError(runErr); ok {
 		manifest.ExecutionStatus = "paused"
@@ -345,6 +350,7 @@ func buildGithubStartInstructions(manifest githubWorkManifest) string {
 		fmt.Sprintf("Run id: %s", manifest.RunID),
 		fmt.Sprintf("Repo: %s", manifest.RepoSlug),
 		fmt.Sprintf("Target: %s #%d", manifest.TargetKind, manifest.TargetNumber),
+		fmt.Sprintf("Work type: %s", workTypeDisplayName(manifest.WorkType)),
 		fmt.Sprintf("Sandbox path: %s", manifest.SandboxPath),
 		fmt.Sprintf("Repo checkout path: %s", manifest.SandboxRepoPath),
 		fmt.Sprintf("Reviewer sync user: %s", manifest.ReviewReviewer),

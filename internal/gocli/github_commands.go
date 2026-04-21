@@ -27,6 +27,7 @@ type githubWorkManifest struct {
 	BaselineSHA                    string                             `json:"baseline_sha,omitempty"`
 	TargetURL                      string                             `json:"target_url"`
 	TargetKind                     string                             `json:"target_kind"`
+	WorkType                       string                             `json:"work_type,omitempty"`
 	UpdatedAt                      string                             `json:"updated_at"`
 	ExecutionStatus                string                             `json:"execution_status,omitempty"`
 	CurrentPhase                   string                             `json:"current_phase,omitempty"`
@@ -95,6 +96,8 @@ type githubWorkManifest struct {
 	RejectedFindingFingerprints    []string                           `json:"rejected_finding_fingerprints,omitempty"`
 	PreexistingFindingFingerprints []string                           `json:"preexisting_finding_fingerprints,omitempty"`
 	PreexistingFindings            []localWorkRememberedFinding       `json:"preexisting_findings,omitempty"`
+	FollowupDecision               string                             `json:"followup_decision,omitempty"`
+	FollowupRounds                 []workFollowupRoundSummary         `json:"followup_rounds,omitempty"`
 }
 
 type githubPipelineLane struct {
@@ -159,6 +162,7 @@ type githubPullStatePayload struct {
 type githubWorkStartOptions struct {
 	Target                  parsedGithubTarget
 	Reviewer                string
+	WorkType                string
 	RequestedConsiderations []string
 	RoleLayout              string
 	NewPR                   bool
@@ -335,6 +339,7 @@ func parseGithubWorkStartArgs(args []string) (githubWorkStartOptions, error) {
 		return githubWorkStartOptions{}, fmt.Errorf("Usage: nana work start <github-issue-or-pr-url>\n\n%s", GithubWorkHelp)
 	}
 	reviewer := "@me"
+	workType := ""
 	requestedConsiderations := []string{}
 	roleLayout := ""
 	newPR := false
@@ -375,6 +380,15 @@ func parseGithubWorkStartArgs(args []string) (githubWorkStartOptions, error) {
 			if reviewer == "" {
 				return githubWorkStartOptions{}, fmt.Errorf("Missing value after --reviewer.\n%s", GithubWorkHelp)
 			}
+		case token == "--work-type":
+			value, err := requireFlagValue(args, index, token)
+			if err != nil {
+				return githubWorkStartOptions{}, err
+			}
+			workType = strings.TrimSpace(value)
+			index++
+		case strings.HasPrefix(token, "--work-type="):
+			workType = strings.TrimSpace(strings.TrimPrefix(token, "--work-type="))
 		case token == "--mode" || strings.HasPrefix(token, "--mode="):
 			return githubWorkStartOptions{}, fmt.Errorf("`--mode` has been removed. Use `--considerations` only.")
 		case token == "--considerations":
@@ -538,6 +552,7 @@ func parseGithubWorkStartArgs(args []string) (githubWorkStartOptions, error) {
 	return githubWorkStartOptions{
 		Target:                  target,
 		Reviewer:                reviewer,
+		WorkType:                workType,
 		RequestedConsiderations: requestedConsiderations,
 		RoleLayout:              roleLayout,
 		NewPR:                   newPR,

@@ -5,7 +5,7 @@
 Use `nana work` instead:
 
 ```bash
-nana work start --task "execute the approved local refactor plan"
+nana work start --task "execute the approved local refactor plan" --work-type refactor
 nana work resume --repo ~/src/widget --last
 nana work status --repo ~/src/widget --last --json
 nana work logs --repo ~/src/widget --last --json

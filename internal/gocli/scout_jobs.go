@@ -90,6 +90,7 @@ func startWorkScoutJobFromDiscovered(item localScoutDiscoveredItem, createdAt st
 		ID:                item.ID,
 		Role:              item.Role,
 		Title:             item.Title,
+		WorkType:          inferScoutWorkType(item.Role, item.Proposal).WorkType,
 		Area:              defaultString(strings.TrimSpace(item.Proposal.Area), scoutIssueHeading(item.Role)),
 		Summary:           strings.TrimSpace(item.Proposal.Summary),
 		Rationale:         strings.TrimSpace(item.Proposal.Rationale),
@@ -130,6 +131,7 @@ func startWorkScoutJobFromItem(item startWorkScoutJob) startUIScoutItem {
 		ID:                item.ID,
 		Role:              item.Role,
 		Title:             item.Title,
+		WorkType:          item.WorkType,
 		Area:              item.Area,
 		Summary:           item.Summary,
 		Rationale:         item.Rationale,
@@ -177,6 +179,7 @@ func startUIScoutItemFromDiscovered(item localScoutDiscoveredItem) startUIScoutI
 		ID:                item.ID,
 		Role:              item.Role,
 		Title:             item.Title,
+		WorkType:          inferScoutWorkType(item.Role, item.Proposal).WorkType,
 		Area:              defaultString(strings.TrimSpace(item.Proposal.Area), scoutIssueHeading(item.Role)),
 		Summary:           strings.TrimSpace(item.Proposal.Summary),
 		Rationale:         strings.TrimSpace(item.Proposal.Rationale),
@@ -307,6 +310,9 @@ func parseLegacyScoutPlannedItemDescription(description string) (string, string,
 			section = ""
 		case strings.HasPrefix(line, "Area:"):
 			finding.Area = strings.TrimSpace(strings.TrimPrefix(line, "Area:"))
+			section = ""
+		case strings.HasPrefix(line, "Work type:"):
+			finding.WorkType = strings.TrimSpace(strings.TrimPrefix(line, "Work type:"))
 			section = ""
 		case line == "Summary:":
 			section = "summary"
@@ -837,7 +843,10 @@ func runStartWorkScoutJob(repoSlug string, job startWorkScoutJob, codexArgs []st
 	if err != nil {
 		return startWorkLaunchResult{}, err
 	}
-	args := []string{"start", "--detach", "--repo", repoPath, "--task", job.TaskBody}
+	if strings.TrimSpace(job.WorkType) == "" {
+		return startWorkLaunchResult{}, fmt.Errorf("scout job %s is missing work_type", job.ID)
+	}
+	args := []string{"start", "--detach", "--repo", repoPath, "--task", job.TaskBody, "--work-type", job.WorkType}
 	if len(codexArgs) > 0 {
 		args = append(args, "--")
 		args = append(args, codexArgs...)

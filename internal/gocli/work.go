@@ -12,7 +12,7 @@ import (
 const WorkHelp = `nana work - Unified local and GitHub-backed implementation runtime
 
 Usage:
-  nana work start [<github-issue-or-pr-url>] [--repo <path>] [--task <text> | --plan-file <path>] [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [--considerations <list>] [--role-layout <split|reviewer+executor>] [--new-pr] [--create-pr | --local-only] [--reviewer <login|@me>] [-- codex-args...]
+  nana work start [<github-issue-or-pr-url>] [--repo <path>] [--task <text> | --plan-file <path>] [--work-type <bug_fix|refactor|feature|test_only>] [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [--considerations <list>] [--role-layout <split|reviewer+executor>] [--new-pr] [--create-pr | --local-only] [--reviewer <login|@me>] [-- codex-args...]
   nana work resume [--run-id <id> | --last | --global-last] [--repo <path>] [-- codex-args...]
   nana work resolve [--run-id <id> | --last | --global-last] [--repo <path>]
   nana work status [--run-id <id> | --last | --global-last] [--repo <path>] [--json]
@@ -29,9 +29,9 @@ Usage:
 
 Behavior:
   - local mode is selected when start does not receive a GitHub issue/PR URL
-  - local mode uses --task, --plan-file, or an inferred task from the current branch
+  - local mode uses --task, --plan-file, or an inferred task from the current branch and requires --work-type
   - local mode syncs the target source branch, commits verified sandbox changes after final review gates pass, pushes to the tracked remote when one exists, and uses resolve to recover blocked final-apply states
-  - GitHub mode is selected when start receives a GitHub issue/PR URL
+  - GitHub mode is selected when start receives a GitHub issue/PR URL; --work-type is optional there only when issue labels/metadata resolve it
   - shared source and sandbox checkouts use heartbeat-backed repo locks: multiple readers are allowed, one writer excludes readers, and stale lock holders are recovered automatically
   - work status --json surfaces current repo lock holders under lock_state when present
   - work items queue inbound GitHub, email, and Slack-style requests into a shared draft/submit workflow
@@ -256,6 +256,7 @@ type githubWorkStatusSnapshot struct {
 	TargetKind              string                             `json:"target_kind"`
 	TargetNumber            int                                `json:"target_number"`
 	TargetURL               string                             `json:"target_url"`
+	WorkType                string                             `json:"work_type,omitempty"`
 	Sandbox                 string                             `json:"sandbox"`
 	RepoCheckout            string                             `json:"repo_checkout"`
 	UpdatedAt               string                             `json:"updated_at"`
@@ -272,6 +273,8 @@ type githubWorkStatusSnapshot struct {
 	CandidateBlockedPaths   []string                           `json:"candidate_blocked_paths,omitempty"`
 	RejectedFindingCount    int                                `json:"rejected_finding_count,omitempty"`
 	PreexistingFindingCount int                                `json:"preexisting_finding_count,omitempty"`
+	FollowupDecision        string                             `json:"followup_decision,omitempty"`
+	FollowupRounds          []workFollowupRoundSummary         `json:"followup_rounds,omitempty"`
 	PauseReason             string                             `json:"pause_reason,omitempty"`
 	PauseUntil              string                             `json:"pause_until,omitempty"`
 	LastError               string                             `json:"last_error,omitempty"`
@@ -299,6 +302,9 @@ func githubWorkStatus(selection localWorkRunSelection, jsonOutput bool) error {
 	fmt.Fprintf(os.Stdout, "[work] Repo: %s\n", snapshot.RepoSlug)
 	fmt.Fprintf(os.Stdout, "[work] Target: %s #%d\n", snapshot.TargetKind, snapshot.TargetNumber)
 	fmt.Fprintf(os.Stdout, "[work] URL: %s\n", snapshot.TargetURL)
+	if strings.TrimSpace(snapshot.WorkType) != "" {
+		fmt.Fprintf(os.Stdout, "[work] Work type: %s\n", workTypeDisplayName(snapshot.WorkType))
+	}
 	fmt.Fprintf(os.Stdout, "[work] Sandbox: %s\n", snapshot.Sandbox)
 	fmt.Fprintf(os.Stdout, "[work] Repo checkout: %s\n", snapshot.RepoCheckout)
 	fmt.Fprintf(os.Stdout, "[work] Updated: %s\n", snapshot.UpdatedAt)
@@ -333,6 +339,9 @@ func githubWorkStatus(selection localWorkRunSelection, jsonOutput bool) error {
 	}
 	if strings.TrimSpace(snapshot.LastError) != "" {
 		fmt.Fprintf(os.Stdout, "[work] Last error: %s\n", snapshot.LastError)
+	}
+	if strings.TrimSpace(snapshot.FollowupDecision) != "" {
+		fmt.Fprintf(os.Stdout, "[work] Followups: %s (rounds=%d)\n", snapshot.FollowupDecision, len(snapshot.FollowupRounds))
 	}
 	if strings.TrimSpace(snapshot.FinalGateStatus) != "" {
 		fmt.Fprintf(os.Stdout, "[work] Final gate: %s\n", snapshot.FinalGateStatus)
@@ -456,6 +465,7 @@ func buildGithubWorkStatusSnapshot(manifest githubWorkManifest, runDir string) (
 		TargetKind:              manifest.TargetKind,
 		TargetNumber:            manifest.TargetNumber,
 		TargetURL:               manifest.TargetURL,
+		WorkType:                manifest.WorkType,
 		Sandbox:                 manifest.SandboxPath,
 		RepoCheckout:            manifest.SandboxRepoPath,
 		UpdatedAt:               manifest.UpdatedAt,
@@ -472,6 +482,8 @@ func buildGithubWorkStatusSnapshot(manifest githubWorkManifest, runDir string) (
 		CandidateBlockedPaths:   append([]string{}, manifest.CandidateBlockedPaths...),
 		RejectedFindingCount:    len(manifest.RejectedFindingFingerprints),
 		PreexistingFindingCount: len(manifest.PreexistingFindings),
+		FollowupDecision:        manifest.FollowupDecision,
+		FollowupRounds:          append([]workFollowupRoundSummary{}, manifest.FollowupRounds...),
 		PauseReason:             manifest.PauseReason,
 		PauseUntil:              manifest.PauseUntil,
 		LastError:               manifest.LastError,
@@ -565,7 +577,7 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 		if err := requireGithubWorkBaselineForCompletionResume(&manifest); err != nil {
 			return err
 		}
-		if err := runGithubWorkCompletionLoop(manifestPath, runDir, &manifest, options.CodexArgs); err != nil {
+		if err := runGithubWorkFollowupLoop(manifestPath, runDir, &manifest, options.CodexArgs); err != nil {
 			manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 			if pauseErr, ok := isCodexRateLimitPauseError(err); ok {
 				manifest.ExecutionStatus = "paused"
@@ -675,7 +687,7 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 	}
 	completionErr := error(nil)
 	if runErr == nil {
-		completionErr = runGithubWorkCompletionLoop(manifestPath, runDir, &manifest, options.CodexArgs)
+		completionErr = runGithubWorkFollowupLoop(manifestPath, runDir, &manifest, options.CodexArgs)
 		manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		if pauseErr, ok := isCodexRateLimitPauseError(completionErr); ok {
 			manifest.ExecutionStatus = "paused"

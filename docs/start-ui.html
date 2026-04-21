@@ -46,7 +46,7 @@ nana start</code></pre>
           </article>
           <article class="card">
             <h3>Issues and investigations</h3>
-            <p>Inspect tracked issues, review triage rationale, launch work for tracked issues, and start or inspect investigation runs with retry timing when work is paused.</p>
+            <p>Inspect tracked issues, review triage rationale, launch work for tracked issues, and start or inspect investigation runs with retry timing when work is paused. Tracked issues and planned work now surface a resolved work type before launch.</p>
           </article>
           <article class="card">
             <h3>Feedback and approvals</h3>
@@ -54,7 +54,7 @@ nana start</code></pre>
           </article>
           <article class="card">
             <h3>Repo operations</h3>
-            <p>Keep the existing repo-scoped config, controls, scouts, planned work, and logs available without leaving the workspace.</p>
+            <p>Keep the existing repo-scoped config, controls, scouts, planned work, and logs available without leaving the workspace. Manual planned work now requires an explicit work type, and tracked issues show the inferred type Nana will use.</p>
           </article>
         </div>
       </section>
@@ -94,9 +94,9 @@ nana start</code></pre>
             <tr><td><code>PATCH /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/settings</code></td><td>Update repo-mode, issue-pick, PR-forwarding, publish settings, scout policies, and scout schedules.</td></tr>
             <tr><td><code>PATCH /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/issues/&lt;number&gt;</code></td><td>Schedule, defer, reprioritize, or clear scheduling for a mirrored issue.</td></tr>
             <tr><td><code>POST /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/issues/&lt;number&gt;/investigate</code></td><td>Start an investigation from a tracked issue.</td></tr>
-            <tr><td><code>POST /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/issues/&lt;number&gt;/launch-work</code></td><td>Launch work for a tracked issue through the planned-work path.</td></tr>
+            <tr><td><code>POST /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/issues/&lt;number&gt;/launch-work</code></td><td>Launch work for a tracked issue through the planned-work path, using the issue's resolved work type.</td></tr>
             <tr><td><code>GET /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/scout-items</code></td><td>List local scout proposals and their available actions.</td></tr>
-            <tr><td><code>POST /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/planned-items</code></td><td>Create planned work for a repo.</td></tr>
+            <tr><td><code>POST /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/planned-items</code></td><td>Create planned work for a repo. Manual planned items require <code>work_type</code>.</td></tr>
             <tr><td><code>GET /api/v1/work/runs</code></td><td>List recent work runs.</td></tr>
             <tr><td><code>GET /api/v1/work/runs/&lt;run-id&gt;</code></td><td>Inspect run manifest/status detail for local and GitHub-backed work, including paused retry timing.</td></tr>
             <tr><td><code>POST /api/v1/work/runs/&lt;run-id&gt;/sync</code></td><td>Run the safe GitHub feedback-sync flow for a GitHub-backed run.</td></tr>

@@ -112,7 +112,10 @@ func launchStartPlannedLocalWork(repoSlug string, item startWorkPlannedItem, cod
 	if err != nil {
 		return startPlannedLaunchResult{}, err
 	}
-	args := []string{"work", "start", "--repo", repoPath, "--task", startPlannedLocalWorkTask(item)}
+	if _, err := parseRequiredWorkType(item.WorkType, "planned_item.work_type"); err != nil {
+		return startPlannedLaunchResult{}, err
+	}
+	args := []string{"work", "start", "--repo", repoPath, "--task", startPlannedLocalWorkTask(item), "--work-type", item.WorkType}
 	if len(codexArgs) > 0 {
 		args = append(args, "--")
 		args = append(args, codexArgs...)
@@ -152,7 +155,10 @@ func launchStartPlannedLocalWorkScheduled(repoSlug string, item startWorkPlanned
 	if err != nil {
 		return startPlannedLaunchResult{}, err
 	}
-	args := []string{"start", "--repo", repoPath, "--task", startPlannedLocalWorkTask(item)}
+	if _, err := parseRequiredWorkType(item.WorkType, "planned_item.work_type"); err != nil {
+		return startPlannedLaunchResult{}, err
+	}
+	args := []string{"start", "--repo", repoPath, "--task", startPlannedLocalWorkTask(item), "--work-type", item.WorkType}
 	if len(codexArgs) > 0 {
 		args = append(args, "--")
 		args = append(args, codexArgs...)
@@ -171,6 +177,9 @@ func launchStartPlannedTrackedIssue(repoSlug string, item startWorkPlannedItem) 
 	if targetURL == "" {
 		return startPlannedLaunchResult{}, fmt.Errorf("planned item %s is missing target_url for tracked issue launch", item.ID)
 	}
+	if _, err := parseRequiredWorkType(item.WorkType, "planned_item.work_type"); err != nil {
+		return startPlannedLaunchResult{}, err
+	}
 	repoPath, err := resolveStartPlannedRepoPath(repoSlug)
 	if err != nil {
 		return startPlannedLaunchResult{}, err
@@ -183,7 +192,7 @@ func launchStartPlannedTrackedIssue(repoSlug string, item startWorkPlannedItem) 
 	if err != nil {
 		return startPlannedLaunchResult{}, err
 	}
-	cmd, err := startManagedNanaCommand("work", "start", targetURL)
+	cmd, err := startManagedNanaCommand("work", "start", targetURL, "--work-type", item.WorkType)
 	if err != nil {
 		_ = logFile.Close()
 		return startPlannedLaunchResult{}, err
@@ -210,11 +219,14 @@ func launchStartPlannedTrackedIssueScheduled(repoSlug string, item startWorkPlan
 	if targetURL == "" {
 		return startPlannedLaunchResult{}, fmt.Errorf("planned item %s is missing target_url for tracked issue launch", item.ID)
 	}
+	if _, err := parseRequiredWorkType(item.WorkType, "planned_item.work_type"); err != nil {
+		return startPlannedLaunchResult{}, err
+	}
 	repoPath, err := resolveStartPlannedRepoPath(repoSlug)
 	if err != nil {
 		return startPlannedLaunchResult{}, err
 	}
-	args := []string{"start", targetURL}
+	args := []string{"start", targetURL, "--work-type", item.WorkType}
 	if len(codexArgs) > 0 {
 		args = append(args, "--")
 		args = append(args, codexArgs...)
@@ -236,7 +248,10 @@ func launchStartPlannedGithubIssue(repoSlug string, item startWorkPlannedItem) (
 	if err != nil {
 		return startPlannedLaunchResult{}, err
 	}
-	labels := applyStartWorkPriorityLabel([]string{"nana"}, item.Priority)
+	if _, err := parseRequiredWorkType(item.WorkType, "planned_item.work_type"); err != nil {
+		return startPlannedLaunchResult{}, err
+	}
+	labels := applyStartWorkPriorityLabel([]string{"nana", workTypeCanonicalLabel(item.WorkType)}, item.Priority)
 	if err := ensureStartWorkLabels(repoSlug, labels, apiBaseURL, token); err != nil {
 		return startPlannedLaunchResult{}, err
 	}

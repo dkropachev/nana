@@ -425,6 +425,7 @@ func githubWorkLocalManifest(manifest githubWorkManifest, manifestPath string) l
 		SandboxRepoPath:       manifest.SandboxRepoPath,
 		BaselineSHA:           manifest.BaselineSHA,
 		VerificationPlan:      manifest.VerificationPlan,
+		WorkType:              manifest.WorkType,
 		IntegrationPolicy:     "always",
 		GroupingPolicy:        localWorkSingletonPolicy,
 		ValidationParallelism: 1,

@@ -327,7 +327,7 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 		t.Fatalf("unexpected patched issue: %+v", patchPayload.Issue)
 	}
 
-	createBody := strings.NewReader(`{"title":"Run smoke after deploy","description":"Schedule it after release","priority":2,"launch_kind":"github_issue"}`)
+	createBody := strings.NewReader(`{"title":"Run smoke after deploy","description":"Schedule it after release","work_type":"feature","priority":2,"launch_kind":"github_issue"}`)
 	createResponse, err := http.Post(server.URL+"/api/v1/repos/"+repoSlug+"/planned-items", "application/json", createBody)
 	if err != nil {
 		t.Fatalf("POST planned item: %v", err)

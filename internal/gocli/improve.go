@@ -1544,6 +1544,7 @@ func normalizeScoutProposals(proposals []scoutFinding, policy scoutPolicy, role 
 		}
 		proposal.Page = strings.TrimSpace(proposal.Page)
 		proposal.Route = strings.TrimSpace(proposal.Route)
+		proposal.WorkType = inferScoutWorkType(role, proposal).WorkType
 		proposal.Severity = normalizeUIScoutSeverity(proposal.Severity)
 		proposal.TargetKind = normalizeUIScoutTargetKind(proposal.TargetKind)
 		proposal.Labels = normalizeScoutLabels(append(append([]string{}, policy.Labels...), proposal.Labels...), role)

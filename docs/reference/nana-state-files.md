@@ -4,6 +4,11 @@ NANA keeps project-local runtime state under `.nana/` and optional verification
 configuration in `nana-verify.json`. These files are intended to be inspectable
 and safe to regenerate, migrate, or validate in CI.
 
+Managed implementation runtimes also persist state outside the repo under
+`~/.nana/work/`. The key work manifests now include `work_type`, and completed
+or in-flight runs may also expose `followup_decision` plus `followup_rounds`
+when the post-implementation followup planner/reviewer loop has run.
+
 ## Files and expected shapes
 
 | Path | Shape | Validation |
@@ -13,6 +18,16 @@ and safe to regenerate, migrate, or validate in CI.
 | `.nana/logs/context-telemetry.ndjson` | NDJSON: one telemetry JSON object per line. Events record metadata only, never raw args or raw command output. | Event schema: [`../schemas/context-telemetry-event.schema.json`](../schemas/context-telemetry-event.schema.json). `nana doctor` validates a bounded prefix so long-running logs stay cheap to inspect, and rejects raw `command`, `args`, `arguments`, `raw_args`, `stdout`, `stderr`, or `output` fields. |
 | `.nana/plans/*.md` | UTF-8 Markdown plans. Common names are `prd-<slug>.md`, `test-spec-<slug>.md`, and `open-questions.md`. | `nana doctor` verifies Markdown plan files are UTF-8 text when present. |
 | `nana-verify.json` | JSON object with a sequential `stages` array; each stage has `name` and `command`. | JSON Schema: [`../schemas/nana-verify.schema.json`](../schemas/nana-verify.schema.json). `nana doctor` reuses the same profile normalization as `nana verify`. |
+
+## Managed work manifests
+
+These files live under `~/.nana/work/` rather than the source repo:
+
+| Path | Shape | Notes |
+| --- | --- | --- |
+| `~/.nana/work/repos/<repo-id>/runs/<run-id>/manifest.json` | Local-work manifest JSON object. | Includes runtime fields such as `status`, `current_phase`, `work_type`, `iterations`, and optional `followup_decision` / `followup_rounds`. |
+| `~/.nana/work/repos/<owner>/<repo>/runs/<run-id>/manifest.json` | GitHub-work manifest JSON object. | Includes `target_url`, `target_kind`, `work_type`, completion summaries, and optional `followup_decision` / `followup_rounds`. |
+| `~/.nana/work/repos/<owner>/<repo>/start-state.json` | Start automation state JSON object. | Planned items, mirrored issues, and scout jobs may now carry `work_type` so scheduled launches stay typed end-to-end. |
 
 ## Minimal examples
 

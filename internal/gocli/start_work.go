@@ -24,7 +24,7 @@ Use:
 `
 
 const (
-	startWorkStateVersion         = 5
+	startWorkStateVersion         = 6
 	startWorkDefaultParallel      = 3
 	startWorkDefaultOpenPRCap     = 10
 	startWorkStatusQueued         = "queued"
@@ -93,6 +93,7 @@ type startWorkIssueState struct {
 	SourceBody              string   `json:"source_body,omitempty"`
 	ForkURL                 string   `json:"fork_url,omitempty"`
 	Title                   string   `json:"title"`
+	WorkType                string   `json:"work_type,omitempty"`
 	State                   string   `json:"state"`
 	Labels                  []string `json:"labels,omitempty"`
 	SourceFingerprint       string   `json:"source_fingerprint,omitempty"`
@@ -189,6 +190,7 @@ type startWorkPlannedItem struct {
 	RepoSlug          string `json:"repo_slug"`
 	Title             string `json:"title"`
 	Description       string `json:"description,omitempty"`
+	WorkType          string `json:"work_type,omitempty"`
 	LaunchKind        string `json:"launch_kind,omitempty"`
 	TargetURL         string `json:"target_url,omitempty"`
 	Priority          int    `json:"priority"`
@@ -208,6 +210,7 @@ type startWorkScoutJob struct {
 	ID                  string   `json:"id"`
 	Role                string   `json:"role"`
 	Title               string   `json:"title"`
+	WorkType            string   `json:"work_type,omitempty"`
 	Area                string   `json:"area,omitempty"`
 	Summary             string   `json:"summary"`
 	Rationale           string   `json:"rationale,omitempty"`
@@ -756,6 +759,10 @@ func mirrorStartWorkIssues(state *startWorkState, forkRepo string, forkIssuesMod
 			continue
 		}
 		existing := state.Issues[key]
+		workType := normalizeWorkType(existing.WorkType)
+		if workType == "" {
+			workType = inferStartWorkIssueType(issue, labels).WorkType
+		}
 		sourceFingerprint := startWorkIssueFingerprint(issue, labels)
 		priority, prioritySource, triageStatus, triageRationale, triageFingerprint, triageUpdatedAt, triageError := startWorkResolvePriority(existing, issue, labels, sourceFingerprint)
 		complexity := startWorkComplexity(labels)
@@ -773,6 +780,7 @@ func mirrorStartWorkIssues(state *startWorkState, forkRepo string, forkIssuesMod
 			SourceBody:              issue.Body,
 			ForkURL:                 existing.ForkURL,
 			Title:                   issue.Title,
+			WorkType:                workType,
 			State:                   issue.State,
 			Labels:                  labels,
 			SourceFingerprint:       sourceFingerprint,
@@ -798,6 +806,11 @@ func mirrorStartWorkIssues(state *startWorkState, forkRepo string, forkIssuesMod
 			ScheduleUpdatedAt:       existing.ScheduleUpdatedAt,
 			DeferredReason:          existing.DeferredReason,
 			UpdatedAt:               time.Now().UTC().Format(time.RFC3339),
+		}
+		if strings.TrimSpace(updated.WorkType) == "" && updated.Status == startWorkStatusQueued && issue.State == "open" {
+			updated.BlockedReason = "work type unresolved"
+		} else if strings.TrimSpace(updated.BlockedReason) == "work type unresolved" {
+			updated.BlockedReason = ""
 		}
 		if updated.ForkNumber == 0 {
 			created, err := createStartWorkIssue(forkRepo, issue, labels, apiBaseURL, token)
@@ -1462,6 +1475,9 @@ func startWorkIssueReadyForImplementation(issue startWorkIssueState, options sta
 	if issue.Status != startWorkStatusQueued || issue.State != "open" || issue.ForkNumber <= 0 {
 		return false
 	}
+	if strings.TrimSpace(issue.WorkType) == "" {
+		return false
+	}
 	if !startWorkAutomationAllowsIssue(options.ImplementMode, issue.Labels, "implement") {
 		return false
 	}
@@ -1589,6 +1605,7 @@ func startWorkPlannedItemFingerprint(item startWorkPlannedItem) string {
 		item.RepoSlug,
 		item.Title,
 		item.Description,
+		item.WorkType,
 		item.LaunchKind,
 		strconv.Itoa(item.Priority),
 		item.ScheduleAt,
@@ -1676,6 +1693,16 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 		if issue.Status == startWorkStatusInProgress && strings.TrimSpace(issue.LastRunID) == "" && strings.TrimSpace(issue.LastRunError) != "" {
 			issue.Status = startWorkStatusReconciling
 		}
+		if normalized := normalizeWorkType(issue.WorkType); normalized != "" {
+			issue.WorkType = normalized
+		} else {
+			issue.WorkType = inferStartWorkIssueStateType(issue).WorkType
+		}
+		if strings.TrimSpace(issue.WorkType) == "" && issue.Status == startWorkStatusQueued && issue.State == "open" {
+			issue.BlockedReason = defaultString(strings.TrimSpace(issue.BlockedReason), "work type unresolved")
+		} else if strings.TrimSpace(issue.BlockedReason) == "work type unresolved" {
+			issue.BlockedReason = ""
+		}
 		if issue.ManualPriority < 0 || issue.ManualPriority > 5 {
 			issue.ManualPriority = 0
 		}
@@ -1690,6 +1717,11 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 		if strings.TrimSpace(item.State) == "" {
 			item.State = startPlannedItemQueued
 		}
+		if normalized := normalizeWorkType(item.WorkType); normalized != "" {
+			item.WorkType = normalized
+		} else {
+			item.WorkType = inferPlannedItemWorkType(item).WorkType
+		}
 		state.PlannedItems[key] = item
 	}
 	for key, job := range state.ScoutJobs {
@@ -1699,6 +1731,7 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 		if strings.TrimSpace(job.TaskBody) == "" {
 			job.TaskBody = strings.TrimSpace(job.Title)
 		}
+		job.WorkType = inferPersistedScoutJobWorkType(job).WorkType
 		state.ScoutJobs[key] = job
 	}
 	return &state, nil

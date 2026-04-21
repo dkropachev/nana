@@ -437,6 +437,7 @@ func TestRunStartRepoCyclesSharedWorkersLimitsTotalConcurrency(t *testing.T) {
 					State:             "open",
 					Status:            startWorkStatusQueued,
 					Labels:            []string{"nana"},
+					WorkType:          workTypeFeature,
 					SourceFingerprint: fmt.Sprintf("fp-%s-%d", repoSlug, issueNumber),
 					Priority:          2,
 					PrioritySource:    "manual_label",

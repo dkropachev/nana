@@ -62,7 +62,7 @@ Behavior:
 const GithubWorkHelp = `nana work - GitHub-backed issue/PR implementation helper
 
 Usage:
-  nana work start <github-issue-or-pr-url> [--considerations <list>] [--role-layout <split|reviewer+executor>] [--new-pr] [--repo-mode <disabled|local|fork|repo>] [--create-pr | --local-only] [--reviewer <login|@me>] [codex-args...]
+  nana work start <github-issue-or-pr-url> [--work-type <bug_fix|refactor|feature|test_only>] [--considerations <list>] [--role-layout <split|reviewer+executor>] [--new-pr] [--repo-mode <disabled|local|fork|repo>] [--create-pr | --local-only] [--reviewer <login|@me>] [codex-args...]
   nana work sync [--run-id <id> | --last] [--reviewer <login|@me>] [--resume-last] [codex-args...]
   nana work defaults set <owner/repo> [--considerations <list>] [--role-layout <split|reviewer+executor>] [--review-rules-mode <manual|automatic>] [--repo-mode <disabled|local|fork|repo>] [--issue-pick <manual|label|auto>] [--pr-forward <approve|auto>]
   nana work defaults show <owner/repo>

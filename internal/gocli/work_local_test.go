@@ -735,7 +735,7 @@ func TestReadLocalWorkInputRejectsMissingPlanFile(t *testing.T) {
 }
 
 func TestParseLocalWorkStartArgsAllowsBranchTaskInference(t *testing.T) {
-	options, err := parseLocalWorkStartArgs([]string{"--repo", ".", "--max-iterations", "1"})
+	options, err := parseLocalWorkStartArgs([]string{"--repo", ".", "--work-type", workTypeFeature, "--max-iterations", "1"})
 	if err != nil {
 		t.Fatalf("parseLocalWorkStartArgs: %v", err)
 	}
@@ -750,7 +750,7 @@ func TestParseLocalWorkStartArgsAllowsBranchTaskInference(t *testing.T) {
 }
 
 func TestParseLocalWorkStartArgsSupportsDetach(t *testing.T) {
-	options, err := parseLocalWorkStartArgs([]string{"--detach", "--repo", ".", "--task", "ship it"})
+	options, err := parseLocalWorkStartArgs([]string{"--detach", "--repo", ".", "--task", "ship it", "--work-type", workTypeFeature})
 	if err != nil {
 		t.Fatalf("parseLocalWorkStartArgs: %v", err)
 	}
@@ -796,6 +796,7 @@ func TestStartLocalWorkWithRunIDDetachSpawnsBackgroundRunner(t *testing.T) {
 		Detach:                true,
 		RepoPath:              repoRoot,
 		Task:                  "Implement detached local work launch",
+		WorkType:              workTypeFeature,
 		MaxIterations:         1,
 		IntegrationPolicy:     "final",
 		GroupingPolicy:        localWorkDefaultGroupingPolicy,
@@ -839,6 +840,7 @@ func TestStartLocalWorkWithRunIDKeepsBaselineAlignedWithSandboxHead(t *testing.T
 		Detach:                true,
 		RepoPath:              repoRoot,
 		Task:                  "Keep baseline aligned with sandbox",
+		WorkType:              workTypeFeature,
 		MaxIterations:         1,
 		IntegrationPolicy:     "final",
 		GroupingPolicy:        localWorkDefaultGroupingPolicy,
@@ -914,7 +916,7 @@ func TestLocalWorkStartInfersTaskFromCurrentBranch(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 
-	if err := runLocalWorkCommand(repo, []string{"start", "--max-iterations", "1"}); err != nil {
+	if err := runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--max-iterations", "1"}); err != nil {
 		t.Fatalf("runLocalWorkCommand inferred start: %v", err)
 	}
 	manifest, _ := mustLatestLocalWorkRun(t, repo)
@@ -975,7 +977,7 @@ func TestLocalWorkRejectsDirtyRepo(t *testing.T) {
 		t.Fatalf("write dirty file: %v", err)
 	}
 
-	err := runLocalWorkCommand(repo, []string{"start", "--task", "do it"})
+	err := runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "do it"})
 	if err == nil || !strings.Contains(err.Error(), "clean repo") {
 		t.Fatalf("expected clean repo error, got %v", err)
 	}
@@ -1007,7 +1009,7 @@ func TestLocalWorkStartStatusRetrospectiveAndGlobalRunLookup(t *testing.T) {
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 
 	startOutput, err := captureStdout(t, func() error {
-		return runLocalWorkCommand(repo, []string{"start", "--task", "Update the local docs flow"})
+		return runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Update the local docs flow"})
 	})
 	if err != nil {
 		t.Fatalf("runLocalWorkCommand(start): %v\n%s", err, startOutput)
@@ -1186,7 +1188,7 @@ func TestLocalWorkRunsHardeningPassWhenReviewFindingsRemain(t *testing.T) {
 	t.Setenv("FAKE_CODEX_HARDENED_PATH", markerPath)
 
 	output, err := captureStdout(t, func() error {
-		return runLocalWorkCommand(repo, []string{"start", "--task", "Trigger the hardening pass"})
+		return runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Trigger the hardening pass"})
 	})
 	if err != nil {
 		t.Fatalf("runLocalWorkCommand(start): %v\n%s", err, output)
@@ -1265,7 +1267,7 @@ func TestLocalWorkFinalReviewGateBlocksCompletionUntilHardened(t *testing.T) {
 	t.Setenv("FAKE_FINAL_GATE_HARDENED_PATH", finalGateHardenedPath)
 
 	output, err := captureStdout(t, func() error {
-		return runLocalWorkCommand(repo, []string{"start", "--task", "Trigger final gate hardening"})
+		return runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Trigger final gate hardening"})
 	})
 	if err != nil {
 		t.Fatalf("runLocalWorkCommand(start): %v\n%s", err, output)
@@ -1340,7 +1342,7 @@ func TestLocalWorkFinalApplyBlocksOnDirtySourceAndResumeCommits(t *testing.T) {
 	t.Setenv("FAKE_SOURCE_REPO", repo)
 
 	output, err := captureStdout(t, func() error {
-		return runLocalWorkCommand(repo, []string{"start", "--task", "Dirty source before final apply"})
+		return runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Dirty source before final apply"})
 	})
 	if err == nil || !strings.Contains(err.Error(), "source checkout has local changes") {
 		t.Fatalf("expected dirty-source apply blocker, err=%v output=%s", err, output)
@@ -1397,7 +1399,7 @@ func TestLocalWorkFinalApplyCommitsNewSandboxFiles(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 
-	if err := runLocalWorkCommand(repo, []string{"start", "--task", "Create a new file"}); err != nil {
+	if err := runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Create a new file"}); err != nil {
 		t.Fatalf("runLocalWorkCommand(start): %v", err)
 	}
 	manifest, _ := mustLatestLocalWorkRun(t, repo)
@@ -1448,7 +1450,7 @@ func TestLocalWorkSkipsFinalGateWhenSandboxDiffIsEmpty(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 
-	if err := runLocalWorkCommand(repo, []string{"start", "--task", "Do nothing"}); err != nil {
+	if err := runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Do nothing"}); err != nil {
 		t.Fatalf("runLocalWorkCommand(start): %v", err)
 	}
 	manifest, runDir := mustLatestLocalWorkRun(t, repo)
@@ -1498,7 +1500,7 @@ func TestLocalWorkCandidateAuditBlocksGeneratedFilesBeforeFinalGate(t *testing.T
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 
 	output, err := captureStdout(t, func() error {
-		return runLocalWorkCommand(repo, []string{"start", "--task", "Create generated artifact"})
+		return runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Create generated artifact"})
 	})
 	if err == nil || !strings.Contains(err.Error(), "candidate diff contains generated or runtime files") {
 		t.Fatalf("expected candidate audit blocker, err=%v output=%s", err, output)
@@ -1746,6 +1748,7 @@ func TestStartLocalWorkWithRunIDRefreshesManagedSourceBeforeSandboxClone(t *test
 	runID, err := startLocalWorkWithRunID(managedSource, localWorkStartOptions{
 		Detach:                true,
 		Task:                  "Refresh managed source before start",
+		WorkType:              workTypeFeature,
 		MaxIterations:         localWorkDefaultMaxIterations,
 		IntegrationPolicy:     "final",
 		GroupingPolicy:        localWorkDefaultGroupingPolicy,
@@ -2591,7 +2594,7 @@ func TestLocalWorkStatusAndLogsJSON(t *testing.T) {
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 	t.Setenv("FAKE_CODEX_HARDENED_PATH", markerPath)
 
-	if err := runLocalWorkCommand(repo, []string{"start", "--task", "Trigger json status", "--grouping-policy", "singleton", "--validation-parallelism", "2"}); err != nil {
+	if err := runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Trigger json status", "--grouping-policy", "singleton", "--validation-parallelism", "2"}); err != nil {
 		t.Fatalf("runLocalWorkCommand(start): %v", err)
 	}
 
@@ -2760,7 +2763,7 @@ func TestLocalWorkAIFallbacksToSingletonGrouping(t *testing.T) {
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 	t.Setenv("FAKE_CODEX_HARDENED_PATH", markerPath)
 
-	if err := runLocalWorkCommand(repo, []string{"start", "--task", "Fallback grouping"}); err != nil {
+	if err := runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Fallback grouping"}); err != nil {
 		t.Fatalf("runLocalWorkCommand(start): %v", err)
 	}
 	manifest, _ := mustLatestLocalWorkRun(t, repo)
@@ -2816,7 +2819,7 @@ func TestLocalWorkPathGroupingBypassesAIGrouper(t *testing.T) {
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 	t.Setenv("FAKE_CODEX_HARDENED_PATH", markerPath)
 
-	if err := runLocalWorkCommand(repo, []string{"start", "--task", "Path grouping bypass", "--grouping-policy", "path"}); err != nil {
+	if err := runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Path grouping bypass", "--grouping-policy", "path"}); err != nil {
 		t.Fatalf("runLocalWorkCommand(start): %v", err)
 	}
 	manifest, _ := mustLatestLocalWorkRun(t, repo)
@@ -2856,7 +2859,7 @@ func TestLocalWorkValidationFailurePersistsRuntimeStateAndFailureDetails(t *test
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 
-	err := runLocalWorkCommand(repo, []string{"start", "--task", "Fail validator"})
+	err := runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Fail validator"})
 	if err == nil || !strings.Contains(err.Error(), "validator group readme-validation failed after 3 attempt(s)") {
 		t.Fatalf("expected validator failure, got %v", err)
 	}
@@ -3085,7 +3088,7 @@ func TestLocalWorkResumeAfterValidatorFailureReusesGroupingAndCleansRuntimeState
 	t.Setenv("FAKE_VALIDATE_COUNT_PATH", validateCountPath)
 	t.Setenv("FAKE_HARDENED_PATH", hardenedPath)
 
-	startErr := runLocalWorkCommand(repo, []string{"start", "--task", "Resume validator failure"})
+	startErr := runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Resume validator failure"})
 	if startErr == nil {
 		t.Fatal("expected initial start to fail")
 	}
@@ -3158,7 +3161,7 @@ func TestLocalWorkFindingHistoryRecordsLifecycle(t *testing.T) {
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 	t.Setenv("FAKE_HARDENED_PATH", hardenedPath)
 
-	if err := runLocalWorkCommand(repo, []string{"start", "--task", "Finding history"}); err != nil {
+	if err := runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Finding history"}); err != nil {
 		t.Fatalf("runLocalWorkCommand(start): %v", err)
 	}
 	manifest, _ := mustLatestLocalWorkRun(t, repo)
@@ -3254,7 +3257,7 @@ func TestLocalWorkReportsAndFiltersPreexistingFindings(t *testing.T) {
 	t.Setenv("FAKE_VALIDATE_COUNT_PATH", validateCountPath)
 
 	output, err := captureStdout(t, func() error {
-		return runLocalWorkCommand(repo, []string{"start", "--task", "Filter preexisting issues"})
+		return runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Filter preexisting issues"})
 	})
 	if err != nil {
 		t.Fatalf("runLocalWorkCommand(start): %v\n%s", err, output)
@@ -3963,7 +3966,7 @@ func TestLocalWorkResumeAfterFailedImplement(t *testing.T) {
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 	t.Setenv("FAKE_CODEX_FAIL_ONCE_PATH", failOncePath)
 
-	startErr := runLocalWorkCommand(repo, []string{"start", "--task", "Recover after one failure"})
+	startErr := runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Recover after one failure"})
 	if startErr == nil {
 		t.Fatal("expected initial start to fail")
 	}
@@ -4030,7 +4033,7 @@ func TestLocalWorkResumeAfterFailedImplementUsesExecResume(t *testing.T) {
 	t.Setenv("FAKE_CODEX_FAIL_ONCE_PATH", failOncePath)
 	t.Setenv("FAKE_CODEX_LOG_PATH", commandLogPath)
 
-	startErr := runLocalWorkCommand(repo, []string{"start", "--task", "Recover with exec resume"})
+	startErr := runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Recover with exec resume"})
 	if startErr == nil {
 		t.Fatal("expected initial start to fail")
 	}

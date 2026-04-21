@@ -186,7 +186,7 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 	manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	completionErr := error(nil)
 	if runErr == nil {
-		completionErr = runGithubWorkCompletionLoop(manifestPath, runDir, &manifest, options.CodexArgs)
+		completionErr = runGithubWorkFollowupLoop(manifestPath, runDir, &manifest, options.CodexArgs)
 	}
 	if pauseErr, ok := isCodexRateLimitPauseError(runErr); ok {
 		manifest.ExecutionStatus = "paused"

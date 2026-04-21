@@ -36,6 +36,7 @@ func TestLaunchStartPlannedItemScheduledRunsLocalWorkInline(t *testing.T) {
 		RepoSlug:    repoSlug,
 		Title:       "Nightly cleanup",
 		Description: "Tighten scheduler defaults",
+		WorkType:    workTypeRefactor,
 		LaunchKind:  "local_work",
 	})
 	if err != nil {
@@ -53,6 +54,8 @@ func TestLaunchStartPlannedItemScheduledRunsLocalWorkInline(t *testing.T) {
 		repoPath,
 		"--task",
 		"Nightly cleanup\n\nTighten scheduler defaults",
+		"--work-type",
+		workTypeRefactor,
 		"--",
 		"--model",
 		"gpt-5.4",
@@ -89,6 +92,7 @@ func TestLaunchStartPlannedItemScheduledRunsTrackedIssueInline(t *testing.T) {
 		ID:         "planned-2",
 		RepoSlug:   repoSlug,
 		Title:      "Implement tracked issue",
+		WorkType:   workTypeBugFix,
 		LaunchKind: "tracked_issue",
 		TargetURL:  "https://github.com/acme/widget/issues/42",
 	})
@@ -104,6 +108,8 @@ func TestLaunchStartPlannedItemScheduledRunsTrackedIssueInline(t *testing.T) {
 	wantArgs := []string{
 		"start",
 		"https://github.com/acme/widget/issues/42",
+		"--work-type",
+		workTypeBugFix,
 		"--",
 		"--model",
 		"gpt-5.4",
@@ -141,6 +147,7 @@ func TestLaunchStartPlannedLocalWorkChildInheritsDBProxyEnv(t *testing.T) {
 		RepoSlug:    repoSlug,
 		Title:       "Nightly cleanup",
 		Description: "Tighten scheduler defaults",
+		WorkType:    workTypeRefactor,
 		LaunchKind:  "local_work",
 	}, nil)
 	if err != nil {
@@ -181,6 +188,7 @@ func TestLaunchStartPlannedTrackedIssueChildInheritsDBProxyEnv(t *testing.T) {
 		ID:         "planned-tracked",
 		RepoSlug:   repoSlug,
 		Title:      "Implement tracked issue",
+		WorkType:   workTypeBugFix,
 		LaunchKind: "tracked_issue",
 		TargetURL:  "https://github.com/acme/widget/issues/42",
 	})
