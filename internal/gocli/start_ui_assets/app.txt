@@ -102,7 +102,7 @@
       loading: false,
       loaded: false,
       error: "",
-      lastRepoUpdatedAt: "",
+      lastRepoScoutRefreshKey: "",
     };
   }
 
@@ -986,7 +986,7 @@
     state.scoutItems = {
       ...defaultScoutItemsState(),
       repoSlug: repo ? repo.repo_slug : "",
-      lastRepoUpdatedAt: repo ? defaultString(repo.updated_at, "") : "",
+      lastRepoScoutRefreshKey: repoScoutItemsRefreshKey(repo),
     };
   }
 
@@ -999,7 +999,7 @@
       resetScoutItemsState(repo);
       return;
     }
-    if (state.scoutItems.loaded && defaultString(repo.updated_at, "") !== state.scoutItems.lastRepoUpdatedAt && !state.scoutItems.loading) {
+    if (state.scoutItems.loaded && repoScoutItemsRefreshKey(repo) !== state.scoutItems.lastRepoScoutRefreshKey && !state.scoutItems.loading) {
       loadScoutItems(repo.repo_slug, { silent: true });
     }
   }
@@ -1042,6 +1042,16 @@
     setSelectedScoutItemIDs([]);
   }
 
+  function repoScoutItemsRefreshKey(repo) {
+    if (!repo) return "";
+    return JSON.stringify({
+      scout_jobs: (repo.state && repo.state.scout_jobs) || {},
+      planned_items: (repo.state && repo.state.planned_items) || {},
+      scout_job_counts: repo.scout_job_counts || {},
+      planned_item_counts: repo.planned_item_counts || {},
+    });
+  }
+
   function toggleScoutItemSelection(itemID, checked) {
     const current = new Set(selectedScoutItemIDs());
     if (checked) {
@@ -1068,7 +1078,7 @@
     state.scoutItems.loading = false;
     state.scoutItems.loaded = true;
     state.scoutItems.error = "";
-    state.scoutItems.lastRepoUpdatedAt = payload.repo ? defaultString(payload.repo.updated_at, "") : state.scoutItems.lastRepoUpdatedAt;
+    state.scoutItems.lastRepoScoutRefreshKey = payload.repo ? repoScoutItemsRefreshKey(payload.repo) : state.scoutItems.lastRepoScoutRefreshKey;
     if (!state.scoutItems.selectedItemID || !state.scoutItems.items.some((item) => item.id === state.scoutItems.selectedItemID)) {
       state.scoutItems.selectedItemID = state.scoutItems.items[0] ? state.scoutItems.items[0].id : "";
     }
@@ -2240,9 +2250,23 @@
   function renderGrid(target, columns, data, options = {}) {
     const host = document.getElementById(target);
     if (!host) return;
+    const nextRenderKey = defaultString(options.renderKey, "");
+    if (nextRenderKey && host.getAttribute("data-grid-render-key") === nextRenderKey) {
+      return;
+    }
+    const currentTableWrap = options.preserveScroll ? host.querySelector(".data-table-wrap") : null;
+    const currentCards = options.preserveScroll ? host.querySelector(".data-cards") : null;
+    const tableScrollTop = currentTableWrap ? currentTableWrap.scrollTop : 0;
+    const tableScrollLeft = currentTableWrap ? currentTableWrap.scrollLeft : 0;
+    const cardsScrollTop = currentCards ? currentCards.scrollTop : 0;
     host.innerHTML = "";
     if (!columns.length || !data.length) {
       host.innerHTML = buildInlineNotice(options.emptyMessage || "No data yet");
+      if (nextRenderKey) {
+        host.setAttribute("data-grid-render-key", nextRenderKey);
+      } else {
+        host.removeAttribute("data-grid-render-key");
+      }
       return;
     }
     const tableRows = data.map((row) => {
@@ -2287,6 +2311,22 @@
         <div class="data-cards">${cardRows}</div>
       </div>
     `;
+    if (nextRenderKey) {
+      host.setAttribute("data-grid-render-key", nextRenderKey);
+    } else {
+      host.removeAttribute("data-grid-render-key");
+    }
+    if (options.preserveScroll) {
+      const nextTableWrap = host.querySelector(".data-table-wrap");
+      const nextCards = host.querySelector(".data-cards");
+      if (nextTableWrap) {
+        nextTableWrap.scrollTop = tableScrollTop;
+        nextTableWrap.scrollLeft = tableScrollLeft;
+      }
+      if (nextCards) {
+        nextCards.scrollTop = cardsScrollTop;
+      }
+    }
   }
 
   function renderPendingJobsChart(target, runs) {
@@ -4194,6 +4234,36 @@
     `;
   }
 
+  function syncRepoScoutsChrome(selectedCount, allSelected, retryableCount, dismissibleCount) {
+    const count = state.scoutItems.items.length || 0;
+    const countPill = document.getElementById("repo-scout-count");
+    if (countPill) {
+      countPill.textContent = `${count} items`;
+    }
+    const selectAllButton = document.getElementById("repo-scout-select-all");
+    if (selectAllButton) {
+      selectAllButton.disabled = !count;
+    }
+    const clearButton = document.getElementById("repo-scout-clear-selection");
+    if (clearButton) {
+      clearButton.disabled = !selectedCount;
+    }
+    const retryButton = document.getElementById("repo-scout-bulk-retry");
+    if (retryButton) {
+      retryButton.disabled = !retryableCount;
+      retryButton.textContent = `Retry Selected (${retryableCount})`;
+    }
+    const dismissButton = document.getElementById("repo-scout-bulk-dismiss");
+    if (dismissButton) {
+      dismissButton.disabled = !dismissibleCount;
+      dismissButton.textContent = `Dismiss Selected (${dismissibleCount})`;
+    }
+    const selectionCopy = document.getElementById("repo-scout-selection-copy");
+    if (selectionCopy) {
+      selectionCopy.textContent = allSelected ? `All ${selectedCount} selected` : `${selectedCount} selected`;
+    }
+  }
+
   function renderRepoScoutsPage(repo) {
     ensureScoutItemsState(repo);
     const selectedIDs = selectedScoutItemIDs();
@@ -4203,6 +4273,15 @@
     const allSelected = totalCount > 0 && selectedCount === totalCount;
     const retryableCount = scoutActionableSelection("retry").length;
     const dismissibleCount = scoutActionableSelection("dismiss").length;
+    const gridRows = scoutItemRows(state.scoutItems.items).map((row) => ({
+      ...row,
+      selected: selectedSet.has(row.id),
+    }));
+    const gridRenderKey = JSON.stringify({
+      loading: Boolean(state.scoutItems.loading),
+      error: defaultString(state.scoutItems.error, ""),
+      rows: gridRows,
+    });
     ensureBodyStructure(`repo:${repo.repo_slug}:scouts`, `
       <section class="surface scout-surface">
         <div class="surface-head">
@@ -4210,19 +4289,20 @@
             <h3>Scout Items</h3>
             <p>Scout findings and proposals saved under the repo checkout.</p>
           </div>
-          <span class="status-pill">${escapeHTML(String(state.scoutItems.items.length || 0))} items</span>
+          <span id="repo-scout-count" class="status-pill">${escapeHTML(String(state.scoutItems.items.length || 0))} items</span>
         </div>
         <div class="scout-bulk-bar">
-          <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-select-all="true" ${state.scoutItems.items.length ? "" : "disabled"}>Select All</button>
-          <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-clear-selection="true" ${selectedCount ? "" : "disabled"}>Clear</button>
-          <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-bulk-action="retry" ${retryableCount ? "" : "disabled"}>Retry Selected (${escapeHTML(String(retryableCount))})</button>
-          <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-bulk-action="dismiss" ${dismissibleCount ? "" : "disabled"}>Dismiss Selected (${escapeHTML(String(dismissibleCount))})</button>
-          <p class="scout-bulk-copy">${escapeHTML(allSelected ? `All ${selectedCount} selected` : `${selectedCount} selected`)}</p>
+          <button id="repo-scout-select-all" class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-select-all="true" ${state.scoutItems.items.length ? "" : "disabled"}>Select All</button>
+          <button id="repo-scout-clear-selection" class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-clear-selection="true" ${selectedCount ? "" : "disabled"}>Clear</button>
+          <button id="repo-scout-bulk-retry" class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-bulk-action="retry" ${retryableCount ? "" : "disabled"}>Retry Selected (${escapeHTML(String(retryableCount))})</button>
+          <button id="repo-scout-bulk-dismiss" class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-bulk-action="dismiss" ${dismissibleCount ? "" : "disabled"}>Dismiss Selected (${escapeHTML(String(dismissibleCount))})</button>
+          <p id="repo-scout-selection-copy" class="scout-bulk-copy">${escapeHTML(allSelected ? `All ${selectedCount} selected` : `${selectedCount} selected`)}</p>
         </div>
         <div id="repo-scout-grid"></div>
         <div id="repo-scout-detail" class="scout-detail"></div>
       </section>
     `);
+    syncRepoScoutsChrome(selectedCount, allSelected, retryableCount, dismissibleCount);
     if (!state.scoutItems.loading && !state.scoutItems.loaded && !state.scoutItems.error) {
       loadScoutItems(repo.repo_slug, { silent: true });
     }
@@ -4262,12 +4342,11 @@
           return actions.length ? `<div class="scout-actions">${actions.join("")}</div>` : '<span class="data-value-text">No actions</span>';
         },
       },
-    ], scoutItemRows(state.scoutItems.items).map((row) => ({
-      ...row,
-      selected: selectedSet.has(row.id),
-    })), {
+    ], gridRows, {
       maxHeight: "460px",
       emptyMessage: state.scoutItems.loading ? "Loading scout items..." : "No scout-discovered items found for this repo.",
+      preserveScroll: true,
+      renderKey: gridRenderKey,
     });
     renderScoutDetail(selectedScoutItem());
   }
