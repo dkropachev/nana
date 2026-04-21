@@ -2,7 +2,6 @@ package gocli
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -464,7 +463,7 @@ func runLocalWorkCommandWithRunID(cwd string, args []string) (string, error) {
 
 func runLocalWorkCommandWithOptions(cwd string, args []string, rateLimitPolicy codexRateLimitPolicy) (string, error) {
 	if len(args) == 0 || isHelpToken(args[0]) {
-		fmt.Fprint(os.Stdout, LocalWorkHelp)
+		fmt.Fprint(currentWorkStdout(), LocalWorkHelp)
 		return "", nil
 	}
 
@@ -1640,15 +1639,15 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 		return "", err
 	}
 
-	fmt.Fprintf(os.Stdout, "[local] Starting run %s for %s\n", runID, repoRoot)
-	fmt.Fprintf(os.Stdout, "[local] Managed sandbox: %s\n", sandboxPath)
-	fmt.Fprintf(os.Stdout, "[local] Run artifacts: %s\n", runDir)
-	fmt.Fprintf(os.Stdout, "[local] Verification policy: lint=%d compile=%d unit=%d integration=%d benchmark=%d integration_policy=%s\n",
+	fmt.Fprintf(currentWorkStdout(), "[local] Starting run %s for %s\n", runID, repoRoot)
+	fmt.Fprintf(currentWorkStdout(), "[local] Managed sandbox: %s\n", sandboxPath)
+	fmt.Fprintf(currentWorkStdout(), "[local] Run artifacts: %s\n", runDir)
+	fmt.Fprintf(currentWorkStdout(), "[local] Verification policy: lint=%d compile=%d unit=%d integration=%d benchmark=%d integration_policy=%s\n",
 		len(verificationPlan.Lint), len(verificationPlan.Compile), len(verificationPlan.Unit), len(verificationPlan.Integration), len(verificationPlan.Benchmarks), options.IntegrationPolicy)
-	fmt.Fprintf(os.Stdout, "[local] Work type: %s\n", workTypeDisplayName(manifest.WorkType))
-	fmt.Fprintf(os.Stdout, "[local] Validation policy: grouping=%s parallelism=%d\n", options.GroupingPolicy, options.ValidationParallelism)
+	fmt.Fprintf(currentWorkStdout(), "[local] Work type: %s\n", workTypeDisplayName(manifest.WorkType))
+	fmt.Fprintf(currentWorkStdout(), "[local] Validation policy: grouping=%s parallelism=%d\n", options.GroupingPolicy, options.ValidationParallelism)
 	for _, warning := range verificationPlan.Warnings {
-		fmt.Fprintf(os.Stdout, "[local] Verification warning: %s\n", warning)
+		fmt.Fprintf(currentWorkStdout(), "[local] Verification warning: %s\n", warning)
 	}
 
 	if options.Detach {
@@ -1665,7 +1664,7 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 			}
 			return runID, err
 		}
-		fmt.Fprintf(os.Stdout, "[local] Detached run %s; runtime log: %s\n", runID, logPath)
+		fmt.Fprintf(currentWorkStdout(), "[local] Detached run %s; runtime log: %s\n", runID, logPath)
 		return runID, nil
 	}
 
@@ -1728,7 +1727,7 @@ func resumeLocalWork(cwd string, options localWorkResumeOptions) error {
 	if len(manifest.Iterations) >= manifest.MaxIterations {
 		return fmt.Errorf("work run %s has already exhausted max iterations (%d)", manifest.RunID, manifest.MaxIterations)
 	}
-	fmt.Fprintf(os.Stdout, "[local] Resuming run %s for %s\n", manifest.RunID, manifest.RepoRoot)
+	fmt.Fprintf(currentWorkStdout(), "[local] Resuming run %s for %s\n", manifest.RunID, manifest.RepoRoot)
 	return localWorkExecuteLoop(manifest.RunID, options.CodexArgs, options.RateLimitPolicy)
 }
 
@@ -1765,13 +1764,13 @@ func resolveLocalWorkManifest(manifest localWorkManifest) error {
 }
 
 func retryBlockedLocalWorkFinalApply(manifest localWorkManifest) error {
-	fmt.Fprintf(os.Stdout, "[local] Retrying final source commit for run %s\n", manifest.RunID)
+	fmt.Fprintf(currentWorkStdout(), "[local] Retrying final source commit for run %s\n", manifest.RunID)
 	applyResult := applyLocalWorkFinalDiff(manifest)
 	return finalizeResolvedLocalWork(manifest, applyResult)
 }
 
 func retryBlockedLocalWorkPostApply(manifest localWorkManifest) error {
-	fmt.Fprintf(os.Stdout, "[local] Resolving post-apply blocker for run %s\n", manifest.RunID)
+	fmt.Fprintf(currentWorkStdout(), "[local] Resolving post-apply blocker for run %s\n", manifest.RunID)
 	applyResult, err := continueLocalWorkPostApply(manifest)
 	if err != nil {
 		manifest.FinalApplyStatus = applyResult.Status
@@ -1872,11 +1871,11 @@ func finalizeResolvedLocalWork(manifest localWorkManifest, applyResult localWork
 	}
 	switch applyResult.Status {
 	case "pushed":
-		fmt.Fprintf(os.Stdout, "[local] Completed run %s; committed and pushed source branch %s at %s.\n", manifest.RunID, defaultString(manifest.SourceBranch, "HEAD"), applyResult.CommitSHA)
+		fmt.Fprintf(currentWorkStdout(), "[local] Completed run %s; committed and pushed source branch %s at %s.\n", manifest.RunID, defaultString(manifest.SourceBranch, "HEAD"), applyResult.CommitSHA)
 	case "committed":
-		fmt.Fprintf(os.Stdout, "[local] Completed run %s; committed to source branch at %s.\n", manifest.RunID, applyResult.CommitSHA)
+		fmt.Fprintf(currentWorkStdout(), "[local] Completed run %s; committed to source branch at %s.\n", manifest.RunID, applyResult.CommitSHA)
 	case "no-op":
-		fmt.Fprintf(os.Stdout, "[local] Completed run %s; no source changes to commit.\n", manifest.RunID)
+		fmt.Fprintf(currentWorkStdout(), "[local] Completed run %s; no source changes to commit.\n", manifest.RunID)
 	}
 	return nil
 }
@@ -1969,7 +1968,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 			if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: implementing.\n", iteration, manifest.MaxIterations)
+			fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d: implementing.\n", iteration, manifest.MaxIterations)
 			implementPrompt, err := buildLocalWorkImplementPrompt(manifest, iteration)
 			if err != nil {
 				return err
@@ -2000,14 +1999,14 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 			if err := writeLocalWorkRuntimeState(manifest.RunID, state); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: implementation complete.\n", iteration, manifest.MaxIterations)
+			fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d: implementation complete.\n", iteration, manifest.MaxIterations)
 		}
 
 		setLocalWorkProgress(&manifest, &state, "verify-refresh", "verify-refresh", 0)
 		if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: refreshing verification plan.\n", iteration, manifest.MaxIterations)
+		fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d: refreshing verification plan.\n", iteration, manifest.MaxIterations)
 		plan, scriptsDir, err := refreshLocalWorkVerificationArtifactsInPlace(&manifest)
 		if err != nil {
 			return err
@@ -2030,7 +2029,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 			if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: running verification.\n", iteration, manifest.MaxIterations)
+			fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d: running verification.\n", iteration, manifest.MaxIterations)
 			initialVerification, err = runLocalVerification(manifest.SandboxRepoPath, plan, manifest.IntegrationPolicy == "always")
 			if err != nil {
 				return err
@@ -2042,7 +2041,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 			if err := writeLocalWorkRuntimeState(manifest.RunID, state); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: verification %s.\n", iteration, manifest.MaxIterations, summarizeLocalVerification(initialVerification))
+			fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d: verification %s.\n", iteration, manifest.MaxIterations, summarizeLocalVerification(initialVerification))
 		}
 
 		reviewPromptPath := filepath.Join(iterationDir, "review-prompt.md")
@@ -2060,7 +2059,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 			if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: running review.\n", iteration, manifest.MaxIterations)
+			fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d: running review.\n", iteration, manifest.MaxIterations)
 			reviewPrompt, err := buildLocalWorkReviewPrompt(manifest)
 			if err != nil {
 				return err
@@ -2092,7 +2091,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 			if err := writeLocalWorkRuntimeState(manifest.RunID, state); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: review findings=%d.\n", iteration, manifest.MaxIterations, len(initialFindings))
+			fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d: review findings=%d.\n", iteration, manifest.MaxIterations, len(initialFindings))
 		}
 
 		finalGateFindingsCount := 0
@@ -2127,7 +2126,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 					if gateRolesErr != nil {
 						return gateRolesErr
 					}
-					fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: running final review gate (%d roles).\n", iteration, manifest.MaxIterations, len(gateRolesToRun))
+					fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d: running final review gate (%d roles).\n", iteration, manifest.MaxIterations, len(gateRolesToRun))
 					gateFindings, gateRoles, gateRoleResults, gateCount, err := runLocalWorkFinalReviewGate(manifest, codexArgs, iterationDir, "initial")
 					if err != nil {
 						manifest.Status = "failed"
@@ -2147,7 +2146,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 					} else {
 						finalGateStatus = "passed"
 					}
-					fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: final review gate %s findings=%d.\n", iteration, manifest.MaxIterations, finalGateStatus, gateCount)
+					fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d: final review gate %s findings=%d.\n", iteration, manifest.MaxIterations, finalGateStatus, gateCount)
 				}
 			}
 		}
@@ -2184,7 +2183,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 			return err
 		}
 		if len(initialFilterResult.Findings) > 0 {
-			fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: validated findings=%d rejected=%d preexisting=%d.\n", iteration, manifest.MaxIterations, len(validatedInitialFindings), len(rejectedInitialFingerprints), len(preexistingInitialFindings))
+			fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d: validated findings=%d rejected=%d preexisting=%d.\n", iteration, manifest.MaxIterations, len(validatedInitialFindings), len(rejectedInitialFingerprints), len(preexistingInitialFindings))
 		}
 
 		finalVerification := initialVerification
@@ -2225,7 +2224,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 				if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 					return err
 				}
-				fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d round %d: hardening %d finding(s).\n", iteration, manifest.MaxIterations, round, len(finalFindings))
+				fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d round %d: hardening %d finding(s).\n", iteration, manifest.MaxIterations, round, len(finalFindings))
 				hardeningPrompt, err := buildLocalWorkHardeningPrompt(manifest, finalVerification, finalFindings)
 				if err != nil {
 					return err
@@ -2267,7 +2266,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 				if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 					return err
 				}
-				fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d round %d: running post-hardening verification.\n", iteration, manifest.MaxIterations, round)
+				fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d round %d: running post-hardening verification.\n", iteration, manifest.MaxIterations, round)
 				finalVerification, err = runLocalVerification(manifest.SandboxRepoPath, plan, manifest.IntegrationPolicy == "always")
 				if err != nil {
 					return err
@@ -2279,7 +2278,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 				if err := writeLocalWorkRuntimeState(manifest.RunID, state); err != nil {
 					return err
 				}
-				fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d round %d: post-hardening verification %s.\n", iteration, manifest.MaxIterations, round, summarizeLocalVerification(finalVerification))
+				fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d round %d: post-hardening verification %s.\n", iteration, manifest.MaxIterations, round, summarizeLocalVerification(finalVerification))
 			} else if err := readGithubJSON(postVerificationPath, &finalVerification); err != nil {
 				roundState.PostVerificationCompleted = false
 				round--
@@ -2297,7 +2296,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 				if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 					return err
 				}
-				fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d round %d: running post-hardening review.\n", iteration, manifest.MaxIterations, round)
+				fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d round %d: running post-hardening review.\n", iteration, manifest.MaxIterations, round)
 				finalReviewPrompt, err := buildLocalWorkReviewPrompt(manifest)
 				if err != nil {
 					return err
@@ -2361,7 +2360,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 						if gateRolesErr != nil {
 							return gateRolesErr
 						}
-						fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d round %d: running final review gate (%d roles).\n", iteration, manifest.MaxIterations, round, len(gateRolesToRun))
+						fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d round %d: running final review gate (%d roles).\n", iteration, manifest.MaxIterations, round, len(gateRolesToRun))
 						gateFindings, gateRoles, gateRoleResults, gateCount, err := runLocalWorkFinalReviewGate(manifest, codexArgs, iterationDir, fmt.Sprintf("round-%d", round))
 						if err != nil {
 							manifest.Status = "failed"
@@ -2381,7 +2380,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 						} else {
 							finalGateStatus = "passed"
 						}
-						fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d round %d: final review gate %s findings=%d.\n", iteration, manifest.MaxIterations, round, finalGateStatus, gateCount)
+						fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d round %d: final review gate %s findings=%d.\n", iteration, manifest.MaxIterations, round, finalGateStatus, gateCount)
 					}
 				}
 			}
@@ -2588,7 +2587,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 				if err := writeLocalWorkActiveState(runDir, &manifest, &state); err != nil {
 					return err
 				}
-				fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: applying verified changes to source branch.\n", iteration, manifest.MaxIterations)
+				fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d: applying verified changes to source branch.\n", iteration, manifest.MaxIterations)
 				applyResult := applyLocalWorkFinalDiff(manifest)
 				manifest.FinalApplyStatus = applyResult.Status
 				manifest.FinalApplyCommitSHA = applyResult.CommitSHA
@@ -2630,25 +2629,25 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 			return err
 		}
 
-		fmt.Fprintf(os.Stdout, "[local] Iteration %d/%d: %s\n", iteration, manifest.MaxIterations, summary.VerificationSummary)
+		fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d/%d: %s\n", iteration, manifest.MaxIterations, summary.VerificationSummary)
 		if len(finalFindings) > 0 {
-			fmt.Fprintf(os.Stdout, "[local] Iteration %d review findings: %d\n", iteration, len(finalFindings))
+			fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d review findings: %d\n", iteration, len(finalFindings))
 		}
 
 		if summary.Status == "completed" {
 			if _, err := writeLocalWorkRetrospective(manifest); err != nil {
 				return err
 			}
-			printLocalWorkRememberedFindings(os.Stdout, "Pre-existing issues excluded from propagation", manifest.PreexistingFindings)
+			printLocalWorkRememberedFindings(currentWorkStdout(), "Pre-existing issues excluded from propagation", manifest.PreexistingFindings)
 			switch manifest.FinalApplyStatus {
 			case "pushed":
-				fmt.Fprintf(os.Stdout, "[local] Completed run %s after %d iteration(s); committed and pushed source branch %s at %s.\n", manifest.RunID, iteration, defaultString(manifest.SourceBranch, "HEAD"), manifest.FinalApplyCommitSHA)
+				fmt.Fprintf(currentWorkStdout(), "[local] Completed run %s after %d iteration(s); committed and pushed source branch %s at %s.\n", manifest.RunID, iteration, defaultString(manifest.SourceBranch, "HEAD"), manifest.FinalApplyCommitSHA)
 			case "committed":
-				fmt.Fprintf(os.Stdout, "[local] Completed run %s after %d iteration(s); committed to source branch at %s.\n", manifest.RunID, iteration, manifest.FinalApplyCommitSHA)
+				fmt.Fprintf(currentWorkStdout(), "[local] Completed run %s after %d iteration(s); committed to source branch at %s.\n", manifest.RunID, iteration, manifest.FinalApplyCommitSHA)
 			case "no-op":
-				fmt.Fprintf(os.Stdout, "[local] Completed run %s after %d iteration(s); no source changes to commit.\n", manifest.RunID, iteration)
+				fmt.Fprintf(currentWorkStdout(), "[local] Completed run %s after %d iteration(s); no source changes to commit.\n", manifest.RunID, iteration)
 			default:
-				fmt.Fprintf(os.Stdout, "[local] Completed run %s after %d iteration(s).\n", manifest.RunID, iteration)
+				fmt.Fprintf(currentWorkStdout(), "[local] Completed run %s after %d iteration(s).\n", manifest.RunID, iteration)
 			}
 			return nil
 		}
@@ -2657,7 +2656,7 @@ func executeLocalWorkLoop(runID string, codexArgs []string, rateLimitPolicy code
 				return err
 			}
 			blocker := defaultString(manifest.FinalApplyError, manifest.LastError)
-			fmt.Fprintf(os.Stdout, "[local] Blocked run %s after %d iteration(s); source commit was not created: %s\n", manifest.RunID, iteration, blocker)
+			fmt.Fprintf(currentWorkStdout(), "[local] Blocked run %s after %d iteration(s); source commit was not created: %s\n", manifest.RunID, iteration, blocker)
 			return errors.New(blocker)
 		}
 
@@ -2857,6 +2856,10 @@ type localWorkStatusSnapshot struct {
 }
 
 func localWorkStatus(cwd string, options localWorkStatusOptions) error {
+	return localWorkStatusWithIO(cwd, options, currentWorkStdout())
+}
+
+func localWorkStatusWithIO(cwd string, options localWorkStatusOptions, stdout io.Writer) error {
 	manifest, runDir, err := resolveLocalWorkRun(cwd, options.RunSelection)
 	if err != nil {
 		return localWorkReadCommandError(err)
@@ -2866,70 +2869,70 @@ func localWorkStatus(cwd string, options localWorkStatusOptions) error {
 		return localWorkReadCommandError(err)
 	}
 	if options.JSON {
-		_, err := os.Stdout.Write(mustMarshalJSON(snapshot))
+		_, err := stdout.Write(mustMarshalJSON(snapshot))
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "[local] Run id: %s\n", snapshot.RunID)
-	fmt.Fprintf(os.Stdout, "[local] Repo root: %s\n", snapshot.RepoRoot)
-	fmt.Fprintf(os.Stdout, "[local] Run artifacts: %s\n", snapshot.RunArtifacts)
-	fmt.Fprintf(os.Stdout, "[local] Sandbox: %s\n", snapshot.Sandbox)
-	fmt.Fprintf(os.Stdout, "[local] Status: %s\n", snapshot.Status)
+	fmt.Fprintf(stdout, "[local] Run id: %s\n", snapshot.RunID)
+	fmt.Fprintf(stdout, "[local] Repo root: %s\n", snapshot.RepoRoot)
+	fmt.Fprintf(stdout, "[local] Run artifacts: %s\n", snapshot.RunArtifacts)
+	fmt.Fprintf(stdout, "[local] Sandbox: %s\n", snapshot.Sandbox)
+	fmt.Fprintf(stdout, "[local] Status: %s\n", snapshot.Status)
 	if strings.TrimSpace(snapshot.WorkType) != "" {
-		fmt.Fprintf(os.Stdout, "[local] Work type: %s\n", workTypeDisplayName(snapshot.WorkType))
+		fmt.Fprintf(stdout, "[local] Work type: %s\n", workTypeDisplayName(snapshot.WorkType))
 	}
 	if strings.TrimSpace(snapshot.PauseUntil) != "" {
-		fmt.Fprintf(os.Stdout, "[local] Pause until: %s", snapshot.PauseUntil)
+		fmt.Fprintf(stdout, "[local] Pause until: %s", snapshot.PauseUntil)
 		if strings.TrimSpace(snapshot.PauseReason) != "" {
-			fmt.Fprintf(os.Stdout, " reason=%s", snapshot.PauseReason)
+			fmt.Fprintf(stdout, " reason=%s", snapshot.PauseReason)
 		}
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(stdout)
 	}
 	if strings.TrimSpace(snapshot.FinalApplyStatus) != "" {
-		fmt.Fprintf(os.Stdout, "[local] Final apply: %s", snapshot.FinalApplyStatus)
+		fmt.Fprintf(stdout, "[local] Final apply: %s", snapshot.FinalApplyStatus)
 		if strings.TrimSpace(snapshot.FinalApplyCommitSHA) != "" {
-			fmt.Fprintf(os.Stdout, " commit=%s", snapshot.FinalApplyCommitSHA)
+			fmt.Fprintf(stdout, " commit=%s", snapshot.FinalApplyCommitSHA)
 		}
 		if strings.TrimSpace(snapshot.FinalApplyError) != "" {
-			fmt.Fprintf(os.Stdout, " error=%s", snapshot.FinalApplyError)
+			fmt.Fprintf(stdout, " error=%s", snapshot.FinalApplyError)
 		}
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(stdout)
 	}
 	if strings.TrimSpace(snapshot.FinalGateStatus) != "" {
-		fmt.Fprintf(os.Stdout, "[local] Final gate: %s", snapshot.FinalGateStatus)
+		fmt.Fprintf(stdout, "[local] Final gate: %s", snapshot.FinalGateStatus)
 		if len(snapshot.FinalGateRoleResults) > 0 {
 			parts := make([]string, 0, len(snapshot.FinalGateRoleResults))
 			for _, result := range snapshot.FinalGateRoleResults {
 				parts = append(parts, fmt.Sprintf("%s=%d", result.Role, result.Findings))
 			}
-			fmt.Fprintf(os.Stdout, " %s", strings.Join(parts, ","))
+			fmt.Fprintf(stdout, " %s", strings.Join(parts, ","))
 		}
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(stdout)
 	}
 	if strings.TrimSpace(snapshot.CandidateAuditStatus) != "" {
-		fmt.Fprintf(os.Stdout, "[local] Candidate audit: %s", snapshot.CandidateAuditStatus)
+		fmt.Fprintf(stdout, "[local] Candidate audit: %s", snapshot.CandidateAuditStatus)
 		if len(snapshot.CandidateBlockedPaths) > 0 {
-			fmt.Fprintf(os.Stdout, " blocked=%s", strings.Join(snapshot.CandidateBlockedPaths, ","))
+			fmt.Fprintf(stdout, " blocked=%s", strings.Join(snapshot.CandidateBlockedPaths, ","))
 		}
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(stdout)
 	}
 	if strings.TrimSpace(snapshot.NextAction) != "" {
-		fmt.Fprintf(os.Stdout, "[local] Next action: %s\n", snapshot.NextAction)
+		fmt.Fprintf(stdout, "[local] Next action: %s\n", snapshot.NextAction)
 	}
 	if strings.TrimSpace(snapshot.FollowupDecision) != "" {
-		fmt.Fprintf(os.Stdout, "[local] Followups: %s (rounds=%d)\n", snapshot.FollowupDecision, len(snapshot.FollowupRounds))
+		fmt.Fprintf(stdout, "[local] Followups: %s (rounds=%d)\n", snapshot.FollowupDecision, len(snapshot.FollowupRounds))
 	}
-	fmt.Fprintf(os.Stdout, "[local] Iteration: %d/%d (phase=%s", snapshot.Iteration, snapshot.MaxIterations, defaultString(snapshot.Phase, "n/a"))
+	fmt.Fprintf(stdout, "[local] Iteration: %d/%d (phase=%s", snapshot.Iteration, snapshot.MaxIterations, defaultString(snapshot.Phase, "n/a"))
 	if strings.TrimSpace(snapshot.Subphase) != "" {
-		fmt.Fprintf(os.Stdout, ", subphase=%s", snapshot.Subphase)
+		fmt.Fprintf(stdout, ", subphase=%s", snapshot.Subphase)
 	}
 	if snapshot.Round > 0 {
-		fmt.Fprintf(os.Stdout, ", round=%d", snapshot.Round)
+		fmt.Fprintf(stdout, ", round=%d", snapshot.Round)
 	}
-	fmt.Fprintln(os.Stdout, ")")
+	fmt.Fprintln(stdout, ")")
 	if snapshot.LastIteration != nil {
-		fmt.Fprintf(os.Stdout, "[local] Last verification: %s\n", snapshot.LastVerification)
-		fmt.Fprintf(os.Stdout, "[local] Last review findings: %d\n", snapshot.LastReviewFindings)
-		fmt.Fprintf(os.Stdout, "[local] Last validation: groups=%d validated=%d confirmed=%d rejected=%d preexisting=%d modified=%d skipped-rejected=%d skipped-preexisting=%d policy=%s",
+		fmt.Fprintf(stdout, "[local] Last verification: %s\n", snapshot.LastVerification)
+		fmt.Fprintf(stdout, "[local] Last review findings: %d\n", snapshot.LastReviewFindings)
+		fmt.Fprintf(stdout, "[local] Last validation: groups=%d validated=%d confirmed=%d rejected=%d preexisting=%d modified=%d skipped-rejected=%d skipped-preexisting=%d policy=%s",
 			len(snapshot.LastIteration.ValidationGroups),
 			snapshot.LastIteration.ValidatedFindings,
 			snapshot.LastIteration.ConfirmedFindings,
@@ -2940,45 +2943,45 @@ func localWorkStatus(cwd string, options localWorkStatusOptions) error {
 			snapshot.LastIteration.SkippedPreexistingFindings,
 			defaultString(snapshot.LastIteration.EffectiveGroupingPolicy, snapshot.LastIteration.RequestedGroupingPolicy))
 		if strings.TrimSpace(snapshot.LastIteration.GroupingFallbackReason) != "" {
-			fmt.Fprintf(os.Stdout, " fallback=%s", snapshot.LastIteration.GroupingFallbackReason)
+			fmt.Fprintf(stdout, " fallback=%s", snapshot.LastIteration.GroupingFallbackReason)
 		}
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(stdout)
 	}
 	if snapshot.ActiveValidationContext != nil {
-		fmt.Fprintf(os.Stdout, "[local] Active validation context: %s", snapshot.ActiveValidationContext.Name)
+		fmt.Fprintf(stdout, "[local] Active validation context: %s", snapshot.ActiveValidationContext.Name)
 		if snapshot.ActiveValidationContext.Round > 0 {
-			fmt.Fprintf(os.Stdout, " (round=%d)", snapshot.ActiveValidationContext.Round)
+			fmt.Fprintf(stdout, " (round=%d)", snapshot.ActiveValidationContext.Round)
 		}
-		fmt.Fprintf(os.Stdout, " policy=%s", defaultString(snapshot.ActiveValidationContext.EffectivePolicy, snapshot.ActiveValidationContext.RequestedPolicy))
+		fmt.Fprintf(stdout, " policy=%s", defaultString(snapshot.ActiveValidationContext.EffectivePolicy, snapshot.ActiveValidationContext.RequestedPolicy))
 		if strings.TrimSpace(snapshot.ActiveValidationContext.FallbackReason) != "" {
-			fmt.Fprintf(os.Stdout, " fallback=%s", snapshot.ActiveValidationContext.FallbackReason)
+			fmt.Fprintf(stdout, " fallback=%s", snapshot.ActiveValidationContext.FallbackReason)
 		}
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(stdout)
 		for _, group := range snapshot.ActiveValidationContext.GroupStates {
 			if strings.TrimSpace(group.Status) == "" {
 				continue
 			}
-			fmt.Fprintf(os.Stdout, "[local] Validation group: %s status=%s attempts=%d", group.GroupID, group.Status, group.Attempts)
+			fmt.Fprintf(stdout, "[local] Validation group: %s status=%s attempts=%d", group.GroupID, group.Status, group.Attempts)
 			if strings.TrimSpace(group.Rationale) != "" {
-				fmt.Fprintf(os.Stdout, " rationale=%s", group.Rationale)
+				fmt.Fprintf(stdout, " rationale=%s", group.Rationale)
 			}
 			if strings.TrimSpace(group.LastError) != "" {
-				fmt.Fprintf(os.Stdout, " error=%s", group.LastError)
+				fmt.Fprintf(stdout, " error=%s", group.LastError)
 			}
-			fmt.Fprintln(os.Stdout)
+			fmt.Fprintln(stdout)
 		}
 	}
-	fmt.Fprintf(os.Stdout, "[local] Stored rejected findings: %d\n", snapshot.RejectedFingerprintCount)
-	fmt.Fprintf(os.Stdout, "[local] Stored pre-existing findings: %d\n", snapshot.PreexistingFindingCount)
+	fmt.Fprintf(stdout, "[local] Stored rejected findings: %d\n", snapshot.RejectedFingerprintCount)
+	fmt.Fprintf(stdout, "[local] Stored pre-existing findings: %d\n", snapshot.PreexistingFindingCount)
 	if strings.TrimSpace(snapshot.LastError) != "" {
-		fmt.Fprintf(os.Stdout, "[local] Last error: %s\n", snapshot.LastError)
+		fmt.Fprintf(stdout, "[local] Last error: %s\n", snapshot.LastError)
 	}
 	if snapshot.LockState != nil {
 		if repoAccessLockStateHasHolders(snapshot.LockState.Source) {
-			fmt.Fprintf(os.Stdout, "[local] Repo lock (source): %s\n", repoAccessLockStateSummary(snapshot.LockState.Source))
+			fmt.Fprintf(stdout, "[local] Repo lock (source): %s\n", repoAccessLockStateSummary(snapshot.LockState.Source))
 		}
 		if repoAccessLockStateHasHolders(snapshot.LockState.Sandbox) {
-			fmt.Fprintf(os.Stdout, "[local] Repo lock (sandbox): %s\n", repoAccessLockStateSummary(snapshot.LockState.Sandbox))
+			fmt.Fprintf(stdout, "[local] Repo lock (sandbox): %s\n", repoAccessLockStateSummary(snapshot.LockState.Sandbox))
 		}
 	}
 	return nil
@@ -3082,6 +3085,10 @@ func loadLocalWorkActiveValidationContext(runID string, iteration int, round int
 }
 
 func localWorkLogs(cwd string, options localWorkLogsOptions) error {
+	return localWorkLogsWithIO(cwd, options, currentWorkStdout())
+}
+
+func localWorkLogsWithIO(cwd string, options localWorkLogsOptions, stdout io.Writer) error {
 	manifest, runDir, err := resolveLocalWorkRun(cwd, options.RunSelection)
 	if err != nil {
 		return localWorkReadCommandError(err)
@@ -3131,14 +3138,14 @@ func localWorkLogs(cwd string, options localWorkLogsOptions) error {
 			"grouping":      grouping,
 			"files":         entries,
 		}
-		_, err := os.Stdout.Write(mustMarshalJSON(payload))
+		_, err := stdout.Write(mustMarshalJSON(payload))
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "[local] Run id: %s\n", manifest.RunID)
-	fmt.Fprintf(os.Stdout, "[local] Iteration: %d\n", iteration)
-	fmt.Fprintf(os.Stdout, "[local] Iteration artifacts: %s\n", iterationDir)
+	fmt.Fprintf(stdout, "[local] Run id: %s\n", manifest.RunID)
+	fmt.Fprintf(stdout, "[local] Iteration: %d\n", iteration)
+	fmt.Fprintf(stdout, "[local] Iteration artifacts: %s\n", iterationDir)
 	if snapshot.LastIteration != nil {
-		fmt.Fprintf(os.Stdout, "[local] Validation summary: groups=%d validated=%d confirmed=%d rejected=%d preexisting=%d modified=%d skipped-rejected=%d skipped-preexisting=%d policy=%s",
+		fmt.Fprintf(stdout, "[local] Validation summary: groups=%d validated=%d confirmed=%d rejected=%d preexisting=%d modified=%d skipped-rejected=%d skipped-preexisting=%d policy=%s",
 			len(snapshot.LastIteration.ValidationGroups),
 			snapshot.LastIteration.ValidatedFindings,
 			snapshot.LastIteration.ConfirmedFindings,
@@ -3149,49 +3156,49 @@ func localWorkLogs(cwd string, options localWorkLogsOptions) error {
 			snapshot.LastIteration.SkippedPreexistingFindings,
 			defaultString(snapshot.LastIteration.EffectiveGroupingPolicy, snapshot.LastIteration.RequestedGroupingPolicy))
 		if strings.TrimSpace(snapshot.LastIteration.GroupingFallbackReason) != "" {
-			fmt.Fprintf(os.Stdout, " fallback=%s", snapshot.LastIteration.GroupingFallbackReason)
+			fmt.Fprintf(stdout, " fallback=%s", snapshot.LastIteration.GroupingFallbackReason)
 		}
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(stdout)
 		for _, rationale := range snapshot.LastIteration.ValidationGroupRationales {
-			fmt.Fprintf(os.Stdout, "[local] Group: %s\n", rationale)
+			fmt.Fprintf(stdout, "[local] Group: %s\n", rationale)
 		}
 	}
 	if len(grouping.Groups) > 0 {
-		fmt.Fprintf(os.Stdout, "[local] Effective grouping: %s\n", defaultString(grouping.EffectivePolicy, grouping.RequestedPolicy))
+		fmt.Fprintf(stdout, "[local] Effective grouping: %s\n", defaultString(grouping.EffectivePolicy, grouping.RequestedPolicy))
 	}
 	if snapshot.ActiveValidationContext != nil {
-		fmt.Fprintf(os.Stdout, "[local] Active validation context: %s", snapshot.ActiveValidationContext.Name)
+		fmt.Fprintf(stdout, "[local] Active validation context: %s", snapshot.ActiveValidationContext.Name)
 		if snapshot.ActiveValidationContext.Round > 0 {
-			fmt.Fprintf(os.Stdout, " (round=%d)", snapshot.ActiveValidationContext.Round)
+			fmt.Fprintf(stdout, " (round=%d)", snapshot.ActiveValidationContext.Round)
 		}
-		fmt.Fprintf(os.Stdout, " policy=%s", defaultString(snapshot.ActiveValidationContext.EffectivePolicy, snapshot.ActiveValidationContext.RequestedPolicy))
+		fmt.Fprintf(stdout, " policy=%s", defaultString(snapshot.ActiveValidationContext.EffectivePolicy, snapshot.ActiveValidationContext.RequestedPolicy))
 		if strings.TrimSpace(snapshot.ActiveValidationContext.FallbackReason) != "" {
-			fmt.Fprintf(os.Stdout, " fallback=%s", snapshot.ActiveValidationContext.FallbackReason)
+			fmt.Fprintf(stdout, " fallback=%s", snapshot.ActiveValidationContext.FallbackReason)
 		}
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(stdout)
 		for _, group := range snapshot.ActiveValidationContext.GroupStates {
 			if strings.TrimSpace(group.Status) == "" {
 				continue
 			}
-			fmt.Fprintf(os.Stdout, "[local] Validation group: %s status=%s attempts=%d", group.GroupID, group.Status, group.Attempts)
+			fmt.Fprintf(stdout, "[local] Validation group: %s status=%s attempts=%d", group.GroupID, group.Status, group.Attempts)
 			if strings.TrimSpace(group.Rationale) != "" {
-				fmt.Fprintf(os.Stdout, " rationale=%s", group.Rationale)
+				fmt.Fprintf(stdout, " rationale=%s", group.Rationale)
 			}
 			if strings.TrimSpace(group.LastError) != "" {
-				fmt.Fprintf(os.Stdout, " error=%s", group.LastError)
+				fmt.Fprintf(stdout, " error=%s", group.LastError)
 			}
-			fmt.Fprintln(os.Stdout)
+			fmt.Fprintln(stdout)
 		}
 	}
 	for _, entry := range entries {
-		fmt.Fprintf(os.Stdout, "\n== %s ==\n", entry["name"])
+		fmt.Fprintf(stdout, "\n== %s ==\n", entry["name"])
 		if strings.TrimSpace(entry["content"]) == "" {
-			fmt.Fprintln(os.Stdout, "(empty)")
+			fmt.Fprintln(stdout, "(empty)")
 			continue
 		}
-		fmt.Fprint(os.Stdout, entry["content"])
+		fmt.Fprint(stdout, entry["content"])
 		if !strings.HasSuffix(entry["content"], "\n") {
-			fmt.Fprintln(os.Stdout)
+			fmt.Fprintln(stdout)
 		}
 	}
 	return nil
@@ -3286,11 +3293,15 @@ func localWorkRetrospective(cwd string, selection localWorkRunSelection) error {
 	if err != nil {
 		return localWorkReadCommandError(err)
 	}
-	fmt.Fprint(os.Stdout, content)
+	fmt.Fprint(currentWorkStdout(), content)
 	return nil
 }
 
 func refreshLocalWorkVerificationArtifacts(cwd string, selection localWorkRunSelection) error {
+	return refreshLocalWorkVerificationArtifactsWithIO(cwd, selection, currentWorkStdout())
+}
+
+func refreshLocalWorkVerificationArtifactsWithIO(cwd string, selection localWorkRunSelection, stdout io.Writer) error {
 	manifest, _, err := resolveLocalWorkRun(cwd, selection)
 	if err != nil {
 		return err
@@ -3305,8 +3316,8 @@ func refreshLocalWorkVerificationArtifacts(cwd string, selection localWorkRunSel
 	if err := writeLocalWorkManifest(manifest); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "[local] Verification artifacts for run %s refreshed.\n", manifest.RunID)
-	fmt.Fprintf(os.Stdout, "[local] Verification scripts directory: %s\n", scriptsDir)
+	fmt.Fprintf(stdout, "[local] Verification artifacts for run %s refreshed.\n", manifest.RunID)
+	fmt.Fprintf(stdout, "[local] Verification scripts directory: %s\n", scriptsDir)
 	return nil
 }
 
@@ -3487,100 +3498,55 @@ func localWorkResolvedRepoSlug(repoRoot string, current string) string {
 }
 
 func runLocalVerification(repoPath string, plan githubVerificationPlan, includeIntegration bool) (localWorkVerificationReport, error) {
-	stages := []struct {
-		name     string
-		commands []string
-	}{
-		{name: "lint", commands: append([]string{}, plan.Lint...)},
-		{name: "compile", commands: append([]string{}, plan.Compile...)},
-		{name: "unit", commands: append([]string{}, plan.Unit...)},
-	}
-	if includeIntegration {
-		stages = append(stages, struct {
-			name     string
-			commands []string
-		}{name: "integration", commands: append([]string{}, plan.Integration...)})
-	}
-	return runLocalVerificationStages(repoPath, plan.PlanFingerprint, includeIntegration, stages)
+	return runLocalVerificationStages(repoPath, plan.PlanFingerprint, includeIntegration, verificationExecutionStagesFromPlan(plan, includeIntegration))
 }
 
 func runLocalIntegrationVerification(repoPath string, plan githubVerificationPlan) (localWorkVerificationReport, error) {
 	if len(plan.Integration) == 0 {
 		return localWorkVerificationReport{}, nil
 	}
-	return runLocalVerificationStages(repoPath, plan.PlanFingerprint, true, []struct {
-		name     string
-		commands []string
-	}{{name: "integration", commands: append([]string{}, plan.Integration...)}})
+	return runLocalVerificationStages(repoPath, plan.PlanFingerprint, true, []verificationExecutionStage{{
+		Name:     "integration",
+		Commands: verificationExecutionCommandsFromStrings(plan.Integration),
+	}})
 }
 
-func runLocalVerificationStages(repoPath string, fingerprint string, includeIntegration bool, stages []struct {
-	name     string
-	commands []string
-}) (localWorkVerificationReport, error) {
+func runLocalVerificationStages(repoPath string, fingerprint string, includeIntegration bool, stages []verificationExecutionStage) (localWorkVerificationReport, error) {
 	report := localWorkVerificationReport{
 		GeneratedAt:         ISOTimeNow(),
 		PlanFingerprint:     fingerprint,
 		IntegrationIncluded: includeIntegration,
 		Passed:              true,
 	}
-	cache := map[string]localWorkVerificationCommandResult{}
-	for _, stage := range stages {
-		stageResult := localWorkVerificationStageResult{Name: stage.name, Status: "skipped"}
-		if len(stage.commands) == 0 {
-			report.Stages = append(report.Stages, stageResult)
-			continue
+	executed, err := executeVerificationStages(repoPath, stages, verificationExecutionOptions{
+		UnlimitedOutput: true,
+		SanitizeEnv:     true,
+		DedupeCommands:  true,
+	})
+	if err != nil {
+		return localWorkVerificationReport{}, err
+	}
+	for _, stage := range executed {
+		stageResult := localWorkVerificationStageResult{
+			Name:   stage.Name,
+			Status: stage.Status,
 		}
-		stageResult.Status = "passed"
-		for _, command := range stage.commands {
-			result, ok := cache[command]
-			if ok {
-				result.Cached = true
-			} else {
-				executed, err := executeLocalVerificationCommand(repoPath, command)
-				if err != nil {
-					return localWorkVerificationReport{}, err
-				}
-				result = executed
-				cache[command] = result
-			}
-			stageResult.Commands = append(stageResult.Commands, result)
-			if result.ExitCode != 0 {
-				stageResult.Status = "failed"
-				report.Passed = false
-				report.FailedStages = append(report.FailedStages, stage.name)
-				break
-			}
+		for _, command := range stage.Commands {
+			stageResult.Commands = append(stageResult.Commands, localWorkVerificationCommandResult{
+				Command:  command.Command,
+				ExitCode: command.ExitCode,
+				Output:   command.Output,
+				Cached:   command.Cached,
+			})
 		}
 		report.Stages = append(report.Stages, stageResult)
+		if stage.Status == "failed" {
+			report.Passed = false
+			report.FailedStages = append(report.FailedStages, stage.Name)
+		}
 	}
 	report.FailedStages = uniqueStrings(report.FailedStages)
 	return report, nil
-}
-
-func executeLocalVerificationCommand(repoPath string, command string) (localWorkVerificationCommandResult, error) {
-	cmd := exec.Command("bash", "-lc", command)
-	cmd.Dir = repoPath
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	exitCode := 0
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			exitCode = exitErr.ExitCode()
-		} else {
-			return localWorkVerificationCommandResult{}, err
-		}
-	}
-	output := strings.TrimSpace(strings.Join([]string{strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String())}, "\n"))
-	return localWorkVerificationCommandResult{
-		Command:  command,
-		ExitCode: exitCode,
-		Output:   output,
-	}, nil
 }
 
 func runLocalWorkCodexPrompt(manifest localWorkManifest, codexArgs []string, prompt string, codexHomeAlias string, checkpointPath string) (localWorkExecutionResult, error) {
