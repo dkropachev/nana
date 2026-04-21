@@ -10,11 +10,8 @@ From the repository you want NANA to understand:
 nana setup
 nana doctor
 nana help workflows
-if [ -f nana-verify.json ]; then
-  nana verify --json
-else
-  echo "No nana-verify.json found; run this project's native checks instead."
-fi
+nana repo onboard --repo .
+nana verify --json
 nana explore --prompt "find the repo verification profile"
 nana sparkshell git status --short
 ```
@@ -45,7 +42,7 @@ $cancel
 | Install or refresh NANA guidance | `nana setup` | Writes prompts, skills, hooks, config, and generated `AGENTS.md` guidance for the selected scope. |
 | Check whether the install is healthy | `nana doctor` | Validates the local setup before you debug workflow symptoms. |
 | Discover safe entry points | `nana help workflows` | Shows modes, trigger phrases, common skills, and support commands in one compact index. |
-| Run this repo's profiled checks | `nana verify --json` when `nana-verify.json` exists | Uses the repo-native verification profile and returns machine-readable evidence; otherwise use the project's native checks. |
+| Run this repo's profiled checks | `nana repo onboard --repo .`, then `nana verify --json` | Materializes the managed verification plan and returns machine-readable evidence from the onboarded repo state. |
 | Inspect code without editing | `nana explore --prompt "..."` | Runs a read-only repository lookup when you need a fast answer before changing files. |
 | Summarize noisy shell output | `nana sparkshell <command>` | Runs bounded command inspection with compact summaries; use it for read-only diagnostics and verification output. |
 | See the next operator action | `nana next` | Reduces queue/status noise to one suggested next step. |
@@ -58,7 +55,7 @@ $cancel
 1. **Set up once per scope.** Run `nana setup` after installation, after upgrading NANA, or when prompts/skills/config look stale.
 2. **Diagnose before guessing.** Run `nana doctor` before editing generated files or deleting runtime state.
 3. **Learn the workflow surface.** Run `nana help workflows` for the command and skill discovery index.
-4. **Prove the repo baseline.** Run `nana verify --json` from a repo with a verification profile before asking NANA to change behavior.
+4. **Prove the repo baseline.** Run `nana repo onboard --repo .` once, then `nana verify --json` before asking NANA to change behavior.
 5. **Inspect read-only first.** Use `nana explore --prompt "..."` for source lookups and `nana sparkshell <command>` for bounded shell diagnostics.
 6. **Use skills for intent.** In Codex, prefer explicit `$skill` calls when you know the workflow you want; explicit skill names run before natural-language trigger phrases.
 7. **Cancel safely.** If an autonomous mode, parallel helper, or planning flow is active and no longer wanted, use `nana cancel` from the shell or `$cancel` in-session.

@@ -2,6 +2,7 @@ package gocli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -54,12 +55,12 @@ func MaybeHandleWorkHelp(command string, args []string) bool {
 	switch command {
 	case "work":
 		if len(args) < 2 || isHelpToken(args[1]) || (len(args) > 2 && isHelpToken(args[2])) {
-			fmt.Fprint(os.Stdout, WorkHelp)
+			fmt.Fprint(currentWorkStdout(), WorkHelp)
 			return true
 		}
 	case "work-local", "work-on":
 		if len(args) < 2 || isHelpToken(args[1]) || (len(args) > 2 && isHelpToken(args[2])) {
-			fmt.Fprintf(os.Stdout, "nana %s has been replaced by `nana work`.\n\n%s", command, WorkHelp)
+			fmt.Fprintf(currentWorkStdout(), "nana %s has been replaced by `nana work`.\n\n%s", command, WorkHelp)
 			return true
 		}
 	}
@@ -68,7 +69,7 @@ func MaybeHandleWorkHelp(command string, args []string) bool {
 
 func Work(cwd string, args []string) error {
 	if len(args) == 0 || isHelpToken(args[0]) {
-		fmt.Fprint(os.Stdout, WorkHelp)
+		fmt.Fprint(currentWorkStdout(), WorkHelp)
 		return nil
 	}
 
@@ -100,47 +101,69 @@ func Work(cwd string, args []string) error {
 }
 
 func startWork(cwd string, args []string) error {
-	if len(args) > 1 {
-		first := strings.TrimSpace(args[1])
-		if strings.HasPrefix(first, "https://github.com/") {
-			_, err := GithubWorkCommand(cwd, args)
-			return err
+	return startWorkWithIO(cwd, args, currentWorkStdout(), currentWorkStderr())
+}
+
+func startWorkWithIO(cwd string, args []string, stdout io.Writer, stderr io.Writer) error {
+	return withWorkIO(stdout, stderr, func() error {
+		if len(args) > 1 {
+			first := strings.TrimSpace(args[1])
+			if strings.HasPrefix(first, "https://github.com/") {
+				_, err := GithubWorkCommand(cwd, args)
+				return err
+			}
 		}
-	}
-	return runLocalWorkCommand(cwd, args)
+		return runLocalWorkCommand(cwd, args)
+	})
 }
 
 func resumeWork(cwd string, args []string) error {
-	options, err := parseLocalWorkResumeArgs(args)
-	if err != nil {
-		return err
-	}
-	backend, err := resolveWorkBackend(cwd, options.RunSelection)
-	if err != nil {
-		return err
-	}
-	if backend == "github" {
-		return resumeGithubWork(options)
-	}
-	return resumeLocalWork(cwd, options)
+	return resumeWorkWithIO(cwd, args, currentWorkStdout(), currentWorkStderr())
+}
+
+func resumeWorkWithIO(cwd string, args []string, stdout io.Writer, stderr io.Writer) error {
+	return withWorkIO(stdout, stderr, func() error {
+		options, err := parseLocalWorkResumeArgs(args)
+		if err != nil {
+			return err
+		}
+		backend, err := resolveWorkBackend(cwd, options.RunSelection)
+		if err != nil {
+			return err
+		}
+		if backend == "github" {
+			return resumeGithubWork(options)
+		}
+		return resumeLocalWork(cwd, options)
+	})
 }
 
 func resolveWork(cwd string, args []string) error {
-	options, err := parseLocalWorkResolveArgs(args)
-	if err != nil {
-		return err
-	}
-	backend, err := resolveWorkBackend(cwd, options.RunSelection)
-	if err != nil {
-		return err
-	}
-	if backend == "github" {
-		return fmt.Errorf("work resolve is only available for blocked local runs")
-	}
-	return resolveLocalWork(cwd, options)
+	return resolveWorkWithIO(cwd, args, currentWorkStdout(), currentWorkStderr())
+}
+
+func resolveWorkWithIO(cwd string, args []string, stdout io.Writer, stderr io.Writer) error {
+	return withWorkIO(stdout, stderr, func() error {
+		options, err := parseLocalWorkResolveArgs(args)
+		if err != nil {
+			return err
+		}
+		backend, err := resolveWorkBackend(cwd, options.RunSelection)
+		if err != nil {
+			return err
+		}
+		if backend == "github" {
+			return fmt.Errorf("work resolve is only available for blocked local runs")
+		}
+		return resolveLocalWork(cwd, options)
+	})
 }
 
 func workStatus(cwd string, args []string) error {
+	return workStatusWithIO(cwd, args, currentWorkStdout())
+}
+
+func workStatusWithIO(cwd string, args []string, stdout io.Writer) error {
 	options, err := parseLocalWorkStatusArgs(args)
 	if err != nil {
 		return err
@@ -150,12 +173,16 @@ func workStatus(cwd string, args []string) error {
 		return err
 	}
 	if backend == "github" {
-		return githubWorkStatus(options.RunSelection, options.JSON)
+		return githubWorkStatusWithIO(options.RunSelection, options.JSON, stdout)
 	}
-	return localWorkStatus(cwd, options)
+	return localWorkStatusWithIO(cwd, options, stdout)
 }
 
 func workLogs(cwd string, args []string) error {
+	return workLogsWithIO(cwd, args, currentWorkStdout())
+}
+
+func workLogsWithIO(cwd string, args []string, stdout io.Writer) error {
 	options, err := parseLocalWorkLogsArgs(args)
 	if err != nil {
 		return err
@@ -165,33 +192,43 @@ func workLogs(cwd string, args []string) error {
 		return err
 	}
 	if backend == "github" {
-		return githubWorkLogs(options.RunSelection, options.TailLines, options.JSON)
+		return githubWorkLogsWithIO(options.RunSelection, options.TailLines, options.JSON, stdout)
 	}
-	return localWorkLogs(cwd, options)
+	return localWorkLogsWithIO(cwd, options, stdout)
 }
 
 func workRetrospective(cwd string, args []string) error {
-	selection, err := parseLocalWorkRunSelection(args, true)
-	if err != nil {
-		return err
-	}
-	backend, err := resolveWorkBackend(cwd, selection)
-	if err != nil {
-		return err
-	}
-	if backend == "github" {
-		githubArgs := []string{}
-		if strings.TrimSpace(selection.RunID) != "" {
-			githubArgs = append(githubArgs, "--run-id", selection.RunID)
-		} else if selection.UseLast {
-			githubArgs = append(githubArgs, "--last")
+	return workRetrospectiveWithIO(cwd, args, currentWorkStdout(), currentWorkStderr())
+}
+
+func workRetrospectiveWithIO(cwd string, args []string, stdout io.Writer, stderr io.Writer) error {
+	return withWorkIO(stdout, stderr, func() error {
+		selection, err := parseLocalWorkRunSelection(args, true)
+		if err != nil {
+			return err
 		}
-		return githubWorkRetrospective(githubArgs)
-	}
-	return localWorkRetrospective(cwd, selection)
+		backend, err := resolveWorkBackend(cwd, selection)
+		if err != nil {
+			return err
+		}
+		if backend == "github" {
+			githubArgs := []string{}
+			if strings.TrimSpace(selection.RunID) != "" {
+				githubArgs = append(githubArgs, "--run-id", selection.RunID)
+			} else if selection.UseLast {
+				githubArgs = append(githubArgs, "--last")
+			}
+			return githubWorkRetrospective(githubArgs)
+		}
+		return localWorkRetrospective(cwd, selection)
+	})
 }
 
 func workVerifyRefresh(cwd string, args []string) error {
+	return workVerifyRefreshWithIO(cwd, args, currentWorkStdout())
+}
+
+func workVerifyRefreshWithIO(cwd string, args []string, stdout io.Writer) error {
 	selection, err := parseLocalWorkRunSelection(args, true)
 	if err != nil {
 		return err
@@ -201,9 +238,23 @@ func workVerifyRefresh(cwd string, args []string) error {
 		return err
 	}
 	if backend == "github" {
-		return refreshGithubVerificationArtifacts(selection.RunID, selection.UseLast)
+		return refreshGithubVerificationArtifactsWithIO(selection.RunID, selection.UseLast, stdout)
 	}
-	return refreshLocalWorkVerificationArtifacts(cwd, selection)
+	return refreshLocalWorkVerificationArtifactsWithIO(cwd, selection, stdout)
+}
+
+func workSyncWithIO(cwd string, args []string, stdout io.Writer, stderr io.Writer) error {
+	return withWorkIO(stdout, stderr, func() error {
+		_, err := GithubWorkCommand(cwd, append([]string{"sync"}, args...))
+		return err
+	})
+}
+
+func workLaneExecWithIO(cwd string, args []string, stdout io.Writer, stderr io.Writer) error {
+	return withWorkIO(stdout, stderr, func() error {
+		_, err := GithubWorkCommand(cwd, append([]string{"lane-exec"}, args...))
+		return err
+	})
 }
 
 func resolveWorkBackend(cwd string, selection localWorkRunSelection) (string, error) {
@@ -286,6 +337,10 @@ type githubWorkStatusSnapshot struct {
 }
 
 func githubWorkStatus(selection localWorkRunSelection, jsonOutput bool) error {
+	return githubWorkStatusWithIO(selection, jsonOutput, currentWorkStdout())
+}
+
+func githubWorkStatusWithIO(selection localWorkRunSelection, jsonOutput bool, stdout io.Writer) error {
 	manifest, runDir, err := resolveGithubWorkRun(selection)
 	if err != nil {
 		return err
@@ -295,92 +350,96 @@ func githubWorkStatus(selection localWorkRunSelection, jsonOutput bool) error {
 		return err
 	}
 	if jsonOutput {
-		_, err := os.Stdout.Write(mustMarshalJSON(snapshot))
+		_, err := stdout.Write(mustMarshalJSON(snapshot))
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "[work] Run id: %s\n", snapshot.RunID)
-	fmt.Fprintf(os.Stdout, "[work] Repo: %s\n", snapshot.RepoSlug)
-	fmt.Fprintf(os.Stdout, "[work] Target: %s #%d\n", snapshot.TargetKind, snapshot.TargetNumber)
-	fmt.Fprintf(os.Stdout, "[work] URL: %s\n", snapshot.TargetURL)
+	fmt.Fprintf(stdout, "[work] Run id: %s\n", snapshot.RunID)
+	fmt.Fprintf(stdout, "[work] Repo: %s\n", snapshot.RepoSlug)
+	fmt.Fprintf(stdout, "[work] Target: %s #%d\n", snapshot.TargetKind, snapshot.TargetNumber)
+	fmt.Fprintf(stdout, "[work] URL: %s\n", snapshot.TargetURL)
 	if strings.TrimSpace(snapshot.WorkType) != "" {
-		fmt.Fprintf(os.Stdout, "[work] Work type: %s\n", workTypeDisplayName(snapshot.WorkType))
+		fmt.Fprintf(stdout, "[work] Work type: %s\n", workTypeDisplayName(snapshot.WorkType))
 	}
-	fmt.Fprintf(os.Stdout, "[work] Sandbox: %s\n", snapshot.Sandbox)
-	fmt.Fprintf(os.Stdout, "[work] Repo checkout: %s\n", snapshot.RepoCheckout)
-	fmt.Fprintf(os.Stdout, "[work] Updated: %s\n", snapshot.UpdatedAt)
+	fmt.Fprintf(stdout, "[work] Sandbox: %s\n", snapshot.Sandbox)
+	fmt.Fprintf(stdout, "[work] Repo checkout: %s\n", snapshot.RepoCheckout)
+	fmt.Fprintf(stdout, "[work] Updated: %s\n", snapshot.UpdatedAt)
 	if strings.TrimSpace(snapshot.ReviewReviewer) != "" {
-		fmt.Fprintf(os.Stdout, "[work] Reviewer sync user: %s\n", snapshot.ReviewReviewer)
+		fmt.Fprintf(stdout, "[work] Reviewer sync user: %s\n", snapshot.ReviewReviewer)
 	}
 	if strings.TrimSpace(snapshot.PublicationState) != "" {
-		fmt.Fprintf(os.Stdout, "[work] Publication state: %s\n", snapshot.PublicationState)
+		fmt.Fprintf(stdout, "[work] Publication state: %s\n", snapshot.PublicationState)
 	}
 	if strings.TrimSpace(snapshot.PublicationDetail) != "" {
-		fmt.Fprintf(os.Stdout, "[work] Publication detail: %s\n", snapshot.PublicationDetail)
+		fmt.Fprintf(stdout, "[work] Publication detail: %s\n", snapshot.PublicationDetail)
 	}
 	if strings.TrimSpace(snapshot.PublicationError) != "" {
-		fmt.Fprintf(os.Stdout, "[work] Publication error: %s\n", snapshot.PublicationError)
+		fmt.Fprintf(stdout, "[work] Publication error: %s\n", snapshot.PublicationError)
 	}
 	if strings.TrimSpace(snapshot.ExecutionStatus) != "" {
-		fmt.Fprintf(os.Stdout, "[work] Execution status: %s\n", snapshot.ExecutionStatus)
+		fmt.Fprintf(stdout, "[work] Execution status: %s\n", snapshot.ExecutionStatus)
 	}
 	if strings.TrimSpace(snapshot.CurrentPhase) != "" {
-		fmt.Fprintf(os.Stdout, "[work] Current phase: %s", snapshot.CurrentPhase)
+		fmt.Fprintf(stdout, "[work] Current phase: %s", snapshot.CurrentPhase)
 		if snapshot.CurrentRound > 0 {
-			fmt.Fprintf(os.Stdout, " round=%d", snapshot.CurrentRound)
+			fmt.Fprintf(stdout, " round=%d", snapshot.CurrentRound)
 		}
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(stdout)
 	}
 	if strings.TrimSpace(snapshot.PauseUntil) != "" {
-		fmt.Fprintf(os.Stdout, "[work] Pause until: %s", snapshot.PauseUntil)
+		fmt.Fprintf(stdout, "[work] Pause until: %s", snapshot.PauseUntil)
 		if strings.TrimSpace(snapshot.PauseReason) != "" {
-			fmt.Fprintf(os.Stdout, " reason=%s", snapshot.PauseReason)
+			fmt.Fprintf(stdout, " reason=%s", snapshot.PauseReason)
 		}
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(stdout)
 	}
 	if strings.TrimSpace(snapshot.LastError) != "" {
-		fmt.Fprintf(os.Stdout, "[work] Last error: %s\n", snapshot.LastError)
+		fmt.Fprintf(stdout, "[work] Last error: %s\n", snapshot.LastError)
 	}
 	if strings.TrimSpace(snapshot.FollowupDecision) != "" {
 		fmt.Fprintf(os.Stdout, "[work] Followups: %s (rounds=%d)\n", snapshot.FollowupDecision, len(snapshot.FollowupRounds))
 	}
 	if strings.TrimSpace(snapshot.FinalGateStatus) != "" {
-		fmt.Fprintf(os.Stdout, "[work] Final gate: %s\n", snapshot.FinalGateStatus)
+		fmt.Fprintf(stdout, "[work] Final gate: %s\n", snapshot.FinalGateStatus)
 	}
 	if strings.TrimSpace(snapshot.CandidateAuditStatus) != "" {
-		fmt.Fprintf(os.Stdout, "[work] Candidate audit: %s\n", snapshot.CandidateAuditStatus)
+		fmt.Fprintf(stdout, "[work] Candidate audit: %s\n", snapshot.CandidateAuditStatus)
 	}
 	if len(snapshot.CandidateBlockedPaths) > 0 {
-		fmt.Fprintf(os.Stdout, "[work] Candidate blocked paths: %s\n", strings.Join(snapshot.CandidateBlockedPaths, ", "))
+		fmt.Fprintf(stdout, "[work] Candidate blocked paths: %s\n", strings.Join(snapshot.CandidateBlockedPaths, ", "))
 	}
 	if len(snapshot.CompletionRounds) > 0 {
 		last := snapshot.CompletionRounds[len(snapshot.CompletionRounds)-1]
-		fmt.Fprintf(os.Stdout, "[work] Latest completion round: %d status=%s verification=%s findings=%d\n", last.Round, defaultString(last.Status, "(none)"), defaultString(last.VerificationSummary, "(none)"), last.ReviewFindings)
+		fmt.Fprintf(stdout, "[work] Latest completion round: %d status=%s verification=%s findings=%d\n", last.Round, defaultString(last.Status, "(none)"), defaultString(last.VerificationSummary, "(none)"), last.ReviewFindings)
 	}
 	if snapshot.LockState != nil {
 		if repoAccessLockStateHasHolders(snapshot.LockState.Source) {
-			fmt.Fprintf(os.Stdout, "[work] Repo lock (source): %s\n", repoAccessLockStateSummary(snapshot.LockState.Source))
+			fmt.Fprintf(stdout, "[work] Repo lock (source): %s\n", repoAccessLockStateSummary(snapshot.LockState.Source))
 		}
 		if repoAccessLockStateHasHolders(snapshot.LockState.Sandbox) {
-			fmt.Fprintf(os.Stdout, "[work] Repo lock (sandbox): %s\n", repoAccessLockStateSummary(snapshot.LockState.Sandbox))
+			fmt.Fprintf(stdout, "[work] Repo lock (sandbox): %s\n", repoAccessLockStateSummary(snapshot.LockState.Sandbox))
 		}
 	}
 	if strings.TrimSpace(snapshot.LeaderSessionID) != "" {
-		fmt.Fprintf(os.Stdout, "[work] Leader session: %s", snapshot.LeaderSessionID)
+		fmt.Fprintf(stdout, "[work] Leader session: %s", snapshot.LeaderSessionID)
 		if snapshot.LeaderResumeEligible {
-			fmt.Fprint(os.Stdout, " (resume available)")
+			fmt.Fprint(stdout, " (resume available)")
 		}
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(stdout)
 	}
 	if snapshot.FeedbackAvailable {
-		fmt.Fprintln(os.Stdout, "[work] Feedback instructions are present for this run.")
+		fmt.Fprintln(stdout, "[work] Feedback instructions are present for this run.")
 	}
 	for _, lane := range snapshot.Lanes {
-		fmt.Fprintf(os.Stdout, "[work] Lane: %s status=%s role=%s\n", lane.Alias, lane.Status, lane.Role)
+		fmt.Fprintf(stdout, "[work] Lane: %s status=%s role=%s\n", lane.Alias, lane.Status, lane.Role)
 	}
 	return nil
 }
 
 func githubWorkLogs(selection localWorkRunSelection, tail int, jsonOutput bool) error {
+	return githubWorkLogsWithIO(selection, tail, jsonOutput, currentWorkStdout())
+}
+
+func githubWorkLogsWithIO(selection localWorkRunSelection, tail int, jsonOutput bool, stdout io.Writer) error {
 	manifest, runDir, err := resolveGithubWorkRun(selection)
 	if err != nil {
 		return err
@@ -414,21 +473,21 @@ func githubWorkLogs(selection localWorkRunSelection, tail int, jsonOutput bool) 
 			"run":   snapshot,
 			"files": entries,
 		}
-		_, err := os.Stdout.Write(mustMarshalJSON(payload))
+		_, err := stdout.Write(mustMarshalJSON(payload))
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "[work] Run id: %s\n", snapshot.RunID)
-	fmt.Fprintf(os.Stdout, "[work] Repo: %s\n", snapshot.RepoSlug)
-	fmt.Fprintf(os.Stdout, "[work] Run artifacts: %s\n", runDir)
+	fmt.Fprintf(stdout, "[work] Run id: %s\n", snapshot.RunID)
+	fmt.Fprintf(stdout, "[work] Repo: %s\n", snapshot.RepoSlug)
+	fmt.Fprintf(stdout, "[work] Run artifacts: %s\n", runDir)
 	for _, entry := range entries {
-		fmt.Fprintf(os.Stdout, "\n== %s ==\n", entry["name"])
+		fmt.Fprintf(stdout, "\n== %s ==\n", entry["name"])
 		if strings.TrimSpace(entry["content"]) == "" {
-			fmt.Fprintln(os.Stdout, "(empty)")
+			fmt.Fprintln(stdout, "(empty)")
 			continue
 		}
-		fmt.Fprint(os.Stdout, entry["content"])
+		fmt.Fprint(stdout, entry["content"])
 		if !strings.HasSuffix(entry["content"], "\n") {
-			fmt.Fprintln(os.Stdout)
+			fmt.Fprintln(stdout)
 		}
 	}
 	return nil
@@ -611,7 +670,7 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 		if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stdout, "[github] Resuming completion loop for run %s.\n", manifest.RunID)
+		fmt.Fprintf(currentWorkStdout(), "[github] Resuming completion loop for run %s.\n", manifest.RunID)
 		return nil
 	}
 	if _, err := captureGithubWorkBaselineIfMissing(manifestPath, &manifest); err != nil {
@@ -717,12 +776,12 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 		}
 	}
 
-	fmt.Fprintf(os.Stdout, "[github] Resuming run %s for %s %s #%d\n", manifest.RunID, manifest.RepoSlug, manifest.TargetKind, manifest.TargetNumber)
+	fmt.Fprintf(currentWorkStdout(), "[github] Resuming run %s for %s %s #%d\n", manifest.RunID, manifest.RepoSlug, manifest.TargetKind, manifest.TargetNumber)
 	if strings.TrimSpace(result.Stdout) != "" {
-		fmt.Fprint(os.Stdout, result.Stdout)
+		fmt.Fprint(currentWorkStdout(), result.Stdout)
 	}
 	if strings.TrimSpace(result.Stderr) != "" {
-		fmt.Fprint(os.Stdout, result.Stderr)
+		fmt.Fprint(currentWorkStdout(), result.Stderr)
 	}
 	if runErr != nil {
 		return runErr

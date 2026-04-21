@@ -3,10 +3,33 @@ package gocli
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func initDoctorGitRepo(t *testing.T, repo string) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	cmd := exec.Command("git", "init", "-b", "main")
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git init: %v\n%s", err, output)
+	}
+}
+
+func writeDoctorManagedVerificationPlan(t *testing.T, repoRoot string, body string) {
+	t.Helper()
+	path := managedVerificationPlanPathForRepoRoot(repoRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir managed verification dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write managed verification plan: %v", err)
+	}
+}
 
 func TestCheckMcpServersPassesForSetupGeneratedConfig(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.toml")
@@ -396,6 +419,7 @@ func advanceDoctorRemote(t *testing.T, remote string) {
 
 func TestCheckNanaStateSchemasPassesKnownArtifacts(t *testing.T) {
 	cwd := t.TempDir()
+	initDoctorGitRepo(t, cwd)
 	for _, dir := range []string{
 		filepath.Join(cwd, ".nana", "logs"),
 		filepath.Join(cwd, ".nana", "plans"),
@@ -407,9 +431,7 @@ func TestCheckNanaStateSchemasPassesKnownArtifacts(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cwd, ".nana", "project-memory.json"), []byte(`{"version":1,"updated_at":"2026-04-20T00:00:00Z","decisions":[]}`+"\n"), 0o644); err != nil {
 		t.Fatalf("write project memory: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(cwd, VerifyProfileFile), []byte(`{"version":1,"name":"demo","stages":[{"name":"test","command":"go test ./..."}]}`+"\n"), 0o644); err != nil {
-		t.Fatalf("write verify profile: %v", err)
-	}
+	writeDoctorManagedVerificationPlan(t, cwd, `{"version":1,"name":"demo","stages":[{"name":"test","command":"go test ./..."}]}`+"\n")
 	telemetry := strings.Join([]string{
 		`{"timestamp":"2026-04-20T00:00:00Z","tool":"nana-sparkshell","event":"shell_output_compaction","command_name":"go","argument_count":2,"exit_code":0,"stdout_bytes":8,"stderr_bytes":0,"captured_bytes":8,"stdout_lines":1,"stderr_lines":0,"summary_bytes":12,"summary_lines":1,"summarized":true}`,
 		`{"timestamp":"2026-04-20T00:00:01Z","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md","loader":"nana_skill_runtime_cache","schema":"skill_doc_load.v1"}`,
@@ -448,24 +470,22 @@ func TestCheckNanaStateSchemasFailsInvalidProjectMemoryShape(t *testing.T) {
 
 func TestCheckNanaStateSchemasFailsInvalidVerifyProfile(t *testing.T) {
 	cwd := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cwd, VerifyProfileFile), []byte(`{"version":1,"name":"empty","stages":[]}`+"\n"), 0o644); err != nil {
-		t.Fatalf("write verify profile: %v", err)
-	}
+	initDoctorGitRepo(t, cwd)
+	writeDoctorManagedVerificationPlan(t, cwd, `{"version":1,"name":"empty","stages":[]}`+"\n")
 
 	check := checkNanaStateSchemas(cwd)
-	if check.Status != "fail" || !strings.Contains(check.Message, VerifyProfileFile) || !strings.Contains(check.Message, "at least one stage is required") {
+	if check.Status != "fail" || !strings.Contains(check.Message, managedVerificationPlanFile) || !strings.Contains(check.Message, "at least one stage is required") {
 		t.Fatalf("unexpected check: %#v", check)
 	}
 }
 
 func TestCheckNanaStateSchemasFailsExplicitZeroVerifyProfileVersion(t *testing.T) {
 	cwd := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cwd, VerifyProfileFile), []byte(`{"version":0,"stages":[{"name":"noop","command":"true"}]}`+"\n"), 0o644); err != nil {
-		t.Fatalf("write verify profile: %v", err)
-	}
+	initDoctorGitRepo(t, cwd)
+	writeDoctorManagedVerificationPlan(t, cwd, `{"version":0,"stages":[{"name":"noop","command":"true"}]}`+"\n")
 
 	check := checkNanaStateSchemas(cwd)
-	if check.Status != "fail" || !strings.Contains(check.Message, VerifyProfileFile) || !strings.Contains(check.Message, "version must be >= 1") {
+	if check.Status != "fail" || !strings.Contains(check.Message, managedVerificationPlanFile) || !strings.Contains(check.Message, "version must be >= 1") {
 		t.Fatalf("unexpected check: %#v", check)
 	}
 }

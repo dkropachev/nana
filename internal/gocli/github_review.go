@@ -85,7 +85,7 @@ func reviewGithubPullRequest(options githubReviewExecutionOptions) error {
 	runID := ""
 	if err := readGithubJSON(activePath, &active); err == nil && strings.TrimSpace(active.RunID) != "" {
 		runID = active.RunID
-		fmt.Fprintf(os.Stdout, "[review] Resuming active review run %s for %s.\n", runID, githubCanonicalTargetURL(options.Target))
+		fmt.Fprintf(currentGithubStdout(), "[review] Resuming active review run %s for %s.\n", runID, githubCanonicalTargetURL(options.Target))
 	} else {
 		runID = fmt.Sprintf("gr-%d", now.UnixNano())
 	}
@@ -179,10 +179,10 @@ func reviewGithubPullRequest(options githubReviewExecutionOptions) error {
 	}
 	_ = os.Remove(activePath)
 
-	fmt.Fprintf(os.Stdout, "[review] Completed review for %s.\n", manifest.TargetURL)
-	fmt.Fprintf(os.Stdout, "[review] Accepted=%d user-dropped=0 not-real=0 pre-existing=0.\n", len(findings))
+	fmt.Fprintf(currentGithubStdout(), "[review] Completed review for %s.\n", manifest.TargetURL)
+	fmt.Fprintf(currentGithubStdout(), "[review] Accepted=%d user-dropped=0 not-real=0 pre-existing=0.\n", len(findings))
 	if manifest.PostedReviewURL != "" {
-		fmt.Fprintf(os.Stdout, "[review] GitHub review: %s\n", manifest.PostedReviewURL)
+		fmt.Fprintf(currentGithubStdout(), "[review] GitHub review: %s\n", manifest.PostedReviewURL)
 	}
 	return nil
 }

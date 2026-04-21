@@ -1,8 +1,9 @@
 # NANA state file reference
 
-NANA keeps project-local runtime state under `.nana/` and optional verification
-configuration in `nana-verify.json`. These files are intended to be inspectable
-and safe to regenerate, migrate, or validate in CI.
+NANA keeps project-local runtime state under `.nana/` and managed verification
+configuration under `~/.nana/work/repos/.../verification-plan.json`. These
+files are intended to be inspectable and safe to regenerate, migrate, or
+validate in CI.
 
 Managed implementation runtimes also persist state outside the repo under
 `~/.nana/work/`. The key work manifests now include `work_type`, and completed
@@ -17,7 +18,7 @@ when the post-implementation followup planner/reviewer loop has run.
 | `.nana/notepad.md` | UTF-8 Markdown scratchpad for durable human/agent notes. Setup seeds `# NANA Notepad`. | `nana doctor` verifies it is UTF-8 text when present. |
 | `.nana/logs/context-telemetry.ndjson` | NDJSON: one telemetry JSON object per line. Events record metadata only, never raw args or raw command output. | Event schema: [`../schemas/context-telemetry-event.schema.json`](../schemas/context-telemetry-event.schema.json). `nana doctor` validates a bounded prefix so long-running logs stay cheap to inspect, and rejects raw `command`, `args`, `arguments`, `raw_args`, `stdout`, `stderr`, or `output` fields. |
 | `.nana/plans/*.md` | UTF-8 Markdown plans. Common names are `prd-<slug>.md`, `test-spec-<slug>.md`, and `open-questions.md`. | `nana doctor` verifies Markdown plan files are UTF-8 text when present. |
-| `nana-verify.json` | JSON object with a sequential `stages` array; each stage has `name` and `command`. | JSON Schema: [`../schemas/nana-verify.schema.json`](../schemas/nana-verify.schema.json). `nana doctor` reuses the same profile normalization as `nana verify`. |
+| `~/.nana/work/repos/<repo-id-or-owner/repo>/verification-plan.json` | JSON object with a sequential `stages` array plus categorized `lint` / `compile` / `unit` / `integration` arrays. | JSON Schema: [`../schemas/verification-plan.schema.json`](../schemas/verification-plan.schema.json). `nana doctor` reuses the same profile normalization as `nana verify`. |
 
 ## Managed work manifests
 
@@ -88,21 +89,26 @@ skill/reference counts and single-run context-budget warnings.
 - [ ] The expected outcome is testable.
 
 ## Verification Steps
-- Run `nana verify --json` when `nana-verify.json` exists.
+- Run `nana repo onboard --repo .` once, then `nana verify --json`.
 ```
 
-### `nana-verify.json`
+### `verification-plan.json`
 
 ```json
 {
-  "$schema": "docs/schemas/nana-verify.schema.json",
+  "$schema": "docs/schemas/verification-plan.schema.json",
   "version": 1,
   "name": "example",
+  "source": "heuristic",
   "stages": [
     {
       "name": "test",
       "command": "go test ./..."
     }
-  ]
+  ],
+  "lint": [],
+  "compile": [],
+  "unit": ["go test ./..."],
+  "integration": []
 }
 ```

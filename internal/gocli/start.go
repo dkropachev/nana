@@ -32,6 +32,7 @@ Examples:
 
 Automation mode behavior:
   - with no options, loops indefinitely until interrupted
+  - starts the per-user Nana service control socket used by stateful nana CLI commands
   - scans onboarded GitHub repos under ~/.nana/work/repos
   - skips repos where repo-mode is disabled/local or issue-pick is manual
   - blocks repo automation early when gh auth or managed-source SSH origin preflight fails
@@ -85,6 +86,7 @@ var startRunLocalScoutPickup = runLocalScoutDiscoveredItems
 var startRunRepoCycle = runStartRepoCycle
 var startRunRepoCyclesBatch = runStartRepoCyclesSharedWorkers
 var startLaunchLocalWorkDBProxySupervisor = launchLocalWorkDBProxySupervisor
+var startLaunchNanaServiceSupervisor = launchNanaServiceSupervisor
 var startLoopNow = time.Now
 var startLoopSleep = time.Sleep
 var startLoopContinue = func() bool { return true }
@@ -152,6 +154,11 @@ func Start(cwd string, args []string) error {
 		return err
 	}
 	defer dbProxy.Close()
+	service, err := startLaunchNanaServiceSupervisor()
+	if err != nil {
+		return err
+	}
+	defer service.Close()
 	var ui *startUISupervisor
 	if !uiOptions.NoUI {
 		ui, err = launchStartUISupervisor(cwd, uiOptions)

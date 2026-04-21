@@ -3,10 +3,32 @@ package gocli
 import (
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func initCommandsGitRepo(t *testing.T, repo string) {
+	t.Helper()
+	cmd := exec.Command("git", "init", "-b", "main")
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git init: %v\n%s", err, output)
+	}
+}
+
+func writeCommandsManagedVerificationPlan(t *testing.T, repo string, body string) {
+	t.Helper()
+	path := managedVerificationPlanPathForRepoRoot(repo)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir managed verification plan dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write managed verification plan: %v", err)
+	}
+}
 
 func captureStdout(t *testing.T, fn func() error) (string, error) {
 	t.Helper()
@@ -63,6 +85,8 @@ func TestReadAndUpsertTomlString(t *testing.T) {
 
 func TestStatusAndCancel(t *testing.T) {
 	cwd := t.TempDir()
+	t.Setenv("HOME", filepath.Join(cwd, "home"))
+	initCommandsGitRepo(t, cwd)
 	stateDir := filepath.Join(cwd, ".nana", "state", "sessions", "sess-1")
 	logDir := filepath.Join(cwd, ".nana", "logs")
 	plansDir := filepath.Join(cwd, ".nana", "plans")
@@ -78,9 +102,7 @@ func TestStatusAndCancel(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cwd, ".nana", "state", "session.json"), []byte(`{"session_id":"sess-1"}`), 0o644); err != nil {
 		t.Fatalf("session.json: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(cwd, "nana-verify.json"), []byte(`{"commands":[]}`), 0o644); err != nil {
-		t.Fatalf("nana-verify.json: %v", err)
-	}
+	writeCommandsManagedVerificationPlan(t, cwd, `{"version":1,"source":"heuristic","stages":[{"name":"test","command":"true"}],"lint":[],"compile":[],"unit":[],"integration":[]}`+"\n")
 	if err := os.WriteFile(filepath.Join(stateDir, "team-state.json"), []byte(`{"active":true,"current_phase":"team-exec"}`), 0o644); err != nil {
 		t.Fatalf("team-state.json: %v", err)
 	}

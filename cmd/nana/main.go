@@ -62,7 +62,7 @@ Local tools and support:
   nana next                    Print the highest-priority next step and command
   nana route --explain "..."   Preview prompt-to-skill routing
   nana status                  Show current local NANA runtime status
-  nana verify [--json]         Run the repo-native verification profile
+  nana verify [--json]         Run the managed verification plan for an onboarded repo
   nana usage                   Report token spend across NANA-managed sessions
   nana telemetry summary       Summarize privacy-preserving context telemetry
   nana cancel                  Cancel active NANA runtime modes
@@ -202,6 +202,15 @@ func main() {
 	}
 	if invocation.Command == "version" {
 		version.Print(os.Stdout)
+		return
+	}
+	if routed, exitCode, err := gocli.MaybeRunNanaServiceCommand(invocation.Command, mustGetwd(), args, os.Stdout, os.Stderr); routed {
+		if err != nil {
+			exitWithError(err)
+		}
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
 		return
 	}
 	switch invocation.Command {

@@ -2,13 +2,13 @@
 YOU ARE AN AUTONOMOUS CODING AGENT. EXECUTE TASKS TO COMPLETION WITHOUT ASKING FOR PERMISSION.
 DO NOT STOP TO ASK "SHOULD I PROCEED?" — PROCEED. DO NOT WAIT FOR CONFIRMATION ON OBVIOUS NEXT STEPS.
 IF BLOCKED, TRY AN ALTERNATIVE APPROACH. ONLY ASK WHEN TRULY AMBIGUOUS OR DESTRUCTIVE.
-USE CODEX NATIVE SUBAGENTS FOR INDEPENDENT PARALLEL SUBTASKS WHEN THAT IMPROVES THROUGHPUT. THIS IS COMPLEMENTARY TO NANA TEAM MODE.
+USE CODEX NATIVE SUBAGENTS FOR INDEPENDENT PARALLEL SUBTASKS WHEN USEFUL. THIS COMPLEMENTS NANA TEAM MODE.
 <!-- END AUTONOMY DIRECTIVE -->
 <!-- nana:generated:agents-md -->
 
 # nana - Compact Runtime Policy
 
-NANA coordinates Codex prompts, skills, and state. Role prompts narrow work but never override it.
+NANA coordinates Codex prompts, skills, and runtime state. Role prompts narrow work but never override this file.
 
 ## Always-on Policy
 <!-- NANA:GUIDANCE:OPERATING:START -->
@@ -23,7 +23,7 @@ NANA coordinates Codex prompts, skills, and state. Role prompts narrow work but 
 
 ## Mode Selection and Delegation
 - Default solo. Use `$deep-interview` for unclear intent or explicit "don't assume"; `$ralplan` for unresolved plan/tradeoff/test-shape review; otherwise execute.
-- Delegate only for quality/speed/safety. Leader scopes/verifies; workers stay scoped and do not re-plan. Max 6 children.
+- Delegate only for quality/speed/safety. Leader scopes and verifies; workers stay scoped and do not re-plan the whole task. Max 6 children.
 - Outside active `team`/`swarm`, use `executor` for implementation and reserve `worker` for team runtime. Core roles: `explore`, `planner`, `architect`, `debugger`, `executor`, `verifier`.
 - Routing hints: low complexity `explore`/`style-reviewer`/`writer`; standard `executor`/`debugger`/`test-engineer`; high complexity `architect`/`executor`/`critic`.
 - When routing affects execution, include `routing_decision` in plans, traces, and final reports: `mode`, `role_tier` (tier/roles), `trigger`, `confidence`.
@@ -46,9 +46,9 @@ Load detailed skill runtime docs only when invoked. When a listed keyword matche
 - `$web-clone` (`./.codex/skills/web-clone/RUNTIME.md`): `web-clone`, `clone site`, `clone website`, `copy webpage`
 
 ## Execution and Verification
-- Prefer `nana explore` for simple read-only lookups and `nana sparkshell` for noisy read-only checks; keep edits and ambiguous investigations on the normal path.
-- Prefer `nana verify --json` when `nana-verify.json` exists; otherwise use documented repo verification commands.
-- Run independent work in parallel and dependent checks sequentially. Use background execution for long builds/tests when helpful.
+- Prefer `nana explore` for simple read-only lookups and `nana sparkshell` for noisy read-only output/checks; keep edits and ambiguous investigations on the normal path.
+- Use `nana verify --json` for onboarded repos; otherwise use repo verification commands.
+- Run independent work in parallel and dependent checks sequentially. Use background jobs for long builds/tests.
 - Stop only when the task is verified complete, the user says stop/cancel, or no meaningful recovery path remains; escalate only for destructive, irreversible, materially branching, or authority-blocked decisions.
 <verification>
 <!-- NANA:GUIDANCE:VERIFYSEQ:START -->

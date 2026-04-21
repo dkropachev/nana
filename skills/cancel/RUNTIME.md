@@ -20,5 +20,5 @@ Stop active NANA modes and clean up mode state when work is complete, cancelled,
   - affected mode state paths and previous phases
   - latest open runtime artifact, when known
   - recent pending plan artifacts under `.nana/plans/`
-  - safe next commands: `nana status`, `nana doctor`, and `nana verify --json` when the repo has `nana-verify.json`
+  - safe next commands: `nana status`, `nana doctor`, and `nana verify --json` for onboarded repos
 </Runtime_Rules>

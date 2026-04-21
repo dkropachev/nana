@@ -251,6 +251,20 @@ func localScoutPickupStatusToScoutJobStatus(status string) string {
 	}
 }
 
+func boundRunningScoutJobRun(existing startWorkScoutJob, hasExisting bool, record localScoutPickupItem, recordOK bool) (string, string, bool) {
+	if hasExisting && strings.TrimSpace(existing.Status) == startScoutJobRunning {
+		if runID := strings.TrimSpace(existing.RunID); runID != "" {
+			return runID, strings.TrimSpace(existing.LastError), true
+		}
+	}
+	if recordOK && localScoutPickupStatusToScoutJobStatus(record.Status) == startScoutJobRunning {
+		if runID := strings.TrimSpace(record.RunID); runID != "" {
+			return runID, "", true
+		}
+	}
+	return "", "", false
+}
+
 func findLocalScoutPickupItemByPlannedItemID(pickupState localScoutPickupState, plannedItemID string) (localScoutPickupItem, bool) {
 	plannedItemID = strings.TrimSpace(plannedItemID)
 	if plannedItemID == "" {
@@ -441,6 +455,7 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 		job.CreatedAt = defaultString(strings.TrimSpace(existing.CreatedAt), job.CreatedAt)
 		job.LegacyPlannedItemID = defaultString(strings.TrimSpace(existing.LegacyPlannedItemID), job.LegacyPlannedItemID)
 	}
+	boundRunID, boundRunLastError, hasBoundRun := boundRunningScoutJobRun(existing, hasExisting, record, recordOK)
 	preserveExistingRun := hasExisting && strings.TrimSpace(existing.Status) == startScoutJobRunning && strings.TrimSpace(existing.RunID) != ""
 	preserveExistingFailure := hasExisting && strings.TrimSpace(existing.Status) == startScoutJobFailed
 	if plannedOK {
@@ -450,13 +465,21 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 			if strings.TrimSpace(planned.LaunchRunID) != "" {
 				job.Status = startScoutJobRunning
 				job.LastError = ""
+			} else if hasBoundRun {
+				job.Status = startScoutJobRunning
+				job.RunID = boundRunID
+				job.LastError = boundRunLastError
 			} else if !hasExisting || !startWorkScoutJobIsResolved(existing.Status) {
 				job.Status = startScoutJobQueued
 				job.LastError = ""
 				job.RunID = ""
 			}
 		case startPlannedItemQueued:
-			if !hasExisting || !startWorkScoutJobIsResolved(existing.Status) {
+			if hasBoundRun {
+				job.Status = startScoutJobRunning
+				job.RunID = boundRunID
+				job.LastError = boundRunLastError
+			} else if !hasExisting || !startWorkScoutJobIsResolved(existing.Status) {
 				job.Status = startScoutJobQueued
 				job.LastError = ""
 				job.RunID = ""
@@ -663,11 +686,16 @@ func syncStartWorkScoutJobsIntoState(repoPath string, state *startWorkState) (bo
 		if recordOK && strings.TrimSpace(record.RunID) != "" {
 			job.RunID = strings.TrimSpace(record.RunID)
 		}
+		boundRunID, boundRunLastError, hasBoundRun := boundRunningScoutJobRun(existing, hasExisting, record, recordOK)
 		switch strings.TrimSpace(planned.State) {
 		case startPlannedItemLaunching:
 			if strings.TrimSpace(job.RunID) != "" {
 				job.Status = startScoutJobRunning
 				job.LastError = ""
+			} else if hasBoundRun {
+				job.Status = startScoutJobRunning
+				job.RunID = boundRunID
+				job.LastError = boundRunLastError
 			} else if !startWorkScoutJobIsResolved(job.Status) {
 				job.Status = startScoutJobQueued
 				job.LastError = ""
@@ -679,7 +707,11 @@ func syncStartWorkScoutJobsIntoState(repoPath string, state *startWorkState) (bo
 			job.Status = startScoutJobFailed
 			job.LastError = defaultString(strings.TrimSpace(planned.LastError), strings.TrimSpace(job.LastError))
 		default:
-			if !startWorkScoutJobIsResolved(job.Status) {
+			if hasBoundRun {
+				job.Status = startScoutJobRunning
+				job.RunID = boundRunID
+				job.LastError = boundRunLastError
+			} else if !startWorkScoutJobIsResolved(job.Status) {
 				job.Status = startScoutJobQueued
 				job.LastError = ""
 			}

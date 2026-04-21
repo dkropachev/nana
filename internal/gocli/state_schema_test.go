@@ -11,13 +11,13 @@ import (
 	"testing"
 )
 
-func TestRepositoryVerificationProfileValidatesAgainstPublishedSchema(t *testing.T) {
+func TestRepositoryVerificationPlanExampleValidatesAgainstPublishedSchema(t *testing.T) {
 	repoRoot := repoRootFromCaller(t)
-	schema := readJSONSchemaTestFile(t, filepath.Join(repoRoot, "docs", "schemas", "nana-verify.schema.json"))
-	profile := readJSONValueTestFile(t, filepath.Join(repoRoot, VerifyProfileFile))
+	schema := readJSONSchemaTestFile(t, filepath.Join(repoRoot, "docs", "schemas", "verification-plan.schema.json"))
+	profile := readJSONValueTestFile(t, filepath.Join(repoRoot, "docs", "examples", "verification-plan.example.json"))
 
 	if err := validateJSONSchemaSubset(schema, profile, "$"); err != nil {
-		t.Fatalf("%s should validate against docs/schemas/nana-verify.schema.json: %v", VerifyProfileFile, err)
+		t.Fatalf("verification-plan example should validate against docs/schemas/verification-plan.schema.json: %v", err)
 	}
 }
 
@@ -71,7 +71,7 @@ func TestContextTelemetryPublishedSchemaAcceptsSkillTelemetryWithoutTool(t *test
 
 func TestVerificationPublishedSchemaMatchesVerifyNormalizationEdges(t *testing.T) {
 	repoRoot := repoRootFromCaller(t)
-	schema := readJSONSchemaTestFile(t, filepath.Join(repoRoot, "docs", "schemas", "nana-verify.schema.json"))
+	schema := readJSONSchemaTestFile(t, filepath.Join(repoRoot, "docs", "schemas", "verification-plan.schema.json"))
 
 	for _, tc := range []struct {
 		name      string

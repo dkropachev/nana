@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,6 +40,14 @@ func runCommand(t *testing.T, name string, args ...string) *exec.Cmd {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	t.Cleanup(cancel)
 	return exec.CommandContext(ctx, name, args...)
+}
+
+func appendNanaServiceBypassEnv(env []string) []string {
+	return append(env, "NANA_SERVICE_INTERNAL=1")
+}
+
+func appendNanaServiceRuntimeDirEnv(env []string, dir string) []string {
+	return append(env, "NANA_SERVICE_RUNTIME_DIR="+dir)
 }
 
 func configureBinaryTestGitInsteadOf(t *testing.T, home string, from string, to string) {
@@ -189,7 +199,7 @@ func TestBinaryNestedGithubHelpRoutesLocally(t *testing.T) {
 		{args: []string{"start", "--help"}, expected: "nana start - Run repo automation or scout startup"},
 		{args: []string{"next", "--help"}, expected: "nana next - Show the highest-priority item that needs operator attention"},
 		{args: []string{"route", "--help"}, expected: "nana route - Preview NANA prompt-to-skill routing"},
-		{args: []string{"verify", "--help"}, expected: "nana verify - Run the repository-native verification profile"},
+		{args: []string{"verify", "--help"}, expected: "nana verify - Run the managed verification plan for an onboarded repo"},
 		{args: []string{"ui-scout", "--help"}, expected: "nana ui-scout - Audit UI pages and flows with issue-style findings"},
 		{args: []string{"work", "--help"}, expected: "nana work - Unified local and GitHub-backed implementation runtime"},
 		{args: []string{"usage", "--help"}, expected: "nana usage - Report token spend across NANA-managed sessions"},
@@ -406,6 +416,114 @@ func TestBinaryAuthCommandIsUnknown(t *testing.T) {
 	}
 }
 
+func TestBinaryStatefulCommandFailsWhenServiceAbsent(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cases := [][]string{
+		{"status"},
+		{"implement", "https://github.com/acme/widget/issues/42"},
+	}
+	for _, args := range cases {
+		cwd := t.TempDir()
+		home := filepath.Join(cwd, "home")
+		runtimeDir := t.TempDir()
+
+		cmd := runCommand(t, binaryPath, args...)
+		cmd.Dir = cwd
+		cmd.Env = appendNanaServiceRuntimeDirEnv(append(os.Environ(),
+			"HOME="+home,
+		), runtimeDir)
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected %v to fail without service, got %q", args, output)
+		}
+		if !strings.Contains(string(output), "Nana service is not running for this user") {
+			t.Fatalf("expected service-absent error for %v, got %q", args, output)
+		}
+	}
+}
+
+func TestBinaryStatefulCommandRoutesThroughService(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cases := []struct {
+		args        []string
+		wantCommand string
+	}{
+		{args: []string{"status"}, wantCommand: "status"},
+		{args: []string{"implement", "https://github.com/acme/widget/issues/42"}, wantCommand: "implement"},
+	}
+	for _, tc := range cases {
+		cwd := t.TempDir()
+		home := filepath.Join(cwd, "home")
+		runtimeDir := t.TempDir()
+		socketPath := filepath.Join(runtimeDir, "service.sock")
+		listener, err := net.Listen("unix", socketPath)
+		if err != nil {
+			t.Fatalf("listen unix: %v", err)
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			defer conn.Close()
+			var request struct {
+				Type string   `json:"type"`
+				Argv []string `json:"argv"`
+				Cwd  string   `json:"cwd"`
+			}
+			if err := json.NewDecoder(conn).Decode(&request); err != nil {
+				return
+			}
+			if request.Type != "command" || len(request.Argv) == 0 || request.Argv[0] != tc.wantCommand {
+				return
+			}
+			encoder := json.NewEncoder(conn)
+			_ = encoder.Encode(map[string]any{"type": "stdout", "data": "from-service\n"})
+			_ = encoder.Encode(map[string]any{"type": "done", "exit_code": 0})
+		}()
+
+		cmd := runCommand(t, binaryPath, tc.args...)
+		cmd.Dir = cwd
+		cmd.Env = appendNanaServiceRuntimeDirEnv(append(os.Environ(),
+			"HOME="+home,
+		), runtimeDir)
+		output, err := cmd.CombinedOutput()
+		_ = listener.Close()
+		if err != nil {
+			t.Fatalf("%v via service failed: %v\n%s", tc.args, err, output)
+		}
+		if !strings.Contains(string(output), "from-service") {
+			t.Fatalf("expected service output for %v, got %q", tc.args, output)
+		}
+		<-done
+	}
+}
+
+func TestBinaryLocalOnlyCommandDoesNotRequireService(t *testing.T) {
+	binaryPath := buildNanaBinary(t)
+	cwd := t.TempDir()
+	home := filepath.Join(cwd, "home")
+	runtimeDir := t.TempDir()
+
+	cmd := runCommand(t, binaryPath, "investigate", "help")
+	cmd.Dir = cwd
+	cmd.Env = appendNanaServiceRuntimeDirEnv(append(os.Environ(),
+		"HOME="+home,
+	), runtimeDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("investigate help failed without service: %v\n%s", err, output)
+	}
+	if strings.Contains(string(output), "Nana service is not running for this user") {
+		t.Fatalf("expected investigate help to stay local, got %q", output)
+	}
+	if !strings.Contains(string(output), "nana investigate - Source-backed investigation with validator enforcement") {
+		t.Fatalf("expected investigate help output, got %q", output)
+	}
+}
+
 func TestBinaryHelpTopicRoutesToWorkHelp(t *testing.T) {
 	binaryPath := buildNanaBinary(t)
 	cwd := t.TempDir()
@@ -617,12 +735,12 @@ func TestBinaryGithubWorkStartRunsNatively(t *testing.T) {
 
 	cmd := runCommand(t, binaryPath, "work", "start", "https://github.com/acme/widget/issues/42", "--reviewer", "@me")
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(),
+	cmd.Env = appendNanaServiceBypassEnv(append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),
 		"HOME="+filepath.Join(cwd, "home"),
 		"GH_TOKEN=test-token",
 		"GITHUB_API_URL="+server.URL,
-	)
+	))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("work start native run failed: %v\n%s", err, output)
@@ -705,10 +823,10 @@ func TestBinaryLocalWorkStartCommitsVerifiedSandboxResult(t *testing.T) {
 
 	cmd := runCommand(t, binaryPath, "work", "start", "--task", "Update README", "--work-type", "feature")
 	cmd.Dir = sourceRepo
-	cmd.Env = append(os.Environ(),
+	cmd.Env = appendNanaServiceBypassEnv(append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),
 		"HOME="+filepath.Join(cwd, "home"),
-	)
+	))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("local work start failed: %v\n%s", err, output)
@@ -810,12 +928,12 @@ func TestBinaryReviewRunsNatively(t *testing.T) {
 
 	cmd := runCommand(t, binaryPath, "review", "https://github.com/acme/widget/pull/7", "--mode", "manual", "--per-item-context", "isolated")
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(),
+	cmd.Env = appendNanaServiceBypassEnv(append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),
 		"HOME="+filepath.Join(cwd, "home"),
 		"GH_TOKEN=test-token",
 		"GITHUB_API_URL="+server.URL,
-	)
+	))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("review native run failed: %v\n%s", err, output)
@@ -887,12 +1005,12 @@ func TestBinaryIssueInvestigateRunsNativelyWithoutLegacyBridge(t *testing.T) {
 
 	cmd := runCommand(t, binaryPath, "issue", "investigate", "https://github.com/acme/widget/issues/42")
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(),
+	cmd.Env = appendNanaServiceBypassEnv(append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),
 		"HOME="+filepath.Join(cwd, "home"),
 		"GH_TOKEN=test-token",
 		"GITHUB_API_URL="+server.URL,
-	)
+	))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("binary investigate failed: %v\n%s", err, output)
@@ -939,20 +1057,20 @@ func TestBinaryInvestigateRunsNativeRuntimeWithoutLegacyBridge(t *testing.T) {
 
 	onboard := runCommand(t, binaryPath, "investigate", "onboard")
 	onboard.Dir = cwd
-	onboard.Env = append(os.Environ(),
+	onboard.Env = appendNanaServiceBypassEnv(append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),
 		"HOME="+home,
-	)
+	))
 	if output, err := onboard.CombinedOutput(); err != nil {
 		t.Fatalf("binary investigate onboard failed: %v\n%s", err, output)
 	}
 
 	cmd := runCommand(t, binaryPath, "investigate", "why is CI failing?")
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(),
+	cmd.Env = appendNanaServiceBypassEnv(append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),
 		"HOME="+home,
-	)
+	))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("binary investigate failed: %v\n%s", err, output)
@@ -1024,12 +1142,12 @@ func TestBinaryIssueImplementRunsNativelyWithoutLegacyBridge(t *testing.T) {
 
 	cmd := runCommand(t, binaryPath, "issue", "implement", "https://github.com/acme/widget/issues/42")
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(),
+	cmd.Env = appendNanaServiceBypassEnv(append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),
 		"HOME="+filepath.Join(cwd, "home"),
 		"GH_TOKEN=test-token",
 		"GITHUB_API_URL="+server.URL,
-	)
+	))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("binary issue implement failed: %v\n%s", err, output)
@@ -1090,12 +1208,12 @@ func TestBinaryIssueSyncRunsNativelyWithoutLegacyBridge(t *testing.T) {
 
 	cmd := runCommand(t, binaryPath, "issue", "sync", "https://github.com/acme/widget/issues/42", "--resume-last")
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(),
+	cmd.Env = appendNanaServiceBypassEnv(append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),
 		"HOME="+filepath.Join(cwd, "home"),
 		"GH_TOKEN=test-token",
 		"GITHUB_API_URL="+server.URL,
-	)
+	))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("binary issue sync failed: %v\n%s", err, output)
@@ -1142,10 +1260,10 @@ func TestBinaryGithubWorkVerifyRefreshRunsNativelyWithoutLegacyBridge(t *testing
 
 	cmd := runCommand(t, binaryPath, "work", "verify-refresh", "--run-id", runID)
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(),
+	cmd.Env = appendNanaServiceBypassEnv(append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),
 		"HOME="+filepath.Join(cwd, "home"),
-	)
+	))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("binary verify-refresh failed: %v\n%s", err, output)
@@ -1205,12 +1323,12 @@ func TestBinaryGithubWorkSyncRunsNatively(t *testing.T) {
 
 	cmd := runCommand(t, binaryPath, "work", "sync", "--run-id", runID)
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(),
+	cmd.Env = appendNanaServiceBypassEnv(append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),
 		"HOME="+filepath.Join(cwd, "home"),
 		"GH_TOKEN=test-token",
 		"GITHUB_API_URL="+server.URL,
-	)
+	))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("work sync native run failed: %v\n%s", err, output)
@@ -1305,11 +1423,11 @@ func TestBinaryPublisherLaneRunsNatively(t *testing.T) {
 
 	cmd := runCommand(t, binaryPath, "work", "lane-exec", "--run-id", runID, "--lane", "publisher")
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(),
+	cmd.Env = appendNanaServiceBypassEnv(append(os.Environ(),
 		"HOME="+filepath.Join(cwd, "home"),
 		"GH_TOKEN=test-token",
 		"GITHUB_API_URL="+server.URL,
-	)
+	))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("publisher native run failed: %v\n%s", err, output)
@@ -1370,10 +1488,10 @@ func TestBinaryLaneExecRunsNativelyForNonPublisherLane(t *testing.T) {
 
 	cmd := runCommand(t, binaryPath, "work", "lane-exec", "--run-id", runID, "--lane", "coder")
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(),
+	cmd.Env = appendNanaServiceBypassEnv(append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),
 		"HOME="+filepath.Join(cwd, "home"),
-	)
+	))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("lane-exec native run failed: %v\n%s", err, output)

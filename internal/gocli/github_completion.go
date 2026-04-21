@@ -121,7 +121,7 @@ func runGithubHardeningRound(manifestPath string, completionDir string, manifest
 		if err := setGithubWorkPhase(manifestPath, manifest, "completion-harden", round); err != nil {
 			return githubWorkCompletionRoundSummary{}, localWorkVerificationReport{}, nil, err
 		}
-		fmt.Fprintf(os.Stdout, "[github] Completion round %d: hardening %d finding(s).\n", round, len(findings))
+		fmt.Fprintf(currentWorkStdout(), "[github] Completion round %d: hardening %d finding(s).\n", round, len(findings))
 		prompt, err := buildLocalWorkHardeningPrompt(localManifest, verification, findings)
 		if err != nil {
 			return githubWorkCompletionRoundSummary{}, localWorkVerificationReport{}, nil, err
@@ -194,7 +194,7 @@ func runGithubCompletionReviewCycle(manifestPath string, completionDir string, m
 				if err := setGithubWorkPhase(manifestPath, manifest, "completion-final-review", round); err != nil {
 					return localWorkVerificationReport{}, nil, githubWorkCompletionRoundSummary{}, err
 				}
-				fmt.Fprintf(os.Stdout, "[github] Completion %s: running final review gate.\n", prefix)
+				fmt.Fprintf(currentWorkStdout(), "[github] Completion %s: running final review gate.\n", prefix)
 				gateFindings, gateRoles, gateRoleResults, gateCount, err := runLocalWorkFinalReviewGate(localManifest, codexArgs, completionDir, prefix)
 				if err != nil {
 					return localWorkVerificationReport{}, nil, githubWorkCompletionRoundSummary{}, err
@@ -275,7 +275,7 @@ func loadOrRunGithubVerificationPhase(manifestPath string, manifest *githubWorkM
 	if err := setGithubWorkPhase(manifestPath, manifest, "completion-verify", githubCompletionRoundFromPath(artifactPath)); err != nil {
 		return localWorkVerificationReport{}, err
 	}
-	fmt.Fprintf(os.Stdout, "[github] %s: running verification.\n", filepath.Base(strings.TrimSuffix(artifactPath, ".json")))
+	fmt.Fprintf(currentWorkStdout(), "[github] %s: running verification.\n", filepath.Base(strings.TrimSuffix(artifactPath, ".json")))
 	report, err := runLocalVerification(manifest.SandboxRepoPath, *manifest.VerificationPlan, true)
 	if err != nil {
 		return localWorkVerificationReport{}, err

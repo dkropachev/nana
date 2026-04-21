@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -49,15 +50,19 @@ type nanaArtifact struct {
 }
 
 func Artifacts(cwd string, args []string) error {
+	return artifactsWithIO(cwd, args, os.Stdout)
+}
+
+func artifactsWithIO(cwd string, args []string, stdout io.Writer) error {
 	if len(args) == 0 || isHelpToken(args[0]) {
-		fmt.Fprint(os.Stdout, ArtifactsHelp)
+		fmt.Fprint(stdout, ArtifactsHelp)
 		return nil
 	}
 
 	switch args[0] {
 	case "list":
 		if wantsArtifactsListHelp(args[1:]) {
-			fmt.Fprint(os.Stdout, ArtifactsHelp)
+			fmt.Fprint(stdout, ArtifactsHelp)
 			return nil
 		}
 		options, err := parseArtifactsOptions(args[1:])
@@ -73,11 +78,11 @@ func Artifacts(cwd string, args []string) error {
 			return err
 		}
 		if options.JSON {
-			encoder := json.NewEncoder(os.Stdout)
+			encoder := json.NewEncoder(stdout)
 			encoder.SetIndent("", "  ")
 			return encoder.Encode(index)
 		}
-		printNanaArtifactIndex(index)
+		printNanaArtifactIndex(stdout, index)
 		return nil
 	default:
 		return fmt.Errorf("Unknown artifacts subcommand: %s\n\n%s", args[0], ArtifactsHelp)
@@ -775,10 +780,10 @@ func artifactTypeRank(value string) int {
 	return len(order)
 }
 
-func printNanaArtifactIndex(index nanaArtifactIndex) {
-	fmt.Fprintf(os.Stdout, "NANA artifacts in %s\n", index.NanaDir)
+func printNanaArtifactIndex(stdout io.Writer, index nanaArtifactIndex) {
+	fmt.Fprintf(stdout, "NANA artifacts in %s\n", index.NanaDir)
 	if len(index.Artifacts) == 0 {
-		fmt.Fprintln(os.Stdout, "No artifacts found.")
+		fmt.Fprintln(stdout, "No artifacts found.")
 		return
 	}
 
@@ -801,18 +806,18 @@ func printNanaArtifactIndex(index nanaArtifactIndex) {
 
 	for _, artifactType := range types {
 		items := groups[artifactType]
-		fmt.Fprintf(os.Stdout, "\n%s (%d)\n", artifactType, len(items))
+		fmt.Fprintf(stdout, "\n%s (%d)\n", artifactType, len(items))
 		for _, artifact := range items {
 			timestamp := defaultString(artifact.Timestamp, "n/a")
 			mode := defaultString(artifact.Mode, "n/a")
-			fmt.Fprintf(os.Stdout, "  %s  %-12s  %s", timestamp, mode, artifact.Path)
+			fmt.Fprintf(stdout, "  %s  %-12s  %s", timestamp, mode, artifact.Path)
 			if artifact.Summary != "" {
-				fmt.Fprintf(os.Stdout, " — %s", artifact.Summary)
+				fmt.Fprintf(stdout, " — %s", artifact.Summary)
 			}
 			if artifact.Files > 0 {
-				fmt.Fprintf(os.Stdout, " (%d files)", artifact.Files)
+				fmt.Fprintf(stdout, " (%d files)", artifact.Files)
 			}
-			fmt.Fprintln(os.Stdout)
+			fmt.Fprintln(stdout)
 		}
 	}
 }

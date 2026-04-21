@@ -280,16 +280,16 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 		return githubWorkManifest{}, err
 	}
 
-	fmt.Fprintf(os.Stdout, "[github] Starting run %s for %s %s #%d\n", runID, manifest.RepoSlug, manifest.TargetKind, manifest.TargetNumber)
-	fmt.Fprintf(os.Stdout, "[github] Managed repo root: %s\n", paths.RepoRoot)
-	fmt.Fprintf(os.Stdout, "[github] Managed sandbox: %s -> %s\n", sandboxID, sandboxPath)
-	fmt.Fprintf(os.Stdout, "[github] Managed repo checkout: %s\n", sandboxRepoPath)
-	fmt.Fprintf(os.Stdout, "[github] Reviewer sync user: %s\n", options.Reviewer)
+	fmt.Fprintf(currentWorkStdout(), "[github] Starting run %s for %s %s #%d\n", runID, manifest.RepoSlug, manifest.TargetKind, manifest.TargetNumber)
+	fmt.Fprintf(currentWorkStdout(), "[github] Managed repo root: %s\n", paths.RepoRoot)
+	fmt.Fprintf(currentWorkStdout(), "[github] Managed sandbox: %s -> %s\n", sandboxID, sandboxPath)
+	fmt.Fprintf(currentWorkStdout(), "[github] Managed repo checkout: %s\n", sandboxRepoPath)
+	fmt.Fprintf(currentWorkStdout(), "[github] Reviewer sync user: %s\n", options.Reviewer)
 	if strings.TrimSpace(result.Stdout) != "" {
-		fmt.Fprint(os.Stdout, result.Stdout)
+		fmt.Fprint(currentWorkStdout(), result.Stdout)
 	}
 	if strings.TrimSpace(result.Stderr) != "" {
-		fmt.Fprint(os.Stdout, result.Stderr)
+		fmt.Fprint(currentWorkStdout(), result.Stderr)
 	}
 	if runErr != nil {
 		return manifest, runErr

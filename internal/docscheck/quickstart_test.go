@@ -15,16 +15,12 @@ func TestQuickstartMakesProfileBackedVerifyConditional(t *testing.T) {
 	}
 
 	fiveMinuteCommands := fencedBlockAfterHeading(t, string(content), "## Five-minute path", "bash")
-	if strings.Contains(fiveMinuteCommands, "\nnana verify --json\n") {
-		t.Fatal("five-minute path must not present a bare nana verify --json as mandatory")
-	}
 	for _, expected := range []string{
-		"if [ -f nana-verify.json ]; then",
+		"nana repo onboard --repo .",
 		"nana verify --json",
-		"No nana-verify.json found; run this project's native checks instead.",
 	} {
 		if !strings.Contains(fiveMinuteCommands, expected) {
-			t.Fatalf("five-minute path should condition profile-backed verification with %q; got:\n%s", expected, fiveMinuteCommands)
+			t.Fatalf("five-minute path should include onboarded verification guidance %q; got:\n%s", expected, fiveMinuteCommands)
 		}
 	}
 }

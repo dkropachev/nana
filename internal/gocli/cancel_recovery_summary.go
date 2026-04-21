@@ -129,7 +129,7 @@ func isPlanArtifactFile(name string) bool {
 
 func safeCancelRecoveryCommands(cwd string) []string {
 	commands := []string{"nana status", "nana doctor"}
-	if _, err := os.Stat(filepath.Join(cwd, "nana-verify.json")); err == nil {
+	if _, _, ok := findVerificationProfile(cwd); ok {
 		commands = append(commands, "nana verify --json")
 	}
 	return commands

@@ -155,3 +155,96 @@ func TestReconcileStartWorkScoutJobRunStateKeepsPausedRunBoundToRunningJob(t *te
 		t.Fatalf("expected paused run error to be preserved, got %+v", job)
 	}
 }
+
+func TestSyncStartWorkScoutJobsKeepsBoundRunningRunWhenLegacyPlannedItemIsPrelaunch(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		plannedState string
+	}{
+		{name: "queued", plannedState: startPlannedItemQueued},
+		{name: "launching_without_run_id", plannedState: startPlannedItemLaunching},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+
+			repoSlug := "acme/widget"
+			sourcePath := githubManagedPaths(repoSlug).SourcePath
+			repo := createLocalWorkRepoAt(t, sourcePath)
+			writeScoutPickupFixture(t, repo, improvementScoutRole, "Improve help text", "Make help clearer")
+			if err := writeGithubJSON(filepath.Join(repo, ".nana", "improvements", "improve-test", "policy.json"), improvementPolicy{
+				Version:          1,
+				IssueDestination: improvementDestinationLocal,
+				Labels:           []string{"improvement"},
+			}); err != nil {
+				t.Fatalf("write policy: %v", err)
+			}
+
+			proposal := scoutFinding{
+				Title:             "Improve help text",
+				Area:              "UX",
+				Summary:           "Make help clearer",
+				Rationale:         "Users need this.",
+				Evidence:          "README.md",
+				Impact:            "Better workflow.",
+				SuggestedNextStep: "Make the smallest change.",
+				Files:             []string{"README.md"},
+			}
+			proposalID := localScoutProposalID(improvementScoutRole, proposal)
+			artifactPath := filepath.ToSlash(filepath.Join(".nana", "improvements", "improve-test"))
+			now := time.Now().UTC().Format(time.RFC3339)
+			if err := writeStartWorkState(startWorkState{
+				Version:    startWorkStateVersion,
+				SourceRepo: repoSlug,
+				UpdatedAt:  now,
+				PlannedItems: map[string]startWorkPlannedItem{
+					"planned-scout": {
+						ID:          "planned-scout",
+						RepoSlug:    repoSlug,
+						Title:       startUIScoutPlannedItemTitle(startUIScoutItem{Title: proposal.Title}),
+						Description: "Source artifact: " + artifactPath + "\nScout role: " + improvementScoutRole,
+						LaunchKind:  "local_work",
+						State:       tc.plannedState,
+						CreatedAt:   now,
+						UpdatedAt:   now,
+					},
+				},
+				ScoutJobs: map[string]startWorkScoutJob{
+					proposalID: {
+						ID:                  proposalID,
+						Role:                improvementScoutRole,
+						Title:               proposal.Title,
+						Summary:             proposal.Summary,
+						ArtifactPath:        artifactPath,
+						ProposalPath:        filepath.ToSlash(filepath.Join(artifactPath, "proposals.json")),
+						Destination:         improvementDestinationLocal,
+						TaskBody:            "Implement local scout proposal: Improve help text",
+						Status:              startScoutJobRunning,
+						RunID:               "lw-existing",
+						UpdatedAt:           now,
+						CreatedAt:           now,
+						LegacyPlannedItemID: "planned-scout",
+					},
+				},
+			}); err != nil {
+				t.Fatalf("write start state: %v", err)
+			}
+
+			_, _, err := syncStartWorkScoutJobs(repo, repoSlug)
+			if err != nil {
+				t.Fatalf("syncStartWorkScoutJobs: %v", err)
+			}
+			workState, err := readStartWorkState(repoSlug)
+			if err != nil {
+				t.Fatalf("read start state: %v", err)
+			}
+			job := workState.ScoutJobs[proposalID]
+			if job.Status != startScoutJobRunning || job.RunID != "lw-existing" {
+				t.Fatalf("expected running scout job to keep its bound run, got %+v", job)
+			}
+			if _, ok := workState.PlannedItems["planned-scout"]; ok {
+				t.Fatalf("expected stale scout-derived planned item to be removed, got %+v", workState.PlannedItems)
+			}
+		})
+	}
+}

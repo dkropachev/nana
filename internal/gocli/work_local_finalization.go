@@ -278,7 +278,7 @@ func applyLocalWorkFinalDiff(manifest localWorkManifest) localWorkFinalApplyResu
 		if resolveErr != nil {
 			return localWorkFinalApplyResult{Status: "blocked-before-apply", Error: fmt.Sprintf("final apply onto %s failed after syncing target branch: %v", localWorkFinalApplyTargetLabel(target, manifest.SourceBranch), err)}
 		}
-		fmt.Fprintf(os.Stdout, "[local] Auto-resolved final apply conflicts by preferring sandbox changes for: %s\n", strings.Join(resolvedPaths, ", "))
+		fmt.Fprintf(currentWorkStdout(), "[local] Auto-resolved final apply conflicts by preferring sandbox changes for: %s\n", strings.Join(resolvedPaths, ", "))
 	}
 	if err := githubRunGit(manifest.RepoRoot, "commit", "-m", fmt.Sprintf("nana work: apply %s", manifest.RunID)); err != nil {
 		return localWorkFinalApplyResult{
@@ -376,7 +376,7 @@ func refreshLocalWorkIterationBaseline(manifest *localWorkManifest, iteration in
 	if err := writeLocalWorkManifest(*manifest); err != nil {
 		return false, err
 	}
-	fmt.Fprintf(os.Stdout, "[local] Iteration %d: refreshed sandbox baseline from %s to %s.\n",
+	fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d: refreshed sandbox baseline from %s to %s.\n",
 		iteration,
 		shortGitRef(previousBaseline),
 		shortGitRef(currentBaseline),
@@ -424,7 +424,7 @@ func refreshLocalWorkSandboxBaseline(repoPath string, sourceBranch string, basel
 		if err := githubRunGit(repoPath, "add", "--all"); err != nil {
 			return fmt.Errorf("failed to stage sandbox paths after conflict resolution in iteration %d: %w", iteration, err)
 		}
-		fmt.Fprintf(os.Stdout, "[local] Iteration %d: auto-resolved sandbox refresh conflicts by preferring sandbox changes for: %s\n", iteration, strings.Join(resolvedPaths, ", "))
+		fmt.Fprintf(currentWorkStdout(), "[local] Iteration %d: auto-resolved sandbox refresh conflicts by preferring sandbox changes for: %s\n", iteration, strings.Join(resolvedPaths, ", "))
 	}
 	if err := githubRunGit(repoPath, "stash", "drop", stashRef); err != nil {
 		return fmt.Errorf("refreshed sandbox baseline for iteration %d, but failed to drop temporary stash: %w", iteration, err)
@@ -478,7 +478,7 @@ func refreshLocalWorkTrackedBranch(repoPath string, sourceBranch string, target 
 	if err := githubRunGit(repoPath, "reset", "--hard", remoteRef); err != nil {
 		return fmt.Errorf("failed to refresh managed source checkout for %s to %s %s: %w", managedRepoSlug, localWorkFinalApplyTargetLabel(target, sourceBranch), phase, err)
 	}
-	fmt.Fprintf(os.Stdout, "[local] Refreshed managed source checkout %s to %s %s; preserved previous HEAD at %s.\n",
+	fmt.Fprintf(currentWorkStdout(), "[local] Refreshed managed source checkout %s to %s %s; preserved previous HEAD at %s.\n",
 		managedRepoSlug,
 		localWorkFinalApplyTargetLabel(target, sourceBranch),
 		phase,
@@ -533,7 +533,7 @@ func cleanupDirtyManagedLocalWorkRepo(repoPath string, phase string) error {
 	if err := githubRunGit(repoPath, "clean", "-fd"); err != nil {
 		return fmt.Errorf("failed to clean dirty managed source checkout %s %s: %w", managedRepoSlug, phase, err)
 	}
-	fmt.Fprintf(os.Stdout, "[local] Reset dirty managed source checkout %s %s.\n", managedRepoSlug, phase)
+	fmt.Fprintf(currentWorkStdout(), "[local] Reset dirty managed source checkout %s %s.\n", managedRepoSlug, phase)
 	return nil
 }
 

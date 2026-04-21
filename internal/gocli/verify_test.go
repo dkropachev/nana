@@ -11,27 +11,49 @@ import (
 	"testing"
 )
 
+func initVerifyTestRepo(t *testing.T) string {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	repo := t.TempDir()
+	cmd := exec.Command("git", "init", "-b", "main")
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git init: %v\n%s", err, output)
+	}
+	return repo
+}
+
+func writeManagedVerificationTestProfile(t *testing.T, repoRoot string, content string) string {
+	t.Helper()
+	path := managedVerificationPlanPathForRepoRoot(repoRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir managed verification dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write managed verification plan: %v", err)
+	}
+	return path
+}
+
 func TestVerifyHelpDoesNotRequireProfile(t *testing.T) {
 	output, err := captureStdout(t, func() error { return Verify(t.TempDir(), []string{"--help"}) })
 	if err != nil {
 		t.Fatalf("Verify(--help): %v", err)
 	}
-	if !strings.Contains(output, "nana verify - Run the repository-native verification profile") {
+	if !strings.Contains(output, "nana verify - Run the managed verification plan for an onboarded repo") {
 		t.Fatalf("unexpected help output: %q", output)
 	}
 }
 
 func TestLoadVerificationProfileSearchesParents(t *testing.T) {
-	repo := t.TempDir()
-	profilePath := filepath.Join(repo, VerifyProfileFile)
-	if err := os.WriteFile(profilePath, []byte(`{
+	repo := initVerifyTestRepo(t)
+	profilePath := writeManagedVerificationTestProfile(t, repo, `{
   "version": 1,
   "name": "test-profile",
   "stages": [{"name":"lint","command":"printf ok"}]
 }
-`), 0o644); err != nil {
-		t.Fatalf("write profile: %v", err)
-	}
+`)
 	nested := filepath.Join(repo, "cmd", "nana")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatalf("mkdir nested: %v", err)
@@ -53,14 +75,12 @@ func TestLoadVerificationProfileSearchesParents(t *testing.T) {
 }
 
 func TestLoadVerificationProfileDefaultsOmittedVersion(t *testing.T) {
-	repo := t.TempDir()
-	if err := os.WriteFile(filepath.Join(repo, VerifyProfileFile), []byte(`{
+	repo := initVerifyTestRepo(t)
+	writeManagedVerificationTestProfile(t, repo, `{
   "name": "implicit-version-profile",
   "stages": [{"name":"lint","command":"printf ok"}]
 }
-`), 0o644); err != nil {
-		t.Fatalf("write profile: %v", err)
-	}
+`)
 
 	_, _, profile, err := loadVerificationProfile(repo)
 	if err != nil {
@@ -80,11 +100,9 @@ func TestVerifyProfileRejectsExplicitNonPositiveVersion(t *testing.T) {
 		{name: "negative", version: -1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			repo := t.TempDir()
+			repo := initVerifyTestRepo(t)
 			profile := fmt.Sprintf(`{"version":%d,"stages":[{"name":"noop","command":"true"}]}`+"\n", tc.version)
-			if err := os.WriteFile(filepath.Join(repo, VerifyProfileFile), []byte(profile), 0o644); err != nil {
-				t.Fatalf("write profile: %v", err)
-			}
+			writeManagedVerificationTestProfile(t, repo, profile)
 
 			stdout, stderr, err := captureOutput(t, func() error { return Verify(repo, []string{"--profile"}) })
 			if err == nil {
@@ -103,9 +121,8 @@ func TestVerifyProfileRejectsExplicitNonPositiveVersion(t *testing.T) {
 }
 
 func TestLoadVerificationProfileIncludesChangedScopeGuidance(t *testing.T) {
-	repo := t.TempDir()
-	profilePath := filepath.Join(repo, VerifyProfileFile)
-	if err := os.WriteFile(profilePath, []byte(`{
+	repo := initVerifyTestRepo(t)
+	writeManagedVerificationTestProfile(t, repo, `{
   "version": 1,
   "name": "changed-scope-profile",
   "stages": [
@@ -128,9 +145,7 @@ func TestLoadVerificationProfileIncludesChangedScopeGuidance(t *testing.T) {
     ]
   }
 }
-`), 0o644); err != nil {
-		t.Fatalf("write profile: %v", err)
-	}
+`)
 
 	_, _, profile, err := loadVerificationProfile(repo)
 	if err != nil {
@@ -162,17 +177,15 @@ func TestLoadVerificationProfileIncludesChangedScopeGuidance(t *testing.T) {
 }
 
 func TestLoadVerificationProfileRequiresChangedScopeFullCheck(t *testing.T) {
-	repo := t.TempDir()
-	if err := os.WriteFile(filepath.Join(repo, VerifyProfileFile), []byte(`{
+	repo := initVerifyTestRepo(t)
+	writeManagedVerificationTestProfile(t, repo, `{
   "version": 1,
   "stages": [{"name":"lint","command":"make lint"}],
   "changed_scope": {
     "paths": [{"name":"docs","patterns":["*.md"],"checks":["git diff --check"]}]
   }
 }
-`), 0o644); err != nil {
-		t.Fatalf("write profile: %v", err)
-	}
+`)
 
 	_, _, _, err := loadVerificationProfile(repo)
 	if err == nil || !strings.Contains(err.Error(), "changed_scope.full_check is missing command") {
@@ -180,66 +193,29 @@ func TestLoadVerificationProfileRequiresChangedScopeFullCheck(t *testing.T) {
 	}
 }
 
-func TestLoadVerificationProfileRepositoryRuntimeGuidanceTargetsExistingSetupFallbackTest(t *testing.T) {
+func TestRepositoryVerificationUsesLowMemoryGoTestDefaults(t *testing.T) {
 	repoRoot := repoRootFromCaller(t)
-	_, _, profile, err := loadVerificationProfile(repoRoot)
+
+	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
 	if err != nil {
-		t.Fatalf("loadVerificationProfile(%q): %v", repoRoot, err)
+		t.Fatalf("read Makefile: %v", err)
 	}
-	if profile.ChangedScope == nil {
-		t.Fatalf("repository profile is missing changed_scope guidance")
-	}
-
-	var setupCheck string
-	for _, pathScope := range profile.ChangedScope.Paths {
-		if pathScope.Name != "runtime-guidance-assets" {
-			continue
-		}
-		for _, check := range pathScope.Checks {
-			if strings.Contains(check, "./internal/gocli") && strings.Contains(check, "TestSetupProject") {
-				setupCheck = check
-				break
-			}
-		}
-	}
-	if setupCheck == "" {
-		t.Fatalf("runtime-guidance-assets changed_scope is missing a setup project check: %#v", profile.ChangedScope.Paths)
-	}
-	if strings.Contains(setupCheck, "TestSetupProjectUsesEmbeddedAssetsWhenRepoRootMissing") {
-		t.Fatalf("runtime-guidance-assets changed_scope still targets removed setup test: %q", setupCheck)
-	}
-
-	const setupFallbackTest = "TestSetupProjectFallsBackToEmbeddedAssets"
-	for _, required := range []string{
-		"go test ./internal/gocli -list '^" + setupFallbackTest + "$'",
-		"grep -q '^" + setupFallbackTest + "$'",
-		"go test ./internal/gocli -run '^" + setupFallbackTest + "$'",
+	makefileText := string(makefile)
+	for _, needle := range []string{
+		"GO_TEST_PARALLEL ?= 1",
+		"GOFLAGS= go test -p=$(GO_TEST_PARALLEL) -run '^$$' ./...",
+		"GOFLAGS= go test -p=$(GO_TEST_PARALLEL) ./...",
+		"GOFLAGS= go test -p=$(GO_TEST_PARALLEL) -run=^$$ -bench=. -benchmem ./...",
 	} {
-		if !strings.Contains(setupCheck, required) {
-			t.Fatalf("runtime-guidance-assets setup check should include %q guard, got %q", required, setupCheck)
+		if !strings.Contains(makefileText, needle) {
+			t.Fatalf("Makefile is missing low-memory Go test guardrail %q", needle)
 		}
 	}
 
-	cmd := exec.Command("go", "test", "./internal/gocli", "-list", "^"+setupFallbackTest+"$")
-	cmd.Dir = repoRoot
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("go test ./internal/gocli -list %q failed: %v\n%s", setupFallbackTest, err, string(output))
-	}
-	matched := false
-	for _, line := range strings.Split(string(output), "\n") {
-		if strings.TrimSpace(line) == setupFallbackTest {
-			matched = true
-			break
-		}
-	}
-	if !matched {
-		t.Fatalf("setup fallback test was not listed by go test; output:\n%s", string(output))
-	}
 }
 
 func TestVerifyJSONPreflightReportsMissingProfileRecovery(t *testing.T) {
-	repo := t.TempDir()
+	repo := initVerifyTestRepo(t)
 	if err := os.WriteFile(filepath.Join(repo, "Makefile"), []byte(strings.Join([]string{
 		"lint:",
 		"\t@true",
@@ -260,15 +236,11 @@ func TestVerifyJSONPreflightReportsMissingProfileRecovery(t *testing.T) {
 		t.Fatalf("missing-profile preflight should not corrupt JSON stdout, got %q", stdout)
 	}
 	for _, needle := range []string{
-		"[verify] preflight: nana-verify.json was not found.",
-		"[verify] searched for nana-verify.json",
-		filepath.Join(repo, VerifyProfileFile),
-		"[verify] fallback: detected repo-native checks from makefile",
-		"lint: make lint",
-		"compile: make build",
-		"unit: make test",
-		"[verify] define: add nana-verify.json at the repo root",
-		`{"version":1,"stages":[{"name":"test","command":"make test"}]}`,
+		"[verify] preflight: managed verification plan was not found at " + managedVerificationPlanPathForRepoRoot(repo),
+		"[verify] repo root: " + repo,
+		"[verify] expected managed verification plan path(s):",
+		managedVerificationPlanPathForRepoRoot(repo),
+		"[verify] run: nana repo onboard --repo " + repo,
 	} {
 		if !strings.Contains(stderr, needle) {
 			t.Fatalf("missing-profile recovery missing %q; stderr:\n%s", needle, stderr)
@@ -277,11 +249,8 @@ func TestVerifyJSONPreflightReportsMissingProfileRecovery(t *testing.T) {
 }
 
 func TestVerifyJSONPreflightReportsInvalidProfileRecovery(t *testing.T) {
-	repo := t.TempDir()
-	profilePath := filepath.Join(repo, VerifyProfileFile)
-	if err := os.WriteFile(profilePath, []byte(`{"version":1,"stages":[]}`), 0o644); err != nil {
-		t.Fatalf("write profile: %v", err)
-	}
+	repo := initVerifyTestRepo(t)
+	profilePath := writeManagedVerificationTestProfile(t, repo, `{"version":1,"stages":[]}`)
 	if err := os.WriteFile(filepath.Join(repo, "Makefile"), []byte("test:\n\t@true\n"), 0o644); err != nil {
 		t.Fatalf("write Makefile: %v", err)
 	}
@@ -294,12 +263,11 @@ func TestVerifyJSONPreflightReportsInvalidProfileRecovery(t *testing.T) {
 		t.Fatalf("invalid-profile preflight should not corrupt JSON stdout, got %q", stdout)
 	}
 	for _, needle := range []string{
-		"[verify] preflight: cannot use " + profilePath,
+		"[verify] preflight: cannot use managed verification plan " + profilePath,
 		"at least one stage is required",
-		"[verify] searched for nana-verify.json",
-		"[verify] fallback: detected repo-native checks from makefile",
-		"unit: make test",
-		"[verify] define: add nana-verify.json at the repo root",
+		"[verify] repo root: " + repo,
+		managedVerificationPlanPathForRepoRoot(repo),
+		"[verify] run: nana repo onboard --repo " + repo,
 	} {
 		if !strings.Contains(stderr, needle) {
 			t.Fatalf("invalid-profile recovery missing %q; stderr:\n%s", needle, stderr)
@@ -308,16 +276,14 @@ func TestVerifyJSONPreflightReportsInvalidProfileRecovery(t *testing.T) {
 }
 
 func TestVerifyJSONPreflightIsSilentForValidProfile(t *testing.T) {
-	repo := t.TempDir()
+	repo := initVerifyTestRepo(t)
 	profile := `{
   "version": 1,
   "name": "valid-profile",
   "stages": [{"name":"test","command":"printf ok"}]
 }
 `
-	if err := os.WriteFile(filepath.Join(repo, VerifyProfileFile), []byte(profile), 0o644); err != nil {
-		t.Fatalf("write profile: %v", err)
-	}
+	writeManagedVerificationTestProfile(t, repo, profile)
 
 	stdout, stderr, err := captureOutput(t, func() error { return Verify(repo, []string{"--json"}) })
 	if err != nil {
@@ -336,7 +302,7 @@ func TestVerifyJSONPreflightIsSilentForValidProfile(t *testing.T) {
 }
 
 func TestVerifyEmitsJSONEvidence(t *testing.T) {
-	repo := t.TempDir()
+	repo := initVerifyTestRepo(t)
 	if err := os.WriteFile(filepath.Join(repo, "marker.txt"), []byte("marker\n"), 0o644); err != nil {
 		t.Fatalf("write marker: %v", err)
 	}
@@ -349,9 +315,7 @@ func TestVerifyEmitsJSONEvidence(t *testing.T) {
   ]
 }
 `
-	if err := os.WriteFile(filepath.Join(repo, VerifyProfileFile), []byte(profile), 0o644); err != nil {
-		t.Fatalf("write profile: %v", err)
-	}
+	writeManagedVerificationTestProfile(t, repo, profile)
 	nested := filepath.Join(repo, "internal")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatalf("mkdir nested: %v", err)
@@ -381,7 +345,7 @@ func TestVerifyEmitsJSONEvidence(t *testing.T) {
 
 func TestVerifyJSONEvidenceReportsBoundedOutputMetadata(t *testing.T) {
 	t.Setenv(verifyOutputLimitEnv, "6")
-	repo := t.TempDir()
+	repo := initVerifyTestRepo(t)
 	profile := `{
   "version": 1,
   "name": "bounded-profile",
@@ -390,9 +354,7 @@ func TestVerifyJSONEvidenceReportsBoundedOutputMetadata(t *testing.T) {
   ]
 }
 `
-	if err := os.WriteFile(filepath.Join(repo, VerifyProfileFile), []byte(profile), 0o644); err != nil {
-		t.Fatalf("write profile: %v", err)
-	}
+	writeManagedVerificationTestProfile(t, repo, profile)
 
 	output, err := captureStdout(t, func() error { return Verify(repo, []string{"--json"}) })
 	if err != nil {
@@ -421,7 +383,7 @@ func TestVerifyJSONEvidenceReportsBoundedOutputMetadata(t *testing.T) {
 }
 
 func TestRunVerificationProfileReportsFailuresAndContinues(t *testing.T) {
-	repo := t.TempDir()
+	repo := initVerifyTestRepo(t)
 	profile := verificationProfile{
 		Version: 1,
 		Name:    "failure-profile",
@@ -430,7 +392,7 @@ func TestRunVerificationProfileReportsFailuresAndContinues(t *testing.T) {
 			{Name: "static-analysis", Command: "printf still-ran"},
 		},
 	}
-	report, err := runVerificationProfile(repo, filepath.Join(repo, VerifyProfileFile), profile)
+	report, err := runVerificationProfile(repo, managedVerificationPlanPathForRepoRoot(repo), profile)
 	if err != nil {
 		t.Fatalf("runVerificationProfile(): %v", err)
 	}
@@ -621,5 +583,35 @@ func TestVerificationRunsTestBodies(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "intentional failure proves the test body ran") {
 		t.Fatalf("expected output to show the failing test body ran, got %q", result.Output)
+	}
+}
+
+func TestRunVerificationProfileDoesNotDedupeDuplicateStageCommands(t *testing.T) {
+	repo := t.TempDir()
+	logPath := filepath.Join(repo, "verify.log")
+	if err := os.WriteFile(filepath.Join(repo, "count.sh"), []byte("#!/bin/sh\nprintf 'hit\\n' >> verify.log\n"), 0o755); err != nil {
+		t.Fatalf("write count.sh: %v", err)
+	}
+
+	report, err := runVerificationProfileWithOptions(repo, filepath.Join(repo, VerifyProfileFile), verificationProfile{
+		Version: 1,
+		Name:    "dup-profile",
+		Stages: []verificationStageProfile{
+			{Name: "compile", Command: "./count.sh"},
+			{Name: "unit", Command: "./count.sh"},
+		},
+	}, verificationRunOptions{OutputLimitBytes: 8192})
+	if err != nil {
+		t.Fatalf("runVerificationProfileWithOptions: %v", err)
+	}
+	if !report.Passed {
+		t.Fatalf("expected verification to pass: %#v", report)
+	}
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read verify.log: %v", err)
+	}
+	if got := strings.Count(string(content), "hit"); got != 2 {
+		t.Fatalf("expected duplicate stage commands to run twice, got %d hits in %q", got, content)
 	}
 }

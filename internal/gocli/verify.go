@@ -2,19 +2,16 @@ package gocli
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
 
-const VerifyProfileFile = "nana-verify.json"
+const VerifyProfileFile = managedVerificationPlanFile
 
 const (
 	defaultVerifyOutputLimitBytes = 64 * 1024
@@ -22,7 +19,7 @@ const (
 	verifyOutputLimitEnv          = "NANA_VERIFY_OUTPUT_LIMIT_BYTES"
 )
 
-const VerifyHelp = `nana verify - Run the repository-native verification profile
+const VerifyHelp = `nana verify - Run the managed verification plan for an onboarded repo
 
 Usage:
   nana verify [--json]
@@ -34,45 +31,18 @@ Options:
 
 Profile:
   ` + VerifyProfileFile + ` defines the canonical sequential stages for this repo.
+  The file lives in Nana-managed repo state under ~/.nana/work/repos/...
+  and is materialized by ` + "`nana repo onboard`" + `.
   Optional changed_scope guidance may map changed files to targeted checks.
   A changed_scope profile must keep a full_check command as the fallback.
-  Nana searches the current directory and its parents for the profile file.
-  If the profile is missing or invalid, preflight output reports searched paths,
-  detected fallback commands, and a minimal profile example.
+  ` + "`nana verify`" + ` requires the current repo to be onboarded first.
 `
 
-type verificationProfile struct {
-	Version      int                        `json:"version"`
-	Name         string                     `json:"name,omitempty"`
-	Description  string                     `json:"description,omitempty"`
-	Stages       []verificationStageProfile `json:"stages"`
-	ChangedScope *verificationChangedScope  `json:"changed_scope,omitempty"`
-}
-
-type verificationStageProfile struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	Command     string `json:"command"`
-}
-
-type verificationChangedScope struct {
-	Description string                            `json:"description,omitempty"`
-	FullCheck   verificationChangedScopeFullCheck `json:"full_check"`
-	Paths       []verificationChangedScopePath    `json:"paths,omitempty"`
-}
-
-type verificationChangedScopeFullCheck struct {
-	Description string `json:"description,omitempty"`
-	Command     string `json:"command"`
-}
-
-type verificationChangedScopePath struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	Patterns    []string `json:"patterns"`
-	Stages      []string `json:"stages,omitempty"`
-	Checks      []string `json:"checks,omitempty"`
-}
+type verificationProfile = managedVerificationPlan
+type verificationStageProfile = managedVerificationStage
+type verificationChangedScope = managedVerificationChangedScope
+type verificationChangedScopeFullCheck = managedVerificationChangedScopeFullCheck
+type verificationChangedScopePath = managedVerificationChangedScopePath
 
 type verificationCommandEvidence struct {
 	Name             string `json:"name"`
@@ -118,6 +88,7 @@ type verificationRunOptions struct {
 type verificationProfilePreflight struct {
 	Status        string
 	StartDir      string
+	RepoRoot      string
 	SearchedPaths []string
 	ProfilePath   string
 	Error         string
@@ -196,17 +167,22 @@ func loadVerificationProfile(cwd string) (string, string, verificationProfile, e
 }
 
 func loadVerificationProfileWithPreflight(cwd string) (string, string, verificationProfile, verificationProfilePreflight, error) {
-	repoRoot, profilePath, ok, searchedPaths := findVerificationProfileWithSearch(cwd)
+	repoRoot, profilePath, ok, searchedPaths, repoErr := findVerificationProfileWithSearch(cwd)
 	preflight := verificationProfilePreflight{
 		Status:        "valid",
 		StartDir:      absolutePathOrInput(cwd),
+		RepoRoot:      repoRoot,
 		SearchedPaths: searchedPaths,
 		ProfilePath:   profilePath,
 	}
+	if repoErr != nil {
+		preflight.Status = "missing"
+		preflight.Error = repoErr.Error()
+		return "", "", verificationProfile{}, preflight, repoErr
+	}
 	if !ok {
 		preflight.Status = "missing"
-		preflight.Fallback = buildVerificationFallbackSummary(cwd, "")
-		err := fmt.Errorf("%s not found from %s or its parents", VerifyProfileFile, cwd)
+		err := fmt.Errorf("managed verification plan not found at %s", profilePath)
 		preflight.Error = err.Error()
 		return "", "", verificationProfile{}, preflight, err
 	}
@@ -216,7 +192,6 @@ func loadVerificationProfileWithPreflight(cwd string) (string, string, verificat
 		err := fmt.Errorf("invalid %s: %w", profilePath, profileErr)
 		preflight.Status = "invalid"
 		preflight.Error = profileErr.Error()
-		preflight.Fallback = buildVerificationFallbackSummary(cwd, profilePath)
 		return "", "", verificationProfile{}, preflight, err
 	}
 	profile, err := decodeVerificationProfile(content)
@@ -225,7 +200,6 @@ func loadVerificationProfileWithPreflight(cwd string) (string, string, verificat
 		err := fmt.Errorf("invalid %s: %w", profilePath, profileErr)
 		preflight.Status = "invalid"
 		preflight.Error = profileErr.Error()
-		preflight.Fallback = buildVerificationFallbackSummary(cwd, profilePath)
 		return "", "", verificationProfile{}, preflight, err
 	}
 	return repoRoot, profilePath, profile, preflight, nil
@@ -265,28 +239,19 @@ func validateVerificationProfileVersionField(fields map[string]json.RawMessage) 
 }
 
 func findVerificationProfile(cwd string) (string, string, bool) {
-	repoRoot, profilePath, ok, _ := findVerificationProfileWithSearch(cwd)
+	repoRoot, profilePath, ok, _, _ := findVerificationProfileWithSearch(cwd)
 	return repoRoot, profilePath, ok
 }
 
-func findVerificationProfileWithSearch(cwd string) (string, string, bool, []string) {
-	current, err := filepath.Abs(cwd)
+func findVerificationProfileWithSearch(cwd string) (string, string, bool, []string, error) {
+	repoRoot, profilePath, err := managedVerificationPlanPathForCWD(cwd)
 	if err != nil {
-		current = cwd
+		return "", "", false, nil, fmt.Errorf("verify requires a git-backed repo: %w", err)
 	}
-	searchedPaths := []string{}
-	for {
-		candidate := filepath.Join(current, VerifyProfileFile)
-		searchedPaths = append(searchedPaths, candidate)
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return current, candidate, true, searchedPaths
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return "", "", false, searchedPaths
-		}
-		current = parent
+	if info, statErr := os.Stat(profilePath); statErr == nil && !info.IsDir() {
+		return repoRoot, profilePath, true, []string{profilePath}, nil
 	}
+	return repoRoot, profilePath, false, []string{profilePath}, nil
 }
 
 func absolutePathOrInput(path string) string {
@@ -294,47 +259,6 @@ func absolutePathOrInput(path string) string {
 		return absolute
 	}
 	return path
-}
-
-func buildVerificationFallbackSummary(cwd string, profilePath string) verificationFallbackSummary {
-	repoRoot := verificationFallbackRepoRoot(cwd, profilePath)
-	plan := detectGithubVerificationPlan(repoRoot)
-	return verificationFallbackSummary{
-		RepoRoot: repoRoot,
-		Source:   defaultString(plan.Source, "heuristic"),
-		Commands: flattenVerificationFallbackCommands(plan),
-		Warnings: append([]string{}, plan.Warnings...),
-	}
-}
-
-func verificationFallbackRepoRoot(cwd string, profilePath string) string {
-	if strings.TrimSpace(profilePath) != "" {
-		return filepath.Dir(profilePath)
-	}
-	if output, err := readGitOutput(cwd, "rev-parse", "--show-toplevel"); err == nil {
-		if root := strings.TrimSpace(output); root != "" {
-			return filepath.Clean(root)
-		}
-	}
-	return absolutePathOrInput(cwd)
-}
-
-func flattenVerificationFallbackCommands(plan githubVerificationPlan) []verificationFallbackCommand {
-	var commands []verificationFallbackCommand
-	add := func(stage string, values []string) {
-		for _, command := range values {
-			command = strings.TrimSpace(command)
-			if command != "" {
-				commands = append(commands, verificationFallbackCommand{Stage: stage, Command: command})
-			}
-		}
-	}
-	add("lint", plan.Lint)
-	add("compile", plan.Compile)
-	add("unit", plan.Unit)
-	add("integration", plan.Integration)
-	add("benchmark", plan.Benchmarks)
-	return commands
 }
 
 func printVerificationProfileRecovery(preflight verificationProfilePreflight) {
@@ -353,33 +277,28 @@ func formatVerificationProfileRecovery(preflight verificationProfilePreflight) s
 	}
 	var builder strings.Builder
 	if preflight.Status == "missing" {
-		fmt.Fprintf(&builder, "[verify] preflight: %s was not found.\n", VerifyProfileFile)
+		if strings.TrimSpace(preflight.ProfilePath) != "" {
+			fmt.Fprintf(&builder, "[verify] preflight: managed verification plan was not found at %s.\n", preflight.ProfilePath)
+		} else {
+			fmt.Fprintf(&builder, "[verify] preflight: managed verification plan was not found.\n")
+		}
 	} else {
-		fmt.Fprintf(&builder, "[verify] preflight: cannot use %s: %s\n", defaultString(preflight.ProfilePath, VerifyProfileFile), preflight.Error)
+		fmt.Fprintf(&builder, "[verify] preflight: cannot use managed verification plan %s: %s\n", defaultString(preflight.ProfilePath, VerifyProfileFile), preflight.Error)
+	}
+	if strings.TrimSpace(preflight.RepoRoot) != "" {
+		fmt.Fprintf(&builder, "[verify] repo root: %s\n", preflight.RepoRoot)
 	}
 	if len(preflight.SearchedPaths) > 0 {
-		fmt.Fprintf(&builder, "[verify] searched for %s from %s:\n", VerifyProfileFile, defaultString(preflight.StartDir, "."))
+		fmt.Fprintf(&builder, "[verify] expected managed verification plan path(s):\n")
 		for _, path := range preflight.SearchedPaths {
 			fmt.Fprintf(&builder, "[verify]   %s\n", path)
 		}
 	}
-	fallback := preflight.Fallback
-	if len(fallback.Commands) > 0 {
-		fmt.Fprintf(&builder, "[verify] fallback: detected repo-native checks from %s at %s; run these if continuing without a usable profile:\n", defaultString(fallback.Source, "heuristic"), defaultString(fallback.RepoRoot, "."))
-		for _, command := range fallback.Commands {
-			fmt.Fprintf(&builder, "[verify]   %s: %s\n", command.Stage, command.Command)
-		}
+	if strings.TrimSpace(preflight.RepoRoot) != "" {
+		fmt.Fprintf(&builder, "[verify] run: nana repo onboard --repo %s\n", preflight.RepoRoot)
 	} else {
-		fmt.Fprintf(&builder, "[verify] fallback: no automatic checks were detected at %s; use this repo's documented verification commands.\n", defaultString(fallback.RepoRoot, defaultString(preflight.StartDir, ".")))
+		fmt.Fprintf(&builder, "[verify] run: nana repo onboard\n")
 	}
-	for _, warning := range fallback.Warnings {
-		warning = strings.TrimSpace(warning)
-		if warning != "" {
-			fmt.Fprintf(&builder, "[verify] warning: %s\n", warning)
-		}
-	}
-	fmt.Fprintf(&builder, "[verify] define: add %s at the repo root with canonical stages, for example:\n", VerifyProfileFile)
-	fmt.Fprintf(&builder, "[verify]   {\"version\":1,\"stages\":[{\"name\":\"test\",\"command\":\"make test\"}]}\n")
 	return builder.String()
 }
 
@@ -486,89 +405,6 @@ func verifyOutputCaptureLimitBytes() int {
 	return limit
 }
 
-func normalizeVerifyOutputLimit(limit int) int {
-	if limit < 0 {
-		return 0
-	}
-	return limit
-}
-
-type boundedOutputCapture struct {
-	limit  int
-	total  int64
-	buffer []byte
-	start  int
-	size   int
-}
-
-func newBoundedOutputCapture(limit int) *boundedOutputCapture {
-	return &boundedOutputCapture{limit: normalizeVerifyOutputLimit(limit)}
-}
-
-func (capture *boundedOutputCapture) Write(p []byte) (int, error) {
-	capture.total += int64(len(p))
-	if capture.limit == 0 || len(p) == 0 {
-		return len(p), nil
-	}
-	if capture.buffer == nil {
-		capture.buffer = make([]byte, capture.limit)
-	}
-	if len(p) >= capture.limit {
-		copy(capture.buffer, p[len(p)-capture.limit:])
-		capture.start = 0
-		capture.size = capture.limit
-		return len(p), nil
-	}
-
-	if overflow := capture.size + len(p) - capture.limit; overflow > 0 {
-		capture.start = (capture.start + overflow) % capture.limit
-		capture.size -= overflow
-	}
-	end := (capture.start + capture.size) % capture.limit
-	first := min(len(p), capture.limit-end)
-	copy(capture.buffer[end:end+first], p[:first])
-	copy(capture.buffer, p[first:])
-	capture.size += len(p)
-	return len(p), nil
-}
-
-func (capture *boundedOutputCapture) String() string {
-	if capture.size == 0 {
-		return ""
-	}
-	if capture.start+capture.size <= capture.limit {
-		return string(capture.buffer[capture.start : capture.start+capture.size])
-	}
-	tail := make([]byte, capture.size)
-	n := copy(tail, capture.buffer[capture.start:])
-	copy(tail[n:], capture.buffer[:capture.size-n])
-	return string(tail)
-}
-
-func (capture *boundedOutputCapture) TotalBytes() int64 {
-	return capture.total
-}
-
-func (capture *boundedOutputCapture) Truncated() bool {
-	return capture.total > int64(capture.size)
-}
-
-func verificationStreamWriter(capture io.Writer, stream io.Writer) io.Writer {
-	if stream == nil {
-		return capture
-	}
-	return io.MultiWriter(ignoreWriteErrors{Writer: stream}, capture)
-}
-
-type ignoreWriteErrors struct {
-	Writer io.Writer
-}
-
-func (writer ignoreWriteErrors) Write(p []byte) (int, error) {
-	_, _ = writer.Writer.Write(p)
-	return len(p), nil
-}
-
 func printVerificationProfile(profilePath string, profile verificationProfile, jsonOutput bool) error {
 	if jsonOutput {
 		payload := struct {
@@ -606,15 +442,25 @@ func runVerificationProfileWithOptions(repoRoot string, profilePath string, prof
 		Profile:     profile,
 		Passed:      true,
 	}
-	for _, stage := range profile.Stages {
-		result, err := runVerificationStageWithOptions(repoRoot, stage, options)
-		if err != nil {
-			return verificationEvidence{}, err
+	executed, err := executeVerificationStages(repoRoot, verificationExecutionStagesFromProfile(profile), verificationExecutionOptions{
+		OutputLimitBytes: options.OutputLimitBytes,
+		Stdout:           options.Stdout,
+		Stderr:           options.Stderr,
+		SanitizeEnv:      true,
+		DedupeCommands:   false,
+	})
+	if err != nil {
+		return verificationEvidence{}, err
+	}
+	for _, stage := range executed {
+		if len(stage.Commands) == 0 {
+			continue
 		}
+		result := verificationCommandEvidenceFromExecution(stage)
 		report.Stages = append(report.Stages, result)
 		if result.ExitCode != 0 {
 			report.Passed = false
-			report.FailedStages = append(report.FailedStages, stage.Name)
+			report.FailedStages = append(report.FailedStages, result.Name)
 		}
 	}
 	report.DurationMillis = time.Since(started).Milliseconds()
@@ -625,91 +471,47 @@ func runVerificationStage(repoRoot string, stage verificationStageProfile) (veri
 	return runVerificationStageWithOptions(repoRoot, stage, defaultVerificationRunOptions())
 }
 
-func verificationShellCommand(command string) (string, []string) {
-	if runtime.GOOS == "windows" {
-		return "cmd", []string{"/C", command}
+func runVerificationStageWithOptions(repoRoot string, stage verificationStageProfile, options verificationRunOptions) (verificationCommandEvidence, error) {
+	executed, err := executeVerificationStages(repoRoot, []verificationExecutionStage{{
+		Name:        stage.Name,
+		Description: stage.Description,
+		Commands: []verificationExecutionCommand{{
+			Command: stage.Command,
+		}},
+	}}, verificationExecutionOptions{
+		OutputLimitBytes: options.OutputLimitBytes,
+		Stdout:           options.Stdout,
+		Stderr:           options.Stderr,
+		SanitizeEnv:      true,
+		DedupeCommands:   false,
+	})
+	if err != nil {
+		return verificationCommandEvidence{}, err
 	}
-	return "sh", []string{"-c", command}
+	if len(executed) == 0 || len(executed[0].Commands) == 0 {
+		return verificationCommandEvidence{}, fmt.Errorf("verification stage %q did not execute", stage.Name)
+	}
+	return verificationCommandEvidenceFromExecution(executed[0]), nil
 }
 
-func runVerificationStageWithOptions(repoRoot string, stage verificationStageProfile, options verificationRunOptions) (verificationCommandEvidence, error) {
-	started := time.Now()
-	shell, shellArgs := verificationShellCommand(stage.Command)
-	cmd := exec.Command(shell, shellArgs...)
-	cmd.Dir = repoRoot
-	cmd.Env = verificationCommandEnv(cmd.Environ())
-
-	limit := normalizeVerifyOutputLimit(options.OutputLimitBytes)
-	stdoutCapture := newBoundedOutputCapture(limit)
-	stderrCapture := newBoundedOutputCapture(limit)
-	cmd.Stdout = verificationStreamWriter(stdoutCapture, options.Stdout)
-	cmd.Stderr = verificationStreamWriter(stderrCapture, options.Stderr)
-
-	err := cmd.Run()
-	exitCode := 0
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			exitCode = exitErr.ExitCode()
-		} else {
-			return verificationCommandEvidence{}, err
-		}
-	}
-	output := strings.TrimSpace(strings.Join([]string{strings.TrimSpace(stdoutCapture.String()), strings.TrimSpace(stderrCapture.String())}, "\n"))
-	status := "passed"
-	if exitCode != 0 {
-		status = "failed"
-	}
-	stdoutBytes := stdoutCapture.TotalBytes()
-	stderrBytes := stderrCapture.TotalBytes()
+func verificationCommandEvidenceFromExecution(stage verificationExecutionStageResult) verificationCommandEvidence {
+	command := stage.Commands[0]
 	return verificationCommandEvidence{
 		Name:             stage.Name,
 		Description:      stage.Description,
-		Command:          stage.Command,
-		Status:           status,
-		ExitCode:         exitCode,
-		DurationMillis:   time.Since(started).Milliseconds(),
-		Output:           output,
-		OutputBytes:      stdoutBytes + stderrBytes,
-		OutputTruncated:  stdoutCapture.Truncated() || stderrCapture.Truncated(),
-		OutputLimitBytes: limit,
-		StdoutBytes:      stdoutBytes,
-		StdoutTruncated:  stdoutCapture.Truncated(),
-		StderrBytes:      stderrBytes,
-		StderrTruncated:  stderrCapture.Truncated(),
-	}, nil
-}
-
-func verificationCommandEnv(environ []string) []string {
-	cleaned := make([]string, 0, len(environ))
-	for _, entry := range environ {
-		key, _, ok := strings.Cut(entry, "=")
-		if ok && isVerificationControlEnvKey(key) {
-			continue
-		}
-		cleaned = append(cleaned, entry)
+		Command:          command.Command,
+		Status:           stage.Status,
+		ExitCode:         command.ExitCode,
+		DurationMillis:   stage.DurationMillis,
+		Output:           command.Output,
+		OutputBytes:      command.OutputBytes,
+		OutputTruncated:  command.OutputTruncated,
+		OutputLimitBytes: command.OutputLimitBytes,
+		StdoutBytes:      command.StdoutBytes,
+		StdoutTruncated:  command.StdoutTruncated,
+		StderrBytes:      command.StderrBytes,
+		StderrTruncated:  command.StderrTruncated,
 	}
-	return cleaned
-}
-
-func isVerificationControlEnvKey(key string) bool {
-	return isMakeControlEnvKey(key) || envKeyEqual(key, "GOFLAGS")
-}
-
-func isMakeControlEnvKey(key string) bool {
-	for _, makeKey := range []string{"MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS", "MAKEFILES"} {
-		if envKeyEqual(key, makeKey) {
-			return true
-		}
-	}
-	return false
-}
-
-func envKeyEqual(key string, want string) bool {
-	if runtime.GOOS == "windows" {
-		return strings.EqualFold(key, want)
-	}
-	return key == want
 }
 
 func printVerificationEvidence(report verificationEvidence, jsonOutput bool) error {

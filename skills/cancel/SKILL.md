@@ -99,7 +99,7 @@ Recovery summary:
   Safe next commands:
     - nana status
     - nana doctor
-    - nana verify --json
+    - nana verify --json (for onboarded repos)
 ```
 
 ## Notes

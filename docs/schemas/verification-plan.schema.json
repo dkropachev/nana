@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://dkropachev.github.io/nana/schemas/nana-verify.schema.json",
-  "title": "NANA verification profile",
-  "description": "Repository-native verification profile consumed by `nana verify` from nana-verify.json.",
+  "$id": "https://dkropachev.github.io/nana/schemas/verification-plan.schema.json",
+  "title": "NANA managed verification plan",
+  "description": "Managed repository verification plan consumed by `nana verify` from verification-plan.json in Nana-managed repo state.",
   "type": "object",
   "additionalProperties": false,
   "required": ["stages"],
@@ -20,6 +20,51 @@
     },
     "description": {
       "type": "string"
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "lint": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "compile": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "unit": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "integration": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "benchmarks": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "plan_fingerprint": {
+      "type": "string"
+    },
+    "source_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "checksum", "kind"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "checksum": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "kind": { "type": "string", "minLength": 1, "pattern": "\\S" }
+        }
+      }
     },
     "changed_scope": {
       "type": "object",

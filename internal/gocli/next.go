@@ -3,6 +3,7 @@ package gocli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -45,11 +46,15 @@ type attentionReport struct {
 }
 
 func Next(cwd string, args []string) error {
+	return nextWithIO(cwd, args, os.Stdout)
+}
+
+func nextWithIO(cwd string, args []string, stdout io.Writer) error {
 	jsonOutput := false
 	for _, arg := range args {
 		switch arg {
 		case "--help", "-h", "help":
-			fmt.Fprint(os.Stdout, NextUsage)
+			fmt.Fprint(stdout, NextUsage)
 			return nil
 		case "--json":
 			jsonOutput = true
@@ -67,11 +72,11 @@ func Next(cwd string, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(os.Stdout, string(payload))
+		fmt.Fprintln(stdout, string(payload))
 		return nil
 	}
 
-	fmt.Fprintln(os.Stdout, formatAttentionReport(report))
+	fmt.Fprintln(stdout, formatAttentionReport(report))
 	return nil
 }
 

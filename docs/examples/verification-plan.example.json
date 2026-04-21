@@ -1,0 +1,61 @@
+{
+  "$schema": "docs/schemas/verification-plan.schema.json",
+  "version": 1,
+  "name": "nana-go",
+  "description": "Canonical managed repository verification plan for local completion evidence.",
+  "source": "makefile",
+  "stages": [
+    {
+      "name": "lint",
+      "description": "Check Go formatting without modifying files.",
+      "command": "make lint"
+    },
+    {
+      "name": "typecheck",
+      "description": "Compile Go packages and tests without running test bodies.",
+      "command": "make typecheck"
+    },
+    {
+      "name": "test",
+      "description": "Run the Go test suite.",
+      "command": "make test"
+    },
+    {
+      "name": "static-analysis",
+      "description": "Run Go static analysis checks.",
+      "command": "make static-analysis"
+    }
+  ],
+  "lint": [
+    "make lint"
+  ],
+  "compile": [
+    "make typecheck"
+  ],
+  "unit": [
+    "make test"
+  ],
+  "integration": [],
+  "benchmarks": [],
+  "changed_scope": {
+    "description": "Advisory changed-file map for local iteration.",
+    "full_check": {
+      "description": "Canonical full repository fallback for release confidence.",
+      "command": "make verify"
+    },
+    "paths": [
+      {
+        "name": "verify-runtime",
+        "description": "Verification CLI changes should prove parsing and evidence output still work.",
+        "patterns": [
+          "internal/gocli/verify*.go",
+          "internal/gocli/verification_plan.go",
+          "docs/schemas/verification-plan.schema.json"
+        ],
+        "checks": [
+          "go test -p=1 ./internal/gocli -run '^(TestVerify|TestLoadVerificationProfile)'"
+        ]
+      }
+    ]
+  }
+}

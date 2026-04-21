@@ -7,6 +7,7 @@ BINDIR ?= $(PREFIX)/bin
 NANA_BIN ?= $(BINDIR)/nana
 REPO_ROOT := $(abspath .)
 NANA_ENTRY := $(REPO_ROOT)/bin/nana
+GO_TEST_PARALLEL ?= 1
 
 .PHONY: all help build lint typecheck test benchmark fmt vet static-analysis verify install install-local uninstall run setup doctor clean release-assets
 
@@ -43,13 +44,13 @@ lint:
 	if [ -n "$$out" ]; then printf '%s\n' "$$out"; exit 1; fi
 
 typecheck:
-	GOFLAGS= go test -run '^$$' ./...
+	GOFLAGS= go test -p=$(GO_TEST_PARALLEL) -run '^$$' ./...
 
 test:
-	GOFLAGS= go test ./...
+	GOFLAGS= go test -p=$(GO_TEST_PARALLEL) ./...
 
 benchmark:
-	GOFLAGS= go test -run=^$$ -bench=. -benchmem ./...
+	GOFLAGS= go test -p=$(GO_TEST_PARALLEL) -run=^$$ -bench=. -benchmem ./...
 
 fmt:
 	gofmt -w $$(find cmd internal -type f -name '*.go')

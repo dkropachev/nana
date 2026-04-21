@@ -3,6 +3,7 @@ package gocli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -27,25 +28,29 @@ type nanaUserConfig struct {
 }
 
 func Status(cwd string) error {
+	return statusWithIO(cwd, os.Stdout, os.Stderr)
+}
+
+func statusWithIO(cwd string, stdout io.Writer, stderr io.Writer) error {
 	refs, err := ListModeStateFilesWithScopePreference(cwd)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[nana-go] status warning: %v\n", err)
-		fmt.Fprintln(os.Stdout, "No active modes.")
+		fmt.Fprintf(stderr, "[nana-go] status warning: %v\n", err)
+		fmt.Fprintln(stdout, "No active modes.")
 		return nil
 	}
 	if len(refs) == 0 {
-		fmt.Fprintln(os.Stdout, "No active modes.")
+		fmt.Fprintln(stdout, "No active modes.")
 		return nil
 	}
 	for _, ref := range refs {
 		content, err := os.ReadFile(ref.Path)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[nana-go] status warning: %v\n", err)
+			fmt.Fprintf(stderr, "[nana-go] status warning: %v\n", err)
 			continue
 		}
 		var state map[string]any
 		if err := json.Unmarshal(content, &state); err != nil {
-			fmt.Fprintf(os.Stderr, "[nana-go] status warning: %v\n", err)
+			fmt.Fprintf(stderr, "[nana-go] status warning: %v\n", err)
 			continue
 		}
 		phase, _ := state["current_phase"].(string)
@@ -56,11 +61,11 @@ func Status(cwd string) error {
 		if active, ok := state["active"].(bool); ok && active {
 			status = "ACTIVE"
 		}
-		fmt.Fprintf(os.Stdout, "%s: %s (phase: %s)\n", ref.Mode, status, phase)
+		fmt.Fprintf(stdout, "%s: %s (phase: %s)\n", ref.Mode, status, phase)
 	}
 	runtimeRecovery, err := BuildRuntimeRecoveryStatus(cwd)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[nana-go] status warning: %v\n", err)
+		fmt.Fprintf(stderr, "[nana-go] status warning: %v\n", err)
 		return nil
 	}
 	if runtimeRecovery != nil {
@@ -68,18 +73,18 @@ func Status(cwd string) error {
 		if len(runtimeRecovery.ActiveModes) > 1 {
 			activeMode = fmt.Sprintf("%s (+%d more)", activeMode, len(runtimeRecovery.ActiveModes)-1)
 		}
-		fmt.Fprintf(os.Stdout, "Active mode: %s\n", activeMode)
+		fmt.Fprintf(stdout, "Active mode: %s\n", activeMode)
 		if strings.TrimSpace(runtimeRecovery.StateFile) != "" {
-			fmt.Fprintf(os.Stdout, "State file: %s\n", runtimeRecovery.StateFile)
+			fmt.Fprintf(stdout, "State file: %s\n", runtimeRecovery.StateFile)
 		}
 		if strings.TrimSpace(runtimeRecovery.LatestArtifact) != "" {
-			fmt.Fprintf(os.Stdout, "Latest artifact: %s\n", runtimeRecovery.LatestArtifact)
+			fmt.Fprintf(stdout, "Latest artifact: %s\n", runtimeRecovery.LatestArtifact)
 		}
 		if inspect := runtimeRecoveryInspectPathSummary(runtimeRecovery.InspectPaths); inspect != "" {
-			fmt.Fprintf(os.Stdout, "Inspect: %s\n", inspect)
+			fmt.Fprintf(stdout, "Inspect: %s\n", inspect)
 		}
 		if strings.TrimSpace(runtimeRecovery.RecoveryHint) != "" {
-			fmt.Fprintf(os.Stdout, "Recovery: %s\n", runtimeRecovery.RecoveryHint)
+			fmt.Fprintf(stdout, "Recovery: %s\n", runtimeRecovery.RecoveryHint)
 		}
 	}
 	return nil

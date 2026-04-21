@@ -291,8 +291,8 @@ func TestGeneratedAgentsVerifyGuidanceRequiresRepoProfileOrDocumentedFallback(t 
 		t.Fatalf("read root AGENTS.md: %v", err)
 	}
 	requiredNeedles := []string{
-		"Prefer `nana verify --json` when `nana-verify.json` exists",
-		"otherwise use documented repo verification commands",
+		"Use `nana verify --json` for onboarded repos",
+		"otherwise use repo verification commands",
 	}
 	forbiddenNeedles := []string{
 		"its profile runs lint, typecheck, tests, and static analysis",

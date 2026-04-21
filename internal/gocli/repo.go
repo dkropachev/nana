@@ -3,6 +3,7 @@ package gocli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -30,55 +31,61 @@ Notes:
 `
 
 func Repo(cwd string, args []string) error {
-	if len(args) == 0 || isHelpToken(args[0]) {
-		fmt.Fprint(os.Stdout, RepoHelp)
-		return nil
-	}
+	return repoWithIO(cwd, args, currentAdminStdout(), currentAdminStderr())
+}
 
-	switch args[0] {
-	case "onboard":
-		if len(args) > 1 && validRepoSlug(args[1]) {
-			return repoGithubOnboard(args[1:])
+func repoWithIO(cwd string, args []string, stdout io.Writer, stderr io.Writer) error {
+	return withAdminIO(stdout, stderr, func() error {
+		if len(args) == 0 || isHelpToken(args[0]) {
+			fmt.Fprint(currentAdminStdout(), RepoHelp)
+			return nil
 		}
-		repoPath := ""
-		jsonOutput := false
-		for index := 1; index < len(args); index++ {
-			token := args[index]
-			switch {
-			case token == "--repo":
-				if index+1 >= len(args) {
-					return fmt.Errorf("Missing value after --repo.\n%s", RepoHelp)
-				}
-				repoPath = args[index+1]
-				index++
-			case strings.HasPrefix(token, "--repo="):
-				repoPath = strings.TrimSpace(strings.TrimPrefix(token, "--repo="))
-			case token == "--json":
-				jsonOutput = true
-			default:
-				return fmt.Errorf("Unknown repo onboard option: %s\n\n%s", token, RepoHelp)
+
+		switch args[0] {
+		case "onboard":
+			if len(args) > 1 && validRepoSlug(args[1]) {
+				return repoGithubOnboard(args[1:])
 			}
+			repoPath := ""
+			jsonOutput := false
+			for index := 1; index < len(args); index++ {
+				token := args[index]
+				switch {
+				case token == "--repo":
+					if index+1 >= len(args) {
+						return fmt.Errorf("Missing value after --repo.\n%s", RepoHelp)
+					}
+					repoPath = args[index+1]
+					index++
+				case strings.HasPrefix(token, "--repo="):
+					repoPath = strings.TrimSpace(strings.TrimPrefix(token, "--repo="))
+				case token == "--json":
+					jsonOutput = true
+				default:
+					return fmt.Errorf("Unknown repo onboard option: %s\n\n%s", token, RepoHelp)
+				}
+			}
+			return repoOnboard(cwd, repoPath, jsonOutput)
+		case "config":
+			if len(args) < 2 || !validRepoSlug(args[1]) {
+				return fmt.Errorf("Usage: nana repo config <owner/repo> [--repo-mode disabled|local|fork|repo] [--issue-pick manual|label|auto] [--pr-forward approve|auto]\n\n%s", RepoHelp)
+			}
+			return githubDefaultsSet(args[1:])
+		case "drop", "forget", "remove":
+			if len(args) < 2 || !validRepoSlug(args[1]) {
+				return fmt.Errorf("Usage: nana repo drop <owner/repo>\n\n%s", RepoHelp)
+			}
+			return repoDrop(args[1])
+		case "scout":
+			return repoScout(cwd, args[1:])
+		case "defaults":
+			return repoAutomationDefaults(args[1:])
+		case "explain":
+			return repoExplain(args[1:])
+		default:
+			return fmt.Errorf("Unknown repo subcommand: %s\n\n%s", args[0], RepoHelp)
 		}
-		return repoOnboard(cwd, repoPath, jsonOutput)
-	case "config":
-		if len(args) < 2 || !validRepoSlug(args[1]) {
-			return fmt.Errorf("Usage: nana repo config <owner/repo> [--repo-mode disabled|local|fork|repo] [--issue-pick manual|label|auto] [--pr-forward approve|auto]\n\n%s", RepoHelp)
-		}
-		return githubDefaultsSet(args[1:])
-	case "drop", "forget", "remove":
-		if len(args) < 2 || !validRepoSlug(args[1]) {
-			return fmt.Errorf("Usage: nana repo drop <owner/repo>\n\n%s", RepoHelp)
-		}
-		return repoDrop(args[1])
-	case "scout":
-		return repoScout(cwd, args[1:])
-	case "defaults":
-		return repoAutomationDefaults(args[1:])
-	case "explain":
-		return repoExplain(args[1:])
-	default:
-		return fmt.Errorf("Unknown repo subcommand: %s\n\n%s", args[0], RepoHelp)
-	}
+	})
 }
 
 type repoAutomationDefaultsConfig struct {
@@ -162,12 +169,12 @@ func repoDrop(repoSlug string) error {
 		}
 	}
 	if len(filtered) == 0 {
-		fmt.Fprintf(os.Stdout, "[repo] %s is already forgotten.\n", repoSlug)
+		fmt.Fprintf(currentAdminStdout(), "[repo] %s is already forgotten.\n", repoSlug)
 		return nil
 	}
-	fmt.Fprintf(os.Stdout, "[repo] Forgot %s\n", repoSlug)
+	fmt.Fprintf(currentAdminStdout(), "[repo] Forgot %s\n", repoSlug)
 	for _, path := range filtered {
-		fmt.Fprintf(os.Stdout, "[repo] Removed: %s\n", path)
+		fmt.Fprintf(currentAdminStdout(), "[repo] Removed: %s\n", path)
 	}
 	return nil
 }
@@ -469,8 +476,8 @@ func repoAutomationDefaultsSet(args []string) error {
 	if err := writeGithubJSON(repoAutomationDefaultsPath(), config); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "[repo] Saved manual onboard defaults: repo-mode=%s issue-pick=%s pr-forward=%s\n", defaultString(config.RepoMode, "local"), defaultString(config.IssuePickMode, "manual"), defaultString(config.PRForwardMode, "approve"))
-	fmt.Fprintf(os.Stdout, "[repo] Defaults path: %s\n", repoAutomationDefaultsPath())
+	fmt.Fprintf(currentAdminStdout(), "[repo] Saved manual onboard defaults: repo-mode=%s issue-pick=%s pr-forward=%s\n", defaultString(config.RepoMode, "local"), defaultString(config.IssuePickMode, "manual"), defaultString(config.PRForwardMode, "approve"))
+	fmt.Fprintf(currentAdminStdout(), "[repo] Defaults path: %s\n", repoAutomationDefaultsPath())
 	return nil
 }
 
@@ -484,11 +491,11 @@ func repoAutomationDefaultsShow(jsonOutput bool) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stdout, "%s\n", string(content))
+		fmt.Fprintf(currentAdminStdout(), "%s\n", string(content))
 		return nil
 	}
-	fmt.Fprintf(os.Stdout, "[repo] Manual onboard defaults: repo-mode=%s issue-pick=%s pr-forward=%s\n", defaultString(config.RepoMode, "local"), defaultString(config.IssuePickMode, "manual"), defaultString(config.PRForwardMode, "approve"))
-	fmt.Fprintf(os.Stdout, "[repo] Defaults path: %s\n", repoAutomationDefaultsPath())
+	fmt.Fprintf(currentAdminStdout(), "[repo] Manual onboard defaults: repo-mode=%s issue-pick=%s pr-forward=%s\n", defaultString(config.RepoMode, "local"), defaultString(config.IssuePickMode, "manual"), defaultString(config.PRForwardMode, "approve"))
+	fmt.Fprintf(currentAdminStdout(), "[repo] Defaults path: %s\n", repoAutomationDefaultsPath())
 	return nil
 }
 
@@ -517,6 +524,10 @@ func repoOnboard(cwd string, repoPath string, jsonOutput bool) error {
 		return err
 	}
 	plan := detectGithubVerificationPlan(repoRoot)
+	planPath, err := writeManagedVerificationPlan(repoRoot, plan)
+	if err != nil {
+		return err
+	}
 	considerations := inferGithubInitialRepoConsiderations(repoRoot, filepath.Base(repoRoot), plan)
 	repoSlug := inferGithubRepoSlugFromRepo(repoRoot)
 	profile, profilePath, err := refreshGithubRepoProfile(repoSlug, repoRoot, plan, considerations.Considerations, time.Now().UTC())
@@ -527,6 +538,7 @@ func repoOnboard(cwd string, repoPath string, jsonOutput bool) error {
 		payload := map[string]any{
 			"repo_root":                repoRoot,
 			"repo_slug":                repoSlug,
+			"verification_plan_path":   planPath,
 			"verification_plan":        plan,
 			"suggested_considerations": considerations.Considerations,
 			"repo_profile_path":        profilePath,
@@ -536,19 +548,20 @@ func repoOnboard(cwd string, repoPath string, jsonOutput bool) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stdout, "%s\n", string(content))
+		fmt.Fprintf(currentAdminStdout(), "%s\n", string(content))
 		return nil
 	}
 
-	fmt.Fprintf(os.Stdout, "[repo] Onboarding %s\n", repoRoot)
+	fmt.Fprintf(currentAdminStdout(), "[repo] Onboarding %s\n", repoRoot)
+	fmt.Fprintf(currentAdminStdout(), "[repo] Verification plan path: %s\n", planPath)
 	if profile != nil {
-		fmt.Fprintf(os.Stdout, "[repo] Repo profile fingerprint: %s\n", profile.Fingerprint)
+		fmt.Fprintf(currentAdminStdout(), "[repo] Repo profile fingerprint: %s\n", profile.Fingerprint)
 		if profilePath != "" {
-			fmt.Fprintf(os.Stdout, "[repo] Repo profile path: %s\n", profilePath)
+			fmt.Fprintf(currentAdminStdout(), "[repo] Repo profile path: %s\n", profilePath)
 		}
 	}
 	fmt.Fprintf(
-		os.Stdout,
+		currentAdminStdout(),
 		"[repo] Verification plan: lint=%d compile=%d unit=%d integration=%d benchmark=%d\n",
 		len(plan.Lint),
 		len(plan.Compile),
@@ -556,22 +569,22 @@ func repoOnboard(cwd string, repoPath string, jsonOutput bool) error {
 		len(plan.Integration),
 		len(plan.Benchmarks),
 	)
-	fmt.Fprintf(os.Stdout, "[repo] Suggested considerations: %s\n", joinOrNone(considerations.Considerations))
+	fmt.Fprintf(currentAdminStdout(), "[repo] Suggested considerations: %s\n", joinOrNone(considerations.Considerations))
 	printRepoPlanSection("Lint", plan.Lint)
 	printRepoPlanSection("Compile", plan.Compile)
 	printRepoPlanSection("Unit", plan.Unit)
 	printRepoPlanSection("Integration", plan.Integration)
 	printRepoPlanSection("Benchmark", plan.Benchmarks)
 	if len(plan.Warnings) == 0 {
-		fmt.Fprintln(os.Stdout, "[repo] Warnings: (none)")
+		fmt.Fprintln(currentAdminStdout(), "[repo] Warnings: (none)")
 	} else {
 		for _, warning := range plan.Warnings {
-			fmt.Fprintf(os.Stdout, "[repo] Warning: %s\n", warning)
+			fmt.Fprintf(currentAdminStdout(), "[repo] Warning: %s\n", warning)
 		}
 	}
 	if profile != nil {
 		for _, warning := range profile.Warnings {
-			fmt.Fprintf(os.Stdout, "[repo] Profile warning: %s\n", warning)
+			fmt.Fprintf(currentAdminStdout(), "[repo] Profile warning: %s\n", warning)
 		}
 	}
 	return nil
@@ -641,37 +654,37 @@ func repoExplain(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stdout, "%s\n", string(content))
+		fmt.Fprintf(currentAdminStdout(), "%s\n", string(content))
 		return nil
 	}
-	fmt.Fprintf(os.Stdout, "[repo] Repo: %s\n", repoSlug)
-	fmt.Fprintf(os.Stdout, "[repo] Settings path: %s\n", githubRepoSettingsPath(repoSlug))
-	fmt.Fprintf(os.Stdout, "[repo] Start state path: %s\n", startWorkStatePath(repoSlug))
-	fmt.Fprintf(os.Stdout, "[repo] repo-mode: %s\n", repoMode)
-	fmt.Fprintf(os.Stdout, "[repo] issue-pick: %s\n", issuePickMode)
-	fmt.Fprintf(os.Stdout, "[repo] pr-forward: %s\n", prForwardMode)
-	fmt.Fprintf(os.Stdout, "[repo] fork-issues: %s\n", forkMode)
-	fmt.Fprintf(os.Stdout, "[repo] implement: %s\n", implementMode)
-	fmt.Fprintf(os.Stdout, "[repo] publish: %s\n", defaultString(publishTarget, "(none)"))
-	fmt.Fprintf(os.Stdout, "[repo] Start participation: %t\n", githubRepoAutomationEnabled(settings))
+	fmt.Fprintf(currentAdminStdout(), "[repo] Repo: %s\n", repoSlug)
+	fmt.Fprintf(currentAdminStdout(), "[repo] Settings path: %s\n", githubRepoSettingsPath(repoSlug))
+	fmt.Fprintf(currentAdminStdout(), "[repo] Start state path: %s\n", startWorkStatePath(repoSlug))
+	fmt.Fprintf(currentAdminStdout(), "[repo] repo-mode: %s\n", repoMode)
+	fmt.Fprintf(currentAdminStdout(), "[repo] issue-pick: %s\n", issuePickMode)
+	fmt.Fprintf(currentAdminStdout(), "[repo] pr-forward: %s\n", prForwardMode)
+	fmt.Fprintf(currentAdminStdout(), "[repo] fork-issues: %s\n", forkMode)
+	fmt.Fprintf(currentAdminStdout(), "[repo] implement: %s\n", implementMode)
+	fmt.Fprintf(currentAdminStdout(), "[repo] publish: %s\n", defaultString(publishTarget, "(none)"))
+	fmt.Fprintf(currentAdminStdout(), "[repo] Start participation: %t\n", githubRepoAutomationEnabled(settings))
 	if repoMode == "disabled" {
-		fmt.Fprintln(os.Stdout, "[repo] disabled mode keeps the repo onboarded for observation only; Nana will not launch work until repo-mode changes.")
+		fmt.Fprintln(currentAdminStdout(), "[repo] disabled mode keeps the repo onboarded for observation only; Nana will not launch work until repo-mode changes.")
 	}
-	fmt.Fprintln(os.Stdout, "[repo] `nana start` mirrors eligible issues, triages them locally, runs one shared worker queue across all selected repos, schedules scout -> issue-sync -> triage dependencies, reconciles implementation runs, and forwards PRs when pr-forward is auto.")
-	fmt.Fprintln(os.Stdout, "[repo] label issue-pick mode requires the single opt-in label: nana")
-	fmt.Fprintf(os.Stdout, "[repo] Defaults: max_workers=%d open_fork_pr_cap=%d\n", startDefaultGlobalParallel, startWorkDefaultOpenPRCap)
+	fmt.Fprintln(currentAdminStdout(), "[repo] `nana start` mirrors eligible issues, triages them locally, runs one shared worker queue across all selected repos, schedules scout -> issue-sync -> triage dependencies, reconciles implementation runs, and forwards PRs when pr-forward is auto.")
+	fmt.Fprintln(currentAdminStdout(), "[repo] label issue-pick mode requires the single opt-in label: nana")
+	fmt.Fprintf(currentAdminStdout(), "[repo] Defaults: max_workers=%d open_fork_pr_cap=%d\n", startDefaultGlobalParallel, startWorkDefaultOpenPRCap)
 	if state != nil {
 		promoted, reused, activeSkips := startWorkPromotionCounts(state)
-		fmt.Fprintf(os.Stdout, "[repo] Fork repo: %s\n", defaultString(state.ForkRepo, "(none)"))
-		fmt.Fprintf(os.Stdout, "[repo] Tracked issues: %d\n", len(state.Issues))
-		fmt.Fprintf(os.Stdout, "[repo] Forwarding: promoted=%d reused=%d active_skips=%d\n", promoted, reused, activeSkips)
+		fmt.Fprintf(currentAdminStdout(), "[repo] Fork repo: %s\n", defaultString(state.ForkRepo, "(none)"))
+		fmt.Fprintf(currentAdminStdout(), "[repo] Tracked issues: %d\n", len(state.Issues))
+		fmt.Fprintf(currentAdminStdout(), "[repo] Forwarding: promoted=%d reused=%d active_skips=%d\n", promoted, reused, activeSkips)
 		if len(state.PromotionSkips) > 0 {
 			reasons := []string{}
 			for _, skipped := range state.PromotionSkips {
 				reasons = append(reasons, fmt.Sprintf("fork PR #%d: %s", skipped.ForkPRNumber, skipped.Reason))
 			}
 			slices.Sort(reasons)
-			fmt.Fprintf(os.Stdout, "[repo] Forward skips: %s\n", strings.Join(reasons, "; "))
+			fmt.Fprintf(currentAdminStdout(), "[repo] Forward skips: %s\n", strings.Join(reasons, "; "))
 		}
 	}
 
@@ -680,8 +693,8 @@ func repoExplain(args []string) error {
 
 func printRepoPlanSection(label string, commands []string) {
 	if len(commands) == 0 {
-		fmt.Fprintf(os.Stdout, "[repo] %s: (none)\n", label)
+		fmt.Fprintf(currentAdminStdout(), "[repo] %s: (none)\n", label)
 		return
 	}
-	fmt.Fprintf(os.Stdout, "[repo] %s: %s\n", label, strings.Join(commands, " | "))
+	fmt.Fprintf(currentAdminStdout(), "[repo] %s: %s\n", label, strings.Join(commands, " | "))
 }

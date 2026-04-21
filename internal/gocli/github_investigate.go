@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -66,25 +67,6 @@ type githubIssuePayload struct {
 type githubTargetContext struct {
 	Repository githubRepositoryPayload
 	Issue      githubIssuePayload
-}
-
-type githubVerificationPlan struct {
-	Version         int                            `json:"version,omitempty"`
-	Source          string                         `json:"source"`
-	Lint            []string                       `json:"lint"`
-	Compile         []string                       `json:"compile"`
-	Unit            []string                       `json:"unit"`
-	Integration     []string                       `json:"integration"`
-	Benchmarks      []string                       `json:"benchmarks,omitempty"`
-	Warnings        []string                       `json:"warnings,omitempty"`
-	PlanFingerprint string                         `json:"plan_fingerprint,omitempty"`
-	SourceFiles     []githubVerificationSourceFile `json:"source_files,omitempty"`
-}
-
-type githubVerificationSourceFile struct {
-	Path     string `json:"path"`
-	Checksum string `json:"checksum"`
-	Kind     string `json:"kind"`
 }
 
 type githubConsiderationInference struct {
@@ -150,29 +132,29 @@ func githubInvestigateTarget(targetURL string) error {
 		}
 	}
 
-	fmt.Fprintf(os.Stdout, "[github] Investigated %s %s #%d\n", repoMeta.RepoSlug, target.kind, target.number)
-	fmt.Fprintf(os.Stdout, "[github] Title: %s\n", context.Issue.Title)
-	fmt.Fprintf(os.Stdout, "[github] Managed repo root: %s\n", paths.RepoRoot)
-	fmt.Fprintf(os.Stdout, "[github] Source path: %s\n", paths.SourcePath)
-	fmt.Fprintf(os.Stdout, "[github] Default branch: %s\n", repoMeta.DefaultBranch)
-	fmt.Fprintf(os.Stdout, "[github] Suggested considerations: %s\n", joinOrNone(considerations))
-	fmt.Fprintf(os.Stdout, "[github] Suggested role layout: %s\n", defaultString(roleLayout, "split"))
-	fmt.Fprintf(os.Stdout, "[github] Review-rules mode: %s\n", reviewRulesMode)
-	fmt.Fprintf(os.Stdout, "[github] Work-on policy: experimental=%t feedback_source=%s repo_native=%s human_gate=%s\n", policy.Experimental, policy.FeedbackSource, policy.RepoNativeStrictness, policy.HumanGate)
+	fmt.Fprintf(currentGithubStdout(), "[github] Investigated %s %s #%d\n", repoMeta.RepoSlug, target.kind, target.number)
+	fmt.Fprintf(currentGithubStdout(), "[github] Title: %s\n", context.Issue.Title)
+	fmt.Fprintf(currentGithubStdout(), "[github] Managed repo root: %s\n", paths.RepoRoot)
+	fmt.Fprintf(currentGithubStdout(), "[github] Source path: %s\n", paths.SourcePath)
+	fmt.Fprintf(currentGithubStdout(), "[github] Default branch: %s\n", repoMeta.DefaultBranch)
+	fmt.Fprintf(currentGithubStdout(), "[github] Suggested considerations: %s\n", joinOrNone(considerations))
+	fmt.Fprintf(currentGithubStdout(), "[github] Suggested role layout: %s\n", defaultString(roleLayout, "split"))
+	fmt.Fprintf(currentGithubStdout(), "[github] Review-rules mode: %s\n", reviewRulesMode)
+	fmt.Fprintf(currentGithubStdout(), "[github] Work-on policy: experimental=%t feedback_source=%s repo_native=%s human_gate=%s\n", policy.Experimental, policy.FeedbackSource, policy.RepoNativeStrictness, policy.HumanGate)
 	if profile != nil {
-		fmt.Fprintf(os.Stdout, "[github] Repo profile fingerprint: %s\n", profile.Fingerprint)
+		fmt.Fprintf(currentGithubStdout(), "[github] Repo profile fingerprint: %s\n", profile.Fingerprint)
 		if profilePath != "" {
-			fmt.Fprintf(os.Stdout, "[github] Repo profile path: %s\n", profilePath)
+			fmt.Fprintf(currentGithubStdout(), "[github] Repo profile path: %s\n", profilePath)
 		}
 		if profile.CommitStyle != nil {
-			fmt.Fprintf(os.Stdout, "[github] Repo commit style: %s (confidence %.2f)\n", profile.CommitStyle.Kind, profile.CommitStyle.Confidence)
+			fmt.Fprintf(currentGithubStdout(), "[github] Repo commit style: %s (confidence %.2f)\n", profile.CommitStyle.Kind, profile.CommitStyle.Confidence)
 		}
 		if profile.PullRequestTemplate != nil {
-			fmt.Fprintf(os.Stdout, "[github] Repo PR template: %s\n", profile.PullRequestTemplate.Path)
+			fmt.Fprintf(currentGithubStdout(), "[github] Repo PR template: %s\n", profile.PullRequestTemplate.Path)
 		}
 	}
 	fmt.Fprintf(
-		os.Stdout,
+		currentGithubStdout(),
 		"[github] Verification plan: lint=%d compile=%d unit=%d integration=%d benchmark=%d\n",
 		len(verificationPlan.Lint),
 		len(verificationPlan.Compile),
@@ -181,20 +163,20 @@ func githubInvestigateTarget(targetURL string) error {
 		len(verificationPlan.Benchmarks),
 	)
 	for _, warning := range verificationPlan.Warnings {
-		fmt.Fprintf(os.Stdout, "[github] Verification warning: %s\n", warning)
+		fmt.Fprintf(currentGithubStdout(), "[github] Verification warning: %s\n", warning)
 	}
 	if settings.HotPathAPIProfile != nil {
-		fmt.Fprintf(os.Stdout, "[github] Hot-path API files: %s\n", joinOrNone(settings.HotPathAPIProfile.HotPathAPIFiles))
-		fmt.Fprintf(os.Stdout, "[github] Hot-path API tokens: %s\n", joinOrNone(settings.HotPathAPIProfile.APIIdentifierTokens))
+		fmt.Fprintf(currentGithubStdout(), "[github] Hot-path API files: %s\n", joinOrNone(settings.HotPathAPIProfile.HotPathAPIFiles))
+		fmt.Fprintf(currentGithubStdout(), "[github] Hot-path API tokens: %s\n", joinOrNone(settings.HotPathAPIProfile.APIIdentifierTokens))
 	} else {
-		fmt.Fprintf(os.Stdout, "[github] Hot-path API files: (none detected)\n")
-		fmt.Fprintf(os.Stdout, "[github] Hot-path API tokens: (none detected)\n")
+		fmt.Fprintf(currentGithubStdout(), "[github] Hot-path API files: (none detected)\n")
+		fmt.Fprintf(currentGithubStdout(), "[github] Hot-path API tokens: (none detected)\n")
 	}
-	fmt.Fprintln(os.Stdout, "[github] Suggested pipeline:")
+	fmt.Fprintln(currentGithubStdout(), "[github] Suggested pipeline:")
 	for _, line := range buildGithubConsiderationInstructionLines(considerations, roleLayout) {
-		fmt.Fprintln(os.Stdout, line)
+		fmt.Fprintln(currentGithubStdout(), line)
 	}
-	fmt.Fprintf(os.Stdout, "[github] Next: nana implement %s\n", githubCanonicalTargetURL(target))
+	fmt.Fprintf(currentGithubStdout(), "[github] Next: nana implement %s\n", githubCanonicalTargetURL(target))
 	return nil
 }
 
@@ -332,7 +314,7 @@ func ensureGithubManagedOrigin(repoPath string, repoMeta *githubManagedRepoMetad
 		if err := githubRunGit(repoPath, "remote", "add", "origin", canonical); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stdout, "[github] Repaired managed source origin for %s to %s.\n", repoPath, canonical)
+		fmt.Fprintf(currentGithubStdout(), "[github] Repaired managed source origin for %s to %s.\n", repoPath, canonical)
 		return nil
 	}
 	current := strings.TrimSpace(currentOrigin)
@@ -340,7 +322,7 @@ func ensureGithubManagedOrigin(repoPath string, repoMeta *githubManagedRepoMetad
 		if err := githubRunGit(repoPath, "remote", "set-url", "origin", canonical); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stdout, "[github] Repaired managed source origin for %s to %s.\n", repoPath, canonical)
+		fmt.Fprintf(currentGithubStdout(), "[github] Repaired managed source origin for %s to %s.\n", repoPath, canonical)
 	}
 	pushOrigin, pushErr := githubGitOutput(repoPath, "remote", "get-url", "--push", "origin")
 	if pushErr == nil && strings.TrimSpace(pushOrigin) == canonical {
@@ -591,6 +573,10 @@ func inferGithubHotPathProfileFromFiles(files []string, now time.Time) *githubHo
 }
 
 func refreshGithubVerificationArtifacts(runID string, useLast bool) error {
+	return refreshGithubVerificationArtifactsWithIO(runID, useLast, currentGithubStdout())
+}
+
+func refreshGithubVerificationArtifactsWithIO(runID string, useLast bool, stdout io.Writer) error {
 	manifestPath, repoRoot, err := resolveGithubRunManifestPath(runID, useLast)
 	if err != nil {
 		return err
@@ -638,16 +624,16 @@ func refreshGithubVerificationArtifacts(runID string, useLast bool) error {
 	if beforePlan != plan.PlanFingerprint || beforePlan == "" {
 		status = "refreshed"
 	}
-	fmt.Fprintf(os.Stdout, "[github] Verification artifacts for run %s %s.\n", manifest.RunID, status)
+	fmt.Fprintf(stdout, "[github] Verification artifacts for run %s %s.\n", manifest.RunID, status)
 	if len(plan.SourceFiles) > 0 {
 		parts := make([]string, 0, len(plan.SourceFiles))
 		for _, sourceFile := range plan.SourceFiles {
 			parts = append(parts, fmt.Sprintf("%s:%s", sourceFile.Path, sourceFile.Checksum))
 		}
-		fmt.Fprintf(os.Stdout, "[github] Verification source files: %s\n", strings.Join(parts, ", "))
+		fmt.Fprintf(stdout, "[github] Verification source files: %s\n", strings.Join(parts, ", "))
 	}
 	if scriptsDir != "" {
-		fmt.Fprintf(os.Stdout, "[github] Verification scripts directory: %s\n", scriptsDir)
+		fmt.Fprintf(stdout, "[github] Verification scripts directory: %s\n", scriptsDir)
 	}
 	return nil
 }
@@ -751,7 +737,8 @@ func detectGithubVerificationPlan(repoCheckoutPath string) githubVerificationPla
 		fingerprintInput += "\n" + item.Path + "\n" + item.Checksum + "\n" + item.Kind
 	}
 	sum := sha256.Sum256([]byte(fingerprintInput))
-	return githubVerificationPlan{
+	plan := githubVerificationPlan{
+		Version:         1,
 		Source:          source,
 		Lint:            lint,
 		Compile:         compile,
@@ -762,6 +749,8 @@ func detectGithubVerificationPlan(repoCheckoutPath string) githubVerificationPla
 		PlanFingerprint: hex.EncodeToString(sum[:]),
 		SourceFiles:     sourceFiles,
 	}
+	deriveManagedVerificationDefaults(&plan, repoCheckoutPath, inferGithubRepoSlugFromRepo(repoCheckoutPath))
+	return plan
 }
 
 func checksumFile(path string) (string, error) {

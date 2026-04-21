@@ -186,7 +186,7 @@ type githubWorkSyncOptions struct {
 
 func GithubWorkCommand(cwd string, args []string) (githubCommandResult, error) {
 	if len(args) == 0 || isHelpToken(args[0]) {
-		fmt.Fprint(os.Stdout, GithubWorkHelp)
+		fmt.Fprint(currentGithubStdout(), GithubWorkHelp)
 		return githubCommandResult{Handled: true}, nil
 	}
 
@@ -258,12 +258,12 @@ func GithubIssue(cwd string, args []string) (githubCommandResult, error) {
 	command := ""
 	rest := []string{}
 	if len(args) == 0 {
-		fmt.Fprint(os.Stdout, IssueHelp)
+		fmt.Fprint(currentGithubStdout(), IssueHelp)
 		return githubCommandResult{Handled: true}, nil
 	}
 	if args[0] == "issue" {
 		if len(args) == 1 || isHelpToken(args[1]) {
-			fmt.Fprint(os.Stdout, IssueHelp)
+			fmt.Fprint(currentGithubStdout(), IssueHelp)
 			return githubCommandResult{Handled: true}, nil
 		}
 		command = args[1]
@@ -273,7 +273,7 @@ func GithubIssue(cwd string, args []string) (githubCommandResult, error) {
 		rest = append([]string{}, args[1:]...)
 	}
 	if len(rest) > 0 && isHelpToken(rest[0]) {
-		fmt.Fprint(os.Stdout, IssueHelp)
+		fmt.Fprint(currentGithubStdout(), IssueHelp)
 		return githubCommandResult{Handled: true}, nil
 	}
 
@@ -632,7 +632,7 @@ func normalizeGithubWorkRunSelectionArgs(args []string, requireRunSelection bool
 			break
 		}
 		if isHelpToken(token) {
-			fmt.Fprint(os.Stdout, GithubWorkHelp)
+			fmt.Fprint(currentGithubStdout(), GithubWorkHelp)
 			return "", nil
 		}
 		switch {
@@ -741,7 +741,7 @@ func normalizeGithubIssueSyncArgs(args []string) ([]string, error) {
 
 func GithubReview(cwd string, args []string) (githubCommandResult, error) {
 	if len(args) == 0 || isHelpToken(args[0]) {
-		fmt.Fprint(os.Stdout, GithubReviewHelp)
+		fmt.Fprint(currentGithubStdout(), GithubReviewHelp)
 		return githubCommandResult{Handled: true}, nil
 	}
 	if args[0] != "followup" {
@@ -773,7 +773,7 @@ type githubReviewExecutionOptions struct {
 
 func parseGithubReviewExecutionArgs(args []string) (githubReviewExecutionOptions, error) {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stdout, GithubReviewHelp)
+		fmt.Fprint(currentGithubStdout(), GithubReviewHelp)
 		return githubReviewExecutionOptions{}, nil
 	}
 	target, err := parseGithubTargetURL(args[0])
@@ -790,7 +790,7 @@ func parseGithubReviewExecutionArgs(args []string) (githubReviewExecutionOptions
 		token := args[index]
 		switch {
 		case isHelpToken(token):
-			fmt.Fprint(os.Stdout, GithubReviewHelp)
+			fmt.Fprint(currentGithubStdout(), GithubReviewHelp)
 			return githubReviewExecutionOptions{}, nil
 		case token == "--mode":
 			value, err := requireFlagValue(args, index, token)
@@ -895,15 +895,15 @@ func githubReviewFollowup(target parsedGithubTarget, allowOpen bool) error {
 	}
 	targetURL := githubCanonicalTargetURL(target)
 	if len(findings) == 0 {
-		fmt.Fprintf(os.Stdout, "[review] No persisted pre-existing findings for %s.\n", targetURL)
+		fmt.Fprintf(currentGithubStdout(), "[review] No persisted pre-existing findings for %s.\n", targetURL)
 		return nil
 	}
-	fmt.Fprintf(os.Stdout, "[review] Pre-existing findings for %s:\n", targetURL)
+	fmt.Fprintf(currentGithubStdout(), "[review] Pre-existing findings for %s:\n", targetURL)
 	for _, finding := range findings {
-		fmt.Fprintf(os.Stdout, "- %s (%s)\n", finding.Title, renderGithubFindingReference(finding))
-		fmt.Fprintf(os.Stdout, "  %s\n", defaultString(strings.TrimSpace(finding.UserExplanation), strings.TrimSpace(finding.Detail)))
+		fmt.Fprintf(currentGithubStdout(), "- %s (%s)\n", finding.Title, renderGithubFindingReference(finding))
+		fmt.Fprintf(currentGithubStdout(), "  %s\n", defaultString(strings.TrimSpace(finding.UserExplanation), strings.TrimSpace(finding.Detail)))
 		if link := renderGithubFindingLink(finding); link != "" {
-			fmt.Fprintf(os.Stdout, "  %s\n", link)
+			fmt.Fprintf(currentGithubStdout(), "  %s\n", link)
 		}
 	}
 	return nil

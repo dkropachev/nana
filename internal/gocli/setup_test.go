@@ -222,15 +222,15 @@ func TestSetupProjectFallsBackToEmbeddedAssets(t *testing.T) {
 		t.Fatalf("expected embedded AGENTS template rewrite, got %q", string(agentsMd))
 	}
 	for _, needle := range []string{
-		"Prefer `nana verify --json` when `nana-verify.json` exists",
-		"otherwise use documented repo verification commands",
+		"Use `nana verify --json` for onboarded repos",
+		"otherwise use repo verification commands",
 	} {
 		if !strings.Contains(string(agentsMd), needle) {
 			t.Fatalf("expected embedded AGENTS template to include conditional verify guidance %q, got %q", needle, string(agentsMd))
 		}
 	}
 	if strings.Contains(string(agentsMd), "its profile runs lint, typecheck, tests, and static analysis") {
-		t.Fatalf("embedded AGENTS template should not imply nana verify works without a nana-verify.json profile, got %q", string(agentsMd))
+		t.Fatalf("embedded AGENTS template should not imply nana verify works before repo onboarding, got %q", string(agentsMd))
 	}
 	if !fileExists(filepath.Join(cwd, ".nana", "codex-home-investigate", "AGENTS.md")) {
 		t.Fatalf("embedded investigate AGENTS.md not installed")

@@ -203,10 +203,10 @@ func executeGithubLane(runID string, useLast bool, laneAlias string, task string
 		return err
 	}
 
-	fmt.Fprintf(os.Stdout, "[github] Lane %s %s via isolated CODEX_HOME %s.\n", lane.Alias, state.Status, laneCodexHome)
-	fmt.Fprintf(os.Stdout, "[github] Lane result: %s\n", resultPath)
+	fmt.Fprintf(currentWorkStdout(), "[github] Lane %s %s via isolated CODEX_HOME %s.\n", lane.Alias, state.Status, laneCodexHome)
+	fmt.Fprintf(currentWorkStdout(), "[github] Lane result: %s\n", resultPath)
 	if combined != "" {
-		fmt.Fprintln(os.Stdout, combined)
+		fmt.Fprintln(currentWorkStdout(), combined)
 	}
 	if runErr != nil {
 		return runErr

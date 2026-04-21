@@ -714,6 +714,89 @@ func TestRunLocalVerificationDedupesDuplicateCommands(t *testing.T) {
 	}
 }
 
+func TestRunLocalVerificationClearsInheritedGOFLAGSSoTestsCannotBeSkipped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses POSIX Makefile recipe syntax")
+	}
+	if _, err := exec.LookPath("make"); err != nil {
+		t.Skipf("make not available: %v", err)
+	}
+	repo := t.TempDir()
+	files := map[string]string{
+		"go.mod":   "module example.com/localverifyflags\n\ngo 1.20\n",
+		"Makefile": "test:\n\tgo test ./...\n",
+		"verify_flags_test.go": `package localverifyflags
+
+import "testing"
+
+func TestLocalVerificationRunsTestBodies(t *testing.T) {
+	t.Fatal("intentional failure proves the test body ran")
+}
+`,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	t.Setenv("GOFLAGS", "-run=^$")
+
+	report, err := runLocalVerification(repo, githubVerificationPlan{
+		PlanFingerprint: "env-preserve",
+		Unit:            []string{"make test"},
+	}, false)
+	if err != nil {
+		t.Fatalf("runLocalVerification: %v", err)
+	}
+	if report.Passed {
+		t.Fatalf("expected failing test body to run despite inherited GOFLAGS=-run=^$, got %#v", report)
+	}
+	if len(report.Stages) < 3 || report.Stages[2].Status != "failed" {
+		t.Fatalf("expected unit stage to fail, got %#v", report.Stages)
+	}
+	if len(report.Stages[2].Commands) == 0 {
+		t.Fatalf("expected unit command result, got %#v", report.Stages)
+	}
+	if !strings.Contains(report.Stages[2].Commands[0].Output, "intentional failure proves the test body ran") {
+		t.Fatalf("expected output to show the failing test body ran, got %#v", report.Stages[2].Commands[0])
+	}
+}
+
+func TestRunLocalVerificationClearsInheritedMakeFlagsSoRecipesStillRun(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses POSIX Makefile recipe syntax")
+	}
+	if _, err := exec.LookPath("make"); err != nil {
+		t.Skipf("make not available: %v", err)
+	}
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "Makefile"), []byte("verify-marker:\n\t@printf 'ran' > marker.txt\n"), 0o644); err != nil {
+		t.Fatalf("write Makefile: %v", err)
+	}
+	t.Setenv("MAKEFLAGS", "-n")
+	t.Setenv("MFLAGS", "-n")
+	t.Setenv("GNUMAKEFLAGS", "-n")
+	t.Setenv("MAKEFILES", "missing-injected.mk")
+
+	report, err := runLocalVerification(repo, githubVerificationPlan{
+		PlanFingerprint: "make-sanitize",
+		Unit:            []string{"make verify-marker"},
+	}, false)
+	if err != nil {
+		t.Fatalf("runLocalVerification: %v", err)
+	}
+	if !report.Passed {
+		t.Fatalf("expected local verification to clear inherited make dry-run flags, got %#v", report)
+	}
+	content, err := os.ReadFile(filepath.Join(repo, "marker.txt"))
+	if err != nil {
+		t.Fatalf("expected make recipe to execute despite inherited dry-run flags: %v; report=%#v", err, report)
+	}
+	if strings.TrimSpace(string(content)) != "ran" {
+		t.Fatalf("unexpected marker content: %q", string(content))
+	}
+}
+
 func TestNormalizeLocalWorkCodexArgsDefaultsToBypass(t *testing.T) {
 	got := normalizeLocalWorkCodexArgs(nil)
 	if len(got) == 0 || got[0] != CodexBypassFlag {
@@ -2949,13 +3032,13 @@ func TestLocalWorkRetrospectiveCompletedIterationUsesLegacyVerificationArtifact(
 	if err := os.MkdirAll(iterationDir, 0o755); err != nil {
 		t.Fatalf("mkdir iteration dir: %v", err)
 	}
-	legacyArtifact := filepath.Join(iterationDir, "verification.json")
-	if err := os.WriteFile(legacyArtifact, mustMarshalJSON(localWorkVerificationReport{
+	previousVerificationArtifact := filepath.Join(iterationDir, "verification.json")
+	if err := os.WriteFile(previousVerificationArtifact, mustMarshalJSON(localWorkVerificationReport{
 		GeneratedAt:         ISOTimeNow(),
 		IntegrationIncluded: false,
 		Passed:              true,
 	}), 0o644); err != nil {
-		t.Fatalf("write legacy verification artifact: %v", err)
+		t.Fatalf("write previous verification artifact: %v", err)
 	}
 
 	lines := localWorkRetrospectiveVerificationLines(localWorkManifest{
@@ -2967,11 +3050,11 @@ func TestLocalWorkRetrospectiveCompletedIterationUsesLegacyVerificationArtifact(
 		}},
 	}, runDir)
 	content := strings.Join(lines, "\n")
-	if !strings.Contains(content, "artifact="+legacyArtifact) {
-		t.Fatalf("expected completed iteration to cite legacy verification artifact %q, got:\n%s", legacyArtifact, content)
+	if !strings.Contains(content, "artifact="+previousVerificationArtifact) {
+		t.Fatalf("expected completed iteration to cite previous verification artifact %q, got:\n%s", previousVerificationArtifact, content)
 	}
 	if strings.Contains(content, "verification-round-0-post-hardening.json") {
-		t.Fatalf("completed iteration cited missing zero-round artifact instead of legacy verification.json:\n%s", content)
+		t.Fatalf("completed iteration cited missing zero-round artifact instead of verification.json fallback:\n%s", content)
 	}
 }
 

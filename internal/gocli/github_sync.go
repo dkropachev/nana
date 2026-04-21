@@ -89,7 +89,7 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 			manifest.NextAction = "wait_for_github_feedback"
 		}
 		_ = writeGithubJSON(manifestPath, manifest)
-		fmt.Fprintf(os.Stdout, "[github] No new feedback from %s for %s %s #%d.\n", formatGithubActorSet(actors), manifest.RepoSlug, manifest.TargetKind, manifest.TargetNumber)
+		fmt.Fprintf(currentWorkStdout(), "[github] No new feedback from %s for %s %s #%d.\n", formatGithubActorSet(actors), manifest.RepoSlug, manifest.TargetKind, manifest.TargetNumber)
 		return nil
 	}
 	cursor := advanceGithubFeedbackCursor(snapshot, manifest)
@@ -224,14 +224,14 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stdout, "[github] Stored new feedback for run %s.\n", manifest.RunID)
-	fmt.Fprintf(os.Stdout, "[github] Feedback file: %s\n", feedbackInstructionsPath)
-	fmt.Fprintf(os.Stdout, "[github] Feedback actors: %s\n", formatGithubActorSet(actors))
+	fmt.Fprintf(currentWorkStdout(), "[github] Stored new feedback for run %s.\n", manifest.RunID)
+	fmt.Fprintf(currentWorkStdout(), "[github] Feedback file: %s\n", feedbackInstructionsPath)
+	fmt.Fprintf(currentWorkStdout(), "[github] Feedback actors: %s\n", formatGithubActorSet(actors))
 	if strings.TrimSpace(result.Stdout) != "" {
-		fmt.Fprint(os.Stdout, result.Stdout)
+		fmt.Fprint(currentWorkStdout(), result.Stdout)
 	}
 	if strings.TrimSpace(result.Stderr) != "" {
-		fmt.Fprint(os.Stdout, result.Stderr)
+		fmt.Fprint(currentWorkStdout(), result.Stderr)
 	}
 	if runErr != nil {
 		return runErr
