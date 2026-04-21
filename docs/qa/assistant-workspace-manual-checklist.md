@@ -54,9 +54,11 @@ Use this checklist when validating the `nana start` assistant workspace in a bro
 - Open a blocked run approval and confirm reason, next action, and action kind render.
 - Open a draft-ready approval and confirm it routes to the work-item drawer.
 - Launch a planned-item approval from the workspace.
+- Confirm a scout job in one-shot stale-startup recovery does not appear in `Approvals`; only a repeated stale cleanup should surface there as a failed scout approval.
 
 ## Repo Tabs
 
 - Open a repo from the sidebar.
 - Confirm `Overview`, `Scouts`, `Config`, and `Controls` still work.
 - Confirm settings save and scout actions still update the workspace state.
+- Confirm an auto-recovered scout item in `Scouts` shows recovery count, recovered run id, recovery timestamp, and cooldown metadata in the detail pane.

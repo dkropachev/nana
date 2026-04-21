@@ -246,6 +246,10 @@ type startWorkScoutJob struct {
 	LastError           string   `json:"last_error,omitempty"`
 	PauseUntil          string   `json:"pause_until,omitempty"`
 	PauseReason         string   `json:"pause_reason,omitempty"`
+	RecoveryCount       int      `json:"recovery_count,omitempty"`
+	LastRecoveryReason  string   `json:"last_recovery_reason,omitempty"`
+	LastRecoveryAt      string   `json:"last_recovery_at,omitempty"`
+	LastRecoveredRunID  string   `json:"last_recovered_run_id,omitempty"`
 	UpdatedAt           string   `json:"updated_at"`
 	CreatedAt           string   `json:"created_at"`
 	LegacyPlannedItemID string   `json:"legacy_planned_item_id,omitempty"`
@@ -1645,6 +1649,28 @@ func readStartWorkState(repoSlug string) (*startWorkState, error) {
 	return readStartWorkStateUnlocked(repoSlug)
 }
 
+func normalizeStartWorkStateUnlocked(state *startWorkState) (bool, error) {
+	if state == nil {
+		return false, nil
+	}
+	updated := false
+	for key, job := range state.ScoutJobs {
+		if startWorkScoutJobNormalizeRecovery(&job) {
+			state.ScoutJobs[key] = job
+			updated = true
+		}
+	}
+	scoutUpdated, err := normalizeStartWorkStateScoutJobs(state)
+	if err != nil {
+		return false, err
+	}
+	updated = updated || scoutUpdated
+	if updated {
+		state.UpdatedAt = ISOTimeNow()
+	}
+	return updated, nil
+}
+
 func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 	var state startWorkState
 	if err := readGithubJSON(startWorkStatePath(repoSlug), &state); err != nil {
@@ -1728,11 +1754,21 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 		job.ID = defaultString(strings.TrimSpace(job.ID), key)
 		job.Status = defaultString(strings.TrimSpace(job.Status), startScoutJobQueued)
 		job.Destination = defaultString(strings.TrimSpace(job.Destination), improvementDestinationLocal)
+		job.LastRecoveryReason = strings.TrimSpace(job.LastRecoveryReason)
+		job.LastRecoveryAt = strings.TrimSpace(job.LastRecoveryAt)
+		job.LastRecoveredRunID = strings.TrimSpace(job.LastRecoveredRunID)
 		if strings.TrimSpace(job.TaskBody) == "" {
 			job.TaskBody = strings.TrimSpace(job.Title)
 		}
 		job.WorkType = inferPersistedScoutJobWorkType(job).WorkType
 		state.ScoutJobs[key] = job
+	}
+	if updated, err := normalizeStartWorkStateUnlocked(&state); err != nil {
+		return nil, err
+	} else if updated {
+		if err := writeGithubJSON(startWorkStatePath(state.SourceRepo), state); err != nil {
+			return nil, err
+		}
 	}
 	return &state, nil
 }
@@ -1744,7 +1780,7 @@ func writeStartWorkState(state startWorkState) error {
 }
 
 func writeStartWorkStateUnlocked(state startWorkState) error {
-	if _, err := normalizeStartWorkStateScoutJobs(&state); err != nil {
+	if _, err := normalizeStartWorkStateUnlocked(&state); err != nil {
 		return err
 	}
 	return writeGithubJSON(startWorkStatePath(state.SourceRepo), state)

@@ -92,11 +92,15 @@ func TestReconcileStartWorkScoutJobRunStateHealsStaleFailureWhenRunCompletes(t *
 	}
 
 	job := startWorkScoutJob{
-		ID:        "proposal-1",
-		Status:    startScoutJobFailed,
-		RunID:     manifest.RunID,
-		LastError: localWorkStaleCleanupError,
-		UpdatedAt: now,
+		ID:                 "proposal-1",
+		Status:             startScoutJobFailed,
+		RunID:              manifest.RunID,
+		LastError:          localWorkStaleCleanupError,
+		RecoveryCount:      1,
+		LastRecoveryReason: localWorkStaleCleanupError,
+		LastRecoveryAt:     now,
+		LastRecoveredRunID: manifest.RunID,
+		UpdatedAt:          now,
 	}
 	reconcileStartWorkScoutJobRunState(&job)
 	if job.Status != startScoutJobCompleted {
@@ -104,6 +108,121 @@ func TestReconcileStartWorkScoutJobRunStateHealsStaleFailureWhenRunCompletes(t *
 	}
 	if job.LastError != "" {
 		t.Fatalf("expected stale error to be cleared, got %+v", job)
+	}
+	if startWorkScoutJobHasRecoveryMetadata(job) {
+		t.Fatalf("expected completed scout job to clear recovery metadata, got %+v", job)
+	}
+}
+
+func TestReconcileStartWorkScoutJobRunStateAutoRequeuesStaleStartupCleanupOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	repoRoot := createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+	now := time.Now().UTC().Format(time.RFC3339)
+	manifest := localWorkManifest{
+		Version:          1,
+		RunID:            "lw-scout-stale-startup",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		CompletedAt:      now,
+		Status:           "failed",
+		CurrentPhase:     "bootstrap",
+		CurrentIteration: 0,
+		RepoRoot:         repoRoot,
+		RepoName:         filepath.Base(repoRoot),
+		RepoID:           localWorkRepoID(repoRoot),
+		SourceBranch:     "main",
+		BaselineSHA:      strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
+		SandboxPath:      filepath.Join(home, "sandboxes", "lw-scout-stale-startup"),
+		SandboxRepoPath:  filepath.Join(home, "sandboxes", "lw-scout-stale-startup", "repo"),
+		LastError:        localWorkStaleCleanupError,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	job := startWorkScoutJob{
+		ID:          "proposal-1",
+		Destination: improvementDestinationLocal,
+		Status:      startScoutJobFailed,
+		RunID:       manifest.RunID,
+		Attempts:    1,
+		LastError:   localWorkStaleCleanupError,
+		UpdatedAt:   now,
+	}
+	before := time.Now().UTC()
+	reconcileStartWorkScoutJobRunState(&job)
+	after := time.Now().UTC()
+	if job.Status != startScoutJobQueued || job.RunID != "" {
+		t.Fatalf("expected stale startup cleanup to auto-requeue scout job, got %+v", job)
+	}
+	if job.PauseReason != startWorkScoutJobStaleRetryPauseReason {
+		t.Fatalf("expected stale retry pause reason, got %+v", job)
+	}
+	if job.LastError != localWorkStaleCleanupError {
+		t.Fatalf("expected stale cleanup error to remain visible, got %+v", job)
+	}
+	if job.RecoveryCount != 1 || job.LastRecoveryReason != localWorkStaleCleanupError || job.LastRecoveredRunID != manifest.RunID || strings.TrimSpace(job.LastRecoveryAt) == "" {
+		t.Fatalf("expected structured stale recovery metadata, got %+v", job)
+	}
+	pauseUntil, err := time.Parse(time.RFC3339Nano, job.PauseUntil)
+	if err != nil {
+		t.Fatalf("parse pause until: %v", err)
+	}
+	if pauseUntil.Before(before.Add(startWorkScoutJobStaleRetryCooldown-time.Minute)) || pauseUntil.After(after.Add(startWorkScoutJobStaleRetryCooldown+time.Minute)) {
+		t.Fatalf("expected pause until near cooldown window, got %s", job.PauseUntil)
+	}
+}
+
+func TestReconcileStartWorkScoutJobRunStateKeepsRepeatedStaleStartupCleanupFailed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	repoRoot := createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+	now := time.Now().UTC().Format(time.RFC3339)
+	manifest := localWorkManifest{
+		Version:          1,
+		RunID:            "lw-scout-stale-repeat",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		CompletedAt:      now,
+		Status:           "failed",
+		CurrentPhase:     "bootstrap",
+		CurrentIteration: 0,
+		RepoRoot:         repoRoot,
+		RepoName:         filepath.Base(repoRoot),
+		RepoID:           localWorkRepoID(repoRoot),
+		SourceBranch:     "main",
+		BaselineSHA:      strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
+		SandboxPath:      filepath.Join(home, "sandboxes", "lw-scout-stale-repeat"),
+		SandboxRepoPath:  filepath.Join(home, "sandboxes", "lw-scout-stale-repeat", "repo"),
+		LastError:        localWorkStaleCleanupError,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	job := startWorkScoutJob{
+		ID:          "proposal-1",
+		Destination: improvementDestinationLocal,
+		Status:      startScoutJobFailed,
+		RunID:       manifest.RunID,
+		Attempts:    2,
+		LastError:   localWorkStaleCleanupError,
+		UpdatedAt:   now,
+	}
+	reconcileStartWorkScoutJobRunState(&job)
+	if job.Status != startScoutJobFailed || job.RunID != manifest.RunID {
+		t.Fatalf("expected repeated stale cleanup to remain failed, got %+v", job)
+	}
+	if job.PauseReason != "" || job.PauseUntil != "" {
+		t.Fatalf("expected repeated stale cleanup to avoid auto-pause, got %+v", job)
+	}
+	if job.RecoveryCount != 0 || job.LastRecoveryReason != "" || job.LastRecoveredRunID != "" || job.LastRecoveryAt != "" {
+		t.Fatalf("expected repeated stale cleanup to avoid recovery metadata, got %+v", job)
 	}
 }
 
@@ -153,6 +272,155 @@ func TestReconcileStartWorkScoutJobRunStateKeepsPausedRunBoundToRunningJob(t *te
 	}
 	if job.LastError != manifest.LastError {
 		t.Fatalf("expected paused run error to be preserved, got %+v", job)
+	}
+}
+
+func TestReconcileStartWorkScoutJobRunStateKeepsProgressedStaleCleanupFailed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	repoRoot := createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+	now := time.Now().UTC().Format(time.RFC3339)
+	manifest := localWorkManifest{
+		Version:          1,
+		RunID:            "lw-scout-progressed-stale",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		CompletedAt:      now,
+		Status:           "failed",
+		CurrentPhase:     "verify",
+		CurrentIteration: 1,
+		RepoRoot:         repoRoot,
+		RepoName:         filepath.Base(repoRoot),
+		RepoID:           localWorkRepoID(repoRoot),
+		SourceBranch:     "main",
+		BaselineSHA:      strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
+		SandboxPath:      filepath.Join(home, "sandboxes", "lw-scout-progressed-stale"),
+		SandboxRepoPath:  filepath.Join(home, "sandboxes", "lw-scout-progressed-stale", "repo"),
+		LastError:        localWorkStaleCleanupError,
+		Iterations: []localWorkIterationSummary{{
+			Iteration: 1,
+			Status:    "failed",
+		}},
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	job := startWorkScoutJob{
+		ID:          "proposal-1",
+		Destination: improvementDestinationLocal,
+		Status:      startScoutJobFailed,
+		RunID:       manifest.RunID,
+		Attempts:    1,
+		LastError:   localWorkStaleCleanupError,
+		UpdatedAt:   now,
+	}
+	reconcileStartWorkScoutJobRunState(&job)
+	if job.Status != startScoutJobFailed || job.RunID != manifest.RunID {
+		t.Fatalf("expected progressed stale cleanup to remain failed, got %+v", job)
+	}
+	if job.PauseReason != "" || job.PauseUntil != "" {
+		t.Fatalf("expected progressed stale cleanup to avoid auto-pause, got %+v", job)
+	}
+	if startWorkScoutJobHasRecoveryMetadata(job) {
+		t.Fatalf("expected progressed stale cleanup to avoid recovery metadata, got %+v", job)
+	}
+}
+
+func TestMutateStartWorkScoutJobClearsRecoveryMetadataOnRetryAndDismiss(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	now := time.Now().UTC().Format(time.RFC3339)
+	state := startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  now,
+		ScoutJobs: map[string]startWorkScoutJob{
+			"failed-job": {
+				ID:                 "failed-job",
+				Role:               improvementScoutRole,
+				Title:              "Improve help text",
+				Summary:            "Make help clearer",
+				ArtifactPath:       ".nana/improvements/improve-test",
+				ProposalPath:       ".nana/improvements/improve-test/proposals.json",
+				Destination:        improvementDestinationLocal,
+				TaskBody:           "Implement local scout proposal: Improve help text",
+				Status:             startScoutJobFailed,
+				RunID:              "lw-failed",
+				LastError:          localWorkStaleCleanupError,
+				PauseReason:        startWorkScoutJobStaleRetryPauseReason,
+				PauseUntil:         time.Now().UTC().Add(15 * time.Minute).Format(time.RFC3339Nano),
+				RecoveryCount:      1,
+				LastRecoveryReason: localWorkStaleCleanupError,
+				LastRecoveryAt:     now,
+				LastRecoveredRunID: "lw-failed",
+				UpdatedAt:          now,
+				CreatedAt:          now,
+			},
+			"queued-job": {
+				ID:                 "queued-job",
+				Role:               improvementScoutRole,
+				Title:              "Improve help text 2",
+				Summary:            "Make help clearer",
+				ArtifactPath:       ".nana/improvements/improve-test-2",
+				ProposalPath:       ".nana/improvements/improve-test-2/proposals.json",
+				Destination:        improvementDestinationLocal,
+				TaskBody:           "Implement local scout proposal: Improve help text 2",
+				Status:             startScoutJobQueued,
+				LastError:          localWorkStaleCleanupError,
+				PauseReason:        startWorkScoutJobStaleRetryPauseReason,
+				PauseUntil:         time.Now().UTC().Add(15 * time.Minute).Format(time.RFC3339Nano),
+				RecoveryCount:      1,
+				LastRecoveryReason: localWorkStaleCleanupError,
+				LastRecoveryAt:     now,
+				LastRecoveredRunID: "lw-failed-2",
+				UpdatedAt:          now,
+				CreatedAt:          now,
+			},
+		},
+	}
+	if err := writeStartWorkState(state); err != nil {
+		t.Fatalf("writeStartWorkState: %v", err)
+	}
+
+	if _, job, err := mutateStartWorkScoutJob(repoSlug, "failed-job", "retry"); err != nil {
+		t.Fatalf("retry scout job: %v", err)
+	} else if job.Status != startScoutJobQueued || job.RunID != "" || job.PauseReason != "" || job.PauseUntil != "" || startWorkScoutJobHasRecoveryMetadata(job) {
+		t.Fatalf("expected retry to clear recovery metadata, got %+v", job)
+	}
+
+	if _, job, err := mutateStartWorkScoutJob(repoSlug, "queued-job", "dismiss"); err != nil {
+		t.Fatalf("dismiss scout job: %v", err)
+	} else if job.Status != startScoutJobDismissed || job.PauseReason != "" || job.PauseUntil != "" || startWorkScoutJobHasRecoveryMetadata(job) {
+		t.Fatalf("expected dismiss to clear recovery metadata, got %+v", job)
+	}
+}
+
+func TestLogStartWorkScoutJobTransitionLogsAutoRecovery(t *testing.T) {
+	next := startWorkScoutJob{
+		ID:                 "proposal-1",
+		Destination:        improvementDestinationLocal,
+		Status:             startScoutJobQueued,
+		PauseReason:        startWorkScoutJobStaleRetryPauseReason,
+		PauseUntil:         "2026-04-21T12:00:00Z",
+		RecoveryCount:      1,
+		LastRecoveryReason: localWorkStaleCleanupError,
+		LastRecoveryAt:     "2026-04-21T11:45:00Z",
+		LastRecoveredRunID: "lw-stale",
+	}
+	output, err := captureStdout(t, func() error {
+		logStartWorkScoutJobTransition("acme/widget", startWorkScoutJob{ID: "proposal-1", Status: startScoutJobFailed, RunID: "lw-stale", LastError: localWorkStaleCleanupError}, next, true)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("captureStdout: %v", err)
+	}
+	if !strings.Contains(output, "auto-requeued after stale startup cleanup") || !strings.Contains(output, "proposal-1") || !strings.Contains(output, "lw-stale") || !strings.Contains(output, "2026-04-21T12:00:00Z") {
+		t.Fatalf("expected auto-recovery log line, got %q", output)
 	}
 }
 

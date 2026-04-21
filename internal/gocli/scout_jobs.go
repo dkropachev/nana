@@ -7,19 +7,12 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 )
 
 func ensureStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 	state, err := readStartWorkStateUnlocked(repoSlug)
 	if err == nil {
-		if updated, syncErr := normalizeStartWorkStateScoutJobs(state); syncErr != nil {
-			return nil, syncErr
-		} else if updated {
-			state.UpdatedAt = defaultString(strings.TrimSpace(state.UpdatedAt), ISOTimeNow())
-			if writeErr := writeGithubJSON(startWorkStatePath(state.SourceRepo), *state); writeErr != nil {
-				return nil, writeErr
-			}
-		}
 		return state, nil
 	}
 	if !os.IsNotExist(err) {
@@ -128,45 +121,49 @@ func startWorkScoutJobFromDiscovered(item localScoutDiscoveredItem, createdAt st
 
 func startWorkScoutJobFromItem(item startWorkScoutJob) startUIScoutItem {
 	return startUIScoutItem{
-		ID:                item.ID,
-		Role:              item.Role,
-		Title:             item.Title,
-		WorkType:          item.WorkType,
-		Area:              item.Area,
-		Summary:           item.Summary,
-		Rationale:         item.Rationale,
-		Evidence:          item.Evidence,
-		Impact:            item.Impact,
-		SuggestedNextStep: item.SuggestedNextStep,
-		Confidence:        item.Confidence,
-		Files:             append([]string{}, item.Files...),
-		Labels:            append([]string{}, item.Labels...),
-		Page:              item.Page,
-		Route:             item.Route,
-		Severity:          item.Severity,
-		TargetKind:        item.TargetKind,
-		Screenshots:       append([]string{}, item.Screenshots...),
-		ArtifactPath:      item.ArtifactPath,
-		ProposalPath:      item.ProposalPath,
-		PolicyPath:        item.PolicyPath,
-		PreflightPath:     item.PreflightPath,
-		IssueDraftPath:    item.IssueDraftPath,
-		RawOutputPath:     item.RawOutputPath,
-		GeneratedAt:       item.GeneratedAt,
-		AuditMode:         item.AuditMode,
-		SurfaceKind:       item.SurfaceKind,
-		SurfaceTarget:     item.SurfaceTarget,
-		BrowserReady:      item.BrowserReady,
-		PreflightReason:   item.PreflightReason,
-		Destination:       item.Destination,
-		ForkRepo:          item.ForkRepo,
-		Status:            item.Status,
-		RunID:             item.RunID,
-		PlannedItemID:     item.LegacyPlannedItemID,
-		Error:             item.LastError,
-		PauseReason:       item.PauseReason,
-		PauseUntil:        item.PauseUntil,
-		UpdatedAt:         item.UpdatedAt,
+		ID:                 item.ID,
+		Role:               item.Role,
+		Title:              item.Title,
+		WorkType:           item.WorkType,
+		Area:               item.Area,
+		Summary:            item.Summary,
+		Rationale:          item.Rationale,
+		Evidence:           item.Evidence,
+		Impact:             item.Impact,
+		SuggestedNextStep:  item.SuggestedNextStep,
+		Confidence:         item.Confidence,
+		Files:              append([]string{}, item.Files...),
+		Labels:             append([]string{}, item.Labels...),
+		Page:               item.Page,
+		Route:              item.Route,
+		Severity:           item.Severity,
+		TargetKind:         item.TargetKind,
+		Screenshots:        append([]string{}, item.Screenshots...),
+		ArtifactPath:       item.ArtifactPath,
+		ProposalPath:       item.ProposalPath,
+		PolicyPath:         item.PolicyPath,
+		PreflightPath:      item.PreflightPath,
+		IssueDraftPath:     item.IssueDraftPath,
+		RawOutputPath:      item.RawOutputPath,
+		GeneratedAt:        item.GeneratedAt,
+		AuditMode:          item.AuditMode,
+		SurfaceKind:        item.SurfaceKind,
+		SurfaceTarget:      item.SurfaceTarget,
+		BrowserReady:       item.BrowserReady,
+		PreflightReason:    item.PreflightReason,
+		Destination:        item.Destination,
+		ForkRepo:           item.ForkRepo,
+		Status:             item.Status,
+		RunID:              item.RunID,
+		PlannedItemID:      item.LegacyPlannedItemID,
+		Error:              item.LastError,
+		PauseReason:        item.PauseReason,
+		PauseUntil:         item.PauseUntil,
+		RecoveryCount:      item.RecoveryCount,
+		LastRecoveryReason: item.LastRecoveryReason,
+		LastRecoveryAt:     item.LastRecoveryAt,
+		LastRecoveredRunID: item.LastRecoveredRunID,
+		UpdatedAt:          item.UpdatedAt,
 	}
 }
 
@@ -403,7 +400,24 @@ func logStartWorkScoutJobTransition(repoSlug string, previous startWorkScoutJob,
 	}
 	if strings.TrimSpace(previous.Status) == strings.TrimSpace(next.Status) &&
 		strings.TrimSpace(previous.RunID) == strings.TrimSpace(next.RunID) &&
-		strings.TrimSpace(previous.LastError) == strings.TrimSpace(next.LastError) {
+		strings.TrimSpace(previous.LastError) == strings.TrimSpace(next.LastError) &&
+		strings.TrimSpace(previous.PauseReason) == strings.TrimSpace(next.PauseReason) &&
+		strings.TrimSpace(previous.PauseUntil) == strings.TrimSpace(next.PauseUntil) &&
+		previous.RecoveryCount == next.RecoveryCount &&
+		strings.TrimSpace(previous.LastRecoveryReason) == strings.TrimSpace(next.LastRecoveryReason) &&
+		strings.TrimSpace(previous.LastRecoveryAt) == strings.TrimSpace(next.LastRecoveryAt) &&
+		strings.TrimSpace(previous.LastRecoveredRunID) == strings.TrimSpace(next.LastRecoveredRunID) {
+		return
+	}
+	if startWorkScoutJobInRecoveryCooldown(next) {
+		fmt.Fprintf(
+			os.Stdout,
+			"[start] %s: scout job %s auto-requeued after stale startup cleanup for run %s; retry after %s.\n",
+			repoSlug,
+			next.ID,
+			defaultString(strings.TrimSpace(next.LastRecoveredRunID), "-"),
+			defaultString(strings.TrimSpace(next.PauseUntil), "-"),
+		)
 		return
 	}
 	switch strings.TrimSpace(next.Status) {
@@ -451,6 +465,12 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 		job.RunID = strings.TrimSpace(existing.RunID)
 		job.Attempts = existing.Attempts
 		job.LastError = strings.TrimSpace(existing.LastError)
+		job.PauseReason = strings.TrimSpace(existing.PauseReason)
+		job.PauseUntil = strings.TrimSpace(existing.PauseUntil)
+		job.RecoveryCount = existing.RecoveryCount
+		job.LastRecoveryReason = strings.TrimSpace(existing.LastRecoveryReason)
+		job.LastRecoveryAt = strings.TrimSpace(existing.LastRecoveryAt)
+		job.LastRecoveredRunID = strings.TrimSpace(existing.LastRecoveredRunID)
 		job.UpdatedAt = defaultString(strings.TrimSpace(existing.UpdatedAt), job.UpdatedAt)
 		job.CreatedAt = defaultString(strings.TrimSpace(existing.CreatedAt), job.CreatedAt)
 		job.LegacyPlannedItemID = defaultString(strings.TrimSpace(existing.LegacyPlannedItemID), job.LegacyPlannedItemID)
@@ -570,12 +590,114 @@ func startWorkScoutJobShouldReconcileRunState(job *startWorkScoutJob) bool {
 	}
 }
 
+const (
+	startWorkScoutJobStaleRetryPauseReason = "auto-retrying after stale startup cleanup"
+	startWorkScoutJobStaleRetryCooldown    = 15 * time.Minute
+)
+
+func startWorkScoutJobClearRecovery(job *startWorkScoutJob) {
+	if job == nil {
+		return
+	}
+	job.RecoveryCount = 0
+	job.LastRecoveryReason = ""
+	job.LastRecoveryAt = ""
+	job.LastRecoveredRunID = ""
+}
+
+func startWorkScoutJobHasRecoveryMetadata(job startWorkScoutJob) bool {
+	return job.RecoveryCount > 0 ||
+		strings.TrimSpace(job.LastRecoveryReason) != "" ||
+		strings.TrimSpace(job.LastRecoveryAt) != "" ||
+		strings.TrimSpace(job.LastRecoveredRunID) != ""
+}
+
+func startWorkScoutJobInRecoveryCooldown(job startWorkScoutJob) bool {
+	return normalizeScoutDestination(job.Destination) == improvementDestinationLocal &&
+		strings.TrimSpace(job.PauseReason) == startWorkScoutJobStaleRetryPauseReason &&
+		strings.TrimSpace(job.PauseUntil) != "" &&
+		strings.TrimSpace(job.LastRecoveryReason) == localWorkStaleCleanupError &&
+		strings.TrimSpace(job.LastRecoveredRunID) != ""
+}
+
+func startWorkScoutJobNormalizeRecovery(job *startWorkScoutJob) bool {
+	if job == nil {
+		return false
+	}
+	updated := false
+	if job.RecoveryCount < 0 {
+		job.RecoveryCount = 0
+		updated = true
+	}
+	if startWorkScoutJobIsResolved(job.Status) && startWorkScoutJobHasRecoveryMetadata(*job) {
+		startWorkScoutJobClearRecovery(job)
+		updated = true
+	}
+	if startWorkScoutJobIsResolved(job.Status) && strings.TrimSpace(job.PauseReason) == startWorkScoutJobStaleRetryPauseReason {
+		job.PauseReason = ""
+		job.PauseUntil = ""
+		updated = true
+	}
+	return updated
+}
+
+func startWorkScoutJobRecordStaleRecovery(job *startWorkScoutJob, manifest localWorkManifest, now time.Time) {
+	if job == nil {
+		return
+	}
+	recoveryReason := defaultString(strings.TrimSpace(manifest.LastError), localWorkStaleCleanupError)
+	job.Status = startScoutJobQueued
+	job.RunID = ""
+	job.LastError = recoveryReason
+	job.PauseReason = startWorkScoutJobStaleRetryPauseReason
+	job.PauseUntil = now.Add(startWorkScoutJobStaleRetryCooldown).Format(time.RFC3339Nano)
+	job.RecoveryCount++
+	job.LastRecoveryReason = recoveryReason
+	job.LastRecoveryAt = now.Format(time.RFC3339Nano)
+	job.LastRecoveredRunID = strings.TrimSpace(manifest.RunID)
+	job.UpdatedAt = now.Format(time.RFC3339Nano)
+}
+
+func startWorkScoutJobNeedsApproval(job startWorkScoutJob) bool {
+	if startWorkScoutJobInRecoveryCooldown(job) {
+		return false
+	}
+	return strings.TrimSpace(job.Status) == startScoutJobFailed
+}
+
+func localWorkManifestEndedBeforeFirstIteration(manifest localWorkManifest) bool {
+	return manifest.CurrentIteration <= 0 && len(manifest.Iterations) == 0
+}
+
+func startWorkScoutJobShouldAutoRetryStaleStartup(job *startWorkScoutJob, manifest localWorkManifest) bool {
+	if job == nil {
+		return false
+	}
+	if normalizeScoutDestination(job.Destination) != improvementDestinationLocal {
+		return false
+	}
+	if job.RecoveryCount > 0 {
+		return false
+	}
+	if job.Attempts > 1 {
+		return false
+	}
+	if !localWorkIsStaleCleanupError(manifest.LastError) {
+		return false
+	}
+	return localWorkManifestEndedBeforeFirstIteration(manifest)
+}
+
 func reconcileStartWorkScoutJobRunState(job *startWorkScoutJob) {
 	if !startWorkScoutJobShouldReconcileRunState(job) {
 		return
 	}
 	manifest, err := readLocalWorkManifestByRunID(job.RunID)
 	if err != nil {
+		return
+	}
+	if startWorkScoutJobShouldAutoRetryStaleStartup(job, manifest) {
+		startWorkScoutJobRecordStaleRecovery(job, manifest, time.Now().UTC())
 		return
 	}
 	switch strings.TrimSpace(manifest.Status) {
@@ -593,6 +715,7 @@ func reconcileStartWorkScoutJobRunState(job *startWorkScoutJob) {
 		job.LastError = ""
 		job.PauseUntil = ""
 		job.PauseReason = ""
+		startWorkScoutJobClearRecovery(job)
 	case "failed", "blocked":
 		job.Status = startScoutJobFailed
 		job.LastError = defaultString(strings.TrimSpace(manifest.LastError), fmt.Sprintf("local work run %s ended with status %s", job.RunID, manifest.Status))
@@ -651,6 +774,7 @@ func syncStartWorkScoutJobsIntoState(repoPath string, state *startWorkState) (bo
 		planned, plannedOK := findLegacyScoutPlannedItem(state, existing, record, recordOK, item)
 		deriveScoutJobLegacyState(&job, existing, hasExisting, record, recordOK, planned, plannedOK)
 		reconcileStartWorkScoutJobRunState(&job)
+		startWorkScoutJobNormalizeRecovery(&job)
 		if !hasExisting || !reflect.DeepEqual(existing, job) {
 			logStartWorkScoutJobTransition(state.SourceRepo, existing, job, hasExisting)
 			state.ScoutJobs[item.ID] = job
@@ -720,6 +844,7 @@ func syncStartWorkScoutJobsIntoState(repoPath string, state *startWorkState) (bo
 			job.RunID = strings.TrimSpace(planned.LaunchRunID)
 		}
 		reconcileStartWorkScoutJobRunState(&job)
+		startWorkScoutJobNormalizeRecovery(&job)
 		if !hasExisting || !reflect.DeepEqual(existing, job) {
 			logStartWorkScoutJobTransition(state.SourceRepo, existing, job, hasExisting)
 			state.ScoutJobs[job.ID] = job
@@ -845,6 +970,9 @@ func mutateStartWorkScoutJob(repoSlug string, jobID string, action string) (*sta
 		case startScoutJobQueued, startScoutJobFailed:
 			job.Status = startScoutJobDismissed
 			job.LastError = ""
+			job.PauseReason = ""
+			job.PauseUntil = ""
+			startWorkScoutJobClearRecovery(&job)
 			job.UpdatedAt = now
 		default:
 			return nil, startWorkScoutJob{}, fmt.Errorf("scout job %s cannot be dismissed from status %s", jobID, job.Status)
@@ -855,6 +983,9 @@ func mutateStartWorkScoutJob(repoSlug string, jobID string, action string) (*sta
 			job.Status = startScoutJobQueued
 			job.RunID = ""
 			job.LastError = ""
+			job.PauseReason = ""
+			job.PauseUntil = ""
+			startWorkScoutJobClearRecovery(&job)
 			job.UpdatedAt = now
 		default:
 			return nil, startWorkScoutJob{}, fmt.Errorf("scout job %s cannot be retried from status %s", jobID, job.Status)

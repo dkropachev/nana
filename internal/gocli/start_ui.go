@@ -498,46 +498,50 @@ type startUIRepoSettingsPatchRequest struct {
 }
 
 type startUIScoutItem struct {
-	ID                string   `json:"id"`
-	Role              string   `json:"role"`
-	Title             string   `json:"title"`
-	WorkType          string   `json:"work_type,omitempty"`
-	Area              string   `json:"area,omitempty"`
-	Summary           string   `json:"summary"`
-	Rationale         string   `json:"rationale,omitempty"`
-	Evidence          string   `json:"evidence,omitempty"`
-	Impact            string   `json:"impact,omitempty"`
-	SuggestedNextStep string   `json:"suggested_next_step,omitempty"`
-	Confidence        string   `json:"confidence,omitempty"`
-	Files             []string `json:"files,omitempty"`
-	Labels            []string `json:"labels,omitempty"`
-	Page              string   `json:"page,omitempty"`
-	Route             string   `json:"route,omitempty"`
-	Severity          string   `json:"severity,omitempty"`
-	TargetKind        string   `json:"target_kind,omitempty"`
-	Screenshots       []string `json:"screenshots,omitempty"`
-	ArtifactPath      string   `json:"artifact_path"`
-	ProposalPath      string   `json:"proposal_path"`
-	PolicyPath        string   `json:"policy_path,omitempty"`
-	PreflightPath     string   `json:"preflight_path,omitempty"`
-	IssueDraftPath    string   `json:"issue_draft_path,omitempty"`
-	RawOutputPath     string   `json:"raw_output_path,omitempty"`
-	GeneratedAt       string   `json:"generated_at,omitempty"`
-	AuditMode         string   `json:"audit_mode,omitempty"`
-	SurfaceKind       string   `json:"surface_kind,omitempty"`
-	SurfaceTarget     string   `json:"surface_target,omitempty"`
-	BrowserReady      bool     `json:"browser_ready,omitempty"`
-	PreflightReason   string   `json:"preflight_reason,omitempty"`
-	Destination       string   `json:"destination"`
-	ForkRepo          string   `json:"fork_repo,omitempty"`
-	Status            string   `json:"status"`
-	RunID             string   `json:"run_id,omitempty"`
-	PlannedItemID     string   `json:"planned_item_id,omitempty"`
-	Error             string   `json:"error,omitempty"`
-	PauseReason       string   `json:"pause_reason,omitempty"`
-	PauseUntil        string   `json:"pause_until,omitempty"`
-	UpdatedAt         string   `json:"updated_at,omitempty"`
-	AvailableActions  []string `json:"available_actions,omitempty"`
+	ID                 string   `json:"id"`
+	Role               string   `json:"role"`
+	Title              string   `json:"title"`
+	WorkType           string   `json:"work_type,omitempty"`
+	Area               string   `json:"area,omitempty"`
+	Summary            string   `json:"summary"`
+	Rationale          string   `json:"rationale,omitempty"`
+	Evidence           string   `json:"evidence,omitempty"`
+	Impact             string   `json:"impact,omitempty"`
+	SuggestedNextStep  string   `json:"suggested_next_step,omitempty"`
+	Confidence         string   `json:"confidence,omitempty"`
+	Files              []string `json:"files,omitempty"`
+	Labels             []string `json:"labels,omitempty"`
+	Page               string   `json:"page,omitempty"`
+	Route              string   `json:"route,omitempty"`
+	Severity           string   `json:"severity,omitempty"`
+	TargetKind         string   `json:"target_kind,omitempty"`
+	Screenshots        []string `json:"screenshots,omitempty"`
+	ArtifactPath       string   `json:"artifact_path"`
+	ProposalPath       string   `json:"proposal_path"`
+	PolicyPath         string   `json:"policy_path,omitempty"`
+	PreflightPath      string   `json:"preflight_path,omitempty"`
+	IssueDraftPath     string   `json:"issue_draft_path,omitempty"`
+	RawOutputPath      string   `json:"raw_output_path,omitempty"`
+	GeneratedAt        string   `json:"generated_at,omitempty"`
+	AuditMode          string   `json:"audit_mode,omitempty"`
+	SurfaceKind        string   `json:"surface_kind,omitempty"`
+	SurfaceTarget      string   `json:"surface_target,omitempty"`
+	BrowserReady       bool     `json:"browser_ready,omitempty"`
+	PreflightReason    string   `json:"preflight_reason,omitempty"`
+	Destination        string   `json:"destination"`
+	ForkRepo           string   `json:"fork_repo,omitempty"`
+	Status             string   `json:"status"`
+	RunID              string   `json:"run_id,omitempty"`
+	PlannedItemID      string   `json:"planned_item_id,omitempty"`
+	Error              string   `json:"error,omitempty"`
+	PauseReason        string   `json:"pause_reason,omitempty"`
+	PauseUntil         string   `json:"pause_until,omitempty"`
+	RecoveryCount      int      `json:"recovery_count,omitempty"`
+	LastRecoveryReason string   `json:"last_recovery_reason,omitempty"`
+	LastRecoveryAt     string   `json:"last_recovery_at,omitempty"`
+	LastRecoveredRunID string   `json:"last_recovered_run_id,omitempty"`
+	UpdatedAt          string   `json:"updated_at,omitempty"`
+	AvailableActions   []string `json:"available_actions,omitempty"`
 }
 
 type startUIScoutItemsResponse struct {
@@ -2291,7 +2295,7 @@ func startUICountApprovals(runs []startUIWorkRun, items []workItem, repos []star
 			}
 		}
 		for _, job := range repo.State.ScoutJobs {
-			if job.Status == startScoutJobFailed {
+			if startWorkScoutJobNeedsApproval(job) {
 				count++
 			}
 		}
@@ -3220,7 +3224,7 @@ func loadStartUIApprovals() ([]startUIApprovalQueueItem, error) {
 			out = append(out, startUIApprovalItemFromServiceTask(repo.RepoSlug, task))
 		}
 		for _, job := range repo.State.ScoutJobs {
-			if job.Status != startScoutJobFailed {
+			if !startWorkScoutJobNeedsApproval(job) {
 				continue
 			}
 			out = append(out, startUIApprovalQueueItem{

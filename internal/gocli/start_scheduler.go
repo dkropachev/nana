@@ -1221,6 +1221,7 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 			if scoutJobOK {
 				scoutJob.Status = startScoutJobCompleted
 				scoutJob.LastError = ""
+				startWorkScoutJobClearRecovery(&scoutJob)
 				scoutJob.UpdatedAt = now
 				if strings.TrimSpace(result.PlannedLaunch.RunID) != "" {
 					scoutJob.RunID = strings.TrimSpace(result.PlannedLaunch.RunID)

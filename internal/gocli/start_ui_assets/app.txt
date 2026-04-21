@@ -4110,6 +4110,19 @@
         <span><strong>Browser ready:</strong> ${escapeHTML(String(Boolean(item.browser_ready)))}</span>
         <span><strong>Preflight reason:</strong> ${escapeHTML(defaultString(item.preflight_reason, "(none)"))}</span>
       </div>
+      ${(item.recovery_count || item.last_recovery_at || item.last_recovered_run_id) ? `
+      <div class="queue-summary">
+        <article class="queue-item">
+          <span class="queue-label">Recovery</span>
+          <p class="queue-copy">Auto-retry scheduled after stale startup cleanup. Nana keeps the interrupted run in work history and retries this scout proposal once after the cooldown expires.</p>
+        </article>
+      </div>
+      <div class="config-meta">
+        <span><strong>Recovery Count:</strong> ${escapeHTML(String(Number(item.recovery_count || 0)))}</span>
+        <span><strong>Recovered Run:</strong> ${escapeHTML(defaultString(item.last_recovered_run_id, "(none)"))}</span>
+        <span><strong>Recovery At:</strong> ${escapeHTML(defaultString(item.last_recovery_at ? formatDateTime(item.last_recovery_at) : "", "(none)"))}</span>
+        <span><strong>Recovery Reason:</strong> ${escapeHTML(defaultString(item.last_recovery_reason, "(none)"))}</span>
+      </div>` : ""}
       <div class="config-meta">
         <span><strong>Run ID:</strong> ${escapeHTML(defaultString(item.run_id, "(none)"))}</span>
         <span><strong>Planned Item:</strong> ${escapeHTML(defaultString(item.planned_item_id, "(none)"))}</span>
