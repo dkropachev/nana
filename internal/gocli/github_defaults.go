@@ -266,7 +266,7 @@ type githubLane struct {
 
 func GithubWork(cwd string, args []string) error {
 	if len(args) == 0 || isHelpToken(args[0]) {
-		fmt.Fprint(currentGithubStdout(), GithubWorkHelp)
+		fmt.Fprint(os.Stdout, GithubWorkHelp)
 		return nil
 	}
 	if args[0] != "defaults" || len(args) < 2 {
@@ -294,7 +294,7 @@ func GithubWork(cwd string, args []string) error {
 
 func GithubReviewRules(cwd string, args []string) error {
 	if len(args) == 0 || isHelpToken(args[0]) {
-		fmt.Fprint(currentGithubStdout(), ReviewRulesHelp)
+		fmt.Fprint(os.Stdout, ReviewRulesHelp)
 		return nil
 	}
 	if args[0] != "config" || len(args) < 2 {
@@ -595,19 +595,19 @@ func githubDefaultsSet(args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(currentGithubStdout(), "[github] Saved default considerations for %s: %s\n", repoSlug, joinOrNone(settings.DefaultConsiderations))
-	fmt.Fprintf(currentGithubStdout(), "[github] Saved role layout for %s: %s\n", repoSlug, defaultString(settings.DefaultRoleLayout, "split"))
-	fmt.Fprintf(currentGithubStdout(), "[github] Saved review-rules mode for %s: %s\n", repoSlug, defaultString(settings.ReviewRulesMode, "manual"))
-	fmt.Fprintf(currentGithubStdout(), "[github] Saved review-rules trusted reviewers for %s: %s\n", repoSlug, joinOrNone(settings.ReviewRulesReviewerPolicy.GetTrusted()))
-	fmt.Fprintf(currentGithubStdout(), "[github] Saved review-rules blocked reviewers for %s: %s\n", repoSlug, joinOrNone(settings.ReviewRulesReviewerPolicy.GetBlocked()))
-	fmt.Fprintf(currentGithubStdout(), "[github] Saved review-rules min distinct reviewers for %s: %s\n", repoSlug, intOrNone(settings.ReviewRulesReviewerPolicy.GetMinDistinct()))
-	fmt.Fprintf(currentGithubStdout(), "[github] Saved repo mode for %s: %s\n", repoSlug, defaultString(settings.RepoMode, "local"))
-	fmt.Fprintf(currentGithubStdout(), "[github] Saved issue-pick mode for %s: %s\n", repoSlug, defaultString(settings.IssuePickMode, "manual"))
-	fmt.Fprintf(currentGithubStdout(), "[github] Saved PR forward mode for %s: %s\n", repoSlug, defaultString(settings.PRForwardMode, "approve"))
-	fmt.Fprintf(currentGithubStdout(), "[github] Saved fork-issues mode for %s: %s\n", repoSlug, defaultString(settings.ForkIssuesMode, "manual"))
-	fmt.Fprintf(currentGithubStdout(), "[github] Saved implement mode for %s: %s\n", repoSlug, defaultString(settings.ImplementMode, "manual"))
-	fmt.Fprintf(currentGithubStdout(), "[github] Saved publish target for %s: %s\n", repoSlug, defaultString(settings.PublishTarget, "(none)"))
-	fmt.Fprintf(currentGithubStdout(), "[github] Settings path: %s\n", settingsPath)
+	fmt.Fprintf(os.Stdout, "[github] Saved default considerations for %s: %s\n", repoSlug, joinOrNone(settings.DefaultConsiderations))
+	fmt.Fprintf(os.Stdout, "[github] Saved role layout for %s: %s\n", repoSlug, defaultString(settings.DefaultRoleLayout, "split"))
+	fmt.Fprintf(os.Stdout, "[github] Saved review-rules mode for %s: %s\n", repoSlug, defaultString(settings.ReviewRulesMode, "manual"))
+	fmt.Fprintf(os.Stdout, "[github] Saved review-rules trusted reviewers for %s: %s\n", repoSlug, joinOrNone(settings.ReviewRulesReviewerPolicy.GetTrusted()))
+	fmt.Fprintf(os.Stdout, "[github] Saved review-rules blocked reviewers for %s: %s\n", repoSlug, joinOrNone(settings.ReviewRulesReviewerPolicy.GetBlocked()))
+	fmt.Fprintf(os.Stdout, "[github] Saved review-rules min distinct reviewers for %s: %s\n", repoSlug, intOrNone(settings.ReviewRulesReviewerPolicy.GetMinDistinct()))
+	fmt.Fprintf(os.Stdout, "[github] Saved repo mode for %s: %s\n", repoSlug, defaultString(settings.RepoMode, "local"))
+	fmt.Fprintf(os.Stdout, "[github] Saved issue-pick mode for %s: %s\n", repoSlug, defaultString(settings.IssuePickMode, "manual"))
+	fmt.Fprintf(os.Stdout, "[github] Saved PR forward mode for %s: %s\n", repoSlug, defaultString(settings.PRForwardMode, "approve"))
+	fmt.Fprintf(os.Stdout, "[github] Saved fork-issues mode for %s: %s\n", repoSlug, defaultString(settings.ForkIssuesMode, "manual"))
+	fmt.Fprintf(os.Stdout, "[github] Saved implement mode for %s: %s\n", repoSlug, defaultString(settings.ImplementMode, "manual"))
+	fmt.Fprintf(os.Stdout, "[github] Saved publish target for %s: %s\n", repoSlug, defaultString(settings.PublishTarget, "(none)"))
+	fmt.Fprintf(os.Stdout, "[github] Settings path: %s\n", settingsPath)
 	return nil
 }
 
@@ -661,23 +661,23 @@ func githubDefaultsShow(args []string) error {
 		effectivePolicy = normalizeGithubReviewerPolicy(globalConfig.ReviewerPolicy)
 	}
 
-	fmt.Fprintf(currentGithubStdout(), "[github] Default considerations for %s: %s\n", repoSlug, joinOrNone(defaults))
-	fmt.Fprintf(currentGithubStdout(), "[github] Default role layout for %s: %s\n", repoSlug, roleLayout)
-	fmt.Fprintf(currentGithubStdout(), "[github] Repo review-rules mode for %s: %s\n", repoSlug, defaultString(reviewRulesRepoMode, "(none)"))
-	fmt.Fprintf(currentGithubStdout(), "[github] Effective review-rules mode for %s: %s\n", repoSlug, effectiveMode)
-	fmt.Fprintf(currentGithubStdout(), "[github] Repo reviewer policy for %s: %s\n", repoSlug, formatGithubReviewerPolicy(repoPolicy))
-	fmt.Fprintf(currentGithubStdout(), "[github] Effective reviewer policy for %s: %s\n", repoSlug, formatGithubReviewerPolicy(effectivePolicy))
-	fmt.Fprintf(currentGithubStdout(), "[github] Repo mode for %s: %s\n", repoSlug, repoWorkMode)
-	fmt.Fprintf(currentGithubStdout(), "[github] Issue-pick mode for %s: %s\n", repoSlug, issuePickMode)
-	fmt.Fprintf(currentGithubStdout(), "[github] PR forward mode for %s: %s\n", repoSlug, prForwardMode)
-	fmt.Fprintf(currentGithubStdout(), "[github] Fork issues mode for %s: %s\n", repoSlug, forkIssuesMode)
-	fmt.Fprintf(currentGithubStdout(), "[github] Implement mode for %s: %s\n", repoSlug, implementMode)
-	fmt.Fprintf(currentGithubStdout(), "[github] Publish target for %s: %s\n", repoSlug, defaultString(publishTarget, "(none)"))
-	fmt.Fprintln(currentGithubStdout(), "[github] Resolved default pipeline:")
+	fmt.Fprintf(os.Stdout, "[github] Default considerations for %s: %s\n", repoSlug, joinOrNone(defaults))
+	fmt.Fprintf(os.Stdout, "[github] Default role layout for %s: %s\n", repoSlug, roleLayout)
+	fmt.Fprintf(os.Stdout, "[github] Repo review-rules mode for %s: %s\n", repoSlug, defaultString(reviewRulesRepoMode, "(none)"))
+	fmt.Fprintf(os.Stdout, "[github] Effective review-rules mode for %s: %s\n", repoSlug, effectiveMode)
+	fmt.Fprintf(os.Stdout, "[github] Repo reviewer policy for %s: %s\n", repoSlug, formatGithubReviewerPolicy(repoPolicy))
+	fmt.Fprintf(os.Stdout, "[github] Effective reviewer policy for %s: %s\n", repoSlug, formatGithubReviewerPolicy(effectivePolicy))
+	fmt.Fprintf(os.Stdout, "[github] Repo mode for %s: %s\n", repoSlug, repoWorkMode)
+	fmt.Fprintf(os.Stdout, "[github] Issue-pick mode for %s: %s\n", repoSlug, issuePickMode)
+	fmt.Fprintf(os.Stdout, "[github] PR forward mode for %s: %s\n", repoSlug, prForwardMode)
+	fmt.Fprintf(os.Stdout, "[github] Fork issues mode for %s: %s\n", repoSlug, forkIssuesMode)
+	fmt.Fprintf(os.Stdout, "[github] Implement mode for %s: %s\n", repoSlug, implementMode)
+	fmt.Fprintf(os.Stdout, "[github] Publish target for %s: %s\n", repoSlug, defaultString(publishTarget, "(none)"))
+	fmt.Fprintln(os.Stdout, "[github] Resolved default pipeline:")
 	for _, line := range buildGithubConsiderationInstructionLines(defaults, roleLayout) {
-		fmt.Fprintf(currentGithubStdout(), "%s\n", line)
+		fmt.Fprintf(os.Stdout, "%s\n", line)
 	}
-	fmt.Fprintf(currentGithubStdout(), "[github] Settings path: %s\n", settingsPath)
+	fmt.Fprintf(os.Stdout, "[github] Settings path: %s\n", settingsPath)
 	return nil
 }
 
@@ -710,16 +710,12 @@ func githubWorkStats(args []string) error {
 		return err
 	}
 	for _, line := range buildIssueStatsLines(stats) {
-		fmt.Fprintln(currentGithubStdout(), line)
+		fmt.Fprintln(os.Stdout, line)
 	}
 	return nil
 }
 
 func githubWorkRetrospective(args []string) error {
-	return githubWorkRetrospectiveWithIO(args, currentWorkStdout())
-}
-
-func githubWorkRetrospectiveWithIO(args []string, stdout io.Writer) error {
 	runID := ""
 	useLast := true
 	for index := 0; index < len(args); index++ {
@@ -759,17 +755,13 @@ func githubWorkRetrospectiveWithIO(args []string, stdout io.Writer) error {
 		return err
 	}
 	for _, line := range strings.Split(strings.TrimSpace(markdown), "\n") {
-		fmt.Fprintln(stdout, line)
+		fmt.Fprintln(os.Stdout, line)
 	}
 	_ = repoRoot
 	return nil
 }
 
 func githubWorkExplain(args []string) error {
-	return githubWorkExplainWithIO(args, currentGithubStdout())
-}
-
-func githubWorkExplainWithIO(args []string, stdout io.Writer) error {
 	runID := ""
 	useLast := true
 	jsonOutput := false
@@ -815,7 +807,7 @@ func githubWorkExplainWithIO(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "%s\n", string(content))
+		fmt.Fprintf(os.Stdout, "%s\n", string(content))
 		return nil
 	}
 	lines := []string{
@@ -890,7 +882,7 @@ func githubWorkExplainWithIO(args []string, stdout io.Writer) error {
 		}
 	}
 	for _, line := range lines {
-		fmt.Fprintln(stdout, line)
+		fmt.Fprintln(os.Stdout, line)
 	}
 	return nil
 }
@@ -995,9 +987,9 @@ func githubReviewRulesConfigSet(args []string) error {
 	if err := writeGithubJSON(configPath, config); err != nil {
 		return err
 	}
-	fmt.Fprintf(currentGithubStdout(), "[github] Saved global review-rules mode: %s\n", config.DefaultMode)
-	fmt.Fprintf(currentGithubStdout(), "[github] Saved global reviewer policy: %s\n", formatGithubReviewerPolicy(config.ReviewerPolicy))
-	fmt.Fprintf(currentGithubStdout(), "[github] Config path: %s\n", configPath)
+	fmt.Fprintf(os.Stdout, "[github] Saved global review-rules mode: %s\n", config.DefaultMode)
+	fmt.Fprintf(os.Stdout, "[github] Saved global reviewer policy: %s\n", formatGithubReviewerPolicy(config.ReviewerPolicy))
+	fmt.Fprintf(os.Stdout, "[github] Config path: %s\n", configPath)
 	return nil
 }
 
@@ -1012,9 +1004,9 @@ func githubReviewRulesConfigShow(args []string) error {
 		policy = globalConfig.ReviewerPolicy
 	}
 	configPath := githubReviewRulesGlobalConfigPath()
-	fmt.Fprintf(currentGithubStdout(), "[github] Global review-rules mode: %s\n", mode)
-	fmt.Fprintf(currentGithubStdout(), "[github] Global reviewer policy: %s\n", formatGithubReviewerPolicy(policy))
-	fmt.Fprintf(currentGithubStdout(), "[github] Config path: %s\n", configPath)
+	fmt.Fprintf(os.Stdout, "[github] Global review-rules mode: %s\n", mode)
+	fmt.Fprintf(os.Stdout, "[github] Global reviewer policy: %s\n", formatGithubReviewerPolicy(policy))
+	fmt.Fprintf(os.Stdout, "[github] Config path: %s\n", configPath)
 
 	if len(args) == 0 {
 		return nil
@@ -1054,22 +1046,22 @@ func githubReviewRulesConfigShow(args []string) error {
 	if effectivePolicy == nil {
 		effectivePolicy = normalizeGithubReviewerPolicy(policy)
 	}
-	fmt.Fprintf(currentGithubStdout(), "[github] Repo review-rules mode for %s: %s\n", repoSlug, defaultString(reviewRulesRepoMode, "(none)"))
-	fmt.Fprintf(currentGithubStdout(), "[github] Effective review-rules mode for %s: %s\n", repoSlug, effectiveMode)
-	fmt.Fprintf(currentGithubStdout(), "[github] Repo reviewer policy for %s: %s\n", repoSlug, formatGithubReviewerPolicy(repoPolicy))
-	fmt.Fprintf(currentGithubStdout(), "[github] Effective reviewer policy for %s: %s\n", repoSlug, formatGithubReviewerPolicy(effectivePolicy))
-	fmt.Fprintf(currentGithubStdout(), "[github] Repo mode for %s: %s\n", repoSlug, repoWorkMode)
-	fmt.Fprintf(currentGithubStdout(), "[github] Issue-pick mode for %s: %s\n", repoSlug, issuePickMode)
-	fmt.Fprintf(currentGithubStdout(), "[github] PR forward mode for %s: %s\n", repoSlug, prForwardMode)
-	fmt.Fprintf(currentGithubStdout(), "[github] Fork issues mode for %s: %s\n", repoSlug, forkIssuesMode)
-	fmt.Fprintf(currentGithubStdout(), "[github] Implement mode for %s: %s\n", repoSlug, implementMode)
-	fmt.Fprintf(currentGithubStdout(), "[github] Publish target for %s: %s\n", repoSlug, defaultString(publishTarget, "(none)"))
+	fmt.Fprintf(os.Stdout, "[github] Repo review-rules mode for %s: %s\n", repoSlug, defaultString(reviewRulesRepoMode, "(none)"))
+	fmt.Fprintf(os.Stdout, "[github] Effective review-rules mode for %s: %s\n", repoSlug, effectiveMode)
+	fmt.Fprintf(os.Stdout, "[github] Repo reviewer policy for %s: %s\n", repoSlug, formatGithubReviewerPolicy(repoPolicy))
+	fmt.Fprintf(os.Stdout, "[github] Effective reviewer policy for %s: %s\n", repoSlug, formatGithubReviewerPolicy(effectivePolicy))
+	fmt.Fprintf(os.Stdout, "[github] Repo mode for %s: %s\n", repoSlug, repoWorkMode)
+	fmt.Fprintf(os.Stdout, "[github] Issue-pick mode for %s: %s\n", repoSlug, issuePickMode)
+	fmt.Fprintf(os.Stdout, "[github] PR forward mode for %s: %s\n", repoSlug, prForwardMode)
+	fmt.Fprintf(os.Stdout, "[github] Fork issues mode for %s: %s\n", repoSlug, forkIssuesMode)
+	fmt.Fprintf(os.Stdout, "[github] Implement mode for %s: %s\n", repoSlug, implementMode)
+	fmt.Fprintf(os.Stdout, "[github] Publish target for %s: %s\n", repoSlug, defaultString(publishTarget, "(none)"))
 	return nil
 }
 
 func githubReviewRulesLifecycle(args []string) error {
 	if len(args) == 0 || isHelpToken(args[0]) {
-		fmt.Fprint(currentGithubStdout(), ReviewRulesHelp)
+		fmt.Fprint(os.Stdout, ReviewRulesHelp)
 		return nil
 	}
 	subcommand := args[0]
@@ -1094,20 +1086,20 @@ func githubReviewRulesLifecycle(args []string) error {
 
 	switch subcommand {
 	case "list":
-		fmt.Fprintf(currentGithubStdout(), "[github] Repo review rules for %s\n", repoSlug)
-		fmt.Fprintf(currentGithubStdout(), "[github] Rules file: %s\n", rulesPath)
-		fmt.Fprintf(currentGithubStdout(), "[github] Approved rules=%d pending candidates=%d disabled=%d archived=%d.\n", len(document.ApprovedRules), len(document.PendingCandidates), len(document.DisabledRules), len(document.ArchivedRules))
+		fmt.Fprintf(os.Stdout, "[github] Repo review rules for %s\n", repoSlug)
+		fmt.Fprintf(os.Stdout, "[github] Rules file: %s\n", rulesPath)
+		fmt.Fprintf(os.Stdout, "[github] Approved rules=%d pending candidates=%d disabled=%d archived=%d.\n", len(document.ApprovedRules), len(document.PendingCandidates), len(document.DisabledRules), len(document.ArchivedRules))
 		for _, rule := range document.ApprovedRules {
-			fmt.Fprintf(currentGithubStdout(), "[github] approved %s\n", formatGithubReviewRuleSummary(rule))
+			fmt.Fprintf(os.Stdout, "[github] approved %s\n", formatGithubReviewRuleSummary(rule))
 		}
 		for _, rule := range document.PendingCandidates {
-			fmt.Fprintf(currentGithubStdout(), "[github] pending %s\n", formatGithubReviewRuleSummary(rule))
+			fmt.Fprintf(os.Stdout, "[github] pending %s\n", formatGithubReviewRuleSummary(rule))
 		}
 		for _, rule := range document.DisabledRules {
-			fmt.Fprintf(currentGithubStdout(), "[github] disabled %s\n", formatGithubReviewRuleSummary(rule))
+			fmt.Fprintf(os.Stdout, "[github] disabled %s\n", formatGithubReviewRuleSummary(rule))
 		}
 		for _, rule := range document.ArchivedRules {
-			fmt.Fprintf(currentGithubStdout(), "[github] archived %s\n", formatGithubReviewRuleSummary(rule))
+			fmt.Fprintf(os.Stdout, "[github] archived %s\n", formatGithubReviewRuleSummary(rule))
 		}
 		return nil
 	case "approve":
@@ -1143,8 +1135,8 @@ func githubReviewRulesLifecycle(args []string) error {
 		if err := writeGithubJSON(rulesPath, document); err != nil {
 			return err
 		}
-		fmt.Fprintf(currentGithubStdout(), "[github] Approved %d repo review rule(s) for %s.\n", moved, repoSlug)
-		fmt.Fprintf(currentGithubStdout(), "[github] Rules file: %s\n", rulesPath)
+		fmt.Fprintf(os.Stdout, "[github] Approved %d repo review rule(s) for %s.\n", moved, repoSlug)
+		fmt.Fprintf(os.Stdout, "[github] Rules file: %s\n", rulesPath)
 		return nil
 	case "disable", "enable", "archive":
 		selectors := cleanSelectors(args[2:])
@@ -1159,8 +1151,8 @@ func githubReviewRulesLifecycle(args []string) error {
 			return err
 		}
 		action := map[string]string{"disable": "Disabled", "enable": "Enabled", "archive": "Archived"}[subcommand]
-		fmt.Fprintf(currentGithubStdout(), "[github] %s %d review rule(s) for %s.\n", action, moved, repoSlug)
-		fmt.Fprintf(currentGithubStdout(), "[github] Rules file: %s\n", rulesPath)
+		fmt.Fprintf(os.Stdout, "[github] %s %d review rule(s) for %s.\n", action, moved, repoSlug)
+		fmt.Fprintf(os.Stdout, "[github] Rules file: %s\n", rulesPath)
 		return nil
 	case "explain":
 		if len(args) < 3 || strings.TrimSpace(args[2]) == "" {
@@ -1170,16 +1162,16 @@ func githubReviewRulesLifecycle(args []string) error {
 		if rule == nil {
 			return fmt.Errorf("No review rule found for %s", args[2])
 		}
-		fmt.Fprintf(currentGithubStdout(), "[github] Rule %s (%s)\n", rule.ID, state)
-		fmt.Fprintf(currentGithubStdout(), "[github] Title: %s\n", rule.Title)
-		fmt.Fprintf(currentGithubStdout(), "[github] Category: %s\n", rule.Category)
-		fmt.Fprintf(currentGithubStdout(), "[github] Confidence: %.2f\n", rule.Confidence)
-		fmt.Fprintf(currentGithubStdout(), "[github] Reviewer count: %d\n", rule.ReviewerCount)
-		fmt.Fprintf(currentGithubStdout(), "[github] Extraction origin: %s\n", defaultString(rule.ExtractionOrigin, ""))
-		fmt.Fprintf(currentGithubStdout(), "[github] Extraction reason: %s\n", defaultString(rule.ExtractionReason, ""))
-		fmt.Fprintf(currentGithubStdout(), "[github] Path scopes: %s\n", joinOrNone(rule.PathScopes))
+		fmt.Fprintf(os.Stdout, "[github] Rule %s (%s)\n", rule.ID, state)
+		fmt.Fprintf(os.Stdout, "[github] Title: %s\n", rule.Title)
+		fmt.Fprintf(os.Stdout, "[github] Category: %s\n", rule.Category)
+		fmt.Fprintf(os.Stdout, "[github] Confidence: %.2f\n", rule.Confidence)
+		fmt.Fprintf(os.Stdout, "[github] Reviewer count: %d\n", rule.ReviewerCount)
+		fmt.Fprintf(os.Stdout, "[github] Extraction origin: %s\n", defaultString(rule.ExtractionOrigin, ""))
+		fmt.Fprintf(os.Stdout, "[github] Extraction reason: %s\n", defaultString(rule.ExtractionReason, ""))
+		fmt.Fprintf(os.Stdout, "[github] Path scopes: %s\n", joinOrNone(rule.PathScopes))
 		for _, evidence := range rule.Evidence {
-			fmt.Fprintf(currentGithubStdout(), "[github] Evidence: kind=%s pr=#%d reviewer=@%s path=%s line=%s provenance=%s ref=%s\n",
+			fmt.Fprintf(os.Stdout, "[github] Evidence: kind=%s pr=#%d reviewer=@%s path=%s line=%s provenance=%s ref=%s\n",
 				defaultString(evidence.Kind, ""),
 				evidence.PRNumber,
 				defaultString(evidence.Reviewer, "unknown"),
@@ -1188,10 +1180,10 @@ func githubReviewRulesLifecycle(args []string) error {
 				defaultString(evidence.CodeContextProvenance, "unknown"),
 				defaultString(evidence.CodeContextRef, "(none)"),
 			)
-			fmt.Fprintf(currentGithubStdout(), "[github]   excerpt: %s\n", evidence.Excerpt)
+			fmt.Fprintf(os.Stdout, "[github]   excerpt: %s\n", evidence.Excerpt)
 			if strings.TrimSpace(evidence.CodeContextExcerpt) != "" {
 				for _, line := range strings.Split(evidence.CodeContextExcerpt, "\n") {
-					fmt.Fprintf(currentGithubStdout(), "[github]   code: %s\n", line)
+					fmt.Fprintf(os.Stdout, "[github]   code: %s\n", line)
 				}
 			}
 		}
@@ -2045,11 +2037,11 @@ func githubReviewRulesScan(locator string) error {
 	if err := writeGithubJSON(rulesPath, document); err != nil {
 		return err
 	}
-	fmt.Fprintf(currentGithubStdout(), "[github] Scanned PR review history for %s from %s.\n", source.RepoSlug, source.SourceTarget)
-	fmt.Fprintf(currentGithubStdout(), "[github] Rules file: %s\n", rulesPath)
-	fmt.Fprintf(currentGithubStdout(), "[github] Approved rules=%d pending candidates=%d.\n", len(document.ApprovedRules), len(document.PendingCandidates))
+	fmt.Fprintf(os.Stdout, "[github] Scanned PR review history for %s from %s.\n", source.RepoSlug, source.SourceTarget)
+	fmt.Fprintf(os.Stdout, "[github] Rules file: %s\n", rulesPath)
+	fmt.Fprintf(os.Stdout, "[github] Approved rules=%d pending candidates=%d.\n", len(document.ApprovedRules), len(document.PendingCandidates))
 	for _, rule := range document.PendingCandidates {
-		fmt.Fprintf(currentGithubStdout(), "[github] pending %s\n", formatGithubReviewRuleSummary(rule))
+		fmt.Fprintf(os.Stdout, "[github] pending %s\n", formatGithubReviewRuleSummary(rule))
 	}
 	return nil
 }
