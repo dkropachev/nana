@@ -407,6 +407,12 @@ textarea {
   font-size: 18px;
 }
 
+.repo-card-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .queue-summary {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }

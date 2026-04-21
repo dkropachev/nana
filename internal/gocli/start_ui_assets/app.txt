@@ -1502,6 +1502,10 @@
       (repo.scout_job_counts.failed || 0);
   }
 
+  function repoDismissedScoutCount(repo) {
+    return repo.scout_job_counts.dismissed || 0;
+  }
+
   function repoManualPlannedQueueCount(repo) {
     return (repo.planned_item_counts.queued || 0) +
       (repo.planned_item_counts.launching || 0);
@@ -1527,6 +1531,14 @@
     if (!state.selectedRepo && state.currentView === "repo") {
       state.currentView = "home";
     }
+  }
+
+  function openRepoView(repoSlug, tab = "overview") {
+    state.currentView = "repo";
+    state.repoTab = defaultString(tab, "overview");
+    state.selectedRepo = repoSlug || "";
+    state.selectedIssue = "";
+    renderApp();
   }
 
   function destroyWidgets() {
@@ -2384,8 +2396,15 @@
               <span>Scouts</span>
               <strong>${repoScoutQueueCount(repo)}</strong>
             </div>
+            <div class="repo-card-metric">
+              <span>Dismissed</span>
+              <strong>${repoDismissedScoutCount(repo)}</strong>
+            </div>
           </div>
-          <button class="tx-btn tx-btn-secondary repo-card-button" type="button" data-open-repo="${escapeHTML(repo.repo_slug)}">Open Repo</button>
+          <div class="repo-card-actions">
+            <button class="tx-btn tx-btn-secondary repo-card-button" type="button" data-open-repo="${escapeHTML(repo.repo_slug)}">Open Repo</button>
+            ${repoDismissedScoutCount(repo) > 0 ? `<button class="tx-btn tx-btn-secondary repo-card-button" type="button" data-open-repo="${escapeHTML(repo.repo_slug)}" data-open-repo-tab="scouts">Open Scouts</button>` : ""}
+          </div>
         </article>
       `;
     }).join("")}</div>`;
@@ -2466,6 +2485,7 @@
       { label: "Repos", value: state.overview.totals.repos, note: "Onboarded and visible in the console." },
       { label: "Queued Issues", value: state.overview.totals.issues_queued, note: "Tracked issues waiting for work." },
       { label: "Scout Queue", value: (state.overview.totals.scout_queued || 0) + (state.overview.totals.scout_running || 0) + (state.overview.totals.scout_failed || 0), note: "Local scout jobs waiting, paused, active, or failed." },
+      { label: "Dismissed Scouts", value: state.overview.totals.scout_dismissed || 0, note: "Saved scout proposals that can be revived from each repo's Scouts tab." },
       { label: "Pending Jobs", value: runs.length, note: "Work runs still in flight or blocked." },
       { label: "Approvals", value: state.overview.totals.approval_items || 0, note: "Human-gate work waiting for review or launch." },
       { label: "Service Queue", value: state.overview.totals.service_queued + state.overview.totals.service_running, note: "Scouts, triage, sync, and reconcile tasks." },
@@ -3709,6 +3729,7 @@
       { label: "Blocked Issues", value: repo.issue_counts.blocked || 0, note: "Issues blocked on policy, timing, or feedback." },
       { label: "Service Queue", value: (repo.service_task_counts.queued || 0) + (repo.service_task_counts.running || 0), note: "Service tasks still executing or waiting." },
       { label: "Scout Queue", value: repoScoutQueueCount(repo), note: "Local scout jobs waiting, paused, active, or failed." },
+      { label: "Dismissed Scouts", value: repoDismissedScoutCount(repo), note: "Saved scout proposals available to retry from the Scouts tab." },
       { label: "Planned Queue", value: repoManualPlannedQueueCount(repo), note: "Manual planned launches that still need action." },
       { label: "Pending Jobs", value: repoRuns.length, note: "Work runs currently mapped to this repo." },
       { label: "Work Items", value: repoWorkItems.length, note: "Inbound items linked to this repo." },
@@ -3721,6 +3742,16 @@
       { label: "Source Path", value: defaultString(repo.source_path, "Unavailable"), note: "Mapped source checkout for this repo." },
       { label: "Last Run", value: repo.last_run ? defaultString(repo.last_run.run_id, "Unknown") : "No run recorded", note: repo.last_run ? formatDateTime(repo.last_run.updated_at || repo.last_run.started_at) : "No completed run metadata." },
     ]);
+    if (repoDismissedScoutCount(repo) > 0) {
+      document.getElementById("repo-queue-summary").insertAdjacentHTML("beforeend", `
+        <article class="queue-item">
+          <span class="queue-label">Dismissed Scout Actions</span>
+          <strong class="queue-value">${escapeHTML(String(repoDismissedScoutCount(repo)))}</strong>
+          <p class="queue-copy">Open Scouts to retry dismissed proposals and return them to the live queue.</p>
+          <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-open-repo="${escapeHTML(repo.repo_slug)}" data-open-repo-tab="scouts">Open Scouts</button>
+        </article>
+      `);
+    }
     if (repoRuns.length) {
       renderGrid("repo-pending-grid", pendingRunColumns(false), runGridRows(repoRuns, false), {
         maxHeight: "360px",
@@ -5268,11 +5299,7 @@
       }
       const repoSlug = button.getAttribute("data-repo-slug");
       if (!repoSlug) return;
-      state.currentView = "repo";
-      state.repoTab = "overview";
-      state.selectedRepo = repoSlug;
-      state.selectedIssue = "";
-      renderApp();
+      openRepoView(repoSlug, "overview");
     });
 
     document.getElementById("sidebar-nav").addEventListener("input", (event) => {
@@ -5331,11 +5358,10 @@
     document.getElementById("page-body").addEventListener("click", (event) => {
       const repoButton = event.target.closest("[data-open-repo]");
       if (repoButton) {
-        state.currentView = "repo";
-        state.repoTab = "overview";
-        state.selectedRepo = repoButton.getAttribute("data-open-repo") || "";
-        state.selectedIssue = "";
-        renderApp();
+        openRepoView(
+          repoButton.getAttribute("data-open-repo") || "",
+          repoButton.getAttribute("data-open-repo-tab") || "overview",
+        );
         return;
       }
 
@@ -5427,10 +5453,7 @@
 
       const issueOpenRepoButton = event.target.closest("[data-issue-open-repo]");
       if (issueOpenRepoButton) {
-        state.currentView = "repo";
-        state.repoTab = "overview";
-        state.selectedRepo = issueOpenRepoButton.getAttribute("data-issue-open-repo") || "";
-        renderApp();
+        openRepoView(issueOpenRepoButton.getAttribute("data-issue-open-repo") || "", "overview");
         return;
       }
 

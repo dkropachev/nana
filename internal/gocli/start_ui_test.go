@@ -150,6 +150,17 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 				UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
 				LastError:   "review failed",
 			},
+			"scout-2": {
+				ID:          "scout-2",
+				Role:        enhancementScoutRole,
+				Title:       "Document the default web console",
+				Summary:     "Keep the default Start UI entrypoint visible in docs.",
+				Destination: improvementDestinationLocal,
+				TaskBody:    "Implement local scout proposal: Document the default web console",
+				Status:      startScoutJobDismissed,
+				CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+				UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
+			},
 		},
 	}); err != nil {
 		t.Fatalf("write start state: %v", err)
@@ -190,7 +201,7 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 	if len(overview.Repos) != 1 || overview.Totals.ActiveWorkRuns != 1 || overview.HUD.Team == nil || overview.HUD.Team.AgentCount != 2 {
 		t.Fatalf("unexpected overview payload: %+v", overview)
 	}
-	if overview.Totals.ScoutFailed != 1 || overview.Repos[0].ScoutJobCounts[startScoutJobFailed] != 1 {
+	if overview.Totals.ScoutFailed != 1 || overview.Totals.ScoutDismissed != 1 || overview.Repos[0].ScoutJobCounts[startScoutJobFailed] != 1 || overview.Repos[0].ScoutJobCounts[startScoutJobDismissed] != 1 {
 		t.Fatalf("expected scout job counts in overview payload, got totals=%+v repo=%+v", overview.Totals, overview.Repos[0].ScoutJobCounts)
 	}
 	if len(overview.ScoutCatalog) != len(supportedScoutRoleOrder) {
@@ -3612,6 +3623,19 @@ func TestLoadStartUIRepoSummaryUsesPersistedScoutJobCounts(t *testing.T) {
 				CreatedAt:           now,
 				LegacyPlannedItemID: "planned-1",
 			},
+			proposalID + "-dismissed": {
+				ID:           proposalID + "-dismissed",
+				Role:         enhancementScoutRole,
+				Title:        "Document the default nana start web console",
+				Summary:      "Expose the default web console path clearly.",
+				ArtifactPath: filepath.ToSlash(filepath.Join(".nana", "enhancements", "enhance-test")),
+				ProposalPath: filepath.ToSlash(filepath.Join(".nana", "enhancements", "enhance-test", "proposals.json")),
+				Destination:  improvementDestinationLocal,
+				TaskBody:     "Implement local scout proposal: Document the default nana start web console",
+				Status:       startScoutJobDismissed,
+				UpdatedAt:    now,
+				CreatedAt:    now,
+			},
 		},
 	}); err != nil {
 		t.Fatalf("write start state: %v", err)
@@ -3621,7 +3645,7 @@ func TestLoadStartUIRepoSummaryUsesPersistedScoutJobCounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadStartUIRepoSummary: %v", err)
 	}
-	if summary.ScoutJobCounts[startScoutJobRunning] != 1 || summary.ScoutJobCounts[startScoutJobQueued] != 0 {
+	if summary.ScoutJobCounts[startScoutJobRunning] != 1 || summary.ScoutJobCounts[startScoutJobDismissed] != 1 || summary.ScoutJobCounts[startScoutJobQueued] != 0 {
 		t.Fatalf("expected repo summary to reflect persisted scout-job state, got %+v", summary.ScoutJobCounts)
 	}
 }
@@ -4388,6 +4412,12 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	}
 	if !strings.Contains(string(appBody), `data-repo-drop="`) {
 		t.Fatalf("expected repo drop control in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `Dismissed Scouts`) {
+		t.Fatalf("expected dismissed scouts summary surfaces in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `data-open-repo-tab="scouts"`) {
+		t.Fatalf("expected direct scouts navigation wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `function dropApprovalItem(`) {
 		t.Fatalf("expected approval drop helper in app.js, got %s", string(appBody))

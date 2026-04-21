@@ -160,6 +160,7 @@ type startUITotals struct {
 	ScoutQueued      int `json:"scout_queued"`
 	ScoutRunning     int `json:"scout_running"`
 	ScoutFailed      int `json:"scout_failed"`
+	ScoutDismissed   int `json:"scout_dismissed"`
 	ScoutCompleted   int `json:"scout_completed"`
 	PlannedQueued    int `json:"planned_queued"`
 	PlannedLaunching int `json:"planned_launching"`
@@ -1767,6 +1768,7 @@ func (h *startUIAPI) buildOverviewUncached() (startUIOverview, error) {
 		totals.ScoutQueued += repo.ScoutJobCounts[startScoutJobQueued]
 		totals.ScoutRunning += repo.ScoutJobCounts[startScoutJobRunning]
 		totals.ScoutFailed += repo.ScoutJobCounts[startScoutJobFailed]
+		totals.ScoutDismissed += repo.ScoutJobCounts[startScoutJobDismissed]
 		totals.ScoutCompleted += repo.ScoutJobCounts[startScoutJobCompleted]
 		totals.PlannedQueued += repo.PlannedItemCounts[startPlannedItemQueued]
 		totals.PlannedLaunching += repo.PlannedItemCounts[startPlannedItemLaunching]
