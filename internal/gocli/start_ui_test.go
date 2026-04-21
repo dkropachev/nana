@@ -3784,6 +3784,14 @@ func TestLoadStartUIRepoSummaryIncludesSourceLockStateWhenScoutConfigReadIsBlock
 	}
 	defer func() { _ = lock.Release() }()
 
+	sleepCalls := 0
+	previousSleep := repoAccessLockSleep
+	repoAccessLockSleep = func(d time.Duration) {
+		sleepCalls++
+		previousSleep(d)
+	}
+	defer func() { repoAccessLockSleep = previousSleep }()
+
 	summary, err := loadStartUIRepoSummary(repoSlug, false)
 	if err != nil {
 		t.Fatalf("loadStartUIRepoSummary: %v", err)
@@ -3793,6 +3801,9 @@ func TestLoadStartUIRepoSummaryIncludesSourceLockStateWhenScoutConfigReadIsBlock
 	}
 	if summary.ScoutsByRole["improvement"].Enabled {
 		t.Fatalf("expected scout config to fall back to defaults while source read is blocked, got %+v", summary.ScoutsByRole["improvement"])
+	}
+	if sleepCalls != 0 {
+		t.Fatalf("expected blocked source scout config fallback without lock polling, got %d sleep calls", sleepCalls)
 	}
 }
 
@@ -5239,6 +5250,35 @@ func TestStartUIOverviewCacheInvalidatesWhenScoutPolicyChanges(t *testing.T) {
 	}
 	if refreshed.Repos[0].Scouts.Improvement.Schedule != scoutScheduleWhenResolved {
 		t.Fatalf("expected missing scout schedule to default to when-resolved, got %+v", refreshed.Repos[0].Scouts.Improvement)
+	}
+}
+
+func TestStartUIRepoSummarySectionCacheStabilizesAfterWarmRead(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	api := &startUIAPI{cwd: cwd}
+	section, err := api.loadOverviewReposSection()
+	if err != nil {
+		t.Fatalf("loadOverviewReposSection: %v", err)
+	}
+	if len(section.summaries) != 1 {
+		t.Fatalf("expected one repo summary, got %+v", section.summaries)
+	}
+
+	api.sectionCacheMu.Lock()
+	cachedValid := api.sectionCaches.repos.valid
+	api.sectionCacheMu.Unlock()
+	if !cachedValid {
+		t.Fatalf("expected repo summary section cache to stay valid after warm read")
 	}
 }
 

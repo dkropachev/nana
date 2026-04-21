@@ -2491,27 +2491,19 @@ func addStartUIRepoLockDependencies(repoPath string, add func(string)) {
 		return
 	}
 	lockRoot := repoAccessLockRoot(normalized)
-	add(lockRoot)
-	_ = filepath.WalkDir(lockRoot, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return nil
+	add(filepath.Join(lockRoot, "target.json"))
+	add(filepath.Join(lockRoot, "writer.json"))
+	readersDir := filepath.Join(lockRoot, "readers")
+	entries, err := os.ReadDir(readersDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
 		}
-		if path == lockRoot {
-			return nil
-		}
-		if entry.IsDir() {
-			rel, err := filepath.Rel(lockRoot, path)
-			if err == nil && strings.Count(filepath.ToSlash(rel), "/") >= 1 {
-				return filepath.SkipDir
-			}
-			add(path)
-			return nil
-		}
-		if strings.HasSuffix(entry.Name(), ".json") {
-			add(path)
-		}
-		return nil
-	})
+		add(filepath.Join(readersDir, entry.Name()))
+	}
 }
 
 func addStartUIScoutPolicyDependencies(add func(string)) {
@@ -3751,6 +3743,10 @@ func applyStartUIRepoScouts(summary *startUIRepoSummary) error {
 	summary.ScoutCatalog = startUIScoutCatalog()
 	summary.ScoutsByRole = startUIDefaultRepoScoutsByRole(repoPath)
 	if info, err := os.Stat(repoPath); err == nil && info.IsDir() {
+		if startUIRepoSummarySourceReadBlocked(summary.LockState) {
+			summary.Scouts = startUIRepoScoutsCompatibility(summary.ScoutsByRole)
+			return nil
+		}
 		lockErr := withManagedSourceReadLock(summary.RepoSlug, repoAccessLockOwner{
 			Backend: "start-ui",
 			RunID:   sanitizePathToken(summary.RepoSlug),
@@ -3774,6 +3770,10 @@ func applyStartUIRepoScouts(summary *startUIRepoSummary) error {
 	}
 	summary.Scouts = startUIRepoScoutsCompatibility(summary.ScoutsByRole)
 	return nil
+}
+
+func startUIRepoSummarySourceReadBlocked(state *repoAccessLockStateSnapshot) bool {
+	return state != nil && state.Writer != nil && !state.Writer.Stale
 }
 
 func loadStartUIRepoScoutConfig(repoPath string, role string) startUIRepoScoutConfig {

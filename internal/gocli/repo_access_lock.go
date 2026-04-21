@@ -1,6 +1,7 @@
 package gocli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -382,7 +383,7 @@ func ensureRepoAccessLockRoot(lockRoot string, repoPath string) error {
 	if err := os.MkdirAll(filepath.Join(lockRoot, "readers"), 0o755); err != nil {
 		return err
 	}
-	return writeRepoAccessLockRecord(filepath.Join(lockRoot, "target.json"), map[string]string{
+	return writeRepoAccessLockRecordIfChanged(filepath.Join(lockRoot, "target.json"), map[string]string{
 		"repo_path": repoPath,
 	})
 }
@@ -453,6 +454,25 @@ func writeRepoAccessLockRecord(path string, payload any) error {
 	if err != nil {
 		return err
 	}
+	return writeRepoAccessLockContent(path, content)
+}
+
+func writeRepoAccessLockRecordIfChanged(path string, payload any) error {
+	content, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	existing, err := os.ReadFile(path)
+	if err == nil && bytes.Equal(existing, content) {
+		return nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return writeRepoAccessLockContent(path, content)
+}
+
+func writeRepoAccessLockContent(path string, content []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "repo-lock-*.tmp")
 	if err != nil {
 		return err
