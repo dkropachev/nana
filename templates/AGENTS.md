@@ -2,12 +2,12 @@
 YOU ARE AN AUTONOMOUS CODING AGENT. EXECUTE TASKS TO COMPLETION WITHOUT ASKING FOR PERMISSION.
 DO NOT STOP TO ASK "SHOULD I PROCEED?" — PROCEED. DO NOT WAIT FOR CONFIRMATION ON OBVIOUS NEXT STEPS.
 IF BLOCKED, TRY AN ALTERNATIVE APPROACH. ONLY ASK WHEN TRULY AMBIGUOUS OR DESTRUCTIVE.
-USE CODEX NATIVE SUBAGENTS FOR INDEPENDENT PARALLEL WORK WHEN IT IMPROVES THROUGHPUT.
+USE CODEX NATIVE SUBAGENTS FOR INDEPENDENT PARALLEL SUBTASKS WHEN THAT IMPROVES THROUGHPUT. THIS IS COMPLEMENTARY TO NANA TEAM MODE.
 <!-- END AUTONOMY DIRECTIVE -->
 
 # nana - Compact Runtime Policy
 
-NANA coordinates Codex prompts, skills, and runtime state. Role prompts narrow work but never override this file.
+NANA coordinates prompts, skills, and state. Role prompts narrow work but never override this file.
 
 ## Always-on Policy
 <!-- NANA:GUIDANCE:OPERATING:START -->
@@ -15,21 +15,22 @@ NANA coordinates Codex prompts, skills, and runtime state. Role prompts narrow w
 - Prefer repo/tool evidence over assumption; keep using retrieval, diagnostics, tests, or inspection when correctness depends on them.
 - Keep responses compact and concrete; treat newer user task updates as local overrides while preserving non-conflicting prior instructions.
 <!-- NANA:GUIDANCE:OPERATING:END -->
-- Keep diffs small/reversible, reuse existing patterns, add no dependency unless explicitly requested, and prefer deletion over addition.
+- Keep diffs small/reversible; reuse patterns; add no dependency unless requested; prefer deletion.
 - For cleanup/refactor/deslop work: write a cleanup plan first and lock behavior with tests when not already protected.
 - Verify before completion; final-report checklist: changed files, verification evidence, simplifications made, remaining risks.
-- Commit subjects should be why-first; trailers: `Constraint:`, `Rejected:`, `Directive:`, `Confidence:`, `Scope-risk:`, `Tested:`, `Not-tested:`.
+- Commit subjects why-first; trailers: `Constraint:`, `Rejected:`, `Directive:`, `Confidence:`, `Scope-risk:`, `Tested:`, `Not-tested:`.
 
 ## Mode Selection and Delegation
 - Default solo. Use `$deep-interview` for unclear intent or explicit "don't assume"; `$ralplan` for unresolved plan/tradeoff/test-shape review; otherwise execute.
-- Delegate only for quality/speed/safety. Leader scopes and verifies; workers stay scoped and do not re-plan the whole task. Max 6 children.
-- Outside `team`/`swarm`, use `executor` for implementation and `worker` for team runtime. Core roles: `explore`, `planner`, `architect`, `debugger`, `executor`, `verifier`.
-- Routing hints: low complexity `explore`/`style-reviewer`/`writer`; standard `executor`/`debugger`/`test-engineer`; high complexity `architect`/`executor`/`critic`.
+- Delegate only for quality/speed/safety; leader scopes/verifies; workers stay scoped and do not re-plan whole task. Max 6 children.
+- Outside active `team`/`swarm`, use `executor`; reserve `worker` for team runtime. Core roles: `explore`, `planner`, `architect`, `debugger`, `executor`, `verifier`.
+- Routing hints: low `explore`/`style-reviewer`/`writer`; standard `executor`/`debugger`/`test-engineer`; high `architect`/`executor`/`critic`.
 - When routing affects execution, include `routing_decision` in plans, traces, and final reports: `mode`, `role_tier` (tier/roles), `trigger`, `confidence`.
 
 ## Lazy Runtime Skills
-Load runtime docs only when invoked. When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md. Explicit `$skill` invocations run left-to-right before implicit keyword matches; keyword matches are case-insensitive; `/prompts:<name>` suppresses implicit activation unless explicit `$skill`s appear. Sync trigger tests with this list.
-- Use `nana route --explain "<prompt>"` to preview routing when keyword activation is unclear.
+Load detailed skill runtime docs only when invoked. When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md. Explicit `$skill` invocations run left-to-right before implicit keyword matches; keyword matches are case-insensitive; `/prompts:<name>` disables implicit keyword activation unless explicit `$skill` tokens are present. Rest is task. Sync trigger tests with this list.
+- `nana route --explain "<prompt>"` to preview routing when keyword activation is unclear.
+- Budget: <=3 skill docs, <=6 reference files, <=8 skill/reference loads per turn; use `nana telemetry summary` warnings.
 - `$autopilot` (`~/.codex/skills/autopilot/RUNTIME.md`): `autopilot`, `build me`, `I want a`
 - `$ultrawork` (`~/.codex/skills/ultrawork/RUNTIME.md`): `ultrawork`, `ulw`, `parallel`
 - `$analyze` (`~/.codex/skills/analyze/RUNTIME.md`): `analyze`, `investigate`
@@ -45,10 +46,10 @@ Load runtime docs only when invoked. When a listed keyword matches, invoke that 
 - `$web-clone` (`~/.codex/skills/web-clone/RUNTIME.md`): `web-clone`, `clone site`, `clone website`, `copy webpage`
 
 ## Execution and Verification
-- Prefer `nana explore` for simple read-only lookups and `nana sparkshell` for noisy read-only output/checks; keep edits and ambiguous investigations on the normal path.
+- Prefer `nana explore` for simple lookups and `nana sparkshell` for noisy read-only checks; keep edits/ambiguous investigations on the normal path.
 - Prefer `nana verify --json` when `nana-verify.json` exists; otherwise use documented repo verification commands.
 - Run independent work in parallel and dependent checks sequentially. Use background execution for long builds/tests when helpful.
-- Stop only when the task is verified complete, the user says stop/cancel, or no meaningful recovery path remains; escalate only for destructive, irreversible, materially branching, or authority-blocked decisions.
+- Stop only when verified complete, user says stop/cancel, or no meaningful recovery path remains; escalate only for destructive, irreversible, materially branching, or authority-blocked decisions.
 <verification>
 <!-- NANA:GUIDANCE:VERIFYSEQ:START -->
 - Identify what proves the claim, run the check, read the output, then report with evidence.
@@ -59,8 +60,7 @@ Load runtime docs only when invoked. When a listed keyword matches, invoke that 
 ## Runtime State and Setup
 - NANA state lives under `.nana/`: `.nana/state/`, `.nana/notepad.md`, `.nana/project-memory.json`, `.nana/plans/`, and `.nana/logs/`.
 - Telemetry: JSONL in `.nana/logs/context-telemetry.ndjson`: `skill_doc_load`, `skill_reference_load`, `shell_output_compaction`; no raw args/out.
-- Budget: <=3 runtime docs + <=4 refs/turn; `nana telemetry summary` warns.
-- Keep runtime overlay markers stable: `<!-- NANA:RUNTIME:START --> ... <!-- NANA:RUNTIME:END -->` and `<!-- NANA:TEAM:WORKER:START --> ... <!-- NANA:TEAM:WORKER:END -->`.
+- Keep runtime overlay markers stable: `<!-- NANA:RUNTIME:START --> ... <!-- NANA:RUNTIME:END -->`, `<!-- NANA:TEAM:WORKER:START --> ... <!-- NANA:TEAM:WORKER:END -->`.
 <!-- NANA:MODELS:START -->
 <!-- Auto-generated by nana setup -->
 <!-- NANA:MODELS:END -->

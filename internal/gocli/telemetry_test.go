@@ -2,6 +2,7 @@ package gocli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,6 +94,9 @@ func TestTelemetrySummaryJSONAllRuns(t *testing.T) {
 	if len(report.SkillLoads) != 1 || report.SkillLoads[0].Skill != "plan" || report.SkillLoads[0].Path != "skills/plan/SKILL.md" {
 		t.Fatalf("unexpected skill loads: %+v", report.SkillLoads)
 	}
+	if report.SkillBudget.TotalLoads != 1 || report.SkillBudget.DocLoadBudget != telemetrySkillDocLoadBudget || report.SkillBudget.Evaluated || report.SkillBudget.OverBudget {
+		t.Fatalf("unexpected skill budget summary: %+v", report.SkillBudget)
+	}
 	if report.Shell.Compactions != 1 || report.Shell.CapturedBytes != 500 || len(report.Shell.Commands) != 1 || report.Shell.Commands[0].Command != "go" {
 		t.Fatalf("unexpected shell summary: %+v", report.Shell)
 	}
@@ -121,21 +125,18 @@ func TestTelemetrySummaryReportsSkillRuntimeCacheStatus(t *testing.T) {
 	}
 }
 
-func TestTelemetrySummaryWarnsWhenSkillLoadBudgetsAreExceededByTurn(t *testing.T) {
+func TestTelemetrySummaryWarnsWhenSkillLoadBudgetExceeded(t *testing.T) {
 	cwd := t.TempDir()
 	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
-	writeTelemetryLog(t, logPath, []string{
-		`{"timestamp":"2026-04-20T11:00:00Z","run_id":"run-current","turn_id":"turn-1","event":"skill_doc_load","skill":"autopilot","path":"skills/autopilot/RUNTIME.md"}`,
-		`{"timestamp":"2026-04-20T11:00:01Z","run_id":"run-current","turn_id":"turn-1","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
-		`{"timestamp":"2026-04-20T11:00:02Z","run_id":"run-current","turn_id":"turn-1","event":"skill_doc_load","skill":"tdd","path":"skills/tdd/RUNTIME.md"}`,
-		`{"timestamp":"2026-04-20T11:00:03Z","run_id":"run-current","turn_id":"turn-1","event":"skill_doc_load","skill":"build-fix","path":"skills/build-fix/RUNTIME.md"}`,
-		`{"timestamp":"2026-04-20T11:00:04Z","run_id":"run-current","turn_id":"turn-1","event":"skill_reference_load","skill":"plan","path":"skills/plan/references/a.md"}`,
-		`{"timestamp":"2026-04-20T11:00:05Z","run_id":"run-current","turn_id":"turn-1","event":"skill_reference_load","skill":"plan","path":"skills/plan/references/b.md"}`,
-		`{"timestamp":"2026-04-20T11:00:06Z","run_id":"run-current","turn_id":"turn-1","event":"skill_reference_load","skill":"plan","path":"skills/plan/references/c.md"}`,
-		`{"timestamp":"2026-04-20T11:00:07Z","run_id":"run-current","turn_id":"turn-1","event":"skill_reference_load","skill":"plan","path":"skills/plan/references/d.md"}`,
-		`{"timestamp":"2026-04-20T11:00:08Z","run_id":"run-current","turn_id":"turn-1","event":"skill_reference_load","skill":"plan","path":"skills/plan/references/e.md"}`,
-		`{"timestamp":"2026-04-20T11:00:09Z","run_id":"other-run","turn_id":"turn-1","event":"skill_doc_load","skill":"extra","path":"skills/extra/RUNTIME.md"}`,
-	})
+	lines := []string{}
+	for i := 1; i <= 4; i++ {
+		lines = append(lines, fmt.Sprintf(`{"timestamp":"2026-04-20T12:00:%02dZ","run_id":"run-current","event":"skill_doc_load","skill":"skill-%d","path":"skills/skill-%d/RUNTIME.md"}`, i, i, i))
+	}
+	for i := 1; i <= 7; i++ {
+		lines = append(lines, fmt.Sprintf(`{"timestamp":"2026-04-20T12:01:%02dZ","run_id":"run-current","event":"skill_reference_load","skill_name":"skill-1","path":"skills/skill-1/references/ref-%d.md"}`, i, i))
+	}
+	lines = append(lines, `{"timestamp":"2026-04-20T12:02:00Z","run_id":"other-run","event":"skill_reference_load","skill_name":"other","path":"skills/other/references/ref.md"}`)
+	writeTelemetryLog(t, logPath, lines)
 
 	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-current")
 	t.Setenv("NANA_WORK_RUN_ID", "")
@@ -147,33 +148,16 @@ func TestTelemetrySummaryWarnsWhenSkillLoadBudgetsAreExceededByTurn(t *testing.T
 		t.Fatalf("Telemetry(summary): %v", err)
 	}
 	for _, want := range []string{
-		"Skill/context budget:",
-		"limits: skill_doc_loads_per_turn<=3 skill_reference_loads_per_turn<=4",
-		"run_id=run-current turn_id=turn-1: skill_doc_loads_per_turn=4 exceeds 3",
-		"run_id=run-current turn_id=turn-1: skill_reference_loads_per_turn=5 exceeds 4",
-		"avoid bulk-loading reference folders",
+		"Events: scanned=12 matched=11 ignored=1 invalid=0",
+		"Skill/reference budget:",
+		"loads: total=11/8 doc=4/3 reference=7/6 unique_files=11",
+		"warning: skill doc loads exceeded per-turn budget: 4 > 3",
+		"warning: skill reference loads exceeded per-turn budget: 7 > 6",
+		"warning: combined skill/reference loads exceeded per-turn budget: 11 > 8",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("expected %q in telemetry output:\n%s", want, output)
 		}
-	}
-
-	jsonOutput, err := captureStdout(t, func() error { return Telemetry(cwd, []string{"summary", "--json"}) })
-	if err != nil {
-		t.Fatalf("Telemetry(summary --json): %v", err)
-	}
-	var report telemetrySummaryReport
-	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
-		t.Fatalf("unmarshal telemetry JSON: %v\n%s", err, jsonOutput)
-	}
-	if report.Budget.SkillDocLoadsPerTurn != 3 || report.Budget.SkillReferenceLoadsPerTurn != 4 {
-		t.Fatalf("unexpected budget in JSON: %+v", report.Budget)
-	}
-	if len(report.BudgetWarnings) != 2 {
-		t.Fatalf("expected two budget warnings, got %+v", report.BudgetWarnings)
-	}
-	if report.BudgetWarnings[0].RunID != "run-current" || report.BudgetWarnings[0].TurnID != "turn-1" {
-		t.Fatalf("warning should preserve safe run/turn ids: %+v", report.BudgetWarnings[0])
 	}
 }
 

@@ -27,16 +27,10 @@ Options:
 By default, nana uses .nana/logs/context-telemetry.ndjson and filters to the
 current run id when NANA_CONTEXT_TELEMETRY_RUN_ID, NANA_WORK_RUN_ID,
 NANA_RUN_ID, or NANA_SESSION_ID is set. The summary reports event counts,
-safe skill/reference identifiers, and shell compaction frequency without
-emitting raw command arguments or shell output. Skill/context budget warnings
-are advisory and group by turn_id when telemetry provides one, otherwise by
-session/run scope.
+safe skill/reference identifiers, skill/reference load budget warnings, and
+shell compaction frequency without emitting raw command arguments or shell
+output.
 `
-
-const (
-	telemetrySkillDocLoadsPerTurnBudget       = 3
-	telemetrySkillReferenceLoadsPerTurnBudget = 4
-)
 
 var telemetrySummaryEvents = map[string]bool{
 	"skill_doc_load":                 true,
@@ -44,6 +38,12 @@ var telemetrySummaryEvents = map[string]bool{
 	"shell_output_compaction":        true,
 	"shell_output_compaction_failed": true,
 }
+
+const (
+	telemetrySkillDocLoadBudget       = 3
+	telemetrySkillReferenceLoadBudget = 6
+	telemetrySkillTotalLoadBudget     = 8
+)
 
 type telemetryOptions struct {
 	View  string
@@ -80,6 +80,19 @@ type telemetrySkillSummary struct {
 	CacheMisses    int    `json:"cache_misses,omitempty"`
 }
 
+type telemetrySkillBudgetSummary struct {
+	Evaluated           bool     `json:"evaluated"`
+	DocLoads            int      `json:"doc_loads"`
+	ReferenceLoads      int      `json:"reference_loads"`
+	TotalLoads          int      `json:"total_loads"`
+	UniqueFiles         int      `json:"unique_files"`
+	DocLoadBudget       int      `json:"doc_load_budget"`
+	ReferenceLoadBudget int      `json:"reference_load_budget"`
+	TotalLoadBudget     int      `json:"total_load_budget"`
+	OverBudget          bool     `json:"over_budget"`
+	Warnings            []string `json:"warnings,omitempty"`
+}
+
 type telemetryCommandSummary struct {
 	Command string `json:"command"`
 	Count   int    `json:"count"`
@@ -103,58 +116,36 @@ type telemetryShellSummary struct {
 	Commands           []telemetryCommandSummary `json:"commands,omitempty"`
 }
 
-type telemetrySkillLoadBudget struct {
-	SkillDocLoadsPerTurn       int `json:"skill_doc_loads_per_turn"`
-	SkillReferenceLoadsPerTurn int `json:"skill_reference_loads_per_turn"`
-}
-
-type telemetryBudgetWarning struct {
-	Scope   string `json:"scope"`
-	RunID   string `json:"run_id,omitempty"`
-	TurnID  string `json:"turn_id,omitempty"`
-	Kind    string `json:"kind"`
-	Count   int    `json:"count"`
-	Limit   int    `json:"limit"`
-	Message string `json:"message"`
-}
-
 type telemetrySummaryReport struct {
-	LogPath        string                   `json:"log_path"`
-	Scope          telemetryScope           `json:"scope"`
-	EventsScanned  int                      `json:"events_scanned"`
-	EventsMatched  int                      `json:"events_matched"`
-	EventsIgnored  int                      `json:"events_ignored"`
-	InvalidLines   int                      `json:"invalid_lines"`
-	ByEvent        []telemetryEventCount    `json:"by_event"`
-	SkillLoads     []telemetrySkillSummary  `json:"skill_loads,omitempty"`
-	Shell          telemetryShellSummary    `json:"shell"`
-	Budget         telemetrySkillLoadBudget `json:"budget"`
-	BudgetWarnings []telemetryBudgetWarning `json:"budget_warnings,omitempty"`
-	Privacy        string                   `json:"privacy"`
-}
-
-type telemetryBudgetGroup struct {
-	RunID               string
-	TurnID              string
-	Scope               string
-	SkillDocLoads       int
-	SkillReferenceLoads int
+	LogPath       string                      `json:"log_path"`
+	Scope         telemetryScope              `json:"scope"`
+	EventsScanned int                         `json:"events_scanned"`
+	EventsMatched int                         `json:"events_matched"`
+	EventsIgnored int                         `json:"events_ignored"`
+	InvalidLines  int                         `json:"invalid_lines"`
+	ByEvent       []telemetryEventCount       `json:"by_event"`
+	SkillLoads    []telemetrySkillSummary     `json:"skill_loads,omitempty"`
+	SkillBudget   telemetrySkillBudgetSummary `json:"skill_budget"`
+	Shell         telemetryShellSummary       `json:"shell"`
+	Privacy       string                      `json:"privacy"`
 }
 
 type telemetryAccumulator struct {
-	logPath       string
-	scope         telemetryScope
-	eventsScanned int
-	eventsMatched int
-	eventsIgnored int
-	invalidLines  int
-	byEvent       map[string]int
-	skillLoads    map[string]*telemetrySkillSummary
-	commands      map[string]*telemetryCommandSummary
-	budgetGroups  map[string]*telemetryBudgetGroup
-	shell         telemetryShellSummary
-	firstTime     time.Time
-	lastTime      time.Time
+	logPath             string
+	scope               telemetryScope
+	eventsScanned       int
+	eventsMatched       int
+	eventsIgnored       int
+	invalidLines        int
+	byEvent             map[string]int
+	skillLoads          map[string]*telemetrySkillSummary
+	skillLoadFiles      map[string]bool
+	skillDocLoads       int
+	skillReferenceLoads int
+	commands            map[string]*telemetryCommandSummary
+	shell               telemetryShellSummary
+	firstTime           time.Time
+	lastTime            time.Time
 }
 
 func Telemetry(cwd string, args []string) error {
@@ -262,12 +253,12 @@ func buildTelemetrySummary(options telemetryOptions) (telemetrySummaryReport, er
 	}
 
 	acc := telemetryAccumulator{
-		logPath:      filepath.Clean(options.Log),
-		scope:        scope,
-		byEvent:      map[string]int{},
-		skillLoads:   map[string]*telemetrySkillSummary{},
-		commands:     map[string]*telemetryCommandSummary{},
-		budgetGroups: map[string]*telemetryBudgetGroup{},
+		logPath:        filepath.Clean(options.Log),
+		scope:          scope,
+		byEvent:        map[string]int{},
+		skillLoads:     map[string]*telemetrySkillSummary{},
+		skillLoadFiles: map[string]bool{},
+		commands:       map[string]*telemetryCommandSummary{},
 	}
 
 	file, err := os.Open(options.Log)
@@ -328,6 +319,15 @@ func (acc *telemetryAccumulator) recordSkillEvent(eventName string, event map[st
 		skill = "(unknown)"
 	}
 	path := safeTelemetryPath(firstTelemetryString(event, "skill_path", "reference_path", "doc_path", "path", "file", "reference"))
+	if acc.skillLoadFiles == nil {
+		acc.skillLoadFiles = map[string]bool{}
+	}
+	fileKey := path
+	if fileKey == "" {
+		fileKey = "skill:" + skill
+	}
+	acc.skillLoadFiles[fileKey] = true
+
 	key := skill + "\x00" + path
 	row := acc.skillLoads[key]
 	if row == nil {
@@ -336,6 +336,7 @@ func (acc *telemetryAccumulator) recordSkillEvent(eventName string, event map[st
 	}
 	row.Count++
 	if eventName == "skill_doc_load" {
+		acc.skillDocLoads++
 		row.DocLoads++
 		switch strings.ToLower(safeTelemetryLabel(firstTelemetryString(event, "cache", "cache_status"))) {
 		case "hit":
@@ -344,32 +345,8 @@ func (acc *telemetryAccumulator) recordSkillEvent(eventName string, event map[st
 			row.CacheMisses++
 		}
 	} else {
+		acc.skillReferenceLoads++
 		row.ReferenceLoads++
-	}
-	acc.recordSkillBudgetEvent(eventName, event)
-}
-
-func (acc *telemetryAccumulator) recordSkillBudgetEvent(eventName string, event map[string]any) {
-	if acc.budgetGroups == nil {
-		acc.budgetGroups = map[string]*telemetryBudgetGroup{}
-	}
-	runID := safeTelemetryLabel(telemetryString(event, "run_id"))
-	turnID := safeTelemetryLabel(telemetryString(event, "turn_id"))
-	key := runID + "\x00" + turnID
-	group := acc.budgetGroups[key]
-	if group == nil {
-		group = &telemetryBudgetGroup{
-			RunID:  runID,
-			TurnID: turnID,
-			Scope:  formatTelemetryBudgetScope(runID, turnID),
-		}
-		acc.budgetGroups[key] = group
-	}
-	switch eventName {
-	case "skill_doc_load":
-		group.SkillDocLoads++
-	case "skill_reference_load":
-		group.SkillReferenceLoads++
 	}
 }
 
@@ -462,71 +439,51 @@ func (acc *telemetryAccumulator) report() telemetrySummaryReport {
 		}
 	}
 
-	budget := defaultTelemetrySkillLoadBudget()
-
 	return telemetrySummaryReport{
-		LogPath:        acc.logPath,
-		Scope:          acc.scope,
-		EventsScanned:  acc.eventsScanned,
-		EventsMatched:  acc.eventsMatched,
-		EventsIgnored:  acc.eventsIgnored,
-		InvalidLines:   acc.invalidLines,
-		ByEvent:        byEvent,
-		SkillLoads:     skillLoads,
-		Shell:          acc.shell,
-		Budget:         budget,
-		BudgetWarnings: acc.budgetWarnings(budget),
-		Privacy:        "Reports metadata only; raw command arguments and shell output are not emitted.",
+		LogPath:       acc.logPath,
+		Scope:         acc.scope,
+		EventsScanned: acc.eventsScanned,
+		EventsMatched: acc.eventsMatched,
+		EventsIgnored: acc.eventsIgnored,
+		InvalidLines:  acc.invalidLines,
+		ByEvent:       byEvent,
+		SkillLoads:    skillLoads,
+		SkillBudget:   acc.skillBudget(),
+		Shell:         acc.shell,
+		Privacy:       "Reports metadata only; raw command arguments and shell output are not emitted.",
 	}
 }
 
-func defaultTelemetrySkillLoadBudget() telemetrySkillLoadBudget {
-	return telemetrySkillLoadBudget{
-		SkillDocLoadsPerTurn:       telemetrySkillDocLoadsPerTurnBudget,
-		SkillReferenceLoadsPerTurn: telemetrySkillReferenceLoadsPerTurnBudget,
+func (acc *telemetryAccumulator) skillBudget() telemetrySkillBudgetSummary {
+	summary := telemetrySkillBudgetSummary{
+		Evaluated:           acc.scope.FilteredByRun,
+		DocLoads:            acc.skillDocLoads,
+		ReferenceLoads:      acc.skillReferenceLoads,
+		TotalLoads:          acc.skillDocLoads + acc.skillReferenceLoads,
+		UniqueFiles:         len(acc.skillLoadFiles),
+		DocLoadBudget:       telemetrySkillDocLoadBudget,
+		ReferenceLoadBudget: telemetrySkillReferenceLoadBudget,
+		TotalLoadBudget:     telemetrySkillTotalLoadBudget,
 	}
+	if !summary.Evaluated {
+		return summary
+	}
+	summary.Warnings = telemetrySkillBudgetWarnings(summary)
+	summary.OverBudget = len(summary.Warnings) > 0
+	return summary
 }
 
-func (acc *telemetryAccumulator) budgetWarnings(budget telemetrySkillLoadBudget) []telemetryBudgetWarning {
-	groups := make([]*telemetryBudgetGroup, 0, len(acc.budgetGroups))
-	for _, group := range acc.budgetGroups {
-		groups = append(groups, group)
+func telemetrySkillBudgetWarnings(summary telemetrySkillBudgetSummary) []string {
+	warnings := []string{}
+	if summary.DocLoadBudget > 0 && summary.DocLoads > summary.DocLoadBudget {
+		warnings = append(warnings, fmt.Sprintf("skill doc loads exceeded per-turn budget: %d > %d; prefer one explicit $skill and avoid broad trigger overlap", summary.DocLoads, summary.DocLoadBudget))
 	}
-	sort.Slice(groups, func(i, j int) bool {
-		return groups[i].Scope < groups[j].Scope
-	})
-
-	warnings := []telemetryBudgetWarning{}
-	for _, group := range groups {
-		if budget.SkillDocLoadsPerTurn > 0 && group.SkillDocLoads > budget.SkillDocLoadsPerTurn {
-			warnings = append(warnings, telemetryBudgetWarning{
-				Scope:   group.Scope,
-				RunID:   group.RunID,
-				TurnID:  group.TurnID,
-				Kind:    "skill_doc_loads_per_turn",
-				Count:   group.SkillDocLoads,
-				Limit:   budget.SkillDocLoadsPerTurn,
-				Message: "reduce implicit skill activations or split the work across turns",
-			})
-		}
-		if budget.SkillReferenceLoadsPerTurn > 0 && group.SkillReferenceLoads > budget.SkillReferenceLoadsPerTurn {
-			warnings = append(warnings, telemetryBudgetWarning{
-				Scope:   group.Scope,
-				RunID:   group.RunID,
-				TurnID:  group.TurnID,
-				Kind:    "skill_reference_loads_per_turn",
-				Count:   group.SkillReferenceLoads,
-				Limit:   budget.SkillReferenceLoadsPerTurn,
-				Message: "avoid bulk-loading reference folders; open only the variant needed",
-			})
-		}
+	if summary.ReferenceLoadBudget > 0 && summary.ReferenceLoads > summary.ReferenceLoadBudget {
+		warnings = append(warnings, fmt.Sprintf("skill reference loads exceeded per-turn budget: %d > %d; load only the variant-specific references needed now", summary.ReferenceLoads, summary.ReferenceLoadBudget))
 	}
-	sort.Slice(warnings, func(i, j int) bool {
-		if warnings[i].Scope == warnings[j].Scope {
-			return warnings[i].Kind < warnings[j].Kind
-		}
-		return warnings[i].Scope < warnings[j].Scope
-	})
+	if summary.TotalLoadBudget > 0 && summary.TotalLoads > summary.TotalLoadBudget {
+		warnings = append(warnings, fmt.Sprintf("combined skill/reference loads exceeded per-turn budget: %d > %d; summarize findings before loading more files", summary.TotalLoads, summary.TotalLoadBudget))
+	}
 	return warnings
 }
 
@@ -562,15 +519,27 @@ func formatTelemetrySummaryReport(report telemetrySummaryReport) string {
 			lines = append(lines, line)
 		}
 	}
-	lines = append(lines, "Skill/context budget:")
-	lines = append(lines, fmt.Sprintf("  limits: skill_doc_loads_per_turn<=%d skill_reference_loads_per_turn<=%d", report.Budget.SkillDocLoadsPerTurn, report.Budget.SkillReferenceLoadsPerTurn))
-	if len(report.BudgetWarnings) == 0 {
-		lines = append(lines, "  warnings: (none)")
-	} else {
-		lines = append(lines, "  warnings:")
-		for _, warning := range report.BudgetWarnings {
-			lines = append(lines, fmt.Sprintf("    %s: %s=%d exceeds %d; %s", warning.Scope, warning.Kind, warning.Count, warning.Limit, warning.Message))
+
+	lines = append(lines, "Skill/reference budget:")
+	budget := report.SkillBudget
+	lines = append(lines, fmt.Sprintf(
+		"  loads: total=%d/%d doc=%d/%d reference=%d/%d unique_files=%d",
+		budget.TotalLoads,
+		budget.TotalLoadBudget,
+		budget.DocLoads,
+		budget.DocLoadBudget,
+		budget.ReferenceLoads,
+		budget.ReferenceLoadBudget,
+		budget.UniqueFiles,
+	))
+	if !budget.Evaluated {
+		lines = append(lines, "  status: not evaluated for all-runs scope (pass --run-id for per-turn warnings)")
+	} else if budget.OverBudget {
+		for _, warning := range budget.Warnings {
+			lines = append(lines, "  warning: "+warning)
 		}
+	} else {
+		lines = append(lines, "  status: ok")
 	}
 
 	lines = append(lines, "Shell output compactions:")
@@ -613,19 +582,6 @@ func formatTelemetryScope(scope telemetryScope) string {
 		return "all runs (no current run id in environment)"
 	}
 	return "all runs"
-}
-
-func formatTelemetryBudgetScope(runID string, turnID string) string {
-	switch {
-	case runID != "" && turnID != "":
-		return "run_id=" + runID + " turn_id=" + turnID
-	case runID != "":
-		return "run_id=" + runID + " session (no turn_id)"
-	case turnID != "":
-		return "turn_id=" + turnID
-	default:
-		return "session (no run_id/turn_id)"
-	}
 }
 
 func telemetryDurationString(seconds float64) string {
