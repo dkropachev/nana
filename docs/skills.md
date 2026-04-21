@@ -90,11 +90,10 @@ For large workflows, keep the template as the short entry point and put detailed
 ## Performance and context budget
 
 - Keep `SKILL.md` short enough to scan quickly; use links to specific runtime/reference files for variant detail.
-- Keep each turn near the default telemetry budget: at most 3 skill runtime doc loads, 4 reference loads, and 6 total skill/reference loads. `nana telemetry summary` warns when the current run exceeds these thresholds.
 - Prefer reusable scripts or templates over pasting long generated examples into the skill body.
-- If a workflow needs more context, split references by variant and tell agents to summarize the loaded section before opening another file.
 - Make optional network calls, external CLIs, and expensive checks explicit in the workflow, with a documented fallback when unavailable.
 - Do not add broad implicit triggers just to improve discoverability; document explicit `$skill-name` usage instead.
+- Treat a run/session as over budget when telemetry shows more than 4 skill doc loads, 6 reference loads, or 8 combined skill/reference loads. `nana telemetry summary` reports these counters as non-blocking context-budget warnings.
 
 ## Minimal verification for a new skill
 
