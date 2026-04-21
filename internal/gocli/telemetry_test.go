@@ -2,7 +2,6 @@ package gocli
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,9 +93,6 @@ func TestTelemetrySummaryJSONAllRuns(t *testing.T) {
 	if len(report.SkillLoads) != 1 || report.SkillLoads[0].Skill != "plan" || report.SkillLoads[0].Path != "skills/plan/SKILL.md" {
 		t.Fatalf("unexpected skill loads: %+v", report.SkillLoads)
 	}
-	if report.SkillBudget.TotalLoads != 1 || report.SkillBudget.DocLoadBudget != telemetrySkillDocLoadBudget || report.SkillBudget.Evaluated || report.SkillBudget.OverBudget {
-		t.Fatalf("unexpected skill budget summary: %+v", report.SkillBudget)
-	}
 	if report.Shell.Compactions != 1 || report.Shell.CapturedBytes != 500 || len(report.Shell.Commands) != 1 || report.Shell.Commands[0].Command != "go" {
 		t.Fatalf("unexpected shell summary: %+v", report.Shell)
 	}
@@ -110,6 +106,7 @@ func TestTelemetrySummaryReportsSkillRuntimeCacheStatus(t *testing.T) {
 		`{"timestamp":"2026-04-20T11:00:01Z","run_id":"run-current","event":"skill_doc_load","skill":"autopilot","path":"skills/autopilot/RUNTIME.md","cache":"hit"}`,
 	})
 
+	t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", "")
 	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-current")
 	t.Setenv("NANA_WORK_RUN_ID", "")
 	t.Setenv("NANA_RUN_ID", "")
@@ -125,39 +122,56 @@ func TestTelemetrySummaryReportsSkillRuntimeCacheStatus(t *testing.T) {
 	}
 }
 
-func TestTelemetrySummaryWarnsWhenSkillLoadBudgetExceeded(t *testing.T) {
+func TestTelemetrySummaryWarnsWhenSkillLoadBudgetsAreExceeded(t *testing.T) {
 	cwd := t.TempDir()
 	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
-	lines := []string{}
-	for i := 1; i <= 4; i++ {
-		lines = append(lines, fmt.Sprintf(`{"timestamp":"2026-04-20T12:00:%02dZ","run_id":"run-current","event":"skill_doc_load","skill":"skill-%d","path":"skills/skill-%d/RUNTIME.md"}`, i, i, i))
-	}
-	for i := 1; i <= 7; i++ {
-		lines = append(lines, fmt.Sprintf(`{"timestamp":"2026-04-20T12:01:%02dZ","run_id":"run-current","event":"skill_reference_load","skill_name":"skill-1","path":"skills/skill-1/references/ref-%d.md"}`, i, i))
-	}
-	lines = append(lines, `{"timestamp":"2026-04-20T12:02:00Z","run_id":"other-run","event":"skill_reference_load","skill_name":"other","path":"skills/other/references/ref.md"}`)
-	writeTelemetryLog(t, logPath, lines)
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T12:00:00Z","run_id":"run-current","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:00:01Z","run_id":"run-current","event":"skill_doc_load","skill":"tdd","path":"skills/tdd/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:00:02Z","run_id":"run-current","event":"skill_doc_load","skill":"review","path":"skills/review/SKILL.md"}`,
+		`{"timestamp":"2026-04-20T12:00:03Z","run_id":"run-current","event":"skill_reference_load","skill_name":"plan","path":"skills/plan/references/checklist.md"}`,
+		`{"timestamp":"2026-04-20T12:00:04Z","run_id":"run-current","event":"skill_reference_load","skill_name":"plan","path":"skills/plan/references/tests.md"}`,
+		`{"timestamp":"2026-04-20T12:00:05Z","run_id":"run-current","event":"skill_reference_load","skill_name":"tdd","path":"skills/tdd/references/cases.md"}`,
+	})
 
+	t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", "")
 	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-current")
 	t.Setenv("NANA_WORK_RUN_ID", "")
 	t.Setenv("NANA_RUN_ID", "")
 	t.Setenv("NANA_SESSION_ID", "")
 
-	output, err := captureStdout(t, func() error { return Telemetry(cwd, []string{"summary"}) })
+	output, err := captureStdout(t, func() error {
+		return Telemetry(cwd, []string{"summary", "--skill-load-budget=4", "--reference-load-budget", "2"})
+	})
 	if err != nil {
-		t.Fatalf("Telemetry(summary): %v", err)
+		t.Fatalf("Telemetry(summary budgets): %v", err)
 	}
+
 	for _, want := range []string{
-		"Events: scanned=12 matched=11 ignored=1 invalid=0",
-		"Skill/reference budget:",
-		"loads: total=11/8 doc=4/3 reference=7/6 unique_files=11",
-		"warning: skill doc loads exceeded per-turn budget: 4 > 3",
-		"warning: skill reference loads exceeded per-turn budget: 7 > 6",
-		"warning: combined skill/reference loads exceeded per-turn budget: 11 > 8",
+		"Skill load budget:",
+		"total: 6/4 (doc=3 reference=3 unique_files=6)",
+		"references: 3/2",
+		"warning: skill/reference loads 6 exceed budget 4",
+		"load only invoked skill docs and targeted references",
+		"warning: reference loads 3 exceed budget 2",
+		"avoid bulk-loading reference folders",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("expected %q in telemetry output:\n%s", want, output)
 		}
+	}
+
+	disabledOutput, err := captureStdout(t, func() error {
+		return Telemetry(cwd, []string{"summary", "--skill-load-budget=0", "--reference-load-budget=0"})
+	})
+	if err != nil {
+		t.Fatalf("Telemetry(summary disabled budgets): %v", err)
+	}
+	if strings.Contains(disabledOutput, "  warning:") {
+		t.Fatalf("disabled budgets should not warn:\n%s", disabledOutput)
+	}
+	if !strings.Contains(disabledOutput, "total: 6/off") || !strings.Contains(disabledOutput, "references: 3/off") {
+		t.Fatalf("disabled budgets should render as off:\n%s", disabledOutput)
 	}
 }
 
