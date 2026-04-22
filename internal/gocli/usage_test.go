@@ -223,6 +223,131 @@ func TestUsageSummaryAndTopJSON(t *testing.T) {
 	}
 }
 
+func TestUsageRepoFilterAndGroupByRepoJSON(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "repo")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatalf("mkdir cwd: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".nana", "codex-home"))
+
+	writeManagedUsage := func(repoSlug string, runID string, total int) {
+		t.Helper()
+		repoRoot := createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+		repoID := localWorkRepoID(repoRoot)
+		sandboxPath := filepath.Join(home, "sandboxes", runID)
+		sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+		if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
+			t.Fatalf("mkdir sandbox repo: %v", err)
+		}
+		manifest := localWorkManifest{
+			Version:           4,
+			RunID:             runID,
+			CreatedAt:         "2026-04-15T12:00:00Z",
+			UpdatedAt:         "2026-04-15T12:30:00Z",
+			Status:            "running",
+			RepoRoot:          repoRoot,
+			RepoName:          filepath.Base(repoRoot),
+			RepoSlug:          repoSlug,
+			RepoID:            repoID,
+			SourceBranch:      "main",
+			BaselineSHA:       strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
+			SandboxPath:       sandboxPath,
+			SandboxRepoPath:   sandboxRepoPath,
+			InputPath:         filepath.Join(home, runID+".md"),
+			InputMode:         "task",
+			IntegrationPolicy: "final",
+			GroupingPolicy:    localWorkDefaultGroupingPolicy,
+			MaxIterations:     1,
+		}
+		if err := writeLocalWorkManifest(manifest); err != nil {
+			t.Fatalf("writeLocalWorkManifest(%s): %v", runID, err)
+		}
+		runDir := localWorkRunDirByID(repoID, runID)
+		if err := os.MkdirAll(runDir, 0o755); err != nil {
+			t.Fatalf("mkdir run dir: %v", err)
+		}
+		if err := writeLocalWorkJSONAtomically(filepath.Join(runDir, "thread-usage.json"), localWorkThreadUsageArtifact{
+			Version:     1,
+			GeneratedAt: "2026-04-15T12:30:00Z",
+			SandboxPath: sandboxPath,
+			Totals: localWorkTokenUsageTotals{
+				InputTokens:       total - 20,
+				OutputTokens:      20,
+				TotalTokens:       total,
+				SessionsAccounted: 1,
+				UpdatedAt:         "2026-04-15T12:30:00Z",
+			},
+			Threads: []localWorkThreadUsageRow{{
+				SessionID:    runID + "-session",
+				Nickname:     "lane-1",
+				Role:         "leader",
+				Model:        "gpt-5.4",
+				CWD:          sandboxRepoPath,
+				InputTokens:  total - 20,
+				OutputTokens: 20,
+				TotalTokens:  total,
+				StartedAt:    time.Date(2026, time.April, 15, 12, 0, 0, 0, time.UTC).Unix(),
+				UpdatedAt:    time.Date(2026, time.April, 15, 12, 30, 0, 0, time.UTC).Unix(),
+			}},
+		}); err != nil {
+			t.Fatalf("write thread-usage artifact(%s): %v", runID, err)
+		}
+	}
+
+	writeManagedUsage("acme/widget", "usage-work-widget", 220)
+	writeManagedUsage("acme/other", "usage-work-other", 90)
+	writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID:      "generic-main",
+		Timestamp:      "2026-04-15T11:00:00Z",
+		CWD:            cwd,
+		Model:          "gpt-5.4",
+		TokenSnapshots: []usageTokenSnapshot{{Input: 30, Output: 10, Total: 40}},
+	})
+
+	summaryOutput, err := captureStdout(t, func() error { return Usage(cwd, []string{"summary", "--repo", "acme/widget", "--json"}) })
+	if err != nil {
+		t.Fatalf("Usage(summary --repo): %v", err)
+	}
+	var summary usageSummaryReport
+	if err := json.Unmarshal([]byte(summaryOutput), &summary); err != nil {
+		t.Fatalf("unmarshal summary output: %v\n%s", err, summaryOutput)
+	}
+	if summary.Totals.TotalTokens != 220 || summary.Totals.Sessions != 1 {
+		t.Fatalf("unexpected repo-filtered summary totals: %+v", summary.Totals)
+	}
+
+	groupOutput, err := captureStdout(t, func() error { return Usage(cwd, []string{"group", "--by", "repo", "--root", "work", "--json"}) })
+	if err != nil {
+		t.Fatalf("Usage(group --by repo): %v", err)
+	}
+	var group usageTopReport
+	if err := json.Unmarshal([]byte(groupOutput), &group); err != nil {
+		t.Fatalf("unmarshal group output: %v\n%s", err, groupOutput)
+	}
+	if group.By != "repo" {
+		t.Fatalf("unexpected group by: %+v", group)
+	}
+	if len(group.Groups) != 2 || group.Groups[0].Key != "acme/widget" || group.Groups[1].Key != "acme/other" {
+		t.Fatalf("unexpected repo groups: %+v", group.Groups)
+	}
+}
+
+func TestUsageRejectsInvalidRepoFilter(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "repo")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatalf("mkdir cwd: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".nana", "codex-home"))
+
+	if err := Usage(cwd, []string{"summary", "--repo", "bad-slug"}); err == nil {
+		t.Fatalf("expected invalid repo filter to fail")
+	}
+}
+
 func TestUsageSinceUsesWindowDeltas(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "repo")

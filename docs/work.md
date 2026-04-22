@@ -40,7 +40,7 @@ Selection rules:
 
 This SQLite-backed control plane currently assumes the repo's Go 1.25 baseline.
 
-Usage data uses the same control plane. `nana usage` and the Start UI Usage view read SQLite-backed session/checkpoint state from `state.db`; legacy usage JSON files and historical `thread-usage*.json` files are only compatibility import inputs and are not part of the live reporting model.
+Usage data uses the same control plane. `nana usage` and the Start UI Usage view read SQLite-backed session/checkpoint state from `state.db`; legacy usage JSON files and historical `thread-usage*.json` files are only compatibility import inputs and are not part of the live reporting model. Repo-aware usage filtering counts only managed Nana work for the selected repo; ad-hoc sessions outside managed work attribution are not included in repo-filtered reports.
 
 Layout:
 

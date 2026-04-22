@@ -17,14 +17,15 @@ const UsageHelp = `nana usage - Report token spend across NANA-managed sessions
 
 Usage:
   nana usage [summary] [filters] [--json]
-  nana usage top [--by <session|cwd|lane|model|activity|phase|day|root>] [--limit <n>] [filters] [--json]
-  nana usage group [--by <cwd|lane|model|activity|phase|day|root>] [filters] [--json]
+  nana usage top [--by <session|repo|cwd|lane|model|activity|phase|day|root>] [--limit <n>] [filters] [--json]
+  nana usage group [--by <repo|cwd|lane|model|activity|phase|day|root>] [filters] [--json]
   nana usage analytics [filters] [--json]
   nana usage help
 
 Filters:
   --since <spec>        Restrict by recency (examples: 7d, 24h, 2026-03-10)
   --project <scope>     Filter by project context: current | all | <cwd-fragment>
+  --repo <owner/repo>   Filter by managed repo usage attribution
   --root <name>         all | main | investigate | work | local-work | start
   --activity <name>     Filter by activity classification
   --phase <name>        Filter by phase classification
@@ -34,6 +35,8 @@ Filters:
 Examples:
   nana usage
   nana usage top
+  nana usage top --by repo
+  nana usage summary --repo acme/widget
   nana usage top --by lane --since 7d
   nana usage group --by activity --root work
   nana usage analytics --project current
@@ -57,6 +60,7 @@ var usageRoots = map[string]bool{
 
 var usageTopByValues = map[string]bool{
 	"session":  true,
+	"repo":     true,
 	"cwd":      true,
 	"lane":     true,
 	"model":    true,
@@ -67,6 +71,7 @@ var usageTopByValues = map[string]bool{
 }
 
 var usageGroupByValues = map[string]bool{
+	"repo":     true,
 	"cwd":      true,
 	"lane":     true,
 	"model":    true,
@@ -327,7 +332,7 @@ func parseUsageArgs(args []string) (usageOptions, error) {
 		switch token {
 		case "--json":
 			options.JSON = true
-		case "--since", "--project", "--root", "--activity", "--phase", "--model", "--by", "--limit":
+		case "--since", "--project", "--repo", "--root", "--activity", "--phase", "--model", "--by", "--limit":
 			if index+1 >= len(args) || strings.HasPrefix(args[index+1], "-") {
 				return usageOptions{}, fmt.Errorf("missing value after %s\n%s", token, UsageHelp)
 			}
@@ -337,6 +342,8 @@ func parseUsageArgs(args []string) (usageOptions, error) {
 				options.Since = value
 			case "--project":
 				options.Project = value
+			case "--repo":
+				options.Repo = value
 			case "--root":
 				options.Root = value
 			case "--activity":
@@ -362,6 +369,8 @@ func parseUsageArgs(args []string) (usageOptions, error) {
 				options.Since = strings.TrimSpace(strings.TrimPrefix(token, "--since="))
 			case strings.HasPrefix(token, "--project="):
 				options.Project = strings.TrimSpace(strings.TrimPrefix(token, "--project="))
+			case strings.HasPrefix(token, "--repo="):
+				options.Repo = strings.TrimSpace(strings.TrimPrefix(token, "--repo="))
 			case strings.HasPrefix(token, "--root="):
 				options.Root = strings.TrimSpace(strings.TrimPrefix(token, "--root="))
 			case strings.HasPrefix(token, "--activity="):
@@ -419,6 +428,9 @@ func parseUsageArgs(args []string) (usageOptions, error) {
 
 	if _, err := parseSinceSpec(options.Since); err != nil {
 		return usageOptions{}, err
+	}
+	if strings.TrimSpace(options.Repo) != "" && !validRepoSlug(options.Repo) {
+		return usageOptions{}, fmt.Errorf("invalid --repo value %q\n%s", options.Repo, UsageHelp)
 	}
 	return options, nil
 }
@@ -1111,6 +1123,8 @@ func usageGroupKey(record usageRecord, by string) string {
 		return record.SessionID
 	case "cwd":
 		return defaultString(strings.TrimSpace(record.CWD), "(unknown)")
+	case "repo":
+		return defaultString(strings.TrimSpace(record.RepoSlug), "(unknown)")
 	case "lane":
 		return defaultString(strings.TrimSpace(record.Lane), "(unknown)")
 	case "model":
@@ -1192,6 +1206,9 @@ func formatUsageTopReport(report usageTopReport) string {
 				defaultString(session.Lane, "(unknown)"),
 				defaultString(session.Model, "(unknown)"),
 			))
+			if strings.TrimSpace(session.RepoSlug) != "" {
+				lines = append(lines, fmt.Sprintf("   repo=%s", session.RepoSlug))
+			}
 		}
 		return strings.Join(lines, "\n")
 	}
