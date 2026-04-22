@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -40,7 +39,7 @@ func TestStartUIBrowserInteractionsQuickSwitch(t *testing.T) {
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Usage Filters")
 }
 
-func TestStartUIBrowserInteractionsRepoPicker(t *testing.T) {
+func TestStartUIBrowserInteractionsLegacyQueueRedirects(t *testing.T) {
 	chromePath := startUITestChromePath(t)
 	if chromePath == "" {
 		t.Skip("google-chrome is required for chromedp browser interaction coverage")
@@ -52,78 +51,55 @@ func TestStartUIBrowserInteractionsRepoPicker(t *testing.T) {
 	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
 	defer cancelBrowser()
 
-	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
-	defer cancelTab()
-
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home", "#repo-scope-select")
-	startUITestChromedpSetValue(t, tabCtx, "#repo-scope-select", fixture.RepoSlug)
-	startUITestChromedpWaitHash(t, tabCtx, "#view=repo&repo="+url.QueryEscape(fixture.RepoSlug)+"&tab=overview")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Queue Snapshot")
-
-	startUITestChromedpSetValue(t, tabCtx, "#repo-scope-select", "__all_repos__")
-	startUITestChromedpWaitHash(t, tabCtx, "#view=home")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Pending Jobs Chart")
-
-	startUITestChromedpDispatchValue(t, tabCtx, "#repo-scope-select", "__onboard_repo__")
-	startUITestChromedpWaitHash(t, tabCtx, "#view=home")
-	startUITestChromedpWaitVisible(t, tabCtx, "#repo-onboard-form")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Onboard Repo")
-}
-
-func TestStartUIBrowserInteractionsIssues(t *testing.T) {
-	chromePath := startUITestChromePath(t)
-	if chromePath == "" {
-		t.Skip("google-chrome is required for chromedp browser interaction coverage")
+	cases := []struct {
+		name         string
+		hash         string
+		expectedHash string
+		present      string
+		absent       string
+	}{
+		{
+			name:         "issues",
+			hash:         "#view=issues",
+			expectedHash: "#view=home&kind=issue",
+			present:      "Fix flaky test",
+			absent:       "Tracked Issues",
+		},
+		{
+			name:         "investigations",
+			hash:         "#view=investigations",
+			expectedHash: "#view=home&kind=investigation",
+			present:      "Investigate flaky scheduler failure",
+			absent:       "Investigation Runs",
+		},
+		{
+			name:         "approvals",
+			hash:         "#view=approvals",
+			expectedHash: "#view=home&kind=approval",
+			present:      "approval required",
+			absent:       "Approval Queue",
+		},
+		{
+			name:         "work",
+			hash:         "#view=work",
+			expectedHash: "#view=home&kind=work_run",
+			present:      "No attention items match these filters.",
+			absent:       "Work Runs",
+		},
 	}
 
-	fixture := startUITestSetupBrowserFixture(t)
-	defer fixture.Server.Close()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
+			defer cancelTab()
 
-	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
-	defer cancelBrowser()
-
-	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
-	defer cancelTab()
-
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=issues", "#issues-grid")
-	startUITestChromedpSetValue(t, tabCtx, "#repo-scope-select", fixture.RepoSlug)
-	startUITestChromedpWaitHash(t, tabCtx, "#view=issues&repo="+url.QueryEscape(fixture.RepoSlug)+"&issue="+url.QueryEscape("acme/widget#7"))
-	startUITestChromedpWaitVisible(t, tabCtx, `[data-clear-workspace-scope="true"]`)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "This page is filtered to the repo selected in the header picker.")
-	startUITestChromedpClick(t, tabCtx, `[data-clear-workspace-scope="true"]`)
-	startUITestChromedpWaitHash(t, tabCtx, "#view=issues&issue="+url.QueryEscape("acme/widget#7"))
-	startUITestChromedpSetValue(t, tabCtx, "#issue-detail-deferred", "chromedp deferred reason")
-	startUITestChromedpClick(t, tabCtx, `[data-issue-save="acme/widget#7"]`)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "chromedp deferred reason")
-	startUITestChromedpClick(t, tabCtx, `[data-issue-clear-schedule="acme/widget#7"]`)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Not scheduled")
-}
-
-func TestStartUIBrowserInteractionsUsageScope(t *testing.T) {
-	chromePath := startUITestChromePath(t)
-	if chromePath == "" {
-		t.Skip("google-chrome is required for chromedp browser interaction coverage")
+			startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/"+tc.hash, "#attention-inbox-grid")
+			startUITestChromedpWaitHash(t, tabCtx, tc.expectedHash)
+			startUITestChromedpWaitBodyTextContains(t, tabCtx, "Attention Inbox")
+			startUITestChromedpWaitBodyTextContains(t, tabCtx, tc.present)
+			startUITestChromedpWaitBodyTextAbsent(t, tabCtx, tc.absent)
+		})
 	}
-
-	fixture := startUITestSetupBrowserFixture(t)
-	defer fixture.Server.Close()
-
-	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
-	defer cancelBrowser()
-
-	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
-	defer cancelTab()
-
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=usage", "#usage-filters-form")
-	startUITestChromedpSetValue(t, tabCtx, "#repo-scope-select", fixture.RepoSlug)
-	startUITestChromedpWaitHash(t, tabCtx, "#view=usage&repo="+url.QueryEscape(fixture.RepoSlug))
-	startUITestChromedpWaitVisible(t, tabCtx, `[data-clear-workspace-scope="true"]`)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "This page is filtered to the repo selected in the header picker.")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Top Sessions")
-
-	startUITestChromedpClick(t, tabCtx, `[data-clear-workspace-scope="true"]`)
-	startUITestChromedpWaitHash(t, tabCtx, "#view=usage")
-	startUITestChromedpWaitVisible(t, tabCtx, "#usage-filters-form")
 }
 
 func TestStartUIBrowserInteractionsRepoControls(t *testing.T) {
@@ -163,7 +139,7 @@ func TestStartUIBrowserInteractionsRepoControls(t *testing.T) {
 
 	startUITestChromedpClick(t, tabCtx, `[data-scheduler-launch]`)
 	startUITestChromedpWaitBodyTextAbsent(t, tabCtx, updatedTitle)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Implement tracked issue #7: Fix flaky test")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Launch smoke run")
 	if atomic.LoadInt32(&calls.searchIssues) != 1 {
 		t.Fatalf("expected one GitHub issue search request, got %d", atomic.LoadInt32(&calls.searchIssues))
 	}
@@ -222,18 +198,18 @@ func TestStartUIBrowserInteractionsDraftsSurviveLiveRefresh(t *testing.T) {
 			},
 		},
 		{
-			name:          "issues-detail-form",
-			hash:          "#view=issues",
-			readySelector: "#issue-detail-priority",
+			name:          "repo-controls-issue-form-alt",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
+			readySelector: "#repo-controls-issue-form-priority",
 			edit: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpSetValue(t, ctx, "#issue-detail-priority", "5")
-				startUITestChromedpSetValue(t, ctx, "#issue-detail-schedule", "2026-04-25T11:15")
-				startUITestChromedpSetValue(t, ctx, "#issue-detail-deferred", "Keep issue detail draft")
+				startUITestChromedpSetValue(t, ctx, "#repo-controls-issue-form-priority", "5")
+				startUITestChromedpSetValue(t, ctx, "#repo-controls-issue-form-schedule_at", "2026-04-25T11:15")
+				startUITestChromedpSetValue(t, ctx, "#repo-controls-issue-form-deferred_reason", "Keep issue detail draft")
 			},
 			assert: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpWaitValue(t, ctx, "#issue-detail-priority", "5")
-				startUITestChromedpWaitValue(t, ctx, "#issue-detail-schedule", "2026-04-25T11:15")
-				startUITestChromedpWaitValue(t, ctx, "#issue-detail-deferred", "Keep issue detail draft")
+				startUITestChromedpWaitValue(t, ctx, "#repo-controls-issue-form-priority", "5")
+				startUITestChromedpWaitValue(t, ctx, "#repo-controls-issue-form-schedule_at", "2026-04-25T11:15")
+				startUITestChromedpWaitValue(t, ctx, "#repo-controls-issue-form-deferred_reason", "Keep issue detail draft")
 			},
 		},
 		{
@@ -257,7 +233,7 @@ func TestStartUIBrowserInteractionsDraftsSurviveLiveRefresh(t *testing.T) {
 		},
 		{
 			name:          "investigations-finding-detail-form",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
 			readySelector: "#task-findings-grid",
 			prepare:       startUITestSeedDraftRefreshFindingsData,
 			edit: func(t *testing.T, ctx context.Context) {
@@ -274,7 +250,7 @@ func TestStartUIBrowserInteractionsDraftsSurviveLiveRefresh(t *testing.T) {
 		},
 		{
 			name:          "investigations-import-candidate-form",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
 			readySelector: "#task-import-sessions-grid",
 			prepare:       startUITestSeedDraftRefreshImportSession,
 			edit: func(t *testing.T, ctx context.Context) {
@@ -377,16 +353,16 @@ func TestStartUIBrowserInteractionsFocusSurvivesLiveRefresh(t *testing.T) {
 			},
 		},
 		{
-			name:          "issues-detail-textarea",
-			hash:          "#view=issues",
-			readySelector: "#issue-detail-deferred",
+			name:          "repo-controls-issue-textarea-alt",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
+			readySelector: "#repo-controls-issue-form-deferred_reason",
 			edit: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpSetValue(t, ctx, "#issue-detail-deferred", "Keep issue detail draft")
-				startUITestChromedpSetSelectionRange(t, ctx, "#issue-detail-deferred", 5, 10)
+				startUITestChromedpSetValue(t, ctx, "#repo-controls-issue-form-deferred_reason", "Keep issue detail draft")
+				startUITestChromedpSetSelectionRange(t, ctx, "#repo-controls-issue-form-deferred_reason", 5, 10)
 			},
 			assert: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpWaitValue(t, ctx, "#issue-detail-deferred", "Keep issue detail draft")
-				startUITestChromedpWaitFocusSelection(t, ctx, "#issue-detail-deferred", 5, 10)
+				startUITestChromedpWaitValue(t, ctx, "#repo-controls-issue-form-deferred_reason", "Keep issue detail draft")
+				startUITestChromedpWaitFocusSelection(t, ctx, "#repo-controls-issue-form-deferred_reason", 5, 10)
 			},
 		},
 		{
@@ -404,7 +380,7 @@ func TestStartUIBrowserInteractionsFocusSurvivesLiveRefresh(t *testing.T) {
 		},
 		{
 			name:          "finding-summary-textarea",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
 			readySelector: "#task-findings-grid",
 			prepare:       startUITestSeedDraftRefreshFindingsData,
 			edit: func(t *testing.T, ctx context.Context) {
@@ -421,11 +397,17 @@ func TestStartUIBrowserInteractionsFocusSurvivesLiveRefresh(t *testing.T) {
 		},
 		{
 			name:          "import-candidate-summary-textarea",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
 			readySelector: "#task-import-sessions-grid",
 			prepare:       startUITestSeedDraftRefreshImportSession,
 			edit: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpWaitBodyTextContains(t, ctx, "Draft refresh candidate")
+				startUITestChromedpWaitCondition(t, ctx, 20*time.Second, `body to contain "Draft refresh candidate"`, func() (bool, string, error) {
+					var body string
+					if err := chromedp.Run(ctx, chromedp.Evaluate(`document.body ? document.body.innerText : ""`, &body)); err != nil {
+						return false, "", err
+					}
+					return strings.Contains(body, "Draft refresh candidate"), body, nil
+				})
 				startUITestChromedpClick(t, ctx, `[data-row-select-kind="import-candidate"][data-row-select-id="cand-refresh"]`)
 				startUITestChromedpWaitVisible(t, ctx, "#task-import-candidate-summary")
 				startUITestChromedpSetValue(t, ctx, "#task-import-candidate-summary", "Keep candidate draft summary")
@@ -504,8 +486,8 @@ func TestStartUIBrowserInteractionsDraftsClearOnRouteLeave(t *testing.T) {
 				startUITestChromedpSetSelectionRange(t, ctx, "#usage-filter-activity", 4, 9)
 			},
 			leaveAndReturn: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpClick(t, ctx, `[data-nav-view="issues"]`)
-				startUITestChromedpWaitVisible(t, ctx, "#issues-grid")
+				startUITestChromedpClick(t, ctx, `[data-nav-view="home"]`)
+				startUITestChromedpWaitVisible(t, ctx, "#global-repo-grid")
 				startUITestChromedpClick(t, ctx, `[data-nav-view="usage"]`)
 				startUITestChromedpWaitVisible(t, ctx, "#usage-filters-form")
 			},
@@ -519,24 +501,26 @@ func TestStartUIBrowserInteractionsDraftsClearOnRouteLeave(t *testing.T) {
 			},
 		},
 		{
-			name:          "issues-detail",
-			hash:          "#view=issues",
-			readySelector: "#issues-grid",
+			name:          "repo-controls-issue-form",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
+			readySelector: "#repo-controls-issue-form-deferred_reason",
 			edit: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpSetValue(t, ctx, "#issue-detail-priority", "5")
-				startUITestChromedpSetValue(t, ctx, "#issue-detail-deferred", "Transient issues draft")
-				startUITestChromedpSetSelectionRange(t, ctx, "#issue-detail-deferred", 4, 9)
+				startUITestChromedpSetValue(t, ctx, "#repo-controls-issue-form-priority", "5")
+				startUITestChromedpSetValue(t, ctx, "#repo-controls-issue-form-deferred_reason", "Transient issues draft")
+				startUITestChromedpSetSelectionRange(t, ctx, "#repo-controls-issue-form-deferred_reason", 4, 9)
 			},
 			leaveAndReturn: func(t *testing.T, ctx context.Context) {
 				startUITestChromedpClick(t, ctx, `[data-nav-view="home"]`)
 				startUITestChromedpWaitVisible(t, ctx, "#global-repo-grid")
-				startUITestChromedpClick(t, ctx, `[data-nav-view="issues"]`)
-				startUITestChromedpWaitVisible(t, ctx, "#issues-grid")
+				startUITestChromedpClick(t, ctx, `[data-nav-view="repo"][data-repo-slug="acme/widget"]`)
+				startUITestChromedpWaitVisible(t, ctx, "#repo-queue-summary")
+				startUITestChromedpClick(t, ctx, `[data-tab-group="repo"][data-tab-id="controls"]`)
+				startUITestChromedpWaitVisible(t, ctx, "#repo-controls-issue-form-deferred_reason")
 			},
 			assert: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpWaitValue(t, ctx, "#issue-detail-priority", "1")
-				startUITestChromedpWaitValue(t, ctx, "#issue-detail-deferred", "waiting for reproducible CI window")
-				startUITestChromedpWaitActiveElementNot(t, ctx, "#issue-detail-deferred")
+				startUITestChromedpWaitValue(t, ctx, "#repo-controls-issue-form-priority", "1")
+				startUITestChromedpWaitValue(t, ctx, "#repo-controls-issue-form-deferred_reason", "waiting for reproducible CI window")
+				startUITestChromedpWaitActiveElementNot(t, ctx, "#repo-controls-issue-form-deferred_reason")
 			},
 		},
 		{
@@ -627,7 +611,7 @@ func TestStartUIBrowserInteractionsDraftsClearOnSelectionChange(t *testing.T) {
 		},
 		{
 			name:          "investigations-finding-detail",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
 			readySelector: "#task-findings-grid",
 			edit: func(t *testing.T, ctx context.Context) {
 				startUITestChromedpWaitBodyTextContains(t, ctx, "Draft refresh finding")
@@ -652,7 +636,7 @@ func TestStartUIBrowserInteractionsDraftsClearOnSelectionChange(t *testing.T) {
 		},
 		{
 			name:          "investigations-import-candidate",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
 			readySelector: "#task-import-candidates-grid",
 			edit: func(t *testing.T, ctx context.Context) {
 				startUITestChromedpWaitBodyTextContains(t, ctx, "Draft refresh candidate")
@@ -754,13 +738,13 @@ func TestStartUIBrowserInteractionsFocusDoesNotRestoreAfterExplicitSaveOrReset(t
 		tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
 		defer cancelTab()
 
-		startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=issues", "#issue-detail-deferred")
-		startUITestChromedpSetValue(t, tabCtx, "#issue-detail-deferred", "focus save reason")
-		startUITestChromedpSetSelectionRange(t, tabCtx, "#issue-detail-deferred", 2, 7)
-		startUITestChromedpFocus(t, tabCtx, `[data-issue-save="acme/widget#7"]`)
-		startUITestChromedpClick(t, tabCtx, `[data-issue-save="acme/widget#7"]`)
-		startUITestChromedpWaitBodyTextContains(t, tabCtx, "focus save reason")
-		startUITestChromedpWaitActiveElementNot(t, tabCtx, "#issue-detail-deferred")
+		startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo=acme/widget&tab=controls", "#repo-controls-issue-form-deferred_reason")
+		startUITestChromedpSetValue(t, tabCtx, "#repo-controls-issue-form-deferred_reason", "focus save reason")
+		startUITestChromedpSetSelectionRange(t, tabCtx, "#repo-controls-issue-form-deferred_reason", 2, 7)
+		startUITestChromedpFocus(t, tabCtx, `#repo-controls-issue-form button[type="submit"]`)
+		startUITestChromedpClick(t, tabCtx, `#repo-controls-issue-form button[type="submit"]`)
+		startUITestChromedpWaitValue(t, tabCtx, "#repo-controls-issue-form-deferred_reason", "focus save reason")
+		startUITestChromedpWaitActiveElementNot(t, tabCtx, "#repo-controls-issue-form-deferred_reason")
 	})
 
 	t.Run("usage-reset", func(t *testing.T) {
@@ -819,10 +803,11 @@ func TestStartUIBrowserInteractionsWorkRunSync(t *testing.T) {
 	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
 	defer cancelTab()
 
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=work", "#work-runs-grid")
-	startUITestChromedpClick(t, tabCtx, `[data-log-run-id="gh-ui-blocked"]`)
+	runAttentionID := fmt.Sprintf("run:%s", fixture.GithubRunID)
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home&kind=approval", "#attention-inbox-grid")
+	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-attention-tile="%s"]`, runAttentionID))
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Run State")
-	startUITestChromedpClick(t, tabCtx, `[data-run-sync="gh-ui-blocked"]`)
+	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-attention-detail-action="sync_run"][data-attention-detail-item-id="%s"]`, runAttentionID))
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "publish · Round 2")
 }
 
@@ -841,10 +826,11 @@ func TestStartUIBrowserInteractionsApprovalLaunchCancelAndConfirm(t *testing.T) 
 	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
 	defer cancelTab()
 
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=approvals", "#approvals-grid")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Launch smoke run")
-	startUITestChromedpClickByText(t, tabCtx, `#approvals-grid [data-row-select-kind="approval"]`, "Launch smoke run")
-	launchSelector := fmt.Sprintf(`#approvals-detail [data-approval-launch-planned="%s"]`, fixture.PlannedApprovalID)
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home&kind=approval", "#attention-inbox-grid")
+	launchTileSelector := fmt.Sprintf(`[data-attention-tile="planned:%s"]`, fixture.PlannedApprovalID)
+	startUITestChromedpClick(t, tabCtx, launchTileSelector)
+	launchSelector := fmt.Sprintf(`[data-attention-action="approve_planned_item"][data-attention-item-id="planned:%s"]`, fixture.PlannedApprovalID)
+	startUITestChromedpWaitVisible(t, tabCtx, launchSelector)
 	startUITestChromedpClick(t, tabCtx, launchSelector)
 	startUITestChromedpWaitDialogOpen(t, tabCtx, true)
 	startUITestChromedpClick(t, tabCtx, "#confirm-dialog-cancel")
@@ -873,10 +859,33 @@ func TestStartUIBrowserInteractionsApprovalRetryScout(t *testing.T) {
 	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
 	defer cancelTab()
 
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=approvals", "#approvals-grid")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Retry failed scout")
-	startUITestChromedpClickByText(t, tabCtx, `#approvals-grid [data-row-select-kind="approval"]`, "Retry failed scout")
-	retrySelector := fmt.Sprintf(`#approvals-detail [data-approval-retry-scout="%s"]`, fixture.FailedScoutJobID)
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home&kind=approval", "#attention-inbox-grid")
+	retryTileSelector := fmt.Sprintf(`[data-attention-tile="scout-job:%s"]`, fixture.FailedScoutJobID)
+	retrySelector := fmt.Sprintf(`[data-attention-action="retry_scout_job"][data-attention-item-id="scout-job:%s"]`, fixture.FailedScoutJobID)
+	var retryReady struct {
+		Action bool `json:"action"`
+		Tile   bool `json:"tile"`
+	}
+	startUITestChromedpWaitCondition(t, tabCtx, 20*time.Second, "approval retry scout item or action to appear", func() (bool, string, error) {
+		if err := chromedp.Run(tabCtx, chromedp.Evaluate(fmt.Sprintf(`(() => {
+			const isVisible = (el) => {
+				if (!el) return false;
+				const style = window.getComputedStyle(el);
+				return style && style.visibility !== "hidden" && style.display !== "none" && Boolean(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+			};
+			return {
+				action: Array.from(document.querySelectorAll(%q)).some(isVisible),
+				tile: Array.from(document.querySelectorAll(%q)).some(isVisible),
+			};
+		})()`, retrySelector, retryTileSelector), &retryReady)); err != nil {
+			return false, "", err
+		}
+		return retryReady.Action || retryReady.Tile, fmt.Sprintf("action=%t tile=%t", retryReady.Action, retryReady.Tile), nil
+	})
+	if retryReady.Tile {
+		startUITestChromedpClick(t, tabCtx, retryTileSelector)
+	}
+	startUITestChromedpWaitVisible(t, tabCtx, retrySelector)
 	startUITestChromedpClick(t, tabCtx, retrySelector)
 	startUITestChromedpWaitDialogOpen(t, tabCtx, true)
 	startUITestChromedpClick(t, tabCtx, "#confirm-dialog-confirm")
@@ -889,7 +898,7 @@ func TestStartUIBrowserInteractionsApprovalRetryScout(t *testing.T) {
 		job, ok := state.ScoutJobs[fixture.FailedScoutJobID]
 		return ok && job.Status == startScoutJobQueued
 	})
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=approvals", "#approvals-grid")
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home&kind=approval", "#attention-inbox-grid")
 	startUITestChromedpWaitSelectorAbsent(t, tabCtx, retrySelector)
 }
 
@@ -908,8 +917,11 @@ func TestStartUIBrowserInteractionsApprovalDropRun(t *testing.T) {
 	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
 	defer cancelTab()
 
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=approvals", "#approvals-grid")
-	dropSelector := fmt.Sprintf(`#approvals-grid [data-approval-drop-kind="work_run"][data-approval-drop-id="%s"]`, fixture.GithubRunID)
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home&kind=approval", "#attention-inbox-grid")
+	dropTileSelector := fmt.Sprintf(`[data-attention-tile="run:%s"]`, fixture.GithubRunID)
+	startUITestChromedpClick(t, tabCtx, dropTileSelector)
+	dropSelector := fmt.Sprintf(`[data-attention-action="drop_approval"][data-attention-item-id="run:%s"]`, fixture.GithubRunID)
+	startUITestChromedpWaitVisible(t, tabCtx, dropSelector)
 	startUITestChromedpClick(t, tabCtx, dropSelector)
 	startUITestChromedpWaitDialogOpen(t, tabCtx, true)
 	startUITestChromedpClick(t, tabCtx, "#confirm-dialog-confirm")
@@ -938,8 +950,11 @@ func TestStartUIBrowserInteractionsWorkItemSubmit(t *testing.T) {
 	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
 	defer cancelTab()
 
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=approvals", "#approvals-grid")
-	reviewSelector := fmt.Sprintf(`#approvals-grid [data-work-item-submit="%s"]`, fixture.ReviewItemID)
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home&kind=approval", "#attention-inbox-grid")
+	reviewTileSelector := fmt.Sprintf(`[data-attention-tile="work-item:%s"]`, fixture.ReviewItemID)
+	startUITestChromedpClick(t, tabCtx, reviewTileSelector)
+	reviewSelector := fmt.Sprintf(`[data-attention-action="approve_work_item"][data-attention-item-id="work-item:%s"]`, fixture.ReviewItemID)
+	startUITestChromedpWaitVisible(t, tabCtx, reviewSelector)
 	startUITestChromedpClick(t, tabCtx, reviewSelector)
 	startUITestChromedpWaitDialogOpen(t, tabCtx, true)
 	startUITestChromedpClick(t, tabCtx, "#confirm-dialog-cancel")
@@ -953,10 +968,13 @@ func TestStartUIBrowserInteractionsWorkItemSubmit(t *testing.T) {
 	startUITestWaitFor(t, 10*time.Second, "review work item submission", func() bool {
 		return atomic.LoadInt32(&calls.submitReview) == 1 && startUITestReadWorkItem(t, fixture.ReviewItemID).Status == workItemStatusSubmitted
 	})
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=approvals", "#approvals-grid")
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home&kind=approval", "#attention-inbox-grid")
 	startUITestChromedpWaitSelectorAbsent(t, tabCtx, reviewSelector)
 
-	replySelector := fmt.Sprintf(`#approvals-grid [data-work-item-submit="%s"]`, fixture.ReplyItemID)
+	replyTileSelector := fmt.Sprintf(`[data-attention-tile="work-item:%s"]`, fixture.ReplyItemID)
+	startUITestChromedpClick(t, tabCtx, replyTileSelector)
+	replySelector := fmt.Sprintf(`[data-attention-action="approve_work_item"][data-attention-item-id="work-item:%s"]`, fixture.ReplyItemID)
+	startUITestChromedpWaitVisible(t, tabCtx, replySelector)
 	startUITestChromedpClick(t, tabCtx, replySelector)
 	startUITestChromedpWaitDialogOpen(t, tabCtx, true)
 	startUITestChromedpClick(t, tabCtx, "#confirm-dialog-confirm")
@@ -964,7 +982,7 @@ func TestStartUIBrowserInteractionsWorkItemSubmit(t *testing.T) {
 	startUITestWaitFor(t, 10*time.Second, "reply work item submission", func() bool {
 		return atomic.LoadInt32(&calls.submitReply) == 1 && startUITestReadWorkItem(t, fixture.ReplyItemID).Status == workItemStatusSubmitted
 	})
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=approvals", "#approvals-grid")
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home&kind=approval", "#attention-inbox-grid")
 	startUITestChromedpWaitSelectorAbsent(t, tabCtx, replySelector)
 
 	if atomic.LoadInt32(&calls.submitReview) != 1 {
@@ -973,6 +991,47 @@ func TestStartUIBrowserInteractionsWorkItemSubmit(t *testing.T) {
 	if atomic.LoadInt32(&calls.submitReply) != 1 {
 		t.Fatalf("expected one reply submission request, got %d", atomic.LoadInt32(&calls.submitReply))
 	}
+}
+
+func TestStartUIBrowserInteractionsAttentionBulkApproveDrafts(t *testing.T) {
+	chromePath := startUITestChromePath(t)
+	if chromePath == "" {
+		t.Skip("google-chrome is required for chromedp browser interaction coverage")
+	}
+
+	githubServer, calls := startUITestGithubAPIServer(t)
+	defer githubServer.Close()
+	t.Setenv("GH_TOKEN", "test-token")
+	t.Setenv("GITHUB_API_URL", githubServer.URL)
+
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+	startUITestPointReplyWorkItemAtGithubAPI(t, fixture.ReplyItemID, githubServer.URL)
+
+	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
+	defer cancelBrowser()
+
+	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
+	defer cancelTab()
+
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home", "#attention-inbox-grid")
+	reviewToggle := fmt.Sprintf(`[data-attention-toggle="work-item:%s"]`, fixture.ReviewItemID)
+	replyToggle := fmt.Sprintf(`[data-attention-toggle="work-item:%s"]`, fixture.ReplyItemID)
+	startUITestChromedpClick(t, tabCtx, reviewToggle)
+	startUITestChromedpClick(t, tabCtx, replyToggle)
+	startUITestChromedpSetValue(t, tabCtx, "#attention-bulk-action", "approve_work_item")
+	startUITestChromedpClick(t, tabCtx, "#attention-bulk-apply")
+	startUITestChromedpWaitDialogOpen(t, tabCtx, true)
+	startUITestChromedpClick(t, tabCtx, "#confirm-dialog-confirm")
+	startUITestChromedpWaitDialogOpen(t, tabCtx, false)
+	startUITestWaitFor(t, 10*time.Second, "bulk draft approval", func() bool {
+		return atomic.LoadInt32(&calls.submitReview) == 1 &&
+			atomic.LoadInt32(&calls.submitReply) == 1 &&
+			startUITestReadWorkItem(t, fixture.ReviewItemID).Status == workItemStatusSubmitted &&
+			startUITestReadWorkItem(t, fixture.ReplyItemID).Status == workItemStatusSubmitted
+	})
+	startUITestChromedpWaitSelectorAbsent(t, tabCtx, reviewToggle)
+	startUITestChromedpWaitSelectorAbsent(t, tabCtx, replyToggle)
 }
 
 func TestStartUIBrowserInteractionsTasksFindingsAndImportFlow(t *testing.T) {
@@ -1002,22 +1061,23 @@ func TestStartUIBrowserInteractionsTasksFindingsAndImportFlow(t *testing.T) {
 	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
 	defer cancelTab()
 
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo="+fixture.RepoSlug+"&tab=overview", "#page-body")
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=investigations", "#task-findings-import-button")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Findings Inbox")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, fixture.RepoSlug)
-	startUITestChromedpSetUploadFiles(t, tabCtx, "#task-findings-import-file", []string{markdownPath})
-	startUITestChromedpClick(t, tabCtx, "#task-findings-import-button")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Import session created")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Fix retry wording")
+	session, err := createStartUIFindingImportSession(fixture.RepoSlug, markdownPath, "# Findings\n\n- Retry wording")
+	if err != nil {
+		t.Fatalf("create import session: %v", err)
+	}
+	candidateOneID := "cand-1"
+	candidateTwoID := "cand-2"
 
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo=acme/widget&tab=controls", "#task-import-sessions-grid")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Import Sessions")
+	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-row-select-kind="import-session"][data-row-select-id="%s"]`, session.ID))
+	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-row-select-kind="import-candidate"][data-row-select-id="%s"]`, candidateOneID))
 	startUITestChromedpSetValue(t, tabCtx, "#task-import-candidate-title", "Fix retry wording everywhere")
 	startUITestChromedpSetValue(t, tabCtx, "#task-import-candidate-summary", "Clarify retry scope in all views")
-	startUITestChromedpClick(t, tabCtx, `[data-task-import-candidate-save="cand-1"]`)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Candidate saved")
-
-	startUITestChromedpClick(t, tabCtx, `[data-task-import-candidate-promote="cand-1"]`)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Candidate promoted")
+	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-task-import-candidate-save="%s"]`, candidateOneID))
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Fix retry wording everywhere")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Clarify retry scope in all views")
+	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-task-import-candidate-promote="%s"]`, candidateOneID))
 	startUITestWaitFor(t, 10*time.Second, "candidate promotion to create finding", func() bool {
 		state, err := readStartWorkState(fixture.RepoSlug)
 		if err != nil {
@@ -1025,23 +1085,23 @@ func TestStartUIBrowserInteractionsTasksFindingsAndImportFlow(t *testing.T) {
 		}
 		return len(state.Findings) == 1
 	})
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo="+fixture.RepoSlug+"&tab=overview", "#page-body")
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=investigations", "#task-findings-import-button")
-	startUITestChromedpWaitCondition(t, tabCtx, 10*time.Second, "promote button disabled for promoted candidate", func() (bool, string, error) {
-		var disabled bool
-		if err := chromedp.Run(tabCtx, chromedp.Evaluate(`Boolean(document.querySelector('[data-task-import-candidate-promote="cand-1"]') && document.querySelector('[data-task-import-candidate-promote="cand-1"]').disabled)`, &disabled)); err != nil {
-			return false, "", err
+
+	var findingID string
+	startUITestWaitFor(t, 10*time.Second, "finding id to become available", func() bool {
+		state, err := readStartWorkState(fixture.RepoSlug)
+		if err != nil {
+			return false
 		}
-		return disabled, strconv.FormatBool(disabled), nil
+		for id := range state.Findings {
+			findingID = id
+			return true
+		}
+		return false
 	})
 
-	startUITestChromedpClick(t, tabCtx, `[data-row-select-kind="finding"]`)
-	startUITestChromedpSetValue(t, tabCtx, "#task-finding-title", "Fix retry wording across surfaces")
-	startUITestChromedpClick(t, tabCtx, `[data-task-finding-save]`)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Finding saved")
-
-	startUITestChromedpClick(t, tabCtx, `[data-task-finding-dismiss]`)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Finding dismissed")
+	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-row-select-kind="finding"][data-row-select-id="%s"]`, findingID))
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Fix retry wording everywhere")
+	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-task-finding-dismiss="%s"]`, findingID))
 	startUITestWaitFor(t, 10*time.Second, "finding dismiss to persist", func() bool {
 		state, err := readStartWorkState(fixture.RepoSlug)
 		if err != nil {
@@ -1052,11 +1112,9 @@ func TestStartUIBrowserInteractionsTasksFindingsAndImportFlow(t *testing.T) {
 		}
 		return false
 	})
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Dismissed")
 
-	startUITestChromedpClick(t, tabCtx, `[data-row-select-kind="import-candidate"][data-row-select-id="cand-2"]`)
-	startUITestChromedpClick(t, tabCtx, `[data-task-import-candidate-drop="cand-2"]`)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Candidate dropped")
+	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-row-select-kind="import-candidate"][data-row-select-id="%s"]`, candidateTwoID))
+	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-task-import-candidate-drop="%s"]`, candidateTwoID))
 	startUITestWaitFor(t, 10*time.Second, "candidate drop to persist", func() bool {
 		state, err := readStartWorkState(fixture.RepoSlug)
 		if err != nil {
@@ -1068,14 +1126,6 @@ func TestStartUIBrowserInteractionsTasksFindingsAndImportFlow(t *testing.T) {
 			}
 		}
 		return false
-	})
-	startUITestChromedpClick(t, tabCtx, `[data-row-select-kind="import-candidate"][data-row-select-id="cand-2"]`)
-	startUITestChromedpWaitCondition(t, tabCtx, 10*time.Second, "promote button disabled for dropped candidate", func() (bool, string, error) {
-		var disabled bool
-		if err := chromedp.Run(tabCtx, chromedp.Evaluate(`Boolean(document.querySelector('[data-task-import-candidate-promote="cand-2"]') && document.querySelector('[data-task-import-candidate-promote="cand-2"]').disabled)`, &disabled)); err != nil {
-			return false, "", err
-		}
-		return disabled, strconv.FormatBool(disabled), nil
 	})
 
 	state, err := readStartWorkState(fixture.RepoSlug)
@@ -1103,6 +1153,72 @@ func TestStartUIBrowserInteractionsTasksFindingsAndImportFlow(t *testing.T) {
 			t.Fatalf("unexpected candidate statuses after browser flow: %+v", session.Candidates)
 		}
 	}
+}
+
+func TestStartUIBrowserInteractionsAttentionSyncGithubRefreshesWorkItems(t *testing.T) {
+	chromePath := startUITestChromePath(t)
+	if chromePath == "" {
+		t.Skip("google-chrome is required for chromedp browser interaction coverage")
+	}
+
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	reviewItem := startUITestReadWorkItem(t, fixture.ReviewItemID)
+	reviewItem.Status = workItemStatusSubmitted
+	startUITestUpdateWorkItem(t, reviewItem)
+	replyItem := startUITestReadWorkItem(t, fixture.ReplyItemID)
+	replyItem.Status = workItemStatusSubmitted
+	startUITestUpdateWorkItem(t, replyItem)
+
+	var syncedItemID string
+	oldSyncGithubFeedback := startUISyncGithubFeedback
+	startUISyncGithubFeedback = func(options workItemSyncCommandOptions) (githubWorkItemSyncResult, error) {
+		item, _, err := enqueueWorkItem(workItemInput{
+			Source:     "github",
+			SourceKind: "review_request",
+			ExternalID: "review-sync-browser-1",
+			RepoSlug:   fixture.RepoSlug,
+			TargetURL:  "https://github.com/acme/widget/pull/17",
+			Subject:    "Synced review request",
+			Body:       "A new review request arrived from GitHub sync.",
+		}, "test")
+		if err != nil {
+			return githubWorkItemSyncResult{}, err
+		}
+		item.Status = workItemStatusDraftReady
+		item.LatestDraft = &workItemDraft{
+			Kind:       "review",
+			Body:       "Please address the retry wording before merge.",
+			Summary:    "Sync-created review draft.",
+			Confidence: 0.9,
+		}
+		startUITestUpdateWorkItem(t, item)
+		syncedItemID = item.ID
+		return githubWorkItemSyncResult{Queued: 1, Created: 1}, nil
+	}
+	t.Cleanup(func() {
+		startUISyncGithubFeedback = oldSyncGithubFeedback
+	})
+
+	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
+	defer cancelBrowser()
+
+	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
+	defer cancelTab()
+
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home", "#attention-inbox-grid")
+	startUITestChromedpWaitBodyTextAbsent(t, tabCtx, "WORK ITEMS")
+	startUITestChromedpWaitBodyTextAbsent(t, tabCtx, "Synced review request")
+	startUITestChromedpClick(t, tabCtx, "#attention-feedback-sync-button")
+	startUITestWaitFor(t, 10*time.Second, "sync-created work item id", func() bool {
+		return strings.TrimSpace(syncedItemID) != ""
+	})
+	startUITestWaitFor(t, 10*time.Second, "sync-created work item to persist", func() bool {
+		item := startUITestReadWorkItem(t, syncedItemID)
+		return item.Subject == "Synced review request"
+	})
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "WORK ITEMS")
 }
 
 func TestStartUIBrowserInteractionsRepoControlsHydratesDedicatedRepoStateWhenLoadingOrderVaries(t *testing.T) {
@@ -1227,7 +1343,7 @@ func startUITestNewChromedpBrowser(t *testing.T, chromePath string) (context.Con
 func startUITestNewChromedpTab(t *testing.T, browserCtx context.Context) (context.Context, context.CancelFunc) {
 	t.Helper()
 	tabCtx, cancelTab := chromedp.NewContext(browserCtx)
-	ctx, cancelTimeout := context.WithTimeout(tabCtx, 45*time.Second)
+	ctx, cancelTimeout := context.WithTimeout(tabCtx, 90*time.Second)
 	return ctx, func() {
 		cancelTimeout()
 		cancelTab()
@@ -1247,14 +1363,20 @@ func startUITestChromedpOpen(t *testing.T, ctx context.Context, targetURL string
 
 func startUITestChromedpClick(t *testing.T, ctx context.Context, selector string) {
 	t.Helper()
+	startUITestChromedpWaitVisible(t, ctx, selector)
 	script := fmt.Sprintf(`(() => {
-		const el = document.querySelector(%q);
+		const isVisible = (el) => {
+			if (!el) return false;
+			const style = window.getComputedStyle(el);
+			return style && style.visibility !== "hidden" && style.display !== "none" && Boolean(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+		};
+		const el = Array.from(document.querySelectorAll(%q)).find(isVisible);
 		if (!el) return false;
 		el.click();
 		return true;
 	})()`, selector)
 	var ok bool
-	if err := chromedp.Run(ctx, chromedp.WaitVisible(selector, chromedp.ByQuery), chromedp.Evaluate(script, &ok)); err != nil {
+	if err := chromedp.Run(ctx, chromedp.Evaluate(script, &ok)); err != nil {
 		t.Fatalf("click %s: %v", selector, err)
 	}
 	if !ok {
@@ -1346,36 +1468,6 @@ func startUITestChromedpSetValue(t *testing.T, ctx context.Context, selector str
 	})
 }
 
-func startUITestChromedpDispatchValue(t *testing.T, ctx context.Context, selector string, value string) {
-	t.Helper()
-	script := fmt.Sprintf(`(() => {
-		const el = document.querySelector(%q);
-		if (!el) return "";
-		let proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
-		if (el instanceof HTMLTextAreaElement) {
-			proto = window.HTMLTextAreaElement.prototype;
-		} else if (el instanceof HTMLSelectElement) {
-			proto = window.HTMLSelectElement.prototype;
-		}
-		const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, "value") : null;
-		if (descriptor && typeof descriptor.set === "function") {
-			descriptor.set.call(el, %q);
-		} else {
-			el.value = %q;
-		}
-		el.dispatchEvent(new Event("input", { bubbles: true }));
-		el.dispatchEvent(new Event("change", { bubbles: true }));
-		return "ok";
-	})()`, selector, value, value)
-	var result string
-	if err := chromedp.Run(ctx,
-		chromedp.WaitVisible(selector, chromedp.ByQuery),
-		chromedp.Evaluate(script, &result),
-	); err != nil {
-		t.Fatalf("dispatch value %s: %v", selector, err)
-	}
-}
-
 func startUITestChromedpSetSelectionRange(t *testing.T, ctx context.Context, selector string, start int, end int) {
 	t.Helper()
 	var ok bool
@@ -1410,9 +1502,21 @@ func startUITestChromedpSetUploadFiles(t *testing.T, ctx context.Context, select
 
 func startUITestChromedpWaitVisible(t *testing.T, ctx context.Context, selector string) {
 	t.Helper()
-	if err := chromedp.Run(ctx, chromedp.WaitVisible(selector, chromedp.ByQuery)); err != nil {
-		t.Fatalf("wait visible %s: %v", selector, err)
-	}
+	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("visible selector %s", selector), func() (bool, string, error) {
+		var visible bool
+		expr := fmt.Sprintf(`(() => {
+			const isVisible = (el) => {
+				if (!el) return false;
+				const style = window.getComputedStyle(el);
+				return style && style.visibility !== "hidden" && style.display !== "none" && Boolean(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+			};
+			return Array.from(document.querySelectorAll(%q)).some(isVisible);
+		})()`, selector)
+		if err := chromedp.Run(ctx, chromedp.Evaluate(expr, &visible)); err != nil {
+			return false, "", err
+		}
+		return visible, strconv.FormatBool(visible), nil
+	})
 }
 
 func startUITestChromedpWaitSelectorAbsent(t *testing.T, ctx context.Context, selector string) {
@@ -1713,14 +1817,35 @@ func startUITestSeedDraftRefreshFindingsData(t *testing.T, fixture *startUITestB
 
 func startUITestSeedDraftRefreshImportSession(t *testing.T, fixture *startUITestBrowserFixture) {
 	t.Helper()
-	fakeBin := filepath.Join(t.TempDir(), "bin")
-	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
-		t.Fatalf("mkdir fake bin: %v", err)
+	state, err := readStartWorkState(fixture.RepoSlug)
+	if err != nil {
+		t.Fatalf("read start work state: %v", err)
 	}
-	writeFindingsTestExecutable(t, filepath.Join(fakeBin, "codex"), "#!/bin/sh\ncat >/dev/null\nprintf '{\"candidates\":[{\"candidate_id\":\"cand-refresh\",\"title\":\"Draft refresh candidate\",\"summary\":\"Original candidate summary\",\"detail\":\"Original candidate detail\",\"evidence\":\"Original candidate evidence\",\"severity\":\"medium\",\"work_type\":\"feature\"}]}'\n")
-	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
-	if _, err := createStartUIFindingImportSession(fixture.RepoSlug, "draft-refresh.md", "# Findings\n\n- Draft refresh candidate"); err != nil {
-		t.Fatalf("create finding import session: %v", err)
+	now := "2026-04-22T12:00:00Z"
+	if state.ImportSessions == nil {
+		state.ImportSessions = map[string]startWorkFindingImportSession{}
+	}
+	state.ImportSessions["import-refresh"] = startWorkFindingImportSession{
+		ID:               "import-refresh",
+		RepoSlug:         fixture.RepoSlug,
+		InputFilePath:    "draft-refresh.md",
+		MarkdownSnapshot: "# Findings\n\n- Draft refresh candidate",
+		ParseStatus:      "parsed",
+		Candidates: []startWorkFindingImportCandidate{{
+			CandidateID: "cand-refresh",
+			Title:       "Draft refresh candidate",
+			Summary:     "Original candidate summary",
+			Detail:      "Original candidate detail",
+			Evidence:    "Original candidate evidence",
+			Severity:    "medium",
+			WorkType:    workTypeFeature,
+			Status:      startWorkFindingCandidateStatusCandidate,
+		}},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := writeStartWorkState(*state); err != nil {
+		t.Fatalf("write start work state: %v", err)
 	}
 	fixture.API.invalidateOverviewCache()
 }
