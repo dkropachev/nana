@@ -102,6 +102,7 @@ const (
 	improvementDestinationLocal  = "local"
 	improvementDestinationTarget = "target"
 	improvementDestinationFork   = "fork"
+	improvementDestinationReview = "review"
 
 	improvementScoutRole     = "improvement-scout"
 	enhancementScoutRole     = "enhancement-scout"
@@ -138,6 +139,7 @@ type ImproveOptions struct {
 	FromFile        string
 	ResumeRunID     string
 	ResumeLast      bool
+	RunID           string
 	DryRun          bool
 	LocalOnly       bool
 	SessionLimit    int
@@ -424,6 +426,10 @@ func parseScoutSessionLimit(value string, command string) (int, error) {
 }
 
 func runScout(cwd string, options ImproveOptions, role string) (err error) {
+	return runScoutWithPolicyOverride(cwd, options, role, scoutPolicy{})
+}
+
+func runScoutWithPolicyOverride(cwd string, options ImproveOptions, role string, policyOverride scoutPolicy) (err error) {
 	repoSlug, githubTarget := normalizeImproveGithubRepo(options.Target)
 	repoPath := strings.TrimSpace(options.RepoPath)
 	resuming := strings.TrimSpace(options.ResumeRunID) != "" || options.ResumeLast
@@ -481,7 +487,7 @@ func runScout(cwd string, options ImproveOptions, role string) (err error) {
 		options.SessionLimit = manifest.SessionLimit
 		_, githubTarget = normalizeImproveGithubRepo(options.Target)
 	} else {
-		artifactDir, err = prepareLocalScoutArtifactDir(repoPath, role)
+		artifactDir, err = prepareLocalScoutArtifactDir(repoPath, role, options.RunID)
 		if err != nil {
 			return err
 		}
@@ -520,7 +526,8 @@ func runScout(cwd string, options ImproveOptions, role string) (err error) {
 	if err != nil {
 		return err
 	}
-	if !githubTarget || options.LocalOnly {
+	mergeScoutPolicy(&policy, policyOverride)
+	if (!githubTarget || options.LocalOnly) && normalizeScoutDestination(policy.IssueDestination) != improvementDestinationReview {
 		policy.IssueDestination = improvementDestinationLocal
 	}
 	if scoutRoleSupportsSessionLimit(role) && options.SessionLimit > 0 {
@@ -651,6 +658,10 @@ func runScout(cwd string, options ImproveOptions, role string) (err error) {
 	}
 	if policy.IssueDestination == improvementDestinationLocal {
 		fmt.Fprintf(os.Stdout, "[%s] Keeping %d %s local by policy.\n", prefix, len(report.Proposals), scoutItemsCountNoun(role))
+		return nil
+	}
+	if policy.IssueDestination == improvementDestinationReview {
+		fmt.Fprintf(os.Stdout, "[%s] Keeping %d %s in manual review.\n", prefix, len(report.Proposals), scoutItemsCountNoun(role))
 		return nil
 	}
 	if !githubTarget {
@@ -1272,6 +1283,8 @@ func normalizeScoutDestination(value string) string {
 		return improvementDestinationTarget
 	case improvementDestinationFork:
 		return improvementDestinationFork
+	case improvementDestinationReview, "manual":
+		return improvementDestinationReview
 	default:
 		return improvementDestinationLocal
 	}
@@ -1590,15 +1603,18 @@ func writeScoutRawOutput(repoPath string, rawOutput []byte, role string) (string
 }
 
 func writeLocalImprovementArtifacts(repoPath string, report scoutReport, policy scoutPolicy, rawOutput []byte) (string, error) {
-	artifactDir, err := prepareLocalScoutArtifactDir(repoPath, improvementScoutRole)
+	artifactDir, err := prepareLocalScoutArtifactDir(repoPath, improvementScoutRole, "")
 	if err != nil {
 		return "", err
 	}
 	return writeLocalScoutArtifacts(artifactDir, report, policy, rawOutput, improvementScoutRole, nil)
 }
 
-func prepareLocalScoutArtifactDir(repoPath string, role string) (string, error) {
-	dir := filepath.Join(repoPath, ".nana", scoutArtifactRoot(role), scoutRunID(role))
+func prepareLocalScoutArtifactDir(repoPath string, role string, runID string) (string, error) {
+	if strings.TrimSpace(runID) == "" {
+		runID = scoutRunID(role)
+	}
+	dir := filepath.Join(repoPath, ".nana", scoutArtifactRoot(role), runID)
 	if err := withScoutRepoWriteLock(repoPath, role, "prepare-artifact-dir", func() error {
 		return os.MkdirAll(dir, 0o755)
 	}); err != nil {

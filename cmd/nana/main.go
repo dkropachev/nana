@@ -33,6 +33,7 @@ Investigate and review:
   nana investigate onboard     Bootstrap dedicated investigate configuration
   nana investigate doctor      Probe MCPs configured for investigate
   nana review <pr-url>         Review an external GitHub PR with persisted findings
+  nana findings ...            Manage repo-scoped findings and markdown imports
   nana review-rules ...        Mine and manage persistent PR review rules
 
 Work automation:
@@ -86,6 +87,7 @@ More help:
   nana help workflows
   nana help work
   nana help investigate
+  nana help findings
   nana help repo
   nana help usage
   nana help telemetry
@@ -392,6 +394,11 @@ func main() {
 			exitWithError(err)
 		}
 		return
+	case "findings":
+		if err := gocli.Findings(mustGetwd(), args[1:]); err != nil {
+			exitWithError(err)
+		}
+		return
 	case "start":
 		if err := gocli.Start(mustGetwd(), args[1:]); err != nil {
 			exitWithError(err)
@@ -530,6 +537,9 @@ func handleNestedHelp(args []string) bool {
 		return true
 	case "repo":
 		mustHandleHelp(gocli.Repo(cwd, []string{"help"}))
+		return true
+	case "findings":
+		mustHandleHelp(gocli.Findings(cwd, []string{"help"}))
 		return true
 	case "start":
 		mustHandleHelp(gocli.Start(cwd, []string{"help"}))

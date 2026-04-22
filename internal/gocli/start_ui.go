@@ -335,13 +335,19 @@ type startUIIssuePatchRequest struct {
 }
 
 type startUIPlannedItemRequest struct {
-	Title       string `json:"title"`
-	Description string `json:"description,omitempty"`
-	WorkType    string `json:"work_type,omitempty"`
-	Priority    *int   `json:"priority,omitempty"`
-	ScheduleAt  string `json:"schedule_at,omitempty"`
-	LaunchKind  string `json:"launch_kind,omitempty"`
-	TargetURL   string `json:"target_url,omitempty"`
+	Title              string   `json:"title"`
+	Description        string   `json:"description,omitempty"`
+	WorkType           string   `json:"work_type,omitempty"`
+	Priority           *int     `json:"priority,omitempty"`
+	ScheduleAt         string   `json:"schedule_at,omitempty"`
+	LaunchKind         string   `json:"launch_kind,omitempty"`
+	FindingsHandling   string   `json:"findings_handling,omitempty"`
+	TargetURL          string   `json:"target_url,omitempty"`
+	InvestigationQuery string   `json:"investigation_query,omitempty"`
+	ScoutRole          string   `json:"scout_role,omitempty"`
+	ScoutDestination   string   `json:"scout_destination,omitempty"`
+	ScoutSessionLimit  int      `json:"scout_session_limit,omitempty"`
+	ScoutFocus         []string `json:"scout_focus,omitempty"`
 }
 
 type startUIIssueSearchRequest struct {
@@ -398,6 +404,40 @@ type startUIPlannedItemPatchRequest struct {
 	Priority      *int    `json:"priority,omitempty"`
 	ScheduleAt    *string `json:"schedule_at,omitempty"`
 	ClearSchedule bool    `json:"clear_schedule,omitempty"`
+}
+
+type startUIFindingPatchRequest struct {
+	Title    *string   `json:"title,omitempty"`
+	Summary  *string   `json:"summary,omitempty"`
+	Detail   *string   `json:"detail,omitempty"`
+	Evidence *string   `json:"evidence,omitempty"`
+	Severity *string   `json:"severity,omitempty"`
+	WorkType *string   `json:"work_type,omitempty"`
+	Files    *[]string `json:"files,omitempty"`
+	Path     *string   `json:"path,omitempty"`
+	Line     *int      `json:"line,omitempty"`
+	Route    *string   `json:"route,omitempty"`
+	Page     *string   `json:"page,omitempty"`
+}
+
+type startUIFindingImportSessionCreateRequest struct {
+	FilePath string `json:"file_path,omitempty"`
+	Markdown string `json:"markdown"`
+}
+
+type startUIFindingImportCandidatePatchRequest struct {
+	Title      *string   `json:"title,omitempty"`
+	Summary    *string   `json:"summary,omitempty"`
+	Detail     *string   `json:"detail,omitempty"`
+	Evidence   *string   `json:"evidence,omitempty"`
+	Severity   *string   `json:"severity,omitempty"`
+	WorkType   *string   `json:"work_type,omitempty"`
+	Files      *[]string `json:"files,omitempty"`
+	Path       *string   `json:"path,omitempty"`
+	Line       *int      `json:"line,omitempty"`
+	Route      *string   `json:"route,omitempty"`
+	Page       *string   `json:"page,omitempty"`
+	ParseNotes *string   `json:"parse_notes,omitempty"`
 }
 
 type startUIIssueSearchPayload struct {
@@ -606,6 +646,16 @@ type startUIScoutItemsResponse struct {
 	Results      []startUIScoutActionResult `json:"results,omitempty"`
 	SuccessCount int                        `json:"success_count,omitempty"`
 	FailureCount int                        `json:"failure_count,omitempty"`
+}
+
+type startUIFindingsResponse struct {
+	Repo  startUIRepoSummary `json:"repo"`
+	Items []startWorkFinding `json:"items"`
+}
+
+type startUIFindingImportSessionsResponse struct {
+	Repo  startUIRepoSummary              `json:"repo"`
+	Items []startWorkFindingImportSession `json:"items"`
 }
 
 type startUIWorkItemFixRequest struct {
@@ -1324,6 +1374,141 @@ func (h *startUIAPI) handleRepoRoute(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSONResponse(w, payload)
+	case r.Method == http.MethodGet && tail == "findings":
+		payload, err := loadStartUIFindings(repoSlug)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSONResponse(w, payload)
+	case r.Method == http.MethodGet && tail == "finding-import-sessions":
+		payload, err := loadStartUIFindingImportSessions(repoSlug)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSONResponse(w, payload)
+	case r.Method == http.MethodPost && tail == "finding-import-sessions":
+		var payload startUIFindingImportSessionCreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		session, err := createStartUIFindingImportSession(repoSlug, payload.FilePath, payload.Markdown)
+		h.invalidateOverviewCache()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSONResponse(w, map[string]any{"session": session})
+	case r.Method == http.MethodGet && strings.HasPrefix(tail, "findings/"):
+		findingID := strings.Trim(strings.TrimPrefix(tail, "findings/"), "/")
+		finding, err := loadStartUIFinding(repoSlug, findingID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSONResponse(w, map[string]any{"finding": finding})
+	case r.Method == http.MethodPatch && strings.HasPrefix(tail, "findings/"):
+		findingID := strings.Trim(strings.TrimPrefix(tail, "findings/"), "/")
+		var payload startUIFindingPatchRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		state, finding, err := patchStartUIFinding(repoSlug, findingID, payload)
+		h.invalidateOverviewCache()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSONResponse(w, map[string]any{"state": state, "finding": finding})
+	case r.Method == http.MethodPost && strings.HasPrefix(tail, "findings/"):
+		findingID, action, ok := parseStartUIFindingRoute(tail)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		switch action {
+		case "promote":
+			state, finding, item, err := promoteStartUIFinding(repoSlug, findingID)
+			h.invalidateOverviewCache()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSONResponse(w, map[string]any{"state": state, "finding": finding, "planned_item": item})
+		case "dismiss":
+			state, finding, err := dismissStartUIFinding(repoSlug, findingID, "")
+			h.invalidateOverviewCache()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSONResponse(w, map[string]any{"state": state, "finding": finding})
+		default:
+			http.NotFound(w, r)
+		}
+	case r.Method == http.MethodGet && strings.HasPrefix(tail, "finding-import-sessions/"):
+		sessionID, candidateID, action, ok := parseStartUIFindingImportSessionRoute(tail)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		if candidateID != "" || action != "" {
+			http.NotFound(w, r)
+			return
+		}
+		session, err := loadStartUIFindingImportSession(repoSlug, sessionID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSONResponse(w, map[string]any{"session": session})
+	case r.Method == http.MethodPatch && strings.HasPrefix(tail, "finding-import-sessions/"):
+		sessionID, candidateID, action, ok := parseStartUIFindingImportSessionRoute(tail)
+		if !ok || candidateID == "" || action != "candidate" {
+			http.NotFound(w, r)
+			return
+		}
+		var payload startUIFindingImportCandidatePatchRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		state, session, err := patchStartUIFindingImportCandidate(repoSlug, sessionID, candidateID, payload)
+		h.invalidateOverviewCache()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSONResponse(w, map[string]any{"state": state, "session": session})
+	case r.Method == http.MethodPost && strings.HasPrefix(tail, "finding-import-sessions/"):
+		sessionID, candidateID, action, ok := parseStartUIFindingImportSessionRoute(tail)
+		if !ok || candidateID == "" {
+			http.NotFound(w, r)
+			return
+		}
+		switch action {
+		case "promote":
+			state, session, finding, err := promoteStartUIFindingImportCandidate(repoSlug, sessionID, candidateID)
+			h.invalidateOverviewCache()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSONResponse(w, map[string]any{"state": state, "session": session, "finding": finding})
+		case "drop":
+			state, session, err := dropStartUIFindingImportCandidate(repoSlug, sessionID, candidateID)
+			h.invalidateOverviewCache()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSONResponse(w, map[string]any{"state": state, "session": session})
+		default:
+			http.NotFound(w, r)
+		}
 	case r.Method == http.MethodPost && tail == "issue-search":
 		var payload startUIIssueSearchRequest
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
@@ -4061,6 +4246,10 @@ func spawnStartUIIssueInvestigation(repoSlug string, issue startWorkIssueState) 
 }
 
 func spawnStartUIInvestigateQuery(workspaceRoot string, query string) (startUIBackgroundLaunch, error) {
+	return startUISpawnInvestigateQueryWithRunID(workspaceRoot, query, "")
+}
+
+func startUISpawnInvestigateQueryWithRunID(workspaceRoot string, query string, runID string) (startUIBackgroundLaunch, error) {
 	trimmedRoot := strings.TrimSpace(workspaceRoot)
 	if trimmedRoot == "" {
 		return startUIBackgroundLaunch{}, fmt.Errorf("investigation workspace root is required")
@@ -4070,7 +4259,12 @@ func spawnStartUIInvestigateQuery(workspaceRoot string, query string) (startUIBa
 		return startUIBackgroundLaunch{}, fmt.Errorf("investigation query is required")
 	}
 	logPath := filepath.Join(trimmedRoot, ".nana", "logs", "investigate-launches", fmt.Sprintf("launch-%d.log", time.Now().UnixNano()))
-	if err := startUISpawnBackgroundNana(trimmedRoot, logPath, []string{"investigate", trimmedQuery}); err != nil {
+	args := []string{"investigate"}
+	if strings.TrimSpace(runID) != "" {
+		args = append(args, "--run-id", strings.TrimSpace(runID))
+	}
+	args = append(args, trimmedQuery)
+	if err := startUISpawnBackgroundNana(trimmedRoot, logPath, args); err != nil {
 		return startUIBackgroundLaunch{}, err
 	}
 	return startUIBackgroundLaunch{
@@ -5060,6 +5254,13 @@ func listStartUIScoutItems(repoSlug string) ([]startUIScoutItem, error) {
 	if err != nil {
 		return nil, err
 	}
+	pickupState, _, err := readLocalScoutPickupStateWithReadLock(repoPath)
+	if err != nil {
+		return nil, err
+	}
+	if pickupState.Items == nil {
+		pickupState.Items = map[string]localScoutPickupItem{}
+	}
 	items := []startUIScoutItem{}
 	if err := withManagedSourceReadLock(repoSlug, repoAccessLockOwner{
 		Backend: "start-ui",
@@ -5140,7 +5341,25 @@ func listStartUIScoutItems(repoSlug string) ([]startUIScoutItem, error) {
 						ForkRepo:        strings.TrimSpace(policy.ForkRepo),
 					}
 					scoutItem := startUIScoutItemFromDiscovered(discovered)
-					if workState != nil && scoutItem.Destination == improvementDestinationLocal {
+					if record, ok := pickupState.Items[itemID]; ok {
+						switch strings.TrimSpace(record.Status) {
+						case "dismissed":
+							scoutItem.Status = "dismissed"
+						case "failed":
+							scoutItem.Status = "failed"
+							scoutItem.Error = strings.TrimSpace(record.Error)
+						case "completed":
+							scoutItem.Status = "completed"
+						case "in_progress":
+							scoutItem.Status = "planned"
+							scoutItem.RunID = strings.TrimSpace(record.RunID)
+							scoutItem.PlannedItemID = strings.TrimSpace(record.PlannedItemID)
+						}
+						if strings.TrimSpace(record.UpdatedAt) != "" {
+							scoutItem.UpdatedAt = strings.TrimSpace(record.UpdatedAt)
+						}
+					}
+					if workState != nil && (scoutItem.Destination == improvementDestinationLocal || scoutItem.Destination == improvementDestinationReview) {
 						if job, ok := workState.ScoutJobs[itemID]; ok {
 							scoutItem = startWorkScoutJobFromItem(job)
 						}
@@ -5179,6 +5398,72 @@ func listStartUIScoutItems(repoSlug string) ([]startUIScoutItem, error) {
 	return items, nil
 }
 
+func promoteStartUIScoutItem(repoSlug string, item startUIScoutItem) (*startWorkState, startWorkScoutJob, error) {
+	startWorkStateFileMu.Lock()
+	defer startWorkStateFileMu.Unlock()
+
+	state, err := ensureStartUIStateUnlocked(repoSlug)
+	if err != nil {
+		return nil, startWorkScoutJob{}, err
+	}
+	if state.ScoutJobs == nil {
+		state.ScoutJobs = map[string]startWorkScoutJob{}
+	}
+	now := ISOTimeNow()
+	existing := state.ScoutJobs[item.ID]
+	job := startWorkScoutJob{
+		ID:                item.ID,
+		Role:              item.Role,
+		Title:             item.Title,
+		WorkType:          item.WorkType,
+		Area:              item.Area,
+		Summary:           item.Summary,
+		Rationale:         item.Rationale,
+		Evidence:          item.Evidence,
+		Impact:            item.Impact,
+		SuggestedNextStep: item.SuggestedNextStep,
+		Confidence:        item.Confidence,
+		Files:             append([]string{}, item.Files...),
+		Labels:            append([]string{}, item.Labels...),
+		Page:              item.Page,
+		Route:             item.Route,
+		Severity:          item.Severity,
+		TargetKind:        item.TargetKind,
+		Screenshots:       append([]string{}, item.Screenshots...),
+		ArtifactPath:      item.ArtifactPath,
+		ProposalPath:      item.ProposalPath,
+		PolicyPath:        item.PolicyPath,
+		PreflightPath:     item.PreflightPath,
+		IssueDraftPath:    item.IssueDraftPath,
+		RawOutputPath:     item.RawOutputPath,
+		GeneratedAt:       item.GeneratedAt,
+		AuditMode:         item.AuditMode,
+		SurfaceKind:       item.SurfaceKind,
+		SurfaceTarget:     item.SurfaceTarget,
+		BrowserReady:      item.BrowserReady,
+		PreflightReason:   item.PreflightReason,
+		Destination:       improvementDestinationLocal,
+		Status:            startScoutJobQueued,
+		UpdatedAt:         now,
+		CreatedAt:         defaultString(strings.TrimSpace(existing.CreatedAt), defaultString(strings.TrimSpace(item.GeneratedAt), now)),
+	}
+	if strings.TrimSpace(job.WorkType) == "" {
+		job.WorkType = inferScoutWorkType(item.Role, scoutFinding{
+			Title:    item.Title,
+			Summary:  item.Summary,
+			Labels:   append([]string{}, item.Labels...),
+			Severity: item.Severity,
+			Files:    append([]string{}, item.Files...),
+		}).WorkType
+	}
+	state.ScoutJobs[item.ID] = job
+	state.UpdatedAt = now
+	if err := writeStartWorkStateUnlocked(*state); err != nil {
+		return nil, startWorkScoutJob{}, err
+	}
+	return state, job, nil
+}
+
 func mutateStartUIScoutItem(repoSlug string, itemID string, action string) (startUIScoutItemsResponse, error) {
 	repoPath := strings.TrimSpace(githubManagedPaths(repoSlug).SourcePath)
 	if repoPath == "" {
@@ -5208,6 +5493,12 @@ func mutateStartUIScoutItem(repoSlug string, itemID string, action string) (star
 		case "queue-planned":
 			return startUIScoutItemsResponse{}, fmt.Errorf("local scout jobs no longer support queue-planned; use retry or dismiss")
 		}
+	}
+	if selected.Destination == improvementDestinationReview && action == "promote" {
+		if _, _, err := promoteStartUIScoutItem(repoSlug, *selected); err != nil {
+			return startUIScoutItemsResponse{}, err
+		}
+		return loadStartUIScoutItems(repoSlug)
 	}
 	if _, _, readErr := readLocalScoutPickupStateWithReadLock(repoPath); readErr != nil {
 		return startUIScoutItemsResponse{}, readErr
@@ -5887,10 +6178,6 @@ func createStartUIPlannedItem(repoSlug string, payload startUIPlannedItemRequest
 	if title == "" {
 		return nil, startWorkPlannedItem{}, fmt.Errorf("title is required")
 	}
-	workType, err := parseRequiredWorkType(payload.WorkType, "work_type")
-	if err != nil {
-		return nil, startWorkPlannedItem{}, err
-	}
 	scheduleAt := strings.TrimSpace(payload.ScheduleAt)
 	if scheduleAt != "" {
 		if _, err := time.Parse(time.RFC3339, scheduleAt); err != nil {
@@ -5911,28 +6198,91 @@ func createStartUIPlannedItem(repoSlug string, payload startUIPlannedItemRequest
 	if err != nil {
 		return nil, startWorkPlannedItem{}, err
 	}
-	itemID := fmt.Sprintf("planned-%d", time.Now().UnixNano())
-	item := startWorkPlannedItem{
-		ID:          itemID,
-		RepoSlug:    repoSlug,
-		Title:       title,
-		Description: strings.TrimSpace(payload.Description),
-		WorkType:    workType,
-		LaunchKind:  strings.TrimSpace(payload.LaunchKind),
-		TargetURL:   strings.TrimSpace(payload.TargetURL),
-		Priority:    priority,
-		ScheduleAt:  scheduleAt,
-		State:       startPlannedItemQueued,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-	if item.LaunchKind == "" {
+	launchKind := strings.TrimSpace(payload.LaunchKind)
+	if launchKind == "" {
 		settings, _ := readGithubRepoSettings(githubRepoSettingsPath(repoSlug))
 		if resolvedGithubRepoMode(settings) == "local" {
-			item.LaunchKind = "local_work"
+			launchKind = "local_work"
 		} else {
-			item.LaunchKind = "github_issue"
+			launchKind = "github_issue"
 		}
+	}
+	switch launchKind {
+	case "local_work", "github_issue", "tracked_issue", "investigation", "manual_scout":
+	default:
+		return nil, startWorkPlannedItem{}, fmt.Errorf("unsupported launch_kind %q", payload.LaunchKind)
+	}
+	workType := ""
+	if launchKind == "local_work" || launchKind == "github_issue" || launchKind == "tracked_issue" {
+		workType, err = parseRequiredWorkType(payload.WorkType, "work_type")
+		if err != nil {
+			return nil, startWorkPlannedItem{}, err
+		}
+	}
+	investigationQuery := ""
+	scoutRole := ""
+	scoutDestination := ""
+	scoutSessionLimit := 0
+	scoutFocus := []string{}
+	findingsHandling := ""
+	switch launchKind {
+	case "investigation":
+		investigationQuery = strings.TrimSpace(payload.InvestigationQuery)
+		if investigationQuery == "" {
+			return nil, startWorkPlannedItem{}, fmt.Errorf("investigation_query is required")
+		}
+		findingsHandling = normalizeFindingsHandling(payload.FindingsHandling, "", launchKind)
+	case "manual_scout":
+		scoutRole = strings.TrimSpace(payload.ScoutRole)
+		if !scoutRoleListIncludes(supportedScoutRoleOrder, scoutRole) {
+			return nil, startWorkPlannedItem{}, fmt.Errorf("unsupported scout_role %q", payload.ScoutRole)
+		}
+		scoutDestination = normalizeScoutDestination(defaultString(payload.ScoutDestination, improvementDestinationReview))
+		if scoutDestination != improvementDestinationLocal && scoutDestination != improvementDestinationReview {
+			return nil, startWorkPlannedItem{}, fmt.Errorf("unsupported scout_destination %q", payload.ScoutDestination)
+		}
+		if payload.ScoutSessionLimit > 0 {
+			if !scoutRoleSupportsSessionLimit(scoutRole) {
+				return nil, startWorkPlannedItem{}, fmt.Errorf("scout_role %s does not support session limits", scoutRole)
+			}
+			if payload.ScoutSessionLimit < 1 || payload.ScoutSessionLimit > maxScoutSessionLimit {
+				return nil, startWorkPlannedItem{}, fmt.Errorf("scout_session_limit must be between 1 and %d", maxScoutSessionLimit)
+			}
+			scoutSessionLimit = payload.ScoutSessionLimit
+		}
+		scoutFocus = make([]string, 0, len(payload.ScoutFocus))
+		for _, focus := range payload.ScoutFocus {
+			trimmed := strings.TrimSpace(focus)
+			if trimmed == "" {
+				continue
+			}
+			scoutFocus = append(scoutFocus, trimmed)
+		}
+		scoutFocus = uniqueStrings(scoutFocus)
+		findingsHandling = normalizeFindingsHandling(payload.FindingsHandling, scoutDestination, launchKind)
+	case "local_work":
+		findingsHandling = normalizeFindingsHandling(payload.FindingsHandling, "", launchKind)
+	}
+	itemID := fmt.Sprintf("planned-%d", time.Now().UnixNano())
+	item := startWorkPlannedItem{
+		ID:                 itemID,
+		RepoSlug:           repoSlug,
+		Title:              title,
+		Description:        strings.TrimSpace(payload.Description),
+		WorkType:           workType,
+		LaunchKind:         launchKind,
+		FindingsHandling:   findingsHandling,
+		TargetURL:          strings.TrimSpace(payload.TargetURL),
+		InvestigationQuery: investigationQuery,
+		ScoutRole:          scoutRole,
+		ScoutDestination:   scoutDestination,
+		ScoutSessionLimit:  scoutSessionLimit,
+		ScoutFocus:         append([]string{}, scoutFocus...),
+		Priority:           priority,
+		ScheduleAt:         scheduleAt,
+		State:              startPlannedItemQueued,
+		CreatedAt:          now,
+		UpdatedAt:          now,
 	}
 	if state.PlannedItems == nil {
 		state.PlannedItems = map[string]startWorkPlannedItem{}
@@ -6131,6 +6481,9 @@ func ensureStartUIStateUnlocked(repoSlug string) (*startWorkState, error) {
 		Promotions:     map[string]startWorkPromotion{},
 		PromotionSkips: map[string]startWorkPromotionSkip{},
 		PlannedItems:   map[string]startWorkPlannedItem{},
+		ScoutJobs:      map[string]startWorkScoutJob{},
+		Findings:       map[string]startWorkFinding{},
+		ImportSessions: map[string]startWorkFindingImportSession{},
 	}
 	return state, nil
 }
@@ -6204,6 +6557,8 @@ func startUIScoutDestinationLabel(destination string) string {
 		return "repo"
 	case improvementDestinationFork:
 		return "fork"
+	case improvementDestinationReview:
+		return "review"
 	default:
 		return "local"
 	}
@@ -6242,6 +6597,15 @@ func startUIScoutAvailableActions(item startUIScoutItem) []string {
 			actions = append(actions, "retry", "dismiss")
 		case startScoutJobDismissed:
 			actions = append(actions, "retry")
+		}
+		return actions
+	}
+	if item.Destination == improvementDestinationReview {
+		switch status {
+		case improvementDestinationReview, "pending":
+			actions = append(actions, "promote", "dismiss")
+		case "failed", "dismissed", "planned", "completed":
+			actions = append(actions, "reset")
 		}
 		return actions
 	}

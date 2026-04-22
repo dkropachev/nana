@@ -159,6 +159,7 @@ type investigateRunOptions struct {
 	CodexArgs   []string
 	ResumeRunID string
 	ResumeLast  bool
+	RunID       string
 }
 
 func Investigate(cwd string, args []string) error {
@@ -194,7 +195,7 @@ func Investigate(cwd string, args []string) error {
 	if strings.TrimSpace(options.ResumeRunID) != "" || options.ResumeLast {
 		return resumeInvestigation(cwd, options)
 	}
-	return runInvestigation(cwd, options.Query, options.CodexArgs)
+	return runInvestigationWithOptions(cwd, options)
 }
 
 func MaybeHandleInvestigateHelp(command string, args []string) bool {
@@ -227,6 +228,14 @@ func parseInvestigateRunArgs(args []string) (investigateRunOptions, error) {
 			continue
 		}
 		switch {
+		case token == "--run-id":
+			if index+1 >= len(args) || strings.HasPrefix(args[index+1], "-") {
+				return investigateRunOptions{}, fmt.Errorf("missing value after --run-id\n\n%s", InvestigateHelp)
+			}
+			options.RunID = strings.TrimSpace(args[index+1])
+			index++
+		case strings.HasPrefix(token, "--run-id="):
+			options.RunID = strings.TrimSpace(strings.TrimPrefix(token, "--run-id="))
 		case token == "--resume":
 			if index+1 >= len(args) || strings.HasPrefix(args[index+1], "-") {
 				return investigateRunOptions{}, fmt.Errorf("missing value after --resume\n\n%s", InvestigateHelp)
@@ -246,6 +255,9 @@ func parseInvestigateRunArgs(args []string) (investigateRunOptions, error) {
 	}
 	options.Query = strings.TrimSpace(strings.Join(taskParts, " "))
 	if strings.TrimSpace(options.ResumeRunID) != "" || options.ResumeLast {
+		if strings.TrimSpace(options.RunID) != "" {
+			return investigateRunOptions{}, fmt.Errorf("resume does not accept --run-id\n\n%s", InvestigateHelp)
+		}
 		if options.Query != "" {
 			return investigateRunOptions{}, fmt.Errorf("resume does not accept a new investigation query\n\n%s", InvestigateHelp)
 		}
@@ -332,9 +344,19 @@ func investigateDoctor(cwd string) error {
 }
 
 func runInvestigation(cwd string, query string, codexArgs []string) error {
+	return runInvestigationWithOptions(cwd, investigateRunOptions{
+		Query:     query,
+		CodexArgs: codexArgs,
+	})
+}
+
+func runInvestigationWithOptions(cwd string, options investigateRunOptions) error {
 	workspaceRoot := resolveInvestigateWorkspaceRoot(cwd)
 	codexHome := ResolveInvestigateCodexHome(cwd)
-	runID := fmt.Sprintf("investigate-%d", time.Now().UnixNano())
+	runID := strings.TrimSpace(options.RunID)
+	if runID == "" {
+		runID = fmt.Sprintf("investigate-%d", time.Now().UnixNano())
+	}
 	runDir := filepath.Join(workspaceRoot, ".nana", "logs", "investigate", runID)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return err
@@ -346,7 +368,7 @@ func runInvestigation(cwd string, query string, codexArgs []string) error {
 		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
 		UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
 		Status:        investigateRunStatusRunning,
-		Query:         query,
+		Query:         options.Query,
 		WorkspaceRoot: workspaceRoot,
 		CodexHome:     codexHome,
 		MCPStatusPath: filepath.Join(runDir, "mcp-status.json"),
@@ -355,7 +377,7 @@ func runInvestigation(cwd string, query string, codexArgs []string) error {
 		Rounds:        []investigateRoundState{},
 	}
 	manifestPath := filepath.Join(runDir, "manifest.json")
-	return executeInvestigationRun(manifestPath, &manifest, codexArgs)
+	return executeInvestigationRun(manifestPath, &manifest, options.CodexArgs)
 }
 
 func resumeInvestigation(cwd string, options investigateRunOptions) error {

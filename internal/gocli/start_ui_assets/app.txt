@@ -29,12 +29,15 @@
     logSelection: defaultLogSelection(),
     configEditor: defaultConfigEditor(),
     scoutItems: defaultScoutItemsState(),
+    taskFindings: defaultTaskFindingsState(),
+    findingImports: defaultFindingImportsState(),
     workItemDrawer: null,
     workItemSelection: defaultWorkItemSelection(),
     issueQueue: defaultIssueQueueState(),
     repoScheduler: defaultRepoSchedulerState(),
     repoOnboarding: defaultRepoOnboardingState(),
     investigations: defaultInvestigationsState(),
+    taskComposer: defaultTaskComposerState(),
     feedback: defaultFeedbackState(),
     approvals: defaultApprovalsState(),
     usage: defaultUsageState(),
@@ -107,6 +110,33 @@
     };
   }
 
+  function defaultTaskFindingsState() {
+    return {
+      repoSlug: "",
+      items: [],
+      selectedFindingID: "",
+      loading: false,
+      loaded: false,
+      error: "",
+      lastRepoFindingRefreshKey: "",
+      saving: false,
+    };
+  }
+
+  function defaultFindingImportsState() {
+    return {
+      repoSlug: "",
+      items: [],
+      selectedSessionID: "",
+      selectedCandidateID: "",
+      loading: false,
+      loaded: false,
+      error: "",
+      importing: false,
+      lastRepoImportRefreshKey: "",
+    };
+  }
+
   function defaultWorkItemSelection() {
     return {
       itemID: "",
@@ -172,6 +202,24 @@
       error: "",
       draftQuery: "",
       starting: false,
+    };
+  }
+
+  function defaultTaskComposerState() {
+    return {
+      repoSlug: "",
+      kind: "investigation",
+      title: "",
+      description: "",
+      scheduleAt: "",
+      creating: false,
+      investigationQuery: "",
+      codingWorkType: "feature",
+      codingPriority: "3",
+      scoutRole: "improvement-scout",
+      scoutDestination: "review",
+      scoutSessionLimit: "4",
+      scoutFocus: "",
     };
   }
 
@@ -573,6 +621,25 @@
     };
   }
 
+  function ensureTaskComposerRepo() {
+    const repos = sortedRepos();
+    if (!repos.length) {
+      state.taskComposer.repoSlug = "";
+      return null;
+    }
+    const preferred = defaultString(state.taskComposer.repoSlug, defaultString(state.selectedRepo, repos[0].repo_slug));
+    const match = repos.find((repo) => repo.repo_slug === preferred) || repos[0];
+    state.taskComposer.repoSlug = match.repo_slug;
+    state.selectedRepo = match.repo_slug;
+    return match;
+  }
+
+  function selectedTaskRepoSummary() {
+    const repo = ensureTaskComposerRepo();
+    if (!repo) return null;
+    return selectedRepoSummary() || repo;
+  }
+
   function selectedIssueRecord() {
     const repo = selectedRepoSummary();
     if (!repo || !repo.state) return null;
@@ -722,7 +789,7 @@
     const options = [
       { value: "Home", action: "view", target: "home" },
       { value: "Issues", action: "view", target: "issues" },
-      { value: "Investigations", action: "view", target: "investigations" },
+      { value: "Tasks", action: "view", target: "investigations" },
       { value: "Work", action: "view", target: "work" },
       { value: "Usage", action: "view", target: "usage" },
       { value: "Feedback", action: "view", target: "feedback" },
@@ -1139,17 +1206,17 @@
       state.scoutItems.error = "";
     }
     if (!options.silent || !state.scoutItems.items.length) {
-      renderRepoScoutsPage(selectedRepoSummary());
+      rerenderScoutSurface();
     }
     return api(`/api/v1/repos/${repoSlug}/scout-items`).then((payload) => {
       if (state.scoutItems.repoSlug !== repoSlug) return;
       applyScoutItemsPayload(repoSlug, payload);
-      renderRepoScoutsPage(selectedRepoSummary());
+      rerenderScoutSurface();
     }).catch((error) => {
       if (state.scoutItems.repoSlug !== repoSlug) return;
       state.scoutItems.loading = false;
       state.scoutItems.error = error.message;
-      renderRepoScoutsPage(selectedRepoSummary());
+      rerenderScoutSurface();
       if (!options.silent) {
         toast("danger", "Scout items failed", error.message);
       }
@@ -1161,7 +1228,7 @@
       method: "POST",
     }).then((payload) => {
       applyScoutItemsPayload(repoSlug, payload);
-      renderRepoScoutsPage(selectedRepoSummary());
+      rerenderScoutSurface();
       return payload;
     }).catch((error) => {
       toast("danger", "Scout item action failed", error.message);
@@ -1185,12 +1252,262 @@
         .map((result) => result.item_id));
       const nextSelection = Array.from(selectedBefore).filter((itemID) => !successfulIDs.has(itemID));
       setSelectedScoutItemIDs(nextSelection);
-      renderRepoScoutsPage(selectedRepoSummary());
+      rerenderScoutSurface();
       return payload;
     }).catch((error) => {
       toast("danger", "Scout bulk action failed", error.message);
       throw error;
     });
+  }
+
+  function taskFindingsRefreshKey(repo) {
+    if (!repo) return "";
+    return JSON.stringify({
+      findings: (repo.state && repo.state.findings) || {},
+      planned_items: (repo.state && repo.state.planned_items) || {},
+    });
+  }
+
+  function resetTaskFindingsState(repo) {
+    state.taskFindings = {
+      ...defaultTaskFindingsState(),
+      repoSlug: repo ? repo.repo_slug : "",
+      lastRepoFindingRefreshKey: taskFindingsRefreshKey(repo),
+    };
+  }
+
+  function ensureTaskFindingsState(repo) {
+    if (!repo) {
+      state.taskFindings = defaultTaskFindingsState();
+      return;
+    }
+    if (state.taskFindings.repoSlug !== repo.repo_slug) {
+      resetTaskFindingsState(repo);
+      return;
+    }
+    if (state.taskFindings.loaded && taskFindingsRefreshKey(repo) !== state.taskFindings.lastRepoFindingRefreshKey && !state.taskFindings.loading) {
+      loadTaskFindings(repo.repo_slug, { silent: true });
+    }
+  }
+
+  function selectedTaskFinding() {
+    if (!state.taskFindings.selectedFindingID) return state.taskFindings.items[0] || null;
+    return state.taskFindings.items.find((item) => item.id === state.taskFindings.selectedFindingID) || state.taskFindings.items[0] || null;
+  }
+
+  function applyTaskFindingsPayload(repoSlug, payload) {
+    if (payload.repo) {
+      mergeRepoSummary(payload.repo, { rerender: false, resetScouts: false });
+    }
+    state.taskFindings.repoSlug = repoSlug;
+    state.taskFindings.items = payload.items || [];
+    state.taskFindings.loading = false;
+    state.taskFindings.loaded = true;
+    state.taskFindings.error = "";
+    state.taskFindings.lastRepoFindingRefreshKey = payload.repo ? taskFindingsRefreshKey(payload.repo) : state.taskFindings.lastRepoFindingRefreshKey;
+    if (!state.taskFindings.selectedFindingID || !state.taskFindings.items.some((item) => item.id === state.taskFindings.selectedFindingID)) {
+      state.taskFindings.selectedFindingID = state.taskFindings.items[0] ? state.taskFindings.items[0].id : "";
+    }
+  }
+
+  function loadTaskFindings(repoSlug, options = {}) {
+    if (!repoSlug) return Promise.resolve();
+    state.taskFindings.repoSlug = repoSlug;
+    state.taskFindings.loading = true;
+    if (!options.silent) {
+      state.taskFindings.error = "";
+    }
+    if (!options.silent || !state.taskFindings.items.length) {
+      renderInvestigationsPage();
+    }
+    return api(`/api/v1/repos/${repoSlug}/findings`).then((payload) => {
+      if (state.taskFindings.repoSlug !== repoSlug) return;
+      applyTaskFindingsPayload(repoSlug, payload);
+      renderInvestigationsPage();
+    }).catch((error) => {
+      if (state.taskFindings.repoSlug !== repoSlug) return;
+      state.taskFindings.loading = false;
+      state.taskFindings.error = error.message;
+      renderInvestigationsPage();
+      if (!options.silent) {
+        toast("danger", "Findings load failed", error.message);
+      }
+    });
+  }
+
+  function saveTaskFinding(repoSlug, findingID, payload) {
+    state.taskFindings.saving = true;
+    renderInvestigationsPage();
+    return api(`/api/v1/repos/${repoSlug}/findings/${encodeURIComponent(findingID)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }).then((response) => {
+      state.taskFindings.saving = false;
+      if (response.state) {
+        mergeRepoState(response.state);
+      }
+      return loadTaskFindings(repoSlug, { silent: true }).then(() => response);
+    }).catch((error) => {
+      state.taskFindings.saving = false;
+      renderInvestigationsPage();
+      toast("danger", "Finding save failed", error.message);
+      throw error;
+    });
+  }
+
+  function mutateTaskFinding(repoSlug, findingID, action) {
+    return api(`/api/v1/repos/${repoSlug}/findings/${encodeURIComponent(findingID)}/${action}`, {
+      method: "POST",
+    }).then((payload) => {
+      if (payload.state) {
+        mergeRepoState(payload.state);
+      }
+      return loadTaskFindings(repoSlug, { silent: true }).then(() => payload);
+    }).catch((error) => {
+      toast("danger", "Finding action failed", error.message);
+      throw error;
+    });
+  }
+
+  function findingImportsRefreshKey(repo) {
+    if (!repo) return "";
+    return JSON.stringify({
+      import_sessions: (repo.state && repo.state.import_sessions) || {},
+      findings: (repo.state && repo.state.findings) || {},
+    });
+  }
+
+  function resetFindingImportsState(repo) {
+    state.findingImports = {
+      ...defaultFindingImportsState(),
+      repoSlug: repo ? repo.repo_slug : "",
+      lastRepoImportRefreshKey: findingImportsRefreshKey(repo),
+    };
+  }
+
+  function ensureFindingImportsState(repo) {
+    if (!repo) {
+      state.findingImports = defaultFindingImportsState();
+      return;
+    }
+    if (state.findingImports.repoSlug !== repo.repo_slug) {
+      resetFindingImportsState(repo);
+      return;
+    }
+    if (state.findingImports.loaded && findingImportsRefreshKey(repo) !== state.findingImports.lastRepoImportRefreshKey && !state.findingImports.loading) {
+      loadFindingImports(repo.repo_slug, { silent: true });
+    }
+  }
+
+  function selectedFindingImportSession() {
+    if (!state.findingImports.selectedSessionID) return state.findingImports.items[0] || null;
+    return state.findingImports.items.find((item) => item.id === state.findingImports.selectedSessionID) || state.findingImports.items[0] || null;
+  }
+
+  function selectedFindingImportCandidate() {
+    const session = selectedFindingImportSession();
+    if (!session || !Array.isArray(session.candidates)) return null;
+    if (!state.findingImports.selectedCandidateID) return session.candidates[0] || null;
+    return session.candidates.find((candidate) => candidate.candidate_id === state.findingImports.selectedCandidateID) || session.candidates[0] || null;
+  }
+
+  function applyFindingImportsPayload(repoSlug, payload) {
+    if (payload.repo) {
+      mergeRepoSummary(payload.repo, { rerender: false, resetScouts: false });
+    }
+    state.findingImports.repoSlug = repoSlug;
+    state.findingImports.items = payload.items || [];
+    state.findingImports.loading = false;
+    state.findingImports.loaded = true;
+    state.findingImports.error = "";
+    state.findingImports.lastRepoImportRefreshKey = payload.repo ? findingImportsRefreshKey(payload.repo) : state.findingImports.lastRepoImportRefreshKey;
+    if (!state.findingImports.selectedSessionID || !state.findingImports.items.some((item) => item.id === state.findingImports.selectedSessionID)) {
+      state.findingImports.selectedSessionID = state.findingImports.items[0] ? state.findingImports.items[0].id : "";
+    }
+    const session = selectedFindingImportSession();
+    if (session && (!state.findingImports.selectedCandidateID || !session.candidates.some((candidate) => candidate.candidate_id === state.findingImports.selectedCandidateID))) {
+      state.findingImports.selectedCandidateID = session.candidates[0] ? session.candidates[0].candidate_id : "";
+    }
+  }
+
+  function loadFindingImports(repoSlug, options = {}) {
+    if (!repoSlug) return Promise.resolve();
+    state.findingImports.repoSlug = repoSlug;
+    state.findingImports.loading = true;
+    if (!options.silent) {
+      state.findingImports.error = "";
+    }
+    if (!options.silent || !state.findingImports.items.length) {
+      renderInvestigationsPage();
+    }
+    return api(`/api/v1/repos/${repoSlug}/finding-import-sessions`).then((payload) => {
+      if (state.findingImports.repoSlug !== repoSlug) return;
+      applyFindingImportsPayload(repoSlug, payload);
+      renderInvestigationsPage();
+    }).catch((error) => {
+      if (state.findingImports.repoSlug !== repoSlug) return;
+      state.findingImports.loading = false;
+      state.findingImports.error = error.message;
+      renderInvestigationsPage();
+      if (!options.silent) {
+        toast("danger", "Import sessions failed", error.message);
+      }
+    });
+  }
+
+  function createFindingImportSession(repoSlug, filePath, markdown) {
+    state.findingImports.importing = true;
+    renderInvestigationsPage();
+    return api(`/api/v1/repos/${repoSlug}/finding-import-sessions`, {
+      method: "POST",
+      body: JSON.stringify({ file_path: filePath, markdown }),
+    }).then((payload) => {
+      state.findingImports.importing = false;
+      return loadFindingImports(repoSlug, { silent: true }).then(() => {
+        if (payload.session && payload.session.id) {
+          state.findingImports.selectedSessionID = payload.session.id;
+          state.findingImports.selectedCandidateID = payload.session.candidates && payload.session.candidates[0] ? payload.session.candidates[0].candidate_id : "";
+        }
+        renderInvestigationsPage();
+        return payload;
+      });
+    }).catch((error) => {
+      state.findingImports.importing = false;
+      renderInvestigationsPage();
+      toast("danger", "Markdown import failed", error.message);
+      throw error;
+    });
+  }
+
+  function mutateFindingImportCandidate(repoSlug, sessionID, candidateID, method, actionOrPayload) {
+    const options = method === "PATCH"
+      ? { method, body: JSON.stringify(actionOrPayload) }
+      : { method: "POST" };
+    const suffix = method === "PATCH" ? "" : `/${actionOrPayload}`;
+    return api(`/api/v1/repos/${repoSlug}/finding-import-sessions/${encodeURIComponent(sessionID)}/candidates/${encodeURIComponent(candidateID)}${suffix}`, options).then((payload) => {
+      if (payload.state) {
+        mergeRepoState(payload.state);
+      }
+      return loadFindingImports(repoSlug, { silent: true }).then(() => {
+        state.findingImports.selectedSessionID = sessionID;
+        state.findingImports.selectedCandidateID = candidateID;
+        renderInvestigationsPage();
+        return payload;
+      });
+    }).catch((error) => {
+      toast("danger", "Candidate action failed", error.message);
+      throw error;
+    });
+  }
+
+  function rerenderScoutSurface() {
+    if (state.currentView === "repo" && state.repoTab === "scouts") {
+      renderRepoScoutsPage(selectedRepoSummary());
+      return;
+    }
+    if (state.currentView === "investigations") {
+      renderInvestigationsPage();
+    }
   }
 
   function loadIssueQueue(options = {}) {
@@ -1434,7 +1751,15 @@
   }
 
   function applyRepoListPayload(repos) {
-    state.repoList.items = Array.isArray(repos) ? repos : [];
+    const existing = new Map((state.repoList.items || []).map((item) => [item.repo_slug, item]));
+    state.repoList.items = (Array.isArray(repos) ? repos : []).map((repo) => {
+      const current = existing.get(repo.repo_slug);
+      return {
+        ...current,
+        ...repo,
+        state: repo.state || current && current.state || null,
+      };
+    });
     state.repoList.loading = false;
     state.repoList.loaded = true;
     state.repoList.error = "";
@@ -1573,6 +1898,19 @@
       case "investigations":
         if (!state.investigations.loaded && !state.investigations.loading) {
           loadInvestigations({ silent: true });
+        }
+        {
+          const repo = selectedTaskRepoSummary();
+          if (repo) {
+            ensureTaskFindingsState(repo);
+            ensureFindingImportsState(repo);
+            if (!state.taskFindings.loaded && !state.taskFindings.loading) {
+              loadTaskFindings(repo.repo_slug, { silent: true });
+            }
+            if (!state.findingImports.loaded && !state.findingImports.loading) {
+              loadFindingImports(repo.repo_slug, { silent: true });
+            }
+          }
         }
         break;
       case "feedback":
@@ -2008,6 +2346,7 @@
     const totals = state.overview ? state.overview.totals || {} : {};
     const homeActive = state.currentView === "home";
     const homeCount = pendingRuns().length + pendingWorkItems().length + Number(totals.approval_items || 0);
+    const taskCount = Number(totals.investigations || 0) + Number(totals.planned_queued || 0) + Number(totals.planned_launching || 0);
     const repoQuery = String(state.sidebarQuery || "").trim().toLowerCase();
     const visibleRepos = repos.filter((repo) => !repoQuery || repo.repo_slug.toLowerCase().includes(repoQuery));
     nav.innerHTML = `
@@ -2026,8 +2365,8 @@
             <span class="nav-count">${Number(totals.issues_queued || 0) + Number(totals.blocked_issues || 0) + Number(totals.issues_in_progress || 0)}</span>
           </button>
           <button class="nav-item ${state.currentView === "investigations" ? "nav-item-active" : ""}" type="button" data-nav-view="investigations" aria-current="${state.currentView === "investigations" ? "page" : "false"}">
-            <span class="nav-label">Investigations</span>
-            <span class="nav-count">${Number(totals.investigations || 0)}</span>
+            <span class="nav-label">Tasks</span>
+            <span class="nav-count">${taskCount}</span>
           </button>
           <button class="nav-item ${state.currentView === "work" ? "nav-item-active" : ""}" type="button" data-nav-view="work" aria-current="${state.currentView === "work" ? "page" : "false"}">
             <span class="nav-label">Work</span>
@@ -2094,8 +2433,8 @@
         subtitle.textContent = "Tracked issues, triage evidence, scheduling, and direct launch actions.";
         updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
       } else if (state.currentView === "investigations") {
-        title.textContent = "Investigations";
-        subtitle.textContent = "Source-backed investigation runs with proofs and validator status.";
+        title.textContent = "Tasks";
+        subtitle.textContent = "Unified scheduling for investigations, coding work, manual scouts, and resulting findings.";
         updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
       } else if (state.currentView === "feedback") {
         title.textContent = "Feedback";
@@ -2128,8 +2467,8 @@
       return;
     }
     if (state.currentView === "investigations") {
-      title.textContent = "Investigations";
-      subtitle.textContent = "Source-backed investigation runs with proofs and validator status.";
+      title.textContent = "Tasks";
+      subtitle.textContent = "Unified scheduling for investigations, coding work, manual scouts, and resulting findings.";
       return;
     }
     if (state.currentView === "work") {
@@ -3241,73 +3580,263 @@
     `;
   }
 
-  function renderInvestigationsPage() {
-    const items = filteredInvestigations();
-    const detail = state.investigations.detail;
-    ensureBodyStructure("investigations", `
-      <section class="surface">
-        <div class="surface-head">
-          <div>
-            <h3>Start Investigation</h3>
-            <p>Run the investigate workflow against this workspace or a managed repo checkout.</p>
-          </div>
+  function taskLaunchKindLabel(value) {
+    switch (String(value || "").trim()) {
+      case "investigation":
+        return "Investigation";
+      case "manual_scout":
+        return "Manual Scout";
+      case "local_work":
+        return "Coding";
+      default:
+        return defaultString(value, "Task");
+    }
+  }
+
+  function taskScheduledItems(repo) {
+    if (!repo || !repo.state) return [];
+    return Object.values(repo.state.planned_items || {})
+      .filter((item) => ["local_work", "investigation", "manual_scout"].includes(String(item.launch_kind || "").trim()))
+      .sort((left, right) => timestamp(right.updated_at) - timestamp(left.updated_at));
+  }
+
+  function taskScheduledRows(repo) {
+    return taskScheduledItems(repo).map((item) => ({
+      id: item.id,
+      title: defaultString(item.title, "(untitled)"),
+      launch_kind: taskLaunchKindLabel(item.launch_kind),
+      schedule_at: item.schedule_at ? formatDateTime(item.schedule_at) : "Ready now",
+      state: defaultString(item.state, "queued"),
+      updated_at: formatDateTime(item.updated_at),
+      result: defaultString(item.launch_result || item.last_error, "-"),
+      can_launch: item.state === "queued" || item.state === "failed",
+      can_remove: item.state === "queued" || item.state === "failed",
+    }));
+  }
+
+  function findingStatusLabel(status) {
+    switch (String(status || "").trim()) {
+      case "promoted":
+        return "Promoted";
+      case "dismissed":
+        return "Dismissed";
+      case "resolved":
+        return "Resolved";
+      default:
+        return "Open";
+    }
+  }
+
+  function findingSourceLabel(finding) {
+    switch (String(finding && finding.source_kind || "").trim()) {
+      case "manual_scout":
+        return `Manual Scout · ${defaultString(finding.source_id, "-")}`;
+      case "investigation":
+        return `Investigation · ${defaultString(finding.source_id, "-")}`;
+      case "coding":
+        return `Coding Run · ${defaultString(finding.source_id, "-")}`;
+      case "manual_import":
+        return `Markdown Import · ${defaultString(finding.source_id, "-")}`;
+      default:
+        return defaultString(finding && finding.source_kind, "-");
+    }
+  }
+
+  function findingParentTaskLabel(finding) {
+    const kind = defaultString(finding && finding.parent_task_kind, "");
+    const id = defaultString(finding && finding.parent_task_id, "");
+    return kind && id ? `${kind} · ${id}` : "None";
+  }
+
+  function findingPromotedTaskLabel(finding) {
+    return defaultString(finding && finding.promoted_task_id, "Not linked");
+  }
+
+  function taskFindingRows(items) {
+    return (items || []).map((finding) => ({
+      id: finding.id,
+      title: defaultString(finding.title, "(untitled)"),
+      source: findingSourceLabel(finding),
+      parent_task: findingParentTaskLabel(finding),
+      status: findingStatusLabel(finding.status),
+      status_key: defaultString(finding.status, "open"),
+      severity: defaultString(finding.severity, "medium"),
+      work_type: workTypeLabel(finding.work_type),
+      promoted_task: findingPromotedTaskLabel(finding),
+      updated_at: formatDateTime(finding.updated_at),
+      finding,
+    }));
+  }
+
+  function renderTaskFindingDetail(repo, finding) {
+    const host = document.getElementById("task-finding-detail");
+    if (!host) return;
+    if (state.taskFindings.error && !finding) {
+      host.innerHTML = `<div class="config-notice">${escapeHTML(state.taskFindings.error)}</div>`;
+      return;
+    }
+    if (state.taskFindings.loading && !finding) {
+      host.innerHTML = '<div class="status-pill">Loading findings...</div>';
+      return;
+    }
+    if (!finding) {
+      host.innerHTML = '<div class="status-pill">No finding selected.</div>';
+      return;
+    }
+    host.innerHTML = `
+      <div class="drawer-summary">
+        <div>
+          <span class="drawer-label">${escapeHTML(findingSourceLabel(finding))}</span>
+          <span class="drawer-value">${escapeHTML(defaultString(finding.title, "(untitled)"))}</span>
+          <p class="drawer-copy">${escapeHTML(defaultString(finding.summary, "(no summary)"))}</p>
         </div>
-        <div class="config-grid">
-          <label class="config-field">
-            <span class="config-label">Repo</span>
-            <select id="investigation-repo-select">
-              <option value="">Current workspace</option>
-              ${sortedRepos().map((repo) => `<option value="${escapeHTML(repo.repo_slug)}">${escapeHTML(repo.repo_slug)}</option>`).join("")}
-            </select>
-          </label>
-          <label class="config-field config-field-wide">
-            <span class="config-label">Query</span>
-            <textarea id="investigation-query" rows="3" placeholder="Investigate why CI is failing for widget deploys.">${escapeHTML(state.investigations.draftQuery || "")}</textarea>
-          </label>
+        <div class="drawer-summary-grid">
+          <div class="drawer-summary-card"><span class="drawer-label">Status</span><span class="drawer-value">${renderStatePill(defaultString(finding.status, "open"), findingStatusLabel(finding.status))}</span></div>
+          <div class="drawer-summary-card"><span class="drawer-label">Severity</span><span class="drawer-value">${escapeHTML(defaultString(finding.severity, "medium"))}</span></div>
+          <div class="drawer-summary-card"><span class="drawer-label">Work Type</span><span class="drawer-value">${escapeHTML(workTypeLabel(finding.work_type))}</span></div>
+          <div class="drawer-summary-card"><span class="drawer-label">Parent Task</span><span class="drawer-value">${escapeHTML(findingParentTaskLabel(finding))}</span></div>
+          <div class="drawer-summary-card"><span class="drawer-label">Promoted Task</span><span class="drawer-value">${escapeHTML(findingPromotedTaskLabel(finding))}</span></div>
         </div>
-        <div class="config-actions">
-          <button id="investigation-start-button" class="tx-btn tx-btn-primary" type="button" ${state.investigations.starting ? "disabled" : ""}>${state.investigations.starting ? "Starting..." : "Start Investigation"}</button>
-        </div>
-      </section>
-      <section class="layout-two-col">
-        <div class="surface">
-        <div class="surface-head">
-          <div>
-            <h3>Runs</h3>
-            <p>Accepted, running, paused, and failed investigation runs.</p>
-          </div>
-        </div>
-        ${buildFilterToolbar("investigations", { placeholder: "Search query, repo, summary, or run id" })}
-        <div id="investigations-grid"></div>
       </div>
-        <div class="surface detail-surface">
-          <div class="surface-head">
-            <div>
-              <h3>Detail</h3>
-              <p>Proofs, validator output, and stored artifacts.</p>
-            </div>
-          </div>
-          <div id="investigation-detail"></div>
+      <div class="config-grid">
+        <label class="selector config-selector config-field-wide">
+          <span>Title</span>
+          <input id="task-finding-title" type="text" value="${escapeHTML(defaultString(finding.title, ""))}" />
+        </label>
+        <label class="selector config-selector config-field-wide">
+          <span>Summary</span>
+          <textarea id="task-finding-summary" rows="3">${escapeHTML(defaultString(finding.summary, ""))}</textarea>
+        </label>
+        <label class="selector config-selector config-field-wide">
+          <span>Detail</span>
+          <textarea id="task-finding-detail-input" rows="6">${escapeHTML(defaultString(finding.detail, ""))}</textarea>
+        </label>
+        <label class="selector config-selector config-field-wide">
+          <span>Evidence</span>
+          <textarea id="task-finding-evidence" rows="4">${escapeHTML(defaultString(finding.evidence, ""))}</textarea>
+        </label>
+        <label class="selector config-selector">
+          <span>Severity</span>
+          <select id="task-finding-severity">
+            ${["low", "medium", "high", "critical"].map((value) => `<option value="${value}" ${defaultString(finding.severity, "medium") === value ? "selected" : ""}>${value}</option>`).join("")}
+          </select>
+        </label>
+        <label class="selector config-selector">
+          <span>Work Type</span>
+          <select id="task-finding-work-type">
+            ${["bug_fix", "refactor", "feature", "test_only"].map((value) => `<option value="${value}" ${defaultString(finding.work_type, "feature") === value ? "selected" : ""}>${escapeHTML(workTypeLabel(value))}</option>`).join("")}
+          </select>
+        </label>
+      </div>
+      <div class="config-actions">
+        <button class="tx-btn tx-btn-secondary" type="button" data-task-finding-dismiss="${escapeHTML(finding.id)}">Dismiss</button>
+        <button class="tx-btn tx-btn-secondary" type="button" data-task-finding-promote="${escapeHTML(finding.id)}" ${finding.promoted_task_id ? "disabled" : ""}>Promote</button>
+        <button class="tx-btn tx-btn-primary" type="button" data-task-finding-save="${escapeHTML(finding.id)}" ${state.taskFindings.saving ? "disabled" : ""}>${escapeHTML(state.taskFindings.saving ? "Saving..." : "Save Finding")}</button>
+      </div>
+      <div class="queue-summary">
+        <article class="queue-item"><span class="queue-label">Source Item</span><p class="queue-copy">${escapeHTML(defaultString(finding.source_item_id, "(none)"))}</p></article>
+        <article class="queue-item"><span class="queue-label">Files</span><p class="queue-copy">${escapeHTML((finding.files || []).join(", ") || "(none)")}</p></article>
+        <article class="queue-item"><span class="queue-label">Path</span><p class="queue-copy">${escapeHTML(defaultString(finding.path, "(none)"))}</p></article>
+        <article class="queue-item"><span class="queue-label">Route / Page</span><p class="queue-copy">${escapeHTML([defaultString(finding.route, ""), defaultString(finding.page, "")].filter(Boolean).join(" / ") || "(none)")}</p></article>
+      </div>
+    `;
+  }
+
+  function findingImportSessionRows(items) {
+    return (items || []).map((session) => ({
+      id: session.id,
+      file_path: defaultString(session.input_file_path, "(inline markdown)"),
+      parse_status: defaultString(session.parse_status, "pending"),
+      candidate_count: Array.isArray(session.candidates) ? session.candidates.length : 0,
+      updated_at: formatDateTime(session.updated_at),
+    }));
+  }
+
+  function findingImportCandidateRows(session) {
+    if (!session || !Array.isArray(session.candidates)) return [];
+    return session.candidates.map((candidate) => ({
+      candidate_id: candidate.candidate_id,
+      title: defaultString(candidate.title, "(untitled)"),
+      status: defaultString(candidate.status, "candidate"),
+      severity: defaultString(candidate.severity, "medium"),
+      work_type: workTypeLabel(candidate.work_type),
+    }));
+  }
+
+  function renderFindingImportDetail(repo, session, candidate) {
+    const host = document.getElementById("task-import-detail");
+    if (!host) return;
+    if (state.findingImports.error && !session) {
+      host.innerHTML = `<div class="config-notice">${escapeHTML(state.findingImports.error)}</div>`;
+      return;
+    }
+    if (state.findingImports.loading && !session) {
+      host.innerHTML = '<div class="status-pill">Loading import sessions...</div>';
+      return;
+    }
+    if (!session) {
+      host.innerHTML = '<div class="status-pill">No import session selected.</div>';
+      return;
+    }
+    if (!candidate) {
+      host.innerHTML = `
+        <div class="queue-summary">
+          <article class="queue-item"><span class="queue-label">Session</span><p class="queue-copy">${escapeHTML(session.id)}</p></article>
+          <article class="queue-item"><span class="queue-label">File</span><p class="queue-copy">${escapeHTML(defaultString(session.input_file_path, "(inline markdown)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Parse Status</span><p class="queue-copy">${escapeHTML(defaultString(session.parse_status, "pending"))}</p></article>
         </div>
-      </section>
-    `);
-    renderGrid("investigations-grid", [
-      { field: "repo_slug", label: "Repo", render: (row) => `<span class="data-value-text">${escapeHTML(defaultString(row.repo_slug, "Workspace"))}</span>` },
-      { field: "status", label: "Run", render: (row) => renderStatePillWithPause(row.attention_state, row.status, row.pause_until, row.pause_reason) },
-      { field: "overall_status", label: "Result" },
-      { field: "query", label: "Query" },
-      { field: "updated_at", label: "Updated", render: (row) => `<span class="data-value-text">${escapeHTML(formatDateTime(row.updated_at))}</span>` },
-    ], items, {
-      maxHeight: "520px",
-      emptyMessage: state.investigations.loading ? "Loading investigations..." : defaultString(state.investigations.error, "No investigations are available."),
-      rowSelect(row) {
-        return {
-          kind: "investigation",
-          value: row.run_id,
-          selected: detail && detail.summary ? detail.summary.run_id === row.run_id : false,
-        };
-      },
-    });
+        ${session.parse_error ? `<div class="config-notice">${escapeHTML(session.parse_error)}</div>` : '<div class="status-pill">Select a candidate to review.</div>'}
+      `;
+      return;
+    }
+    host.innerHTML = `
+      <div class="drawer-summary">
+        <div>
+          <span class="drawer-label">${escapeHTML(session.id)}</span>
+          <span class="drawer-value">${escapeHTML(defaultString(candidate.title, "(untitled)"))}</span>
+          <p class="drawer-copy">${escapeHTML(defaultString(candidate.summary, "(no summary)"))}</p>
+        </div>
+      </div>
+      <div class="config-grid">
+        <label class="selector config-selector config-field-wide">
+          <span>Title</span>
+          <input id="task-import-candidate-title" type="text" value="${escapeHTML(defaultString(candidate.title, ""))}" />
+        </label>
+        <label class="selector config-selector config-field-wide">
+          <span>Summary</span>
+          <textarea id="task-import-candidate-summary" rows="3">${escapeHTML(defaultString(candidate.summary, ""))}</textarea>
+        </label>
+        <label class="selector config-selector config-field-wide">
+          <span>Detail</span>
+          <textarea id="task-import-candidate-detail" rows="6">${escapeHTML(defaultString(candidate.detail, ""))}</textarea>
+        </label>
+        <label class="selector config-selector config-field-wide">
+          <span>Evidence</span>
+          <textarea id="task-import-candidate-evidence" rows="4">${escapeHTML(defaultString(candidate.evidence, ""))}</textarea>
+        </label>
+        <label class="selector config-selector">
+          <span>Severity</span>
+          <select id="task-import-candidate-severity">
+            ${["low", "medium", "high", "critical"].map((value) => `<option value="${value}" ${defaultString(candidate.severity, "medium") === value ? "selected" : ""}>${value}</option>`).join("")}
+          </select>
+        </label>
+        <label class="selector config-selector">
+          <span>Work Type</span>
+          <select id="task-import-candidate-work-type">
+            ${["bug_fix", "refactor", "feature", "test_only"].map((value) => `<option value="${value}" ${defaultString(candidate.work_type, "feature") === value ? "selected" : ""}>${escapeHTML(workTypeLabel(value))}</option>`).join("")}
+          </select>
+        </label>
+      </div>
+      <div class="config-actions">
+        <button class="tx-btn tx-btn-secondary" type="button" data-task-import-candidate-drop="${escapeHTML(candidate.candidate_id)}" ${candidate.status === "candidate" ? "" : "disabled"}>Drop</button>
+        <button class="tx-btn tx-btn-secondary" type="button" data-task-import-candidate-promote="${escapeHTML(candidate.candidate_id)}" ${candidate.status === "candidate" ? "" : "disabled"}>Promote to Finding</button>
+        <button class="tx-btn tx-btn-primary" type="button" data-task-import-candidate-save="${escapeHTML(candidate.candidate_id)}">Save Candidate</button>
+      </div>
+      ${session.parse_error ? `<div class="config-notice">${escapeHTML(session.parse_error)}</div>` : ""}
+    `;
+  }
+
+  function renderTaskInvestigationDetail(detail) {
     const host = document.getElementById("investigation-detail");
     if (!host) return;
     if (state.investigations.error && !detail) {
@@ -3410,6 +3939,288 @@
         ${validatorContent}
       </div>
     `;
+  }
+
+  function renderInvestigationsPage() {
+    const items = filteredInvestigations();
+    const detail = state.investigations.detail;
+    const repo = selectedTaskRepoSummary();
+    ensureTaskFindingsState(repo);
+    ensureFindingImportsState(repo);
+    if (repo && (!state.taskFindings.loaded || state.taskFindings.repoSlug !== repo.repo_slug) && !state.taskFindings.loading) {
+      loadTaskFindings(repo.repo_slug, { silent: true });
+    }
+    if (repo && (!state.findingImports.loaded || state.findingImports.repoSlug !== repo.repo_slug) && !state.findingImports.loading) {
+      loadFindingImports(repo.repo_slug, { silent: true });
+    }
+    const supportsSessionLimit = repoScoutMeta(state.taskComposer.scoutRole, repo).supportsSessionLimit;
+    const scheduledRows = taskScheduledRows(repo);
+    ensureBodyStructure("investigations", `
+      <section class="layout-two-col">
+        <div class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Schedule Task</h3>
+              <p>Queue an investigation, coding task, or manual scout from one intake surface.</p>
+            </div>
+          </div>
+          <div class="config-grid">
+            <label class="config-field">
+              <span class="config-label">Repo</span>
+              <select id="task-composer-repo">
+                ${sortedRepos().map((entry) => `<option value="${escapeHTML(entry.repo_slug)}" ${state.taskComposer.repoSlug === entry.repo_slug ? "selected" : ""}>${escapeHTML(entry.repo_slug)}</option>`).join("")}
+              </select>
+            </label>
+            <label class="config-field">
+              <span class="config-label">Task Type</span>
+              <select id="task-composer-kind">
+                <option value="investigation" ${state.taskComposer.kind === "investigation" ? "selected" : ""}>Investigation</option>
+                <option value="coding" ${state.taskComposer.kind === "coding" ? "selected" : ""}>Coding</option>
+                <option value="manual_scout" ${state.taskComposer.kind === "manual_scout" ? "selected" : ""}>Manual Scout</option>
+              </select>
+            </label>
+            <label class="config-field">
+              <span class="config-label">Schedule</span>
+              <input id="task-composer-schedule" type="datetime-local" value="${escapeHTML(state.taskComposer.scheduleAt)}" />
+            </label>
+            <label class="config-field config-field-wide">
+              <span class="config-label">Task Title</span>
+              <input id="task-composer-title" type="text" value="${escapeHTML(state.taskComposer.title)}" placeholder="${state.taskComposer.kind === "coding" ? "Implement approval retry copy cleanup" : state.taskComposer.kind === "manual_scout" ? "Run a focused UI scout review" : "Label this investigation task"}" />
+            </label>
+            <label class="config-field config-field-wide">
+              <span class="config-label">Description</span>
+              <textarea id="task-composer-description" rows="3" placeholder="${state.taskComposer.kind === "coding" ? "Describe the work Nana should execute." : state.taskComposer.kind === "manual_scout" ? "Optional notes for why this scout run matters." : "Optional context that should stay attached to the scheduled task."}">${escapeHTML(state.taskComposer.description)}</textarea>
+            </label>
+            <label class="config-field">
+              <span class="config-label">Findings Handling</span>
+              <select id="task-findings-handling">
+                <option value="review" ${state.taskComposer.scoutDestination === "review" ? "selected" : ""}>Manual Review</option>
+                <option value="local" ${state.taskComposer.scoutDestination === "local" ? "selected" : ""}>Auto Promote</option>
+              </select>
+            </label>
+            ${state.taskComposer.kind === "investigation" ? `
+              <label class="config-field config-field-wide">
+                <span class="config-label">Investigation Query</span>
+                <textarea id="task-investigation-query" rows="4" placeholder="Investigate why approval retry timing drifts between the queue and the drawer.">${escapeHTML(state.taskComposer.investigationQuery)}</textarea>
+              </label>
+            ` : ""}
+            ${state.taskComposer.kind === "coding" ? `
+              <label class="config-field">
+                <span class="config-label">Work Type</span>
+                <select id="task-coding-work-type">
+                  ${["bug_fix", "refactor", "feature", "test_only"].map((value) => `<option value="${escapeHTML(value)}" ${state.taskComposer.codingWorkType === value ? "selected" : ""}>${escapeHTML(workTypeLabel(value))}</option>`).join("")}
+                </select>
+              </label>
+              <label class="config-field">
+                <span class="config-label">Priority</span>
+                <select id="task-coding-priority">
+                  ${[0, 1, 2, 3, 4, 5].map((priority) => `<option value="${priority}" ${String(state.taskComposer.codingPriority) === String(priority) ? "selected" : ""}>P${priority}</option>`).join("")}
+                </select>
+              </label>
+            ` : ""}
+            ${state.taskComposer.kind === "manual_scout" ? `
+              <label class="config-field">
+                <span class="config-label">Scout Role</span>
+                <select id="task-scout-role">
+                  ${repoScoutCatalog(repo).map((entry) => `<option value="${escapeHTML(entry.role)}" ${state.taskComposer.scoutRole === entry.role ? "selected" : ""}>${escapeHTML(entry.display_label)}</option>`).join("")}
+                </select>
+              </label>
+              ${supportsSessionLimit ? `
+                <label class="config-field">
+                  <span class="config-label">Session Limit</span>
+                  <input id="task-scout-session-limit" type="number" min="1" max="6" value="${escapeHTML(state.taskComposer.scoutSessionLimit)}" />
+                </label>
+              ` : ""}
+              <label class="config-field config-field-wide">
+                <span class="config-label">Focus</span>
+                <input id="task-scout-focus" type="text" value="${escapeHTML(state.taskComposer.scoutFocus)}" placeholder="approvals, retry flow, queue wording" />
+              </label>
+            ` : ""}
+          </div>
+          <div class="config-actions">
+            <button id="task-schedule-button" class="tx-btn tx-btn-primary" type="button" ${state.taskComposer.creating || !repo ? "disabled" : ""}>${state.taskComposer.creating ? "Scheduling..." : "Schedule Task"}</button>
+          </div>
+        </div>
+        <div class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Scheduled Tasks</h3>
+              <p>${repo ? `Queued task launches for ${escapeHTML(repo.repo_slug)}.` : "Select a repo to inspect scheduled tasks."}</p>
+            </div>
+          </div>
+          <div id="task-planned-grid"></div>
+        </div>
+      </section>
+      <section class="layout-two-col">
+        <div class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Investigation Runs</h3>
+              <p>Accepted, running, paused, and failed investigation runs.</p>
+            </div>
+          </div>
+          ${buildFilterToolbar("investigations", { placeholder: "Search query, repo, summary, or run id" })}
+          <div id="investigations-grid"></div>
+        </div>
+        <div class="surface detail-surface">
+          <div class="surface-head">
+            <div>
+              <h3>Investigation Detail</h3>
+              <p>Proofs, validator output, and stored artifacts.</p>
+            </div>
+          </div>
+          <div id="investigation-detail"></div>
+        </div>
+      </section>
+      <section class="layout-two-col">
+        <div class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Findings Inbox</h3>
+              <p>${repo ? `Persisted findings for ${escapeHTML(repo.repo_slug)} with source lineage and promotion controls.` : "Select a repo to inspect findings."}</p>
+            </div>
+            <div class="config-actions">
+              <input id="task-findings-import-file" type="file" accept=".md,text/markdown" ${repo ? "" : "disabled"} />
+              <button id="task-findings-import-button" class="tx-btn tx-btn-secondary tx-btn-sm" type="button" ${repo && !state.findingImports.importing ? "" : "disabled"}>${state.findingImports.importing ? "Importing..." : "Import Findings from Markdown"}</button>
+            </div>
+          </div>
+          <div id="task-findings-grid"></div>
+        </div>
+        <div class="surface detail-surface">
+          <div class="surface-head">
+            <div>
+              <h3>Finding Detail</h3>
+              <p>Edit persisted findings, dismiss them, or promote them into planned work.</p>
+            </div>
+          </div>
+          <div id="task-finding-detail"></div>
+        </div>
+      </section>
+      <section class="layout-two-col">
+        <div class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Import Sessions</h3>
+              <p>${repo ? `Markdown imports and candidate findings for ${escapeHTML(repo.repo_slug)}.` : "Select a repo to inspect import sessions."}</p>
+            </div>
+          </div>
+          <div id="task-import-sessions-grid"></div>
+          <div id="task-import-candidates-grid"></div>
+        </div>
+        <div class="surface detail-surface">
+          <div class="surface-head">
+            <div>
+              <h3>Candidate Detail</h3>
+              <p>Review, edit, drop, or promote markdown-derived candidates.</p>
+            </div>
+          </div>
+          <div id="task-import-detail"></div>
+        </div>
+      </section>
+    `);
+    renderGrid("task-planned-grid", [
+      { field: "launch_kind", label: "Type" },
+      { field: "title", label: "Title" },
+      { field: "state", label: "Status", render: (row) => renderStatePill(row.state === "failed" ? "blocked" : row.state, row.state) },
+      { field: "schedule_at", label: "Scheduled" },
+      { field: "updated_at", label: "Updated" },
+      {
+        field: "id",
+        label: "Actions",
+        action: true,
+        render(row) {
+          const actions = [];
+          if (row.can_launch) {
+            actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-task-planned-launch="${escapeHTML(row.id)}">Launch Now</button>`);
+          }
+          if (row.can_remove) {
+            actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-task-planned-remove="${escapeHTML(row.id)}">Remove</button>`);
+          }
+          return actions.length ? `<div class="scout-actions">${actions.join("")}</div>` : '<span class="data-value-text">No actions</span>';
+        },
+      },
+    ], scheduledRows, {
+      maxHeight: "340px",
+      emptyMessage: repo ? "No scheduled tasks are queued for this repo." : "No repos are onboarded yet.",
+    });
+    renderGrid("investigations-grid", [
+      { field: "repo_slug", label: "Repo", render: (row) => `<span class="data-value-text">${escapeHTML(defaultString(row.repo_slug, "Workspace"))}</span>` },
+      { field: "status", label: "Run", render: (row) => renderStatePillWithPause(row.attention_state, row.status, row.pause_until, row.pause_reason) },
+      { field: "overall_status", label: "Result" },
+      { field: "query", label: "Query" },
+      { field: "updated_at", label: "Updated", render: (row) => `<span class="data-value-text">${escapeHTML(formatDateTime(row.updated_at))}</span>` },
+    ], items, {
+      maxHeight: "520px",
+      emptyMessage: state.investigations.loading ? "Loading investigations..." : defaultString(state.investigations.error, "No investigations are available."),
+      rowSelect(row) {
+        return {
+          kind: "investigation",
+          value: row.run_id,
+          selected: detail && detail.summary ? detail.summary.run_id === row.run_id : false,
+        };
+      },
+    });
+    renderTaskInvestigationDetail(detail);
+    renderGrid("task-findings-grid", [
+      { field: "title", label: "Title" },
+      { field: "source", label: "Source" },
+      { field: "parent_task", label: "Parent Task" },
+      { field: "status", label: "Status", render: (row) => renderStatePill(row.status_key, row.status) },
+      { field: "severity", label: "Severity" },
+      { field: "work_type", label: "Work Type" },
+      { field: "promoted_task", label: "Planned Task" },
+      { field: "updated_at", label: "Updated" },
+    ], taskFindingRows(state.taskFindings.items), {
+      maxHeight: "420px",
+      emptyMessage: repo
+        ? (state.taskFindings.loading ? "Loading findings..." : defaultString(state.taskFindings.error, "No findings are available for this repo."))
+        : "Select a repo to inspect findings.",
+      rowSelect(row) {
+        return {
+          kind: "finding",
+          value: row.id,
+          selected: selectedTaskFinding() ? selectedTaskFinding().id === row.id : false,
+        };
+      },
+    });
+    renderTaskFindingDetail(repo, selectedTaskFinding());
+    renderGrid("task-import-sessions-grid", [
+      { field: "id", label: "Session" },
+      { field: "file_path", label: "Source File" },
+      { field: "parse_status", label: "Parse" },
+      { field: "candidate_count", label: "Candidates" },
+      { field: "updated_at", label: "Updated" },
+    ], findingImportSessionRows(state.findingImports.items), {
+      maxHeight: "220px",
+      emptyMessage: repo
+        ? (state.findingImports.loading ? "Loading import sessions..." : defaultString(state.findingImports.error, "No import sessions exist for this repo."))
+        : "Select a repo to inspect import sessions.",
+      rowSelect(row) {
+        return {
+          kind: "import-session",
+          value: row.id,
+          selected: selectedFindingImportSession() ? selectedFindingImportSession().id === row.id : false,
+        };
+      },
+    });
+    renderGrid("task-import-candidates-grid", [
+      { field: "candidate_id", label: "Candidate" },
+      { field: "title", label: "Title" },
+      { field: "status", label: "Status" },
+      { field: "severity", label: "Severity" },
+      { field: "work_type", label: "Work Type" },
+    ], findingImportCandidateRows(selectedFindingImportSession()), {
+      maxHeight: "220px",
+      emptyMessage: "No candidates are available for the selected import session.",
+      rowSelect(row) {
+        return {
+          kind: "import-candidate",
+          value: row.candidate_id,
+          selected: selectedFindingImportCandidate() ? selectedFindingImportCandidate().candidate_id === row.candidate_id : false,
+        };
+      },
+    });
+    renderFindingImportDetail(repo, selectedFindingImportSession(), selectedFindingImportCandidate());
   }
 
   function renderWorkPage() {
@@ -4300,6 +5111,8 @@
 
   function scoutActionLabel(action) {
     switch (action) {
+      case "promote":
+        return "Promote";
       case "retry":
         return "Retry";
       case "dismiss":
@@ -4323,6 +5136,19 @@
     return normalized.replace(/_/g, " ");
   }
 
+  function scoutDestinationLabel(value) {
+    switch (String(value || "").trim()) {
+      case "review":
+        return "Manual Review";
+      case "repo":
+        return "Repo Issue";
+      case "fork":
+        return "Fork Issue";
+      default:
+        return "Auto Promote";
+    }
+  }
+
   function scoutItemRows(items) {
     return items.map((item) => ({
       id: item.id,
@@ -4332,20 +5158,21 @@
       page: defaultString(item.page || item.route, ""),
       severity: defaultString(item.severity, ""),
       audit_mode: defaultString(item.audit_mode, ""),
-      destination: defaultString(item.destination, "local"),
+      destination: scoutDestinationLabel(item.destination),
       status: scoutStatusLabel(item.status),
       status_key: defaultString(item.status === "paused" ? "blocked" : item.status, "pending"),
       pause_reason: defaultString(item.pause_reason, ""),
       pause_until: defaultString(item.pause_until, ""),
       updated_at: formatDateTime(item.updated_at || item.generated_at),
+      can_promote: (item.available_actions || []).includes("promote"),
       can_retry: (item.available_actions || []).includes("retry"),
       can_dismiss: (item.available_actions || []).includes("dismiss"),
       can_open_run: (item.available_actions || []).includes("open-run"),
     }));
   }
 
-  function renderScoutDetail(item) {
-    const host = document.getElementById("repo-scout-detail");
+  function renderScoutDetail(item, hostID = "repo-scout-detail") {
+    const host = document.getElementById(hostID);
     if (!host) return;
     if (state.scoutItems.error) {
       host.innerHTML = `<div class="config-notice">${escapeHTML(state.scoutItems.error)}</div>`;
@@ -4364,7 +5191,7 @@
       <div class="surface-head">
         <div>
           <h3>${escapeHTML(item.title)}</h3>
-          <p>${escapeHTML(scoutRoleLabel(item.role))} · ${escapeHTML(defaultString(item.destination, "local"))} destination</p>
+          <p>${escapeHTML(scoutRoleLabel(item.role))} · ${escapeHTML(scoutDestinationLabel(defaultString(item.destination, "local")))}</p>
         </div>
         ${renderStatePillWithPause(defaultString(item.status === "paused" ? "blocked" : item.status, "pending"), scoutStatusLabel(item.status), item.pause_until, item.pause_reason)}
       </div>
@@ -4544,6 +5371,9 @@
         action: true,
         render(row) {
           const actions = [];
+          if (row.can_promote) {
+            actions.push(`<button class="tx-btn tx-btn-primary tx-btn-sm grid-action-button" type="button" data-scout-action="promote" data-scout-id="${escapeHTML(row.id)}">Promote</button>`);
+          }
           if (row.can_retry) {
             actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-scout-action="retry" data-scout-id="${escapeHTML(row.id)}">Retry</button>`);
           }
@@ -5631,7 +6461,7 @@
       if (state.currentView !== "usage") {
         refreshCurrentView({ silent: true });
       }
-      if (state.currentView === "repo" && state.repoTab === "scouts" && state.selectedRepo) {
+      if (((state.currentView === "repo" && state.repoTab === "scouts") || state.currentView === "investigations") && state.selectedRepo) {
         loadScoutItems(state.selectedRepo, { silent: true });
       }
       if (state.logSelection.runID) {
@@ -5756,6 +6586,26 @@
           }
           if (kind === "investigation") {
             loadInvestigationDetail(value);
+            return;
+          }
+          if (kind === "finding") {
+            state.taskFindings.selectedFindingID = value;
+            renderInvestigationsPage();
+            return;
+          }
+          if (kind === "import-session") {
+            state.findingImports.selectedSessionID = value;
+            state.findingImports.selectedCandidateID = "";
+            const session = selectedFindingImportSession();
+            if (session && session.candidates && session.candidates[0]) {
+              state.findingImports.selectedCandidateID = session.candidates[0].candidate_id;
+            }
+            renderInvestigationsPage();
+            return;
+          }
+          if (kind === "import-candidate") {
+            state.findingImports.selectedCandidateID = value;
+            renderInvestigationsPage();
             return;
           }
           if (kind === "approval") {
@@ -6016,6 +6866,241 @@
         return;
       }
 
+      if (event.target.id === "task-schedule-button") {
+        const repo = selectedTaskRepoSummary();
+        if (!repo) {
+          toast("warning", "No repo selected", "Pick a repo before scheduling a task.");
+          return;
+        }
+        const kind = state.taskComposer.kind;
+        const scheduleAt = fromDateTimeLocal(state.taskComposer.scheduleAt);
+        const findingsHandling = String(state.taskComposer.scoutDestination || "review").trim() === "local" ? "auto_promote" : "manual_review";
+        let payload = null;
+        if (kind === "investigation") {
+          const query = String(state.taskComposer.investigationQuery || "").trim();
+          if (!query) {
+            toast("warning", "Missing query", "Enter the investigation query first.");
+            return;
+          }
+          payload = {
+            title: String(state.taskComposer.title || "").trim() || `Investigate: ${query.slice(0, 80)}`,
+            description: String(state.taskComposer.description || "").trim(),
+            schedule_at: scheduleAt,
+            launch_kind: "investigation",
+            findings_handling: findingsHandling,
+            investigation_query: query,
+          };
+        } else if (kind === "coding") {
+          const title = String(state.taskComposer.title || "").trim();
+          if (!title) {
+            toast("warning", "Missing title", "Name the coding task before scheduling it.");
+            return;
+          }
+          payload = {
+            title,
+            description: String(state.taskComposer.description || "").trim(),
+            work_type: String(state.taskComposer.codingWorkType || "feature").trim(),
+            priority: Number.parseInt(String(state.taskComposer.codingPriority || "3"), 10),
+            schedule_at: scheduleAt,
+            launch_kind: "local_work",
+            findings_handling: findingsHandling,
+          };
+        } else {
+          const role = String(state.taskComposer.scoutRole || "").trim();
+          const focus = String(state.taskComposer.scoutFocus || "")
+            .split(/[\n,]/)
+            .map((value) => value.trim())
+            .filter(Boolean);
+          payload = {
+            title: String(state.taskComposer.title || "").trim() || `Run ${scoutRoleLabel(role)}`,
+            description: String(state.taskComposer.description || "").trim(),
+            schedule_at: scheduleAt,
+            launch_kind: "manual_scout",
+            findings_handling: findingsHandling,
+            scout_role: role,
+            scout_destination: String(state.taskComposer.scoutDestination || "review").trim(),
+            scout_focus: focus,
+          };
+          const sessionLimitInput = document.getElementById("task-scout-session-limit");
+          if (sessionLimitInput) {
+            payload.scout_session_limit = Number.parseInt(String(sessionLimitInput.value || "0"), 10) || 0;
+          }
+        }
+        state.taskComposer.creating = true;
+        renderInvestigationsPage();
+        api(`/api/v1/repos/${repo.repo_slug}/planned-items`, {
+          method: "POST",
+          body: JSON.stringify(payload),
+        }).then((response) => {
+          state.taskComposer.creating = false;
+          state.taskComposer.title = "";
+          state.taskComposer.description = "";
+          state.taskComposer.scheduleAt = "";
+          if (kind === "investigation") {
+            state.taskComposer.investigationQuery = "";
+          }
+          if (kind === "manual_scout") {
+            state.taskComposer.scoutFocus = "";
+          }
+          if (response.state) {
+            mergeRepoState(response.state);
+          } else {
+            load();
+          }
+          loadApprovals({ silent: true });
+          toast("success", "Task scheduled", response.planned_item && response.planned_item.title || payload.title);
+        }).catch((error) => {
+          state.taskComposer.creating = false;
+          renderInvestigationsPage();
+          toast("danger", "Task scheduling failed", error.message);
+        });
+        return;
+      }
+
+      const taskPlannedLaunchButton = event.target.closest("[data-task-planned-launch]");
+      if (taskPlannedLaunchButton) {
+        const itemID = taskPlannedLaunchButton.getAttribute("data-task-planned-launch") || "";
+        if (!itemID) return;
+        api(`/api/v1/planned-items/${encodeURIComponent(itemID)}/launch-now`, {
+          method: "POST",
+        }).then((payload) => {
+          if (payload.state) {
+            mergeRepoState(payload.state);
+          }
+          loadApprovals({ silent: true });
+          toast("success", "Task launched", payload.launch.result || defaultString(payload.planned_item && payload.planned_item.title, itemID));
+        }).catch((error) => {
+          toast("danger", "Launch failed", error.message);
+        });
+        return;
+      }
+
+      const taskPlannedRemoveButton = event.target.closest("[data-task-planned-remove]");
+      if (taskPlannedRemoveButton) {
+        const itemID = taskPlannedRemoveButton.getAttribute("data-task-planned-remove") || "";
+        if (!itemID) return;
+        api(`/api/v1/planned-items/${encodeURIComponent(itemID)}`, {
+          method: "DELETE",
+        }).then((payload) => {
+          if (payload.state) {
+            mergeRepoState(payload.state);
+          }
+          loadApprovals({ silent: true });
+          toast("success", "Task removed", defaultString(payload.removed_item && payload.removed_item.title, itemID));
+        }).catch((error) => {
+          toast("danger", "Remove failed", error.message);
+        });
+        return;
+      }
+
+      if (event.target.id === "task-findings-import-button") {
+        const repo = selectedTaskRepoSummary();
+        const fileInput = document.getElementById("task-findings-import-file");
+        const file = fileInput && fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+        if (!repo) {
+          toast("warning", "No repo selected", "Pick a repo before importing findings.");
+          return;
+        }
+        if (!file) {
+          toast("warning", "Missing markdown file", "Choose a markdown file first.");
+          return;
+        }
+        file.text().then((markdown) => {
+          return createFindingImportSession(repo.repo_slug, file.name, markdown);
+        }).then((payload) => {
+          toast("success", "Import session created", payload.session && payload.session.id || file.name);
+        }).catch((error) => {
+          toast("danger", "Import failed", error.message);
+        });
+        return;
+      }
+
+      const taskFindingSaveButton = event.target.closest("[data-task-finding-save]");
+      if (taskFindingSaveButton) {
+        const repo = selectedTaskRepoSummary();
+        const findingID = taskFindingSaveButton.getAttribute("data-task-finding-save") || "";
+        const finding = selectedTaskFinding();
+        if (!repo || !findingID || !finding) return;
+        saveTaskFinding(repo.repo_slug, findingID, {
+          title: String(document.getElementById("task-finding-title") && document.getElementById("task-finding-title").value || "").trim(),
+          summary: String(document.getElementById("task-finding-summary") && document.getElementById("task-finding-summary").value || "").trim(),
+          detail: String(document.getElementById("task-finding-detail-input") && document.getElementById("task-finding-detail-input").value || "").trim(),
+          evidence: String(document.getElementById("task-finding-evidence") && document.getElementById("task-finding-evidence").value || "").trim(),
+          severity: String(document.getElementById("task-finding-severity") && document.getElementById("task-finding-severity").value || "medium").trim(),
+          work_type: String(document.getElementById("task-finding-work-type") && document.getElementById("task-finding-work-type").value || "feature").trim(),
+        }).then(() => {
+          toast("success", "Finding saved", finding.title || findingID);
+        });
+        return;
+      }
+
+      const taskFindingPromoteButton = event.target.closest("[data-task-finding-promote]");
+      if (taskFindingPromoteButton) {
+        const repo = selectedTaskRepoSummary();
+        const findingID = taskFindingPromoteButton.getAttribute("data-task-finding-promote") || "";
+        if (!repo || !findingID) return;
+        mutateTaskFinding(repo.repo_slug, findingID, "promote").then((payload) => {
+          loadApprovals({ silent: true });
+          toast("success", "Finding promoted", payload.planned_item && payload.planned_item.id || findingID);
+        });
+        return;
+      }
+
+      const taskFindingDismissButton = event.target.closest("[data-task-finding-dismiss]");
+      if (taskFindingDismissButton) {
+        const repo = selectedTaskRepoSummary();
+        const findingID = taskFindingDismissButton.getAttribute("data-task-finding-dismiss") || "";
+        if (!repo || !findingID) return;
+        mutateTaskFinding(repo.repo_slug, findingID, "dismiss").then(() => {
+          toast("success", "Finding dismissed", findingID);
+        });
+        return;
+      }
+
+      const taskImportCandidateSaveButton = event.target.closest("[data-task-import-candidate-save]");
+      if (taskImportCandidateSaveButton) {
+        const repo = selectedTaskRepoSummary();
+        const session = selectedFindingImportSession();
+        const candidateID = taskImportCandidateSaveButton.getAttribute("data-task-import-candidate-save") || "";
+        if (!repo || !session || !candidateID) return;
+        mutateFindingImportCandidate(repo.repo_slug, session.id, candidateID, "PATCH", {
+          title: String(document.getElementById("task-import-candidate-title") && document.getElementById("task-import-candidate-title").value || "").trim(),
+          summary: String(document.getElementById("task-import-candidate-summary") && document.getElementById("task-import-candidate-summary").value || "").trim(),
+          detail: String(document.getElementById("task-import-candidate-detail") && document.getElementById("task-import-candidate-detail").value || "").trim(),
+          evidence: String(document.getElementById("task-import-candidate-evidence") && document.getElementById("task-import-candidate-evidence").value || "").trim(),
+          severity: String(document.getElementById("task-import-candidate-severity") && document.getElementById("task-import-candidate-severity").value || "medium").trim(),
+          work_type: String(document.getElementById("task-import-candidate-work-type") && document.getElementById("task-import-candidate-work-type").value || "feature").trim(),
+        }).then(() => {
+          toast("success", "Candidate saved", candidateID);
+        });
+        return;
+      }
+
+      const taskImportCandidatePromoteButton = event.target.closest("[data-task-import-candidate-promote]");
+      if (taskImportCandidatePromoteButton) {
+        const repo = selectedTaskRepoSummary();
+        const session = selectedFindingImportSession();
+        const candidateID = taskImportCandidatePromoteButton.getAttribute("data-task-import-candidate-promote") || "";
+        if (!repo || !session || !candidateID) return;
+        mutateFindingImportCandidate(repo.repo_slug, session.id, candidateID, "POST", "promote").then(() => {
+          loadTaskFindings(repo.repo_slug, { silent: true });
+          toast("success", "Candidate promoted", candidateID);
+        });
+        return;
+      }
+
+      const taskImportCandidateDropButton = event.target.closest("[data-task-import-candidate-drop]");
+      if (taskImportCandidateDropButton) {
+        const repo = selectedTaskRepoSummary();
+        const session = selectedFindingImportSession();
+        const candidateID = taskImportCandidateDropButton.getAttribute("data-task-import-candidate-drop") || "";
+        if (!repo || !session || !candidateID) return;
+        mutateFindingImportCandidate(repo.repo_slug, session.id, candidateID, "POST", "drop").then(() => {
+          toast("success", "Candidate dropped", candidateID);
+        });
+        return;
+      }
+
       if (event.target.id === "feedback-sync-button") {
         api("/api/v1/feedback/sync", {
           method: "POST",
@@ -6122,7 +7207,7 @@
       const scoutSelectButton = event.target.closest("[data-scout-select]");
       if (scoutSelectButton) {
         state.scoutItems.selectedItemID = scoutSelectButton.getAttribute("data-scout-select") || "";
-        renderRepoScoutsPage(selectedRepoSummary());
+        rerenderScoutSurface();
         return;
       }
 
@@ -6147,14 +7232,14 @@
       const scoutSelectAllButton = event.target.closest("[data-scout-select-all]");
       if (scoutSelectAllButton) {
         selectAllScoutItems();
-        renderRepoScoutsPage(selectedRepoSummary());
+        rerenderScoutSurface();
         return;
       }
 
       const scoutClearButton = event.target.closest("[data-scout-clear-selection]");
       if (scoutClearButton) {
         clearScoutItemSelection();
-        renderRepoScoutsPage(selectedRepoSummary());
+        rerenderScoutSurface();
         return;
       }
 
@@ -6289,7 +7374,40 @@
       const scoutToggle = event.target.getAttribute("data-scout-toggle");
       if (scoutToggle) {
         toggleScoutItemSelection(scoutToggle, Boolean(event.target.checked));
-        renderRepoScoutsPage(selectedRepoSummary());
+        rerenderScoutSurface();
+        return;
+      }
+      if (event.target.id === "task-composer-repo") {
+        state.taskComposer.repoSlug = String(event.target.value || "");
+        state.selectedRepo = state.taskComposer.repoSlug;
+        state.scoutItems = defaultScoutItemsState();
+        renderInvestigationsPage();
+        return;
+      }
+      if (event.target.id === "task-composer-kind") {
+        state.taskComposer.kind = String(event.target.value || "investigation");
+        renderInvestigationsPage();
+        return;
+      }
+      if (event.target.id === "task-coding-work-type") {
+        state.taskComposer.codingWorkType = String(event.target.value || "feature");
+        return;
+      }
+      if (event.target.id === "task-coding-priority") {
+        state.taskComposer.codingPriority = String(event.target.value || "3");
+        return;
+      }
+      if (event.target.id === "task-scout-role") {
+        state.taskComposer.scoutRole = String(event.target.value || "improvement-scout");
+        renderInvestigationsPage();
+        return;
+      }
+      if (event.target.id === "task-findings-handling") {
+        state.taskComposer.scoutDestination = String(event.target.value || "review");
+        return;
+      }
+      if (event.target.id === "task-scout-session-limit") {
+        state.taskComposer.scoutSessionLimit = String(event.target.value || "");
         return;
       }
       const repoOnboardField = event.target.getAttribute("data-repo-onboard-field");
@@ -6383,6 +7501,26 @@
       if (repoOnboardField) {
         state.repoOnboarding.draft[repoOnboardField] = String(event.target.value || "");
         state.repoOnboarding.error = "";
+        return;
+      }
+      if (event.target.id === "task-composer-title") {
+        state.taskComposer.title = String(event.target.value || "");
+        return;
+      }
+      if (event.target.id === "task-composer-description") {
+        state.taskComposer.description = String(event.target.value || "");
+        return;
+      }
+      if (event.target.id === "task-composer-schedule") {
+        state.taskComposer.scheduleAt = String(event.target.value || "");
+        return;
+      }
+      if (event.target.id === "task-investigation-query") {
+        state.taskComposer.investigationQuery = String(event.target.value || "");
+        return;
+      }
+      if (event.target.id === "task-scout-focus") {
+        state.taskComposer.scoutFocus = String(event.target.value || "");
         return;
       }
       const filterView = event.target.getAttribute("data-view-filter");

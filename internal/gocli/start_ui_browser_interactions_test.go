@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -282,6 +284,136 @@ func TestStartUIBrowserInteractionsWorkItemSubmit(t *testing.T) {
 	}
 }
 
+func TestStartUIBrowserInteractionsTasksFindingsAndImportFlow(t *testing.T) {
+	chromePath := startUITestChromePath(t)
+	if chromePath == "" {
+		t.Skip("google-chrome is required for chromedp browser interaction coverage")
+	}
+
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	fakeBin := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeFindingsTestExecutable(t, filepath.Join(fakeBin, "codex"), "#!/bin/sh\ncat >/dev/null\nprintf '{\"candidates\":[{\"candidate_id\":\"cand-1\",\"title\":\"Fix retry wording\",\"summary\":\"Clarify retry scope\",\"detail\":\"The retry label should explain whether the whole worker reruns.\",\"severity\":\"medium\",\"work_type\":\"feature\"},{\"candidate_id\":\"cand-2\",\"title\":\"Drop this candidate\",\"summary\":\"Optional candidate\",\"detail\":\"This candidate should be dropped after import review.\",\"severity\":\"low\",\"work_type\":\"test_only\"}]}'\n")
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	markdownPath := filepath.Join(t.TempDir(), "findings.md")
+	if err := os.WriteFile(markdownPath, []byte("# Findings\n\n- Retry wording"), 0o644); err != nil {
+		t.Fatalf("write markdown file: %v", err)
+	}
+
+	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
+	defer cancelBrowser()
+
+	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
+	defer cancelTab()
+
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo="+fixture.RepoSlug+"&tab=overview", "#page-body")
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=investigations", "#task-findings-import-button")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Findings Inbox")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, fixture.RepoSlug)
+	startUITestChromedpSetUploadFiles(t, tabCtx, "#task-findings-import-file", []string{markdownPath})
+	startUITestChromedpClick(t, tabCtx, "#task-findings-import-button")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Import session created")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Fix retry wording")
+
+	startUITestChromedpSetValue(t, tabCtx, "#task-import-candidate-title", "Fix retry wording everywhere")
+	startUITestChromedpSetValue(t, tabCtx, "#task-import-candidate-summary", "Clarify retry scope in all views")
+	startUITestChromedpClick(t, tabCtx, `[data-task-import-candidate-save="cand-1"]`)
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Candidate saved")
+
+	startUITestChromedpClick(t, tabCtx, `[data-task-import-candidate-promote="cand-1"]`)
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Candidate promoted")
+	startUITestWaitFor(t, 10*time.Second, "candidate promotion to create finding", func() bool {
+		state, err := readStartWorkState(fixture.RepoSlug)
+		if err != nil {
+			return false
+		}
+		return len(state.Findings) == 1
+	})
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo="+fixture.RepoSlug+"&tab=overview", "#page-body")
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=investigations", "#task-findings-import-button")
+	startUITestChromedpWaitCondition(t, tabCtx, 10*time.Second, "promote button disabled for promoted candidate", func() (bool, string, error) {
+		var disabled bool
+		if err := chromedp.Run(tabCtx, chromedp.Evaluate(`Boolean(document.querySelector('[data-task-import-candidate-promote="cand-1"]') && document.querySelector('[data-task-import-candidate-promote="cand-1"]').disabled)`, &disabled)); err != nil {
+			return false, "", err
+		}
+		return disabled, strconv.FormatBool(disabled), nil
+	})
+
+	startUITestChromedpClick(t, tabCtx, `[data-row-select-kind="finding"]`)
+	startUITestChromedpSetValue(t, tabCtx, "#task-finding-title", "Fix retry wording across surfaces")
+	startUITestChromedpClick(t, tabCtx, `[data-task-finding-save]`)
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Finding saved")
+
+	startUITestChromedpClick(t, tabCtx, `[data-task-finding-dismiss]`)
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Finding dismissed")
+	startUITestWaitFor(t, 10*time.Second, "finding dismiss to persist", func() bool {
+		state, err := readStartWorkState(fixture.RepoSlug)
+		if err != nil {
+			return false
+		}
+		for _, finding := range state.Findings {
+			return finding.Status == startWorkFindingStatusDismissed
+		}
+		return false
+	})
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Dismissed")
+
+	startUITestChromedpClick(t, tabCtx, `[data-row-select-kind="import-candidate"][data-row-select-id="cand-2"]`)
+	startUITestChromedpClick(t, tabCtx, `[data-task-import-candidate-drop="cand-2"]`)
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Candidate dropped")
+	startUITestWaitFor(t, 10*time.Second, "candidate drop to persist", func() bool {
+		state, err := readStartWorkState(fixture.RepoSlug)
+		if err != nil {
+			return false
+		}
+		for _, session := range state.ImportSessions {
+			if len(session.Candidates) > 1 {
+				return session.Candidates[1].Status == startWorkFindingCandidateStatusDropped
+			}
+		}
+		return false
+	})
+	startUITestChromedpClick(t, tabCtx, `[data-row-select-kind="import-candidate"][data-row-select-id="cand-2"]`)
+	startUITestChromedpWaitCondition(t, tabCtx, 10*time.Second, "promote button disabled for dropped candidate", func() (bool, string, error) {
+		var disabled bool
+		if err := chromedp.Run(tabCtx, chromedp.Evaluate(`Boolean(document.querySelector('[data-task-import-candidate-promote="cand-2"]') && document.querySelector('[data-task-import-candidate-promote="cand-2"]').disabled)`, &disabled)); err != nil {
+			return false, "", err
+		}
+		return disabled, strconv.FormatBool(disabled), nil
+	})
+
+	state, err := readStartWorkState(fixture.RepoSlug)
+	if err != nil {
+		t.Fatalf("read start work state: %v", err)
+	}
+	if len(state.Findings) != 1 {
+		t.Fatalf("expected one promoted real finding after browser flow, got %+v", state.Findings)
+	}
+	var finding startWorkFinding
+	for _, candidate := range state.Findings {
+		finding = candidate
+	}
+	if finding.Status != startWorkFindingStatusDismissed {
+		t.Fatalf("unexpected finding after browser flow: %+v", finding)
+	}
+	if len(state.ImportSessions) != 1 {
+		t.Fatalf("expected one import session after browser flow, got %+v", state.ImportSessions)
+	}
+	for _, session := range state.ImportSessions {
+		if len(session.Candidates) != 2 {
+			t.Fatalf("expected two candidates in import session, got %+v", session)
+		}
+		if session.Candidates[0].Status != startWorkFindingCandidateStatusPromoted || session.Candidates[1].Status != startWorkFindingCandidateStatusDropped {
+			t.Fatalf("unexpected candidate statuses after browser flow: %+v", session.Candidates)
+		}
+	}
+}
+
 func TestStartUIBrowserInteractionsRepoControlsHydratesDedicatedRepoStateWhenLoadingOrderVaries(t *testing.T) {
 	chromePath := startUITestChromePath(t)
 	if chromePath == "" {
@@ -422,19 +554,49 @@ func startUITestChromedpSetValue(t *testing.T, ctx context.Context, selector str
 	t.Helper()
 	script := fmt.Sprintf(`(() => {
 		const el = document.querySelector(%q);
-		if (!el) return false;
-		el.focus();
-		el.value = %q;
+		if (!el) return "";
+		let proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
+		if (el instanceof HTMLTextAreaElement) {
+			proto = window.HTMLTextAreaElement.prototype;
+		} else if (el instanceof HTMLSelectElement) {
+			proto = window.HTMLSelectElement.prototype;
+		}
+		const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, "value") : null;
+		if (descriptor && typeof descriptor.set === "function") {
+			descriptor.set.call(el, %q);
+		} else {
+			el.value = %q;
+		}
 		el.dispatchEvent(new Event("input", { bubbles: true }));
 		el.dispatchEvent(new Event("change", { bubbles: true }));
-		return true;
-	})()`, selector, value)
-	var ok bool
-	if err := chromedp.Run(ctx, chromedp.Evaluate(script, &ok)); err != nil {
+		return String(el.value || "");
+	})()`, selector, value, value)
+	var current string
+	if err := chromedp.Run(ctx,
+		chromedp.WaitVisible(selector, chromedp.ByQuery),
+		chromedp.Evaluate(script, &current),
+	); err != nil {
 		t.Fatalf("set value %s: %v", selector, err)
 	}
-	if !ok {
-		t.Fatalf("set value selector %s was not found", selector)
+	startUITestChromedpWaitCondition(t, ctx, 5*time.Second, fmt.Sprintf("value %s to become %q", selector, value), func() (bool, string, error) {
+		var latest string
+		if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`(() => {
+			const el = document.querySelector(%q);
+			return el ? String(el.value || "") : "";
+		})()`, selector), &latest)); err != nil {
+			return false, "", err
+		}
+		return latest == value, latest, nil
+	})
+}
+
+func startUITestChromedpSetUploadFiles(t *testing.T, ctx context.Context, selector string, files []string) {
+	t.Helper()
+	if err := chromedp.Run(ctx,
+		chromedp.WaitVisible(selector, chromedp.ByQuery),
+		chromedp.SetUploadFiles(selector, files, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("set upload files %s: %v", selector, err)
 	}
 }
 

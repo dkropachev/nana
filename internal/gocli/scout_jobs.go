@@ -30,6 +30,8 @@ func ensureStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 		PromotionSkips: map[string]startWorkPromotionSkip{},
 		PlannedItems:   map[string]startWorkPlannedItem{},
 		ScoutJobs:      map[string]startWorkScoutJob{},
+		Findings:       map[string]startWorkFinding{},
+		ImportSessions: map[string]startWorkFindingImportSession{},
 	}, nil
 }
 

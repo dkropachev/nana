@@ -80,6 +80,7 @@ type localWorkStartOptions struct {
 	RepoPath              string
 	Task                  string
 	PlanFile              string
+	RunID                 string
 	WorkType              string
 	MaxIterations         int
 	IntegrationPolicy     string
@@ -1293,6 +1294,15 @@ func parseLocalWorkStartArgs(args []string) (localWorkStartOptions, error) {
 			index++
 		case strings.HasPrefix(token, "--plan-file="):
 			options.PlanFile = strings.TrimSpace(strings.TrimPrefix(token, "--plan-file="))
+		case token == "--run-id":
+			value, err := requireLocalWorkFlagValue(parseArgs, index, "--run-id")
+			if err != nil {
+				return localWorkStartOptions{}, err
+			}
+			options.RunID = strings.TrimSpace(value)
+			index++
+		case strings.HasPrefix(token, "--run-id="):
+			options.RunID = strings.TrimSpace(strings.TrimPrefix(token, "--run-id="))
 		case token == "--work-type":
 			value, err := requireLocalWorkFlagValue(parseArgs, index, "--work-type")
 			if err != nil {
@@ -1363,6 +1373,9 @@ func parseLocalWorkStartArgs(args []string) (localWorkStartOptions, error) {
 
 	if strings.TrimSpace(options.Task) != "" && strings.TrimSpace(options.PlanFile) != "" {
 		return localWorkStartOptions{}, fmt.Errorf("Specify at most one of --task or --plan-file.\n%s", LocalWorkHelp)
+	}
+	if strings.TrimSpace(options.RunID) != "" && strings.Contains(strings.TrimSpace(options.RunID), string(os.PathSeparator)) {
+		return localWorkStartOptions{}, fmt.Errorf("Invalid --run-id value %q.\n%s", options.RunID, LocalWorkHelp)
 	}
 	if _, err := parseRequiredWorkType(options.WorkType, "--work-type"); err != nil {
 		return localWorkStartOptions{}, fmt.Errorf("%w.\n%s", err, LocalWorkHelp)
@@ -1535,7 +1548,10 @@ func startLocalWorkWithRunID(cwd string, options localWorkStartOptions) (string,
 	if err != nil {
 		return "", err
 	}
-	runID := fmt.Sprintf("lw-%d", time.Now().UnixNano())
+	runID := strings.TrimSpace(options.RunID)
+	if runID == "" {
+		runID = fmt.Sprintf("lw-%d", time.Now().UnixNano())
+	}
 	sourceLockOwner := repoAccessLockOwner{
 		Backend: "local-work",
 		RunID:   runID,

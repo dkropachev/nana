@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3727,6 +3728,134 @@ func TestStartUIAPIScoutItemsAndActions(t *testing.T) {
 	}
 }
 
+func TestStartUIAPIScoutReviewItemsSupportPromoteAndDismiss(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	stateDir := filepath.Join(cwd, ".nana", "state")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	repo := createLocalWorkRepoAt(t, sourcePath)
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{
+		Version:        6,
+		RepoMode:       "fork",
+		IssuePickMode:  "auto",
+		PRForwardMode:  "approve",
+		ForkIssuesMode: "auto",
+		ImplementMode:  "auto",
+		PublishTarget:  "fork",
+	}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	now := "2026-04-21T22:15:00Z"
+	promoteID := startUITestWriteScoutArtifact(t, repo, uiScoutRole, "review-promote", scoutFinding{
+		Title:             "Promote retry finding",
+		WorkType:          workTypeFeature,
+		Summary:           "Keep this finding in review until an operator promotes it.",
+		SuggestedNextStep: "Promote it into the local work queue.",
+	}, scoutPolicy{
+		Version:          1,
+		Mode:             "manual",
+		IssueDestination: improvementDestinationReview,
+		SessionLimit:     4,
+	}, uiScoutPreflight{}, now)
+	dismissID := startUITestWriteScoutArtifact(t, repo, enhancementScoutRole, "review-dismiss", scoutFinding{
+		Title:             "Dismiss retry finding",
+		WorkType:          workTypeFeature,
+		Summary:           "Allow operators to dismiss review-only findings.",
+		SuggestedNextStep: "Dismiss it from the review queue.",
+	}, scoutPolicy{
+		Version:          1,
+		Mode:             "manual",
+		IssueDestination: improvementDestinationReview,
+	}, uiScoutPreflight{}, now)
+
+	server := httptest.NewServer((&startUIAPI{cwd: cwd, allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
+	defer server.Close()
+
+	loadResponse, err := http.Get(server.URL + "/api/v1/repos/" + repoSlug + "/scout-items")
+	if err != nil {
+		t.Fatalf("GET scout items: %v", err)
+	}
+	defer loadResponse.Body.Close()
+	var loadPayload startUIScoutItemsResponse
+	if err := json.NewDecoder(loadResponse.Body).Decode(&loadPayload); err != nil {
+		t.Fatalf("decode scout items: %v", err)
+	}
+	if len(loadPayload.Items) != 2 {
+		t.Fatalf("expected two review scout items, got %+v", loadPayload.Items)
+	}
+	for _, item := range loadPayload.Items {
+		if item.Status != improvementDestinationReview {
+			t.Fatalf("expected review status before action, got %+v", item)
+		}
+		if !slices.Contains(item.AvailableActions, "dismiss") || !slices.Contains(item.AvailableActions, "promote") {
+			t.Fatalf("expected promote+dismiss actions, got %+v", item.AvailableActions)
+		}
+	}
+
+	promoteRequest, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/repos/"+repoSlug+"/scout-items/"+promoteID+"/promote", nil)
+	if err != nil {
+		t.Fatalf("new promote request: %v", err)
+	}
+	promoteResponse, err := http.DefaultClient.Do(promoteRequest)
+	if err != nil {
+		t.Fatalf("POST promote: %v", err)
+	}
+	defer promoteResponse.Body.Close()
+	var promotePayload startUIScoutItemsResponse
+	if err := json.NewDecoder(promoteResponse.Body).Decode(&promotePayload); err != nil {
+		t.Fatalf("decode promote payload: %v", err)
+	}
+	var promoted startUIScoutItem
+	for _, item := range promotePayload.Items {
+		if item.ID == promoteID {
+			promoted = item
+			break
+		}
+	}
+	if promoted.Status != startScoutJobQueued || promoted.Destination != improvementDestinationLocal {
+		t.Fatalf("expected promoted review item to enter the local scout queue, got %+v", promoted)
+	}
+	state, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("read promoted work state: %v", err)
+	}
+	if job, ok := state.ScoutJobs[promoteID]; !ok || job.Status != startScoutJobQueued || job.Destination != improvementDestinationLocal {
+		t.Fatalf("expected promoted scout job in state, got %+v", state.ScoutJobs)
+	}
+
+	dismissRequest, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/repos/"+repoSlug+"/scout-items/"+dismissID+"/dismiss", nil)
+	if err != nil {
+		t.Fatalf("new dismiss request: %v", err)
+	}
+	dismissResponse, err := http.DefaultClient.Do(dismissRequest)
+	if err != nil {
+		t.Fatalf("POST dismiss: %v", err)
+	}
+	defer dismissResponse.Body.Close()
+	var dismissPayload startUIScoutItemsResponse
+	if err := json.NewDecoder(dismissResponse.Body).Decode(&dismissPayload); err != nil {
+		t.Fatalf("decode dismiss payload: %v", err)
+	}
+	var dismissed startUIScoutItem
+	for _, item := range dismissPayload.Items {
+		if item.ID == dismissID {
+			dismissed = item
+			break
+		}
+	}
+	if dismissed.Status != "dismissed" || !slices.Contains(dismissed.AvailableActions, "reset") {
+		t.Fatalf("expected dismissed review item with reset action, got %+v", dismissed)
+	}
+}
+
 func TestStartUIAPIScoutItemsBatchAction(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -5002,6 +5131,15 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	}
 	if !strings.Contains(string(appBody), `data-scheduler-save="`) {
 		t.Fatalf("expected scheduler save control wiring in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `Schedule Task`) {
+		t.Fatalf("expected unified task scheduling copy in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `data-task-planned-launch="`) {
+		t.Fatalf("expected scheduled task launch control wiring in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `data-scout-action="promote"`) {
+		t.Fatalf("expected manual scout promote control wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `data-work-item-submit="`) {
 		t.Fatalf("expected work-item submit control wiring in app.js, got %s", string(appBody))
@@ -6721,7 +6859,10 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 		"investigations": {
 			hash: "view=investigations",
 			expect: []string{
-				"Start Investigation",
+				"Schedule Task",
+				"Scheduled Tasks",
+				"Findings Inbox",
+				"Import Sessions",
 				"Detailed Explanation",
 				"Proofs",
 				"Findings",

@@ -25,7 +25,7 @@ Use:
 `
 
 const (
-	startWorkStateVersion         = 6
+	startWorkStateVersion         = 7
 	startWorkDefaultParallel      = 3
 	startWorkDefaultOpenPRCap     = 10
 	startWorkStatusQueued         = "queued"
@@ -70,21 +70,23 @@ type startWorkOptions struct {
 }
 
 type startWorkState struct {
-	Version        int                               `json:"version"`
-	SourceRepo     string                            `json:"source_repo"`
-	ForkRepo       string                            `json:"fork_repo"`
-	ForkOwner      string                            `json:"fork_owner"`
-	DefaultBranch  string                            `json:"default_branch,omitempty"`
-	CreatedAt      string                            `json:"created_at,omitempty"`
-	UpdatedAt      string                            `json:"updated_at"`
-	Issues         map[string]startWorkIssueState    `json:"issues"`
-	ServiceTasks   map[string]startWorkServiceTask   `json:"service_tasks,omitempty"`
-	Preferences    startWorkPreferences              `json:"preferences"`
-	LastRun        *startWorkLastRun                 `json:"last_run,omitempty"`
-	Promotions     map[string]startWorkPromotion     `json:"promotions,omitempty"`
-	PromotionSkips map[string]startWorkPromotionSkip `json:"promotion_skips,omitempty"`
-	PlannedItems   map[string]startWorkPlannedItem   `json:"planned_items,omitempty"`
-	ScoutJobs      map[string]startWorkScoutJob      `json:"scout_jobs,omitempty"`
+	Version        int                                      `json:"version"`
+	SourceRepo     string                                   `json:"source_repo"`
+	ForkRepo       string                                   `json:"fork_repo"`
+	ForkOwner      string                                   `json:"fork_owner"`
+	DefaultBranch  string                                   `json:"default_branch,omitempty"`
+	CreatedAt      string                                   `json:"created_at,omitempty"`
+	UpdatedAt      string                                   `json:"updated_at"`
+	Issues         map[string]startWorkIssueState           `json:"issues"`
+	ServiceTasks   map[string]startWorkServiceTask          `json:"service_tasks,omitempty"`
+	Preferences    startWorkPreferences                     `json:"preferences"`
+	LastRun        *startWorkLastRun                        `json:"last_run,omitempty"`
+	Promotions     map[string]startWorkPromotion            `json:"promotions,omitempty"`
+	PromotionSkips map[string]startWorkPromotionSkip        `json:"promotion_skips,omitempty"`
+	PlannedItems   map[string]startWorkPlannedItem          `json:"planned_items,omitempty"`
+	ScoutJobs      map[string]startWorkScoutJob             `json:"scout_jobs,omitempty"`
+	Findings       map[string]startWorkFinding              `json:"findings,omitempty"`
+	ImportSessions map[string]startWorkFindingImportSession `json:"import_sessions,omitempty"`
 }
 
 type startWorkIssueState struct {
@@ -187,24 +189,30 @@ type startWorkServiceTask struct {
 }
 
 type startWorkPlannedItem struct {
-	ID                string `json:"id"`
-	RepoSlug          string `json:"repo_slug"`
-	Title             string `json:"title"`
-	Description       string `json:"description,omitempty"`
-	WorkType          string `json:"work_type,omitempty"`
-	LaunchKind        string `json:"launch_kind,omitempty"`
-	TargetURL         string `json:"target_url,omitempty"`
-	Priority          int    `json:"priority"`
-	ScheduleAt        string `json:"schedule_at,omitempty"`
-	DeferredReason    string `json:"deferred_reason,omitempty"`
-	State             string `json:"state"`
-	LaunchRunID       string `json:"launch_run_id,omitempty"`
-	LaunchIssueURL    string `json:"launch_issue_url,omitempty"`
-	LaunchIssueNumber int    `json:"launch_issue_number,omitempty"`
-	LaunchResult      string `json:"launch_result,omitempty"`
-	LastError         string `json:"last_error,omitempty"`
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at"`
+	ID                 string   `json:"id"`
+	RepoSlug           string   `json:"repo_slug"`
+	Title              string   `json:"title"`
+	Description        string   `json:"description,omitempty"`
+	WorkType           string   `json:"work_type,omitempty"`
+	LaunchKind         string   `json:"launch_kind,omitempty"`
+	FindingsHandling   string   `json:"findings_handling,omitempty"`
+	TargetURL          string   `json:"target_url,omitempty"`
+	InvestigationQuery string   `json:"investigation_query,omitempty"`
+	ScoutRole          string   `json:"scout_role,omitempty"`
+	ScoutDestination   string   `json:"scout_destination,omitempty"`
+	ScoutSessionLimit  int      `json:"scout_session_limit,omitempty"`
+	ScoutFocus         []string `json:"scout_focus,omitempty"`
+	Priority           int      `json:"priority"`
+	ScheduleAt         string   `json:"schedule_at,omitempty"`
+	DeferredReason     string   `json:"deferred_reason,omitempty"`
+	State              string   `json:"state"`
+	LaunchRunID        string   `json:"launch_run_id,omitempty"`
+	LaunchIssueURL     string   `json:"launch_issue_url,omitempty"`
+	LaunchIssueNumber  int      `json:"launch_issue_number,omitempty"`
+	LaunchResult       string   `json:"launch_result,omitempty"`
+	LastError          string   `json:"last_error,omitempty"`
+	CreatedAt          string   `json:"created_at"`
+	UpdatedAt          string   `json:"updated_at"`
 }
 
 type startWorkScoutJob struct {
@@ -347,6 +355,22 @@ func writeStartWorkStatePreservingPlannedItems(state startWorkState) error {
 			for jobID, job := range current.ScoutJobs {
 				if _, ok := state.ScoutJobs[jobID]; !ok {
 					state.ScoutJobs[jobID] = job
+				}
+			}
+			if state.Findings == nil {
+				state.Findings = map[string]startWorkFinding{}
+			}
+			for findingID, finding := range current.Findings {
+				if _, ok := state.Findings[findingID]; !ok {
+					state.Findings[findingID] = finding
+				}
+			}
+			if state.ImportSessions == nil {
+				state.ImportSessions = map[string]startWorkFindingImportSession{}
+			}
+			for sessionID, session := range current.ImportSessions {
+				if _, ok := state.ImportSessions[sessionID]; !ok {
+					state.ImportSessions[sessionID] = session
 				}
 			}
 		}
@@ -719,6 +743,12 @@ func startWorkSyncRepoState(options startWorkOptions) (startWorkOptions, *startW
 	}
 	if state.PlannedItems == nil {
 		state.PlannedItems = map[string]startWorkPlannedItem{}
+	}
+	if state.Findings == nil {
+		state.Findings = map[string]startWorkFinding{}
+	}
+	if state.ImportSessions == nil {
+		state.ImportSessions = map[string]startWorkFindingImportSession{}
 	}
 	options.RepoMode = defaultString(normalizeGithubRepoMode(options.RepoMode), publishTargetToRepoMode(options.PublishTarget))
 	if options.RepoMode == "" {
@@ -1612,6 +1642,11 @@ func startWorkPlannedItemFingerprint(item startWorkPlannedItem) string {
 		item.Description,
 		item.WorkType,
 		item.LaunchKind,
+		item.InvestigationQuery,
+		item.ScoutRole,
+		item.ScoutDestination,
+		strconv.Itoa(item.ScoutSessionLimit),
+		strings.Join(item.ScoutFocus, ","),
 		strconv.Itoa(item.Priority),
 		item.ScheduleAt,
 		item.State,
@@ -1666,6 +1701,11 @@ func normalizeStartWorkStateUnlocked(state *startWorkState) (bool, error) {
 		return false, err
 	}
 	updated = updated || scoutUpdated
+	findingsUpdated, err := normalizeStartWorkStateFindings(state)
+	if err != nil {
+		return false, err
+	}
+	updated = updated || findingsUpdated
 	if updated {
 		state.UpdatedAt = ISOTimeNow()
 	}
@@ -1694,6 +1734,12 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 	}
 	if state.ScoutJobs == nil {
 		state.ScoutJobs = map[string]startWorkScoutJob{}
+	}
+	if state.Findings == nil {
+		state.Findings = map[string]startWorkFinding{}
+	}
+	if state.ImportSessions == nil {
+		state.ImportSessions = map[string]startWorkFindingImportSession{}
 	}
 	if state.Version < startWorkStateVersion {
 		state.Version = startWorkStateVersion
@@ -1749,6 +1795,7 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 		} else {
 			item.WorkType = inferPlannedItemWorkType(item).WorkType
 		}
+		item.FindingsHandling = normalizeFindingsHandling(item.FindingsHandling, item.ScoutDestination, item.LaunchKind)
 		state.PlannedItems[key] = item
 	}
 	for key, job := range state.ScoutJobs {
@@ -1763,6 +1810,31 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 		}
 		job.WorkType = inferPersistedScoutJobWorkType(job).WorkType
 		state.ScoutJobs[key] = job
+	}
+	for key, finding := range state.Findings {
+		finding.ID = defaultString(strings.TrimSpace(finding.ID), key)
+		finding.RepoSlug = defaultString(strings.TrimSpace(finding.RepoSlug), state.SourceRepo)
+		finding.SourceKind = strings.TrimSpace(finding.SourceKind)
+		finding.SourceID = strings.TrimSpace(finding.SourceID)
+		finding.SourceItemID = strings.TrimSpace(finding.SourceItemID)
+		finding.ParentTaskKind = strings.TrimSpace(finding.ParentTaskKind)
+		finding.ParentTaskID = strings.TrimSpace(finding.ParentTaskID)
+		finding.WorkType = defaultString(normalizeWorkType(finding.WorkType), workTypeFeature)
+		finding.Severity = normalizeGithubSeverity(finding.Severity)
+		finding.Status = normalizeStartWorkFindingStatus(finding.Status)
+		state.Findings[key] = finding
+	}
+	for key, session := range state.ImportSessions {
+		session.ID = defaultString(strings.TrimSpace(session.ID), key)
+		session.RepoSlug = defaultString(strings.TrimSpace(session.RepoSlug), state.SourceRepo)
+		session.ParseStatus = normalizeStartWorkFindingImportParseStatus(session.ParseStatus)
+		if session.Candidates == nil {
+			session.Candidates = []startWorkFindingImportCandidate{}
+		}
+		for index := range session.Candidates {
+			session.Candidates[index] = normalizeStartWorkFindingImportCandidate(session.Candidates[index])
+		}
+		state.ImportSessions[key] = session
 	}
 	if updated, err := normalizeStartWorkStateUnlocked(&state); err != nil {
 		return nil, err

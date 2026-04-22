@@ -87,3 +87,122 @@ func TestQueueScoutItemAsPlannedWorkPersistsWorkType(t *testing.T) {
 		t.Fatalf("expected synced scout job to persist work type, got %+v", job)
 	}
 }
+
+func TestCreateStartUIPlannedItemAllowsInvestigationWithoutWorkType(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+
+	_, item, err := createStartUIPlannedItem(repoSlug, startUIPlannedItemRequest{
+		Title:              "Investigate retry drift",
+		LaunchKind:         "investigation",
+		InvestigationQuery: "Investigate why approval retry timing drifts between the queue and the drawer.",
+	})
+	if err != nil {
+		t.Fatalf("createStartUIPlannedItem: %v", err)
+	}
+	if item.LaunchKind != "investigation" || item.InvestigationQuery == "" {
+		t.Fatalf("unexpected investigation planned item: %+v", item)
+	}
+}
+
+func TestCreateStartUIPlannedItemAllowsManualScoutWithoutWorkType(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+
+	_, item, err := createStartUIPlannedItem(repoSlug, startUIPlannedItemRequest{
+		Title:             "Run review-only UI scout",
+		LaunchKind:        "manual_scout",
+		ScoutRole:         uiScoutRole,
+		ScoutDestination:  improvementDestinationReview,
+		ScoutSessionLimit: 3,
+		ScoutFocus:        []string{"approvals", "retry"},
+	})
+	if err != nil {
+		t.Fatalf("createStartUIPlannedItem: %v", err)
+	}
+	if item.LaunchKind != "manual_scout" || item.ScoutRole != uiScoutRole || item.ScoutDestination != improvementDestinationReview {
+		t.Fatalf("unexpected manual scout planned item: %+v", item)
+	}
+}
+
+func TestCreateStartUIPlannedItemNormalizesFindingsHandling(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+
+	tests := []struct {
+		name string
+		req  startUIPlannedItemRequest
+		want string
+	}{
+		{
+			name: "local work defaults to manual review",
+			req: startUIPlannedItemRequest{
+				Title:      "Implement retry copy fix",
+				LaunchKind: "local_work",
+				WorkType:   workTypeFeature,
+			},
+			want: startWorkFindingsHandlingManualReview,
+		},
+		{
+			name: "investigation defaults to manual review",
+			req: startUIPlannedItemRequest{
+				Title:              "Investigate retry drift",
+				LaunchKind:         "investigation",
+				InvestigationQuery: "Investigate retry drift between queue and drawer.",
+			},
+			want: startWorkFindingsHandlingManualReview,
+		},
+		{
+			name: "manual scout review defaults to manual review",
+			req: startUIPlannedItemRequest{
+				Title:            "Run review scout",
+				LaunchKind:       "manual_scout",
+				ScoutRole:        uiScoutRole,
+				ScoutDestination: improvementDestinationReview,
+			},
+			want: startWorkFindingsHandlingManualReview,
+		},
+		{
+			name: "manual scout local normalizes to auto promote",
+			req: startUIPlannedItemRequest{
+				Title:            "Run local scout",
+				LaunchKind:       "manual_scout",
+				ScoutRole:        uiScoutRole,
+				ScoutDestination: improvementDestinationLocal,
+			},
+			want: startWorkFindingsHandlingAutoPromote,
+		},
+		{
+			name: "explicit findings handling wins",
+			req: startUIPlannedItemRequest{
+				Title:            "Run explicit auto promote scout",
+				LaunchKind:       "manual_scout",
+				ScoutRole:        uiScoutRole,
+				ScoutDestination: improvementDestinationReview,
+				FindingsHandling: startWorkFindingsHandlingAutoPromote,
+			},
+			want: startWorkFindingsHandlingAutoPromote,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, item, err := createStartUIPlannedItem(repoSlug, tc.req)
+			if err != nil {
+				t.Fatalf("createStartUIPlannedItem: %v", err)
+			}
+			if item.FindingsHandling != tc.want {
+				t.Fatalf("expected findings handling %q, got %+v", tc.want, item)
+			}
+		})
+	}
+}

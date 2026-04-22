@@ -54,6 +54,8 @@ func TestLaunchStartPlannedItemScheduledRunsLocalWorkInline(t *testing.T) {
 		repoPath,
 		"--task",
 		"Nightly cleanup\n\nTighten scheduler defaults",
+		"--run-id",
+		result.RunID,
 		"--work-type",
 		workTypeRefactor,
 		"--",
@@ -116,6 +118,137 @@ func TestLaunchStartPlannedItemScheduledRunsTrackedIssueInline(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("unexpected args: got %#v want %#v", gotArgs, wantArgs)
+	}
+}
+
+func TestLaunchStartPlannedItemScheduledRunsInvestigationTask(t *testing.T) {
+	repoSlug := "acme/widget"
+	repoPath := githubManagedPaths(repoSlug).SourcePath
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo path: %v", err)
+	}
+
+	oldRunner := startRunScheduledPlannedInvestigation
+	defer func() { startRunScheduledPlannedInvestigation = oldRunner }()
+
+	var gotRepo string
+	var gotQuery string
+	var gotRunID string
+	startRunScheduledPlannedInvestigation = func(repoSlug string, query string, runID string) (startUIBackgroundLaunch, error) {
+		gotRepo = repoSlug
+		gotQuery = query
+		gotRunID = runID
+		return startUIBackgroundLaunch{
+			Status: "spawned",
+			Result: "investigation started",
+		}, nil
+	}
+
+	result, err := launchStartPlannedItemScheduled("", repoSlug, startWorkOptions{
+		RepoMode: "disabled",
+	}, startWorkPlannedItem{
+		ID:                 "planned-investigation",
+		RepoSlug:           repoSlug,
+		Title:              "Investigate queue drift",
+		LaunchKind:         "investigation",
+		InvestigationQuery: "Investigate why approval retry timing drifts between the queue and the drawer.",
+	})
+	if err != nil {
+		t.Fatalf("launchStartPlannedItemScheduled: %v", err)
+	}
+	if gotRepo != repoSlug {
+		t.Fatalf("expected repo %q, got %q", repoSlug, gotRepo)
+	}
+	if gotQuery == "" {
+		t.Fatalf("expected investigation query, got empty string")
+	}
+	if gotRunID != result.RunID || gotRunID == "" {
+		t.Fatalf("expected investigation run id %q, got %q", result.RunID, gotRunID)
+	}
+	if result.Status != "spawned" || result.Result != "investigation started" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestLaunchStartPlannedItemScheduledRunsManualScoutTask(t *testing.T) {
+	oldRunner := startRunScheduledPlannedScout
+	defer func() { startRunScheduledPlannedScout = oldRunner }()
+
+	var gotOptions ImproveOptions
+	var gotRole string
+	var gotPolicy scoutPolicy
+	startRunScheduledPlannedScout = func(cwd string, options ImproveOptions, role string, policy scoutPolicy) error {
+		gotOptions = options
+		gotRole = role
+		gotPolicy = policy
+		return nil
+	}
+
+	result, err := launchStartPlannedItemScheduled("", "acme/widget", startWorkOptions{
+		RepoMode:  "disabled",
+		CodexArgs: []string{"--model", "gpt-5.4"},
+	}, startWorkPlannedItem{
+		ID:                "planned-scout",
+		RepoSlug:          "acme/widget",
+		Title:             "Run UI scout",
+		LaunchKind:        "manual_scout",
+		ScoutRole:         uiScoutRole,
+		ScoutDestination:  improvementDestinationReview,
+		ScoutSessionLimit: 3,
+		ScoutFocus:        []string{"approvals", "retry"},
+	})
+	if err != nil {
+		t.Fatalf("launchStartPlannedItemScheduled: %v", err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if gotRole != uiScoutRole {
+		t.Fatalf("expected role %q, got %q", uiScoutRole, gotRole)
+	}
+	if gotOptions.RunID == "" || gotOptions.RunID != result.RunID {
+		t.Fatalf("expected stable scout run id, got options=%q result=%q", gotOptions.RunID, result.RunID)
+	}
+	if !reflect.DeepEqual(gotOptions.Focus, []string{"approvals", "retry"}) {
+		t.Fatalf("unexpected focus: %#v", gotOptions.Focus)
+	}
+	if !reflect.DeepEqual(gotOptions.CodexArgs, []string{"--model", "gpt-5.4"}) {
+		t.Fatalf("unexpected codex args: %#v", gotOptions.CodexArgs)
+	}
+	if gotPolicy.IssueDestination != improvementDestinationReview || gotPolicy.SessionLimit != 3 {
+		t.Fatalf("unexpected scout policy: %+v", gotPolicy)
+	}
+}
+
+func TestLaunchStartPlannedItemScheduledManualScoutAutoPromoteUsesReviewArtifacts(t *testing.T) {
+	oldRunner := startRunScheduledPlannedScout
+	defer func() { startRunScheduledPlannedScout = oldRunner }()
+
+	var gotOptions ImproveOptions
+	var gotPolicy scoutPolicy
+	startRunScheduledPlannedScout = func(cwd string, options ImproveOptions, role string, policy scoutPolicy) error {
+		gotOptions = options
+		gotPolicy = policy
+		return nil
+	}
+
+	result, err := launchStartPlannedItemScheduled("", "acme/widget", startWorkOptions{}, startWorkPlannedItem{
+		ID:               "planned-scout-auto",
+		RepoSlug:         "acme/widget",
+		Title:            "Run auto-promote scout",
+		LaunchKind:       "manual_scout",
+		ScoutRole:        uiScoutRole,
+		ScoutDestination: improvementDestinationLocal,
+		FindingsHandling: startWorkFindingsHandlingAutoPromote,
+	})
+	if err != nil {
+		t.Fatalf("launchStartPlannedItemScheduled: %v", err)
+	}
+	if result.RunID == "" || gotOptions.RunID != result.RunID {
+		t.Fatalf("expected stable scout run id, got options=%q result=%q", gotOptions.RunID, result.RunID)
+	}
+	if gotPolicy.IssueDestination != improvementDestinationReview {
+		t.Fatalf("expected auto-promote scout to keep review artifacts, got %+v", gotPolicy)
 	}
 }
 
