@@ -180,10 +180,12 @@ var startUIOverviewCacheAfterUncachedBuildHook func()
 var startUIPrewarmLogWriter io.Writer = os.Stderr
 var startUIPrewarmDelay = time.Second
 var startUISectionCacheProbeInterval = 5 * time.Second
+
 // The Usage page auto-refreshes every 30 seconds in the client, so probing the
 // backing usage index more aggressively just drags refresh work back onto
 // foreground requests without improving visible freshness.
 var startUIUsageIndexProbeInterval = 30 * time.Second
+
 // Usage cache keys already include the indexed data version and active filters,
 // so a longer TTL avoids rebuilding identical reports on repeated page loads
 // while still rolling forward promptly when the usage index changes.
@@ -281,19 +283,19 @@ type startUIUsageReport struct {
 }
 
 type startUIUsageDiagnostics struct {
-	SampledAt         string `json:"sampled_at,omitempty"`
-	DataVersion       string `json:"data_version,omitempty"`
-	CacheStatus       string `json:"cache_status,omitempty"`
-	CacheExpiresAt    string `json:"cache_expires_at,omitempty"`
-	DefaultWindow     bool   `json:"default_window,omitempty"`
-	SessionRoots      int    `json:"session_roots_scanned,omitempty"`
-	IndexLoadMS       int64  `json:"index_load_ms,omitempty"`
-	SourceBuildMS     int64  `json:"source_build_ms,omitempty"`
-	SummaryBuildMS    int64  `json:"summary_build_ms,omitempty"`
-	AnalyticsBuildMS  int64  `json:"analytics_build_ms,omitempty"`
-	GroupBuildMS      int64  `json:"group_build_ms,omitempty"`
-	TopSessionsMS     int64  `json:"top_sessions_ms,omitempty"`
-	TotalBuildMS      int64  `json:"total_build_ms,omitempty"`
+	SampledAt        string `json:"sampled_at,omitempty"`
+	DataVersion      string `json:"data_version,omitempty"`
+	CacheStatus      string `json:"cache_status,omitempty"`
+	CacheExpiresAt   string `json:"cache_expires_at,omitempty"`
+	DefaultWindow    bool   `json:"default_window,omitempty"`
+	SessionRoots     int    `json:"session_roots_scanned,omitempty"`
+	IndexLoadMS      int64  `json:"index_load_ms,omitempty"`
+	SourceBuildMS    int64  `json:"source_build_ms,omitempty"`
+	SummaryBuildMS   int64  `json:"summary_build_ms,omitempty"`
+	AnalyticsBuildMS int64  `json:"analytics_build_ms,omitempty"`
+	GroupBuildMS     int64  `json:"group_build_ms,omitempty"`
+	TopSessionsMS    int64  `json:"top_sessions_ms,omitempty"`
+	TotalBuildMS     int64  `json:"total_build_ms,omitempty"`
 }
 
 type startUIWorkRun struct {

@@ -5,14 +5,21 @@ on:
     branches: [main, dev, experimental/dev]
   pull_request:
     branches: [main, dev, experimental/dev]
+  schedule:
+    # Daily non-blocking benchmark snapshot on the default branch.
+    - cron: '0 9 * * *'
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   fmt:
     name: Format Check
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +36,7 @@ jobs:
 
   vet:
     name: Go Vet
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,6 +47,7 @@ jobs:
 
   test:
     name: Go Test
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -92,6 +101,7 @@ jobs:
 
   docs:
     name: Markdown Docs
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -102,6 +112,7 @@ jobs:
 
   build:
     name: Build Native Binaries
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     needs: [fmt, vet, test, docs]
     steps:
@@ -113,7 +124,7 @@ jobs:
 
   ci-status:
     name: CI Status
-    if: always()
+    if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     needs: [fmt, vet, test, docs, build]
     steps:
