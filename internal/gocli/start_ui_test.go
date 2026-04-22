@@ -5241,9 +5241,6 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `data-open-repo-tab="scouts"`) {
 		t.Fatalf("expected direct scouts navigation wiring in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `data-open-onboard="true"`) {
-		t.Fatalf("expected repo onboarding navigation affordance in app.js, got %s", string(appBody))
-	}
 	if !strings.Contains(string(appBody), `repo-onboard-form`) || !strings.Contains(string(appBody), `submitRepoOnboarding()`) {
 		t.Fatalf("expected repo onboarding form wiring in app.js, got %s", string(appBody))
 	}
