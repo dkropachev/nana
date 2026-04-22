@@ -29,7 +29,7 @@ NANA coordinates Codex prompts, skills, and runtime state. Role prompts narrow w
 
 ## Lazy Runtime Skills
 Load detailed skill runtime docs only when invoked. When a listed keyword matches, invoke that `$skill` by reading its RUNTIME.md. Explicit `$skill` invocations run left-to-right before implicit keyword matches; keyword matches are case-insensitive; `/prompts:<name>` disables implicit keyword activation unless explicit `$skill` tokens are present. The rest is the task. Sync trigger tests with this list.
-- Use `nana route --explain "<prompt>"` to preview routing when keyword activation is unclear.
+- Use `nana route --explain "<prompt>"` when keyword activation is unclear.
 - `$autopilot` (`~/.codex/skills/autopilot/RUNTIME.md`): `autopilot`, `build me`, `I want a`
 - `$ultrawork` (`~/.codex/skills/ultrawork/RUNTIME.md`): `ultrawork`, `ulw`, `parallel`
 - `$analyze` (`~/.codex/skills/analyze/RUNTIME.md`): `analyze`, `investigate`
@@ -37,7 +37,7 @@ Load detailed skill runtime docs only when invoked. When a listed keyword matche
 - `$deep-interview` (`~/.codex/skills/deep-interview/RUNTIME.md`): `interview`, `deep interview`, `gather requirements`, `interview me`, `don't assume`, `ouroboros`
 - `$ralplan` (`~/.codex/skills/ralplan/RUNTIME.md`): `ralplan`, `consensus plan`; planning-only until `.nana/plans/prd-*.md` and `.nana/plans/test-spec-*.md` both exist
 - `$ecomode` (`~/.codex/skills/ecomode/RUNTIME.md`): `ecomode`, `eco`, `budget`
-- `$cancel` (`~/.codex/skills/cancel/RUNTIME.md`): `cancel`, `stop`, `abort`
+- `$cancel` (`~/.codex/skills/cancel/RUNTIME.md`): `cancel`, `stop`, `abort`; user-cancel only
 - `$tdd` (`~/.codex/skills/tdd/RUNTIME.md`): `tdd`, `test first`
 - `$build-fix` (`~/.codex/skills/build-fix/RUNTIME.md`): `fix build`, `type errors`
 - `$code-review` (`~/.codex/skills/code-review/RUNTIME.md`): `review code`, `code review`, `code-review`
@@ -48,7 +48,7 @@ Load detailed skill runtime docs only when invoked. When a listed keyword matche
 - Prefer `nana explore` for simple read-only lookups and `nana sparkshell` for noisy read-only output/checks; keep edits and ambiguous investigations on the normal path.
 - Use `nana verify --json` for onboarded repos; otherwise use repo verification commands.
 - Run independent work in parallel and dependent checks sequentially. Use background jobs for long builds/tests.
-- Stop only when the task is verified complete, the user says stop/cancel, or no meaningful recovery path remains; escalate only for destructive, irreversible, materially branching, or authority-blocked decisions.
+- Stop only when work is verified complete, the user explicitly says stop/cancel, or no recovery path remains; escalate only for destructive, irreversible, materially branching, or authority-blocked decisions.
 <verification>
 <!-- NANA:GUIDANCE:VERIFYSEQ:START -->
 - Identify what proves the claim, run the check, read the output, then report with evidence.

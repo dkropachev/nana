@@ -25,9 +25,10 @@ type lazySkillTriggerManifest struct {
 }
 
 type lazySkillTrigger struct {
-	Skill    string   `json:"skill"`
-	Triggers []string `json:"triggers"`
-	Note     string   `json:"note,omitempty"`
+	Skill     string   `json:"skill"`
+	Triggers  []string `json:"triggers"`
+	Note      string   `json:"note,omitempty"`
+	MatchMode string   `json:"match_mode,omitempty"`
 }
 
 func lazySkillTriggerEntries() ([]lazySkillTrigger, error) {
@@ -54,6 +55,9 @@ func lazySkillTriggerEntries() ([]lazySkillTrigger, error) {
 		seenSkills[entry.Skill] = true
 		if len(entry.Triggers) == 0 {
 			return nil, fmt.Errorf("lazy skill trigger manifest skill %q has no triggers", entry.Skill)
+		}
+		if _, err := parseRouteMatchMode(entry.MatchMode); err != nil {
+			return nil, fmt.Errorf("lazy skill trigger manifest skill %q: %w", entry.Skill, err)
 		}
 		seenTriggers := map[string]bool{}
 		for triggerIndex, trigger := range entry.Triggers {
@@ -89,9 +93,14 @@ func lazySkillTriggerRouteRules() []routeRule {
 	entries := mustLazySkillTriggerEntries()
 	rules := make([]routeRule, 0, len(entries))
 	for _, entry := range entries {
+		matchMode, err := parseRouteMatchMode(entry.MatchMode)
+		if err != nil {
+			panic(err)
+		}
 		rules = append(rules, routeRule{
-			Skill:    entry.Skill,
-			Keywords: append([]string(nil), entry.Triggers...),
+			Skill:     entry.Skill,
+			Keywords:  append([]string(nil), entry.Triggers...),
+			MatchMode: matchMode,
 		})
 	}
 	return rules

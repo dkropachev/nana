@@ -412,6 +412,96 @@ func TestRouteExplainImplicitKeywordsRespectTokenBoundaries(t *testing.T) {
 	}
 }
 
+func TestRouteExplainCancelRequiresExplicitIntent(t *testing.T) {
+	for _, prompt := range []string{
+		"fix the failing build and stop when it passes",
+		"add a cancel button to the dialog",
+		"can we add a cancel button to the dialog",
+		"cancel button should close the dialog",
+		"please stop when it passes",
+		"please stop the current run when it passes",
+		"let's stop when it passes",
+	} {
+		t.Run(prompt, func(t *testing.T) {
+			preview := ExplainPromptRoute(prompt)
+			for _, activation := range preview.Activations {
+				if activation.Skill == "cancel" {
+					t.Fatalf("expected %q not to activate $cancel, got %#v", prompt, preview.Activations)
+				}
+			}
+		})
+	}
+}
+
+func TestRouteExplainCancelAcceptsExplicitUserRequests(t *testing.T) {
+	cases := []struct {
+		prompt  string
+		trigger string
+	}{
+		{prompt: "stop", trigger: "stop"},
+		{prompt: "stop right now", trigger: "stop"},
+		{prompt: "Please, cancel this run.", trigger: "cancel"},
+		{prompt: "okay, please cancel", trigger: "cancel"},
+		{prompt: "please cancel immediately", trigger: "cancel"},
+		{prompt: "can you abort the current session?", trigger: "abort"},
+		{prompt: "please abort the current session and clean up", trigger: "abort"},
+		{prompt: "I want to cancel", trigger: "cancel"},
+		{prompt: "I'd like to cancel", trigger: "cancel"},
+		{prompt: "I'd just like to cancel", trigger: "cancel"},
+		{prompt: "let's stop here", trigger: "stop"},
+		{prompt: "can we abort for now", trigger: "abort"},
+		{prompt: "can you please cancel the current session", trigger: "cancel"},
+		{prompt: "stop the current NANA run safely", trigger: "stop"},
+		{prompt: "stop the current NANA run cleanly", trigger: "stop"},
+		{prompt: "cancel the current NANA run safely", trigger: "cancel"},
+		{prompt: "abort the active NANA mode cleanly", trigger: "abort"},
+		{prompt: "please stop the active NANA execution state safely", trigger: "stop"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.prompt, func(t *testing.T) {
+			preview := ExplainPromptRoute(tc.prompt)
+			if len(preview.Activations) != 1 {
+				t.Fatalf("expected one activation for %q, got %#v", tc.prompt, preview.Activations)
+			}
+			activation := preview.Activations[0]
+			if activation.Skill != "cancel" || activation.Source != "implicit keyword" {
+				t.Fatalf("expected implicit cancel activation for %q, got %#v", tc.prompt, activation)
+			}
+			if activation.Trigger != tc.trigger {
+				t.Fatalf("expected trigger %q for %q, got %q", tc.trigger, tc.prompt, activation.Trigger)
+			}
+		})
+	}
+}
+
+func TestRouteExplainCancelStillActivatesWhenAnotherSkillKeywordFollows(t *testing.T) {
+	preview := ExplainPromptRoute("stop right now analyze this")
+	if len(preview.Activations) < 1 {
+		t.Fatalf("expected at least one activation, got %#v", preview.Activations)
+	}
+	first := preview.Activations[0]
+	if first.Skill != "cancel" || first.Trigger != "stop" {
+		t.Fatalf("expected cancel to win the leading clause, got %#v", first)
+	}
+	foundAnalyze := false
+	for _, activation := range preview.Activations[1:] {
+		if activation.Skill == "analyze" {
+			foundAnalyze = true
+			break
+		}
+	}
+	if !foundAnalyze {
+		t.Fatalf("expected later analyze keyword to remain visible after cancel activation, got %#v", preview.Activations)
+	}
+}
+
+func TestRoutePreviewDocumentsCancelSemantics(t *testing.T) {
+	rendered := FormatRoutePreview(ExplainPromptRoute("stop the current NANA run safely"))
+	if !strings.Contains(rendered, "Internal stop/completion guidance does not count.") {
+		t.Fatalf("route preview missing cancel semantics note: %q", rendered)
+	}
+}
+
 func TestRouteExplainImplicitKeywordAllowsPunctuationDelimiters(t *testing.T) {
 	prompt := "Please (ANALYZE), this"
 	preview := ExplainPromptRoute(prompt)
@@ -559,7 +649,7 @@ func TestRouteRulesStayInSyncWithAgentsTemplate(t *testing.T) {
 		t.Fatalf("read template AGENTS.md: %v", err)
 	}
 	template := string(content)
-	if !strings.Contains(template, "`nana route --explain \"<prompt>\"` to preview routing") {
+	if !strings.Contains(template, "`nana route --explain \"<prompt>\"` when keyword activation is unclear") {
 		t.Fatalf("template AGENTS.md missing route preview guidance")
 	}
 	if strings.Contains(template, "Preview: `nana route --explain <prompt>`") {
@@ -567,6 +657,9 @@ func TestRouteRulesStayInSyncWithAgentsTemplate(t *testing.T) {
 	}
 	if !strings.Contains(template, "Sync trigger tests with this list") {
 		t.Fatalf("template AGENTS.md missing trigger synchronization guidance")
+	}
+	if !strings.Contains(template, "user-cancel only") {
+		t.Fatalf("template AGENTS.md missing cancel semantics note")
 	}
 	for _, rule := range routeRules {
 		if !strings.Contains(template, "- `$"+rule.Skill+"`") {

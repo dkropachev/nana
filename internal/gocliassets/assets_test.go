@@ -248,7 +248,7 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 		{name: "templates/AGENTS.md", content: string(diskContent)},
 		{name: "root AGENTS.md", content: string(rootAgents)},
 	} {
-		if !strings.Contains(source.content, "`nana route --explain \"<prompt>\"` to preview routing") {
+		if !strings.Contains(source.content, "`nana route --explain \"<prompt>\"` when keyword activation is unclear") {
 			t.Fatalf("%s missing route preview CLI guidance", source.name)
 		}
 		if strings.Contains(source.content, "Preview: `nana route --explain <prompt>`") {
@@ -387,6 +387,41 @@ func TestGeneratedAgentsSkillTriggerGuidancePreservesCaseInsensitiveContract(t *
 	} {
 		if !strings.Contains(source.content, needle) {
 			t.Fatalf("%s must preserve case-insensitive skill trigger guidance", source.name)
+		}
+	}
+}
+
+func TestGeneratedAgentsCancelGuidanceDistinguishesExplicitCancelFromNormalStopConditions(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	templates, err := Templates()
+	if err != nil {
+		t.Fatalf("Templates(): %v", err)
+	}
+	diskContent, err := os.ReadFile(filepath.Join(repoRoot, "templates", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read template AGENTS.md: %v", err)
+	}
+	rootAgents, err := os.ReadFile(filepath.Join(repoRoot, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read root AGENTS.md: %v", err)
+	}
+	for _, source := range []struct {
+		name    string
+		content string
+	}{
+		{name: "templates/AGENTS.md", content: string(diskContent)},
+		{name: "generated template AGENTS.md", content: templates["AGENTS.md"]},
+		{name: "root AGENTS.md", content: string(rootAgents)},
+	} {
+		if !strings.Contains(source.content, "user explicitly says stop/cancel") {
+			t.Fatalf("%s missing cancel/stop disambiguation guidance %q", source.name, "user explicitly says stop/cancel")
+		}
+		if !strings.Contains(source.content, "explicit user cancel") && !strings.Contains(source.content, "user-cancel only") {
+			t.Fatalf("%s missing cancel routing guidance for explicit user requests", source.name)
 		}
 	}
 }

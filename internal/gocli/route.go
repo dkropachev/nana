@@ -19,15 +19,17 @@ Usage:
 
 Behavior:
   - reports explicit $skill invocations before implicit keyword matches
-  - matches implicit keywords case-insensitively and anywhere on token boundaries
+  - matches implicit keywords case-insensitively on token boundaries
+  - requires an explicit user cancellation request before routing to $cancel; internal stop/completion guidance does not count
   - prints matched and ignored triggers with precedence/suppression reasons
   - prints the matched trigger, precedence source, and runtime/skill doc path
   - honors /prompts:<name> suppression of implicit keyword routing
 `
 
 type routeRule struct {
-	Skill    string
-	Keywords []string
+	Skill     string
+	Keywords  []string
+	MatchMode routeMatchMode
 }
 
 type routeActivation struct {
@@ -76,31 +78,22 @@ type routeDocBase struct {
 	displayDotRelative bool
 }
 
+type routeMatchMode string
+
 const (
 	routeDocLabelRuntime = "runtime"
 	routeDocLabelSkill   = "skill"
 
 	routeSourceExplicitInvocation = "explicit invocation"
 	routeSourceImplicitKeyword    = "implicit keyword"
+
+	routeMatchModeTokenBoundary  routeMatchMode = ""
+	routeMatchModeExplicitCancel routeMatchMode = "explicit-cancel"
 )
 
-// Keep routeRules synchronized with the Lazy Runtime Skills mapping in
-// AGENTS.md and templates/AGENTS.md.
-var routeRules = []routeRule{
-	{Skill: "autopilot", Keywords: []string{"autopilot", "build me", "I want a"}},
-	{Skill: "ultrawork", Keywords: []string{"ultrawork", "ulw", "parallel"}},
-	{Skill: "analyze", Keywords: []string{"analyze", "investigate"}},
-	{Skill: "plan", Keywords: []string{"plan this", "plan the", "let's plan"}},
-	{Skill: "deep-interview", Keywords: []string{"interview", "deep interview", "gather requirements", "interview me", "don't assume", "ouroboros"}},
-	{Skill: "ralplan", Keywords: []string{"ralplan", "consensus plan"}},
-	{Skill: "ecomode", Keywords: []string{"ecomode", "eco", "budget"}},
-	{Skill: "cancel", Keywords: []string{"cancel", "stop", "abort"}},
-	{Skill: "tdd", Keywords: []string{"tdd", "test first"}},
-	{Skill: "build-fix", Keywords: []string{"fix build", "type errors"}},
-	{Skill: "code-review", Keywords: []string{"review code", "code review", "code-review"}},
-	{Skill: "security-review", Keywords: []string{"security review"}},
-	{Skill: "web-clone", Keywords: []string{"web-clone", "clone site", "clone website", "copy webpage"}},
-}
+// routeRules are loaded from the lazy skill trigger manifest, which also
+// renders the Lazy Runtime Skills block in AGENTS.md/templates.
+var routeRules = lazySkillTriggerRouteRules()
 
 var (
 	explicitRouteSkillPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_])\$([A-Za-z][A-Za-z0-9_-]*)`)
@@ -220,7 +213,7 @@ func explainPromptRoute(prompt string, docPath func(string) routeDoc, validExpli
 
 	keywordCandidates := []keywordRouteCandidate{}
 	for ruleOrder, rule := range routeRules {
-		matches := keywordMatches(prompt, rule.Keywords)
+		matches := keywordMatchesForRule(prompt, rule)
 		if len(matches) == 0 {
 			continue
 		}
@@ -343,6 +336,27 @@ func bestKeywordMatch(prompt string, keywords []string) (routeKeywordMatch, bool
 	return matches[0], true
 }
 
+func parseRouteMatchMode(raw string) (routeMatchMode, error) {
+	mode := routeMatchMode(strings.TrimSpace(raw))
+	switch mode {
+	case routeMatchModeTokenBoundary, routeMatchModeExplicitCancel:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unsupported route match_mode %q", raw)
+	}
+}
+
+func keywordMatchesForRule(prompt string, rule routeRule) []routeKeywordMatch {
+	switch rule.MatchMode {
+	case routeMatchModeExplicitCancel:
+		return explicitCancelMatches(prompt, rule.Keywords)
+	case routeMatchModeTokenBoundary:
+		return keywordMatches(prompt, rule.Keywords)
+	default:
+		return nil
+	}
+}
+
 func keywordMatches(prompt string, keywords []string) []routeKeywordMatch {
 	matches := []routeKeywordMatch{}
 	for _, keyword := range keywords {
@@ -373,6 +387,317 @@ func keywordMatches(prompt string, keywords []string) []routeKeywordMatch {
 		return left.end-left.start > right.end-right.start
 	})
 	return matches
+}
+
+type routeWord struct {
+	start int
+	end   int
+	lower string
+}
+
+var (
+	explicitCancelCourtesyWords = map[string]bool{
+		"just":   true,
+		"kindly": true,
+		"please": true,
+		"pls":    true,
+		"really": true,
+	}
+	explicitCancelAcknowledgementWords = map[string]bool{
+		"alright": true,
+		"fine":    true,
+		"hey":     true,
+		"k":       true,
+		"kk":      true,
+		"ok":      true,
+		"okay":    true,
+		"sure":    true,
+		"then":    true,
+		"well":    true,
+	}
+	explicitCancelLeadInPhrases = [][]string{
+		{"can", "you"},
+		{"could", "you"},
+		{"will", "you"},
+		{"would", "you"},
+		{"can", "we"},
+		{"could", "we"},
+		{"i", "want", "to"},
+		{"i", "need", "to"},
+		{"i", "d", "like", "to"},
+		{"i", "would", "like", "to"},
+		{"i", "d", "like", "you", "to"},
+		{"i", "would", "like", "you", "to"},
+		{"let", "s"},
+		{"lets"},
+	}
+	explicitCancelConditionalWords = map[string]bool{
+		"after":  true,
+		"if":     true,
+		"once":   true,
+		"unless": true,
+		"until":  true,
+		"when":   true,
+	}
+	explicitCancelSuffixSkippableWords = map[string]bool{
+		"and":         true,
+		"away":        true,
+		"cleanly":     true,
+		"for":         true,
+		"here":        true,
+		"immediately": true,
+		"just":        true,
+		"kindly":      true,
+		"now":         true,
+		"please":      true,
+		"pls":         true,
+		"really":      true,
+		"right":       true,
+		"safely":      true,
+		"there":       true,
+		"up":          true,
+	}
+	explicitCancelTargetIntroWords = map[string]bool{
+		"a":       true,
+		"active":  true,
+		"all":     true,
+		"an":      true,
+		"any":     true,
+		"current": true,
+		"my":      true,
+		"our":     true,
+		"that":    true,
+		"the":     true,
+		"these":   true,
+		"this":    true,
+		"those":   true,
+		"your":    true,
+	}
+	explicitCancelTargetPronouns = map[string]bool{
+		"everything": true,
+		"it":         true,
+		"me":         true,
+		"them":       true,
+		"us":         true,
+	}
+	explicitCancelBareObjectWords = map[string]bool{
+		"execution": true,
+		"flow":      true,
+		"flows":     true,
+		"job":       true,
+		"jobs":      true,
+		"mode":      true,
+		"modes":     true,
+		"process":   true,
+		"processes": true,
+		"run":       true,
+		"runs":      true,
+		"session":   true,
+		"sessions":  true,
+		"state":     true,
+		"states":    true,
+		"task":      true,
+		"tasks":     true,
+		"work":      true,
+		"workflow":  true,
+		"workflows": true,
+	}
+	explicitCancelActionWords = map[string]bool{
+		"clean":   true,
+		"cleanup": true,
+		"clear":   true,
+		"close":   true,
+		"end":     true,
+		"exit":    true,
+		"finish":  true,
+		"quit":    true,
+		"wrap":    true,
+	}
+	explicitCancelContinuationWords = routeKeywordTokenSetForCancelSuffix(routeRules)
+)
+
+func explicitCancelMatches(prompt string, keywords []string) []routeKeywordMatch {
+	words := routePromptWords(prompt)
+	if len(words) == 0 {
+		return nil
+	}
+
+	keywordSet := map[string]bool{}
+	for _, keyword := range keywords {
+		keywordSet[strings.ToLower(keyword)] = true
+	}
+
+	for index, word := range words {
+		if !keywordSet[word.lower] {
+			continue
+		}
+		clauseStart, clauseEnd := routeClauseWordBounds(prompt, words, index)
+		clauseKeywordIndex := index - clauseStart
+		clauseWords := words[clauseStart:clauseEnd]
+		if !explicitCancelPrefixMatches(clauseWords[:clauseKeywordIndex]) {
+			continue
+		}
+		if !explicitCancelSuffixMatches(clauseWords[clauseKeywordIndex+1:]) {
+			continue
+		}
+
+		match := words[index]
+		return []routeKeywordMatch{{
+			start:   match.start,
+			end:     match.end,
+			trigger: prompt[match.start:match.end],
+		}}
+	}
+
+	return nil
+}
+
+func explicitCancelPrefixMatches(words []routeWord) bool {
+	index := consumeExplicitCancelPrefixNoise(words, 0)
+	if index == len(words) {
+		return true
+	}
+
+	for _, phrase := range explicitCancelLeadInPhrases {
+		if routeWordsMatchPhrase(words[index:], phrase) != len(words[index:]) {
+			continue
+		}
+		return true
+	}
+
+	return false
+}
+
+func consumeExplicitCancelPrefixNoise(words []routeWord, index int) int {
+	for index < len(words) {
+		lower := words[index].lower
+		if !explicitCancelCourtesyWords[lower] && !explicitCancelAcknowledgementWords[lower] {
+			break
+		}
+		index++
+	}
+	return index
+}
+
+func routeWordsMatchPhrase(words []routeWord, phrase []string) int {
+	index := 0
+	for _, part := range phrase {
+		index = consumeExplicitCancelPrefixNoise(words, index)
+		if index >= len(words) || words[index].lower != part {
+			return -1
+		}
+		index++
+	}
+	return consumeExplicitCancelPrefixNoise(words, index)
+}
+
+func explicitCancelSuffixMatches(words []routeWord) bool {
+	for _, word := range words {
+		if explicitCancelConditionalWords[word.lower] {
+			return false
+		}
+	}
+	for _, word := range words {
+		switch lower := word.lower; {
+		case explicitCancelSuffixSkippableWords[lower]:
+			continue
+		case explicitCancelTargetIntroWords[lower]:
+			return true
+		case explicitCancelTargetPronouns[lower]:
+			return true
+		case explicitCancelBareObjectWords[lower]:
+			return true
+		case explicitCancelActionWords[lower]:
+			return true
+		case explicitCancelContinuationWords[lower]:
+			return true
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func routeClauseWordBounds(prompt string, words []routeWord, index int) (int, int) {
+	start := index
+	for start > 0 {
+		if hasRouteClauseBoundary(prompt[words[start-1].end:words[start].start]) {
+			break
+		}
+		start--
+	}
+
+	end := index + 1
+	for end < len(words) {
+		if hasRouteClauseBoundary(prompt[words[end-1].end:words[end].start]) {
+			break
+		}
+		end++
+	}
+	return start, end
+}
+
+func hasRouteClauseBoundary(segment string) bool {
+	for _, r := range segment {
+		if isRouteClauseBoundaryRune(r) {
+			return true
+		}
+	}
+	return false
+}
+
+func isRouteClauseBoundaryRune(r rune) bool {
+	switch r {
+	case ',', '.', ';', ':', '!', '?', '\n', '\r':
+		return true
+	default:
+		return false
+	}
+}
+
+func routeKeywordTokenSetForCancelSuffix(rules []routeRule) map[string]bool {
+	tokens := map[string]bool{}
+	for _, rule := range rules {
+		if rule.Skill == "cancel" {
+			continue
+		}
+		for _, keyword := range rule.Keywords {
+			for _, word := range routePromptWords(keyword) {
+				if word.lower == "" {
+					continue
+				}
+				tokens[word.lower] = true
+			}
+		}
+	}
+	return tokens
+}
+
+func routePromptWords(prompt string) []routeWord {
+	words := []routeWord{}
+	for index := 0; index < len(prompt); {
+		r, size := utf8.DecodeRuneInString(prompt[index:])
+		if !isRouteTokenRune(r) {
+			index += size
+			continue
+		}
+
+		start := index
+		index += size
+		for index < len(prompt) {
+			r, size = utf8.DecodeRuneInString(prompt[index:])
+			if !isRouteTokenRune(r) {
+				break
+			}
+			index += size
+		}
+		words = append(words, routeWord{
+			start: start,
+			end:   index,
+			lower: strings.ToLower(prompt[start:index]),
+		})
+	}
+	return words
 }
 
 func keywordPattern(keyword string) (*regexp.Regexp, error) {
@@ -533,7 +858,7 @@ func FormatRoutePreview(preview routePreview) string {
 	if preview.ImplicitSuppressedBy != "" {
 		fmt.Fprintf(&builder, "Implicit keywords: suppressed by %s\n", preview.ImplicitSuppressedBy)
 	}
-	fmt.Fprintln(&builder, "Rules: explicit $name invocations run first; implicit keywords are case-insensitive and match anywhere on token boundaries.")
+	fmt.Fprintln(&builder, "Rules: explicit $name invocations run first; implicit keywords are case-insensitive token-boundary matches, except $cancel which requires an explicit user cancellation request. Internal stop/completion guidance does not count.")
 	return builder.String()
 }
 
@@ -542,6 +867,9 @@ func routeActivationWhy(activation routeActivation) string {
 	case routeSourceExplicitInvocation:
 		return "explicit $name invocations run left-to-right before implicit keyword routing"
 	case routeSourceImplicitKeyword:
+		if activation.Skill == "cancel" {
+			return "explicit user cancellation request matched a cancel trigger"
+		}
 		return "case-insensitive keyword match anywhere in the prompt on token boundaries"
 	default:
 		return activation.Source

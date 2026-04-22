@@ -15,7 +15,7 @@ description: Guide on using nana plugin
 | Ask me to plan something | Start a planning interview |
 | Need something done completely | Persist until verified complete |
 | Work on UI/frontend | Activate design sensibility |
-| Say "stop" or "cancel" | Intelligently stop current operation |
+| Say "stop" or "cancel" | Cancel the current run on explicit request |
 
 ## Magic Keywords (Optional Shortcuts)
 
@@ -35,6 +35,8 @@ Just say:
 - "abort"
 
 I'll figure out what to stop based on context.
+
+These words request cancellation. They do not refer to the normal "work is complete, so stop" condition.
 
 ## First Time Setup
 

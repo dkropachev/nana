@@ -147,7 +147,7 @@ Common trigger phrases:
   ecomode | eco | budget
       -> $ecomode
   cancel | stop | abort
-      -> $cancel
+      -> $cancel (explicit user request)
   tdd | test first
       -> $tdd
   fix build | type errors

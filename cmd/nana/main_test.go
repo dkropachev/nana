@@ -356,6 +356,7 @@ func TestBinaryHelpTopicRoutesToWorkflowDiscovery(t *testing.T) {
 		"Common trigger phrases:",
 		"autopilot | build me | I want a",
 		"interview | deep interview | gather requirements | interview me | don't assume | ouroboros",
+		"$cancel (explicit user request)",
 		"web-clone | clone site | clone website | copy webpage",
 		"Safe in-session utilities:",
 		"$trace",

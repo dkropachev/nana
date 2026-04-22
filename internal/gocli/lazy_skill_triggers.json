@@ -32,7 +32,9 @@
     },
     {
       "skill": "cancel",
-      "triggers": ["cancel", "stop", "abort"]
+      "triggers": ["cancel", "stop", "abort"],
+      "match_mode": "explicit-cancel",
+      "note": "user-cancel only"
     },
     {
       "skill": "tdd",
