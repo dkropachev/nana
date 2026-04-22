@@ -181,7 +181,10 @@ var startUIPrewarmLogWriter io.Writer = os.Stderr
 var startUIPrewarmDelay = time.Second
 var startUISectionCacheProbeInterval = 5 * time.Second
 var startUIUsageIndexProbeInterval = 5 * time.Second
-var startUIUsageCacheTTL = 5 * time.Second
+// Usage cache keys already include the indexed data version and active filters,
+// so a longer TTL avoids rebuilding identical reports on repeated page loads
+// while still rolling forward promptly when the usage index changes.
+var startUIUsageCacheTTL = time.Hour
 var startUIUsageCacheNow = time.Now
 
 type startUITotals struct {
@@ -921,7 +924,17 @@ func (h *startUIAPI) prewarmStartUIData() error {
 	if _, err := h.buildOverview(); err != nil {
 		errs = append(errs, fmt.Errorf("overview: %w", err))
 	}
+	if _, err := h.buildUsageReport(startUIDefaultUsageQuery()); err != nil {
+		errs = append(errs, fmt.Errorf("usage: %w", err))
+	}
 	return errors.Join(errs...)
+}
+
+func startUIDefaultUsageQuery() url.Values {
+	return url.Values{
+		"since": {"30d"},
+		"root":  {"all"},
+	}
 }
 
 func (s *startUISupervisor) Close() error {
@@ -2278,6 +2291,7 @@ func (h *startUIAPI) loadUsageIndex() (startUIUsageIndexState, error) {
 	h.usageIndexCache.value = index
 	h.usageIndexMu.Unlock()
 	if strings.TrimSpace(index.Version) != previousVersion {
+		h.clearUsageCache()
 		h.invalidateEventsCache()
 		h.notifyEventsBroadcaster()
 	}
@@ -2285,24 +2299,13 @@ func (h *startUIAPI) loadUsageIndex() (startUIUsageIndexState, error) {
 }
 
 func (h *startUIAPI) loadUsageIndexForReport(options usageOptions) (startUIUsageIndexState, error) {
-	if strings.TrimSpace(options.Since) != "" {
-		index, err := refreshStartUIUsageIndex(h.cwd, "")
-		if err != nil {
-			return startUIUsageIndexState{}, err
-		}
-		h.usageIndexMu.Lock()
-		previousVersion := strings.TrimSpace(h.usageIndexCache.value.Version)
-		h.usageIndexCache.valid = true
-		h.usageIndexCache.checkedAt = time.Now()
-		h.usageIndexCache.value = index
-		h.usageIndexMu.Unlock()
-		if strings.TrimSpace(index.Version) != previousVersion {
-			h.invalidateEventsCache()
-			h.notifyEventsBroadcaster()
-		}
-		return index, nil
-	}
 	return h.loadUsageIndex()
+}
+
+func (h *startUIAPI) clearUsageCache() {
+	h.usageCacheMu.Lock()
+	defer h.usageCacheMu.Unlock()
+	h.usageCache = nil
 }
 
 func refreshStartUIUsageIndex(cwd string, path string) (startUIUsageIndexState, error) {

@@ -300,6 +300,7 @@ func localWorkCurrentSchemaDDL() []string {
 			FOREIGN KEY(session_key) REFERENCES usage_sessions(session_key) ON DELETE CASCADE
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_checkpoints_session_ts ON usage_checkpoints(session_key, checkpoint_ts);`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_checkpoints_ts_session ON usage_checkpoints(checkpoint_ts, session_key);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_checkpoints_day ON usage_checkpoints(day, checkpoint_ts);`,
 		`CREATE TABLE IF NOT EXISTS usage_metadata (
 			key TEXT PRIMARY KEY,

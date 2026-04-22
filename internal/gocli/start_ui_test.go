@@ -1137,7 +1137,7 @@ func TestStartUIUsageSinceCacheRefreshesWhenHistoryChanges(t *testing.T) {
 	previousNow := startUIUsageCacheNow
 	previousIndexProbe := startUIUsageIndexProbeInterval
 	startUIUsageCacheTTL = time.Hour
-	startUIUsageIndexProbeInterval = time.Hour
+	startUIUsageIndexProbeInterval = 0
 	fakeNow := now
 	startUIUsageCacheNow = func() time.Time { return fakeNow }
 	defer func() {
@@ -1167,6 +1167,144 @@ func TestStartUIUsageSinceCacheRefreshesWhenHistoryChanges(t *testing.T) {
 	}
 	if second.Summary.Totals.TotalTokens != 80 {
 		t.Fatalf("expected exact cache refresh after history change, got %+v", second.Summary.Totals)
+	}
+}
+
+func TestStartUIUsageSinceReusesIndexedSnapshotWithinProbeInterval(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repo := createLocalWorkRepo(t)
+	repoID := localWorkRepoID(repo)
+	runID := "usage-work-cache-probe"
+	sandboxPath := filepath.Join(home, "sandboxes", runID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
+		t.Fatalf("mkdir sandbox repo: %v", err)
+	}
+	now := time.Now().UTC()
+	manifest := localWorkManifest{
+		Version:           4,
+		RunID:             runID,
+		CreatedAt:         now.Add(-2 * time.Hour).Format(time.RFC3339),
+		UpdatedAt:         now.Add(-10 * time.Minute).Format(time.RFC3339),
+		Status:            "running",
+		RepoRoot:          repo,
+		RepoName:          filepath.Base(repo),
+		RepoSlug:          "acme/widget",
+		RepoID:            repoID,
+		SourceBranch:      "main",
+		BaselineSHA:       strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:       sandboxPath,
+		SandboxRepoPath:   sandboxRepoPath,
+		InputPath:         filepath.Join(home, "task.md"),
+		InputMode:         "task",
+		IntegrationPolicy: "final",
+		GroupingPolicy:    localWorkDefaultGroupingPolicy,
+		MaxIterations:     1,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	writeHistory := func(total int, updatedAt time.Time) {
+		t.Helper()
+		history := localWorkThreadUsageHistoryArtifact{
+			Version:     1,
+			GeneratedAt: updatedAt.Format(time.RFC3339),
+			SandboxPath: sandboxPath,
+			Threads: []usageHistoryRow{{
+				SessionID: "usage-work-cache-probe",
+				Nickname:  "lane-1",
+				Role:      "leader",
+				Model:     "gpt-5.4",
+				CWD:       sandboxRepoPath,
+				StartedAt: now.Add(-2 * time.Hour).Unix(),
+				UpdatedAt: updatedAt.Unix(),
+				Checkpoints: []usageTokenCheckpoint{
+					{Timestamp: now.Add(-90 * time.Minute).Unix(), InputTokens: 100, TotalTokens: 100},
+					{Timestamp: updatedAt.Unix(), InputTokens: total, TotalTokens: total},
+				},
+			}},
+		}
+		if err := writeLocalWorkJSONAtomically(filepath.Join(runDir, threadUsageHistoryArtifactName), history); err != nil {
+			t.Fatalf("write thread-usage-history artifact: %v", err)
+		}
+		if err := writeLocalWorkJSONAtomically(filepath.Join(runDir, "thread-usage.json"), localWorkThreadUsageArtifact{
+			Version:     1,
+			GeneratedAt: updatedAt.Format(time.RFC3339),
+			SandboxPath: sandboxPath,
+			Totals: localWorkTokenUsageTotals{
+				InputTokens:       total,
+				TotalTokens:       total,
+				SessionsAccounted: 1,
+				UpdatedAt:         updatedAt.Format(time.RFC3339),
+			},
+			Threads: []localWorkThreadUsageRow{{
+				SessionID:   "usage-work-cache-probe",
+				Nickname:    "lane-1",
+				Role:        "leader",
+				Model:       "gpt-5.4",
+				CWD:         sandboxRepoPath,
+				InputTokens: total,
+				TotalTokens: total,
+				StartedAt:   now.Add(-2 * time.Hour).Unix(),
+				UpdatedAt:   updatedAt.Unix(),
+			}},
+		}); err != nil {
+			t.Fatalf("write thread-usage artifact: %v", err)
+		}
+	}
+
+	writeHistory(160, now.Add(-10*time.Minute))
+
+	previousTTL := startUIUsageCacheTTL
+	previousNow := startUIUsageCacheNow
+	previousIndexProbe := startUIUsageIndexProbeInterval
+	startUIUsageCacheTTL = time.Hour
+	startUIUsageIndexProbeInterval = time.Hour
+	fakeNow := now
+	startUIUsageCacheNow = func() time.Time { return fakeNow }
+	defer func() {
+		startUIUsageCacheTTL = previousTTL
+		startUIUsageCacheNow = previousNow
+		startUIUsageIndexProbeInterval = previousIndexProbe
+	}()
+
+	api := &startUIAPI{cwd: repo}
+	first, err := api.buildUsageReport(url.Values{"root": {"work"}, "since": {"1h"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(first): %v", err)
+	}
+	if first.Summary.Totals.TotalTokens != 60 {
+		t.Fatalf("unexpected first exact window totals: %+v", first.Summary.Totals)
+	}
+
+	manifest.UpdatedAt = now.Add(-2 * time.Minute).Format(time.RFC3339)
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("rewrite manifest updated_at: %v", err)
+	}
+	writeHistory(180, now.Add(-2*time.Minute))
+
+	second, err := api.buildUsageReport(url.Values{"root": {"work"}, "since": {"1h"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(second): %v", err)
+	}
+	if second.Summary.Totals.TotalTokens != 60 {
+		t.Fatalf("expected windowed usage to reuse the cached index within the probe interval, got %+v", second.Summary.Totals)
+	}
+
+	startUIUsageIndexProbeInterval = 0
+	third, err := api.buildUsageReport(url.Values{"root": {"work"}, "since": {"1h"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(third): %v", err)
+	}
+	if third.Summary.Totals.TotalTokens != 80 {
+		t.Fatalf("expected windowed usage to refresh after the probe interval, got %+v", third.Summary.Totals)
 	}
 }
 
@@ -1890,17 +2028,14 @@ func TestStartUIPrewarmPopulatesOverviewCacheOnly(t *testing.T) {
 	if !api.overviewCache.valid {
 		t.Fatalf("expected overview cache to be populated by prewarm")
 	}
-	if api.usageIndexCache.valid {
-		t.Fatalf("expected usage cache to remain cold until explicit usage load, got %+v", api.usageIndexCache.value)
+	if !api.usageIndexCache.valid || len(api.usageIndexCache.value.Entries) != 1 {
+		t.Fatalf("expected usage index cache to be populated by prewarm, got %+v", api.usageIndexCache.value)
+	}
+	if len(api.usageCache) == 0 {
+		t.Fatalf("expected default usage report cache to be populated by prewarm")
 	}
 	if _, err := os.Stat(startUIOverviewCachePath()); err != nil {
 		t.Fatalf("expected persisted overview cache after prewarm: %v", err)
-	}
-	if _, err := api.loadUsageIndex(); err != nil {
-		t.Fatalf("loadUsageIndex after prewarm: %v", err)
-	}
-	if !api.usageIndexCache.valid || len(api.usageIndexCache.value.Entries) != 1 {
-		t.Fatalf("expected usage cache to populate after explicit usage load, got %+v", api.usageIndexCache.value)
 	}
 }
 
@@ -6610,6 +6745,49 @@ func TestStartUIOverviewDependencyRunIndexQueryUsesUpdatedAtIndex(t *testing.T) 
 	}
 	if strings.Contains(strings.ToUpper(plan), "USE TEMP B-TREE") {
 		t.Fatalf("expected overview dependency query to avoid temp sort, got plan:\n%s", plan)
+	}
+}
+
+func TestStartUIWindowedUsageQueryUsesCheckpointTimestampIndex(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	store, err := openLocalWorkDB()
+	if err != nil {
+		t.Fatalf("openLocalWorkDB: %v", err)
+	}
+	defer store.Close()
+
+	rows, err := store.db.Query(`
+		EXPLAIN QUERY PLAN
+		SELECT ses.session_key
+		FROM usage_sessions ses
+		JOIN usage_sources src ON src.source_key = ses.source_key
+		JOIN usage_checkpoints ck ON ck.session_key = ses.session_key
+		WHERE src.source_kind != ?
+		  AND ck.checkpoint_ts >= ?
+		GROUP BY ses.session_key, ses.session_id, ses.cwd, ses.transcript_path, src.repo_slug, ses.root, ses.model, ses.agent_role, ses.agent_nickname, ses.lane, ses.activity, ses.phase
+	`, "legacy-index", time.Now().Add(-30*24*time.Hour).Unix())
+	if err != nil {
+		t.Fatalf("explain windowed usage query: %v", err)
+	}
+	defer rows.Close()
+
+	details := []string{}
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("scan query plan: %v", err)
+		}
+		details = append(details, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read query plan: %v", err)
+	}
+	plan := strings.Join(details, "\n")
+	if !strings.Contains(plan, "idx_usage_checkpoints_ts_session") {
+		t.Fatalf("expected windowed usage query to use checkpoint timestamp index, got plan:\n%s", plan)
 	}
 }
 
