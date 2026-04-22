@@ -6933,6 +6933,10 @@ type startUITestBrowserFixture struct {
 	FailedScoutJobID  string
 }
 
+type startUITestBrowserFixtureOptions struct {
+	LiveEvents bool
+}
+
 type startUITestBrowserSmokeCase struct {
 	hash   string
 	expect []string
@@ -7241,6 +7245,10 @@ func startUITestDumpDOM(t *testing.T, chromePath string, targetURL string) strin
 }
 
 func startUITestSetupBrowserFixture(t *testing.T) startUITestBrowserFixture {
+	return startUITestSetupBrowserFixtureWithOptions(t, startUITestBrowserFixtureOptions{})
+}
+
+func startUITestSetupBrowserFixtureWithOptions(t *testing.T, options startUITestBrowserFixtureOptions) startUITestBrowserFixture {
 	t.Helper()
 
 	home := t.TempDir()
@@ -7805,12 +7813,15 @@ func startUITestSetupBrowserFixture(t *testing.T) startUITestBrowserFixture {
 	}
 
 	api := &startUIAPI{cwd: cwd}
+	routes := api.routes()
 	var apiBase string
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/events", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	})
-	mux.Handle("/api/", api.routes())
+	if !options.LiveEvents {
+		mux.HandleFunc("/api/v1/events", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})
+	}
+	mux.Handle("/api/", routes)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		startUIWebHandler(apiBase).ServeHTTP(w, r)
 	})

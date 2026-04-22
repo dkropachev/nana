@@ -43,6 +43,7 @@
     usage: defaultUsageState(),
     filters: defaultWorkspaceFilters(),
     sidebarQuery: "",
+    formDrafts: {},
     confirmDialog: defaultConfirmDialog(),
     hashReady: false,
     liveRegionMessage: "",
@@ -412,6 +413,279 @@
     return `${numeric.toFixed(1)}%`;
   }
 
+  function readDraftFieldValue(field) {
+    if (!field || field.type === "file") return null;
+    if (field instanceof HTMLSelectElement && field.multiple) {
+      return {
+        kind: "select-multiple",
+        values: Array.from(field.selectedOptions || []).map((option) => option.value),
+      };
+    }
+    if (field.type === "checkbox" || field.type === "radio") {
+      return {
+        kind: field.type,
+        checked: Boolean(field.checked),
+      };
+    }
+    return {
+      kind: "value",
+      value: String(field.value ?? ""),
+    };
+  }
+
+  function writeDraftFieldValue(field, draft) {
+    if (!field || !draft || field.type === "file") return;
+    if (draft.kind === "select-multiple" && field instanceof HTMLSelectElement && field.multiple) {
+      const selected = new Set(draft.values || []);
+      Array.from(field.options || []).forEach((option) => {
+        option.selected = selected.has(option.value);
+      });
+      return;
+    }
+    if (draft.kind === "checkbox" || draft.kind === "radio") {
+      field.checked = Boolean(draft.checked);
+      return;
+    }
+    field.value = String(draft.value ?? "");
+  }
+
+  function draftScopeForField(field) {
+    const scopeHost = field && typeof field.closest === "function"
+      ? field.closest("[data-draft-scope]")
+      : null;
+    return scopeHost ? defaultString(scopeHost.getAttribute("data-draft-scope"), "") : "";
+  }
+
+  function draftFieldKey(field) {
+    if (!field) return "";
+    if (field.name) return `name:${field.name}`;
+    if (field.id) return `id:${field.id}`;
+    return "";
+  }
+
+  function captureDraftField(field) {
+    const scope = draftScopeForField(field);
+    const key = draftFieldKey(field);
+    if (!scope || !key) return;
+    const draft = readDraftFieldValue(field);
+    if (!draft) return;
+    state.formDrafts[scope] = {
+      ...(state.formDrafts[scope] || {}),
+      [key]: draft,
+    };
+  }
+
+  function restoreDraftScope(scope, root = document) {
+    const draftFields = scope ? state.formDrafts[scope] : null;
+    if (!draftFields || !root) return;
+    root.querySelectorAll("input, textarea, select").forEach((field) => {
+      if (draftScopeForField(field) !== scope) return;
+      const draft = draftFields[draftFieldKey(field)];
+      if (!draft) return;
+      writeDraftFieldValue(field, draft);
+    });
+  }
+
+  function clearDraftScope(scope) {
+    if (!scope) return;
+    delete state.formDrafts[scope];
+  }
+
+  function clearDraftScopesByPrefix(prefix) {
+    if (!prefix) return;
+    Object.keys(state.formDrafts || {}).forEach((scope) => {
+      if (scope.startsWith(prefix)) {
+        delete state.formDrafts[scope];
+      }
+    });
+  }
+
+  function usageFiltersDraftScope() {
+    return "usage:filters";
+  }
+
+  function issuesDetailDraftScope(issue) {
+    return issue ? `issues:detail:${issue.id}` : "";
+  }
+
+  function repoControlsIssueDraftScope() {
+    return state.selectedRepo && state.selectedIssue
+      ? `repo:${state.selectedRepo}:tracked-issue:${state.selectedIssue}`
+      : "";
+  }
+
+  function repoControlsPlannedDraftScope() {
+    return state.selectedRepo ? `repo:${state.selectedRepo}:planned-create` : "";
+  }
+
+  function repoSchedulerSearchDraftScope(repo) {
+    return repo ? `repo:${repo.repo_slug}:scheduler-search` : "";
+  }
+
+  function repoSchedulerDetailDraftScope(repo, item) {
+    return repo && item ? `repo:${repo.repo_slug}:planned-detail:${item.id}` : "";
+  }
+
+  function taskFindingDraftScope(repo, finding) {
+    return repo && finding ? `investigations:finding:${repo.repo_slug}:${finding.id}` : "";
+  }
+
+  function findingImportCandidateDraftScope(repo, session, candidate) {
+    return repo && session && candidate
+      ? `investigations:import:${repo.repo_slug}:${session.id}:${candidate.candidate_id}`
+      : "";
+  }
+
+  function clearIssuesDetailDrafts() {
+    clearDraftScopesByPrefix("issues:detail:");
+  }
+
+  function clearRepoControlsDrafts(repoSlug = state.selectedRepo) {
+    const repo = String(repoSlug || "").trim();
+    if (!repo) return;
+    clearDraftScope(`repo:${repo}:planned-create`);
+    clearDraftScope(`repo:${repo}:scheduler-search`);
+    clearDraftScopesByPrefix(`repo:${repo}:tracked-issue:`);
+    clearDraftScopesByPrefix(`repo:${repo}:planned-detail:`);
+  }
+
+  function clearInvestigationsDrafts(repoSlug = "") {
+    const repo = String(repoSlug || "").trim();
+    if (!repo) {
+      clearDraftScopesByPrefix("investigations:finding:");
+      clearDraftScopesByPrefix("investigations:import:");
+      return;
+    }
+    clearDraftScopesByPrefix(`investigations:finding:${repo}:`);
+    clearDraftScopesByPrefix(`investigations:import:${repo}:`);
+  }
+
+  function currentRouteDraftContext() {
+    return {
+      view: defaultString(state.currentView, "home"),
+      repoSlug: defaultString(state.selectedRepo, ""),
+      repoTab: defaultString(state.repoTab, "overview"),
+    };
+  }
+
+  function clearDraftsForRouteContext(context) {
+    if (!context) return;
+    switch (defaultString(context.view, "home")) {
+      case "usage":
+        clearDraftScope(usageFiltersDraftScope());
+        break;
+      case "issues":
+        clearIssuesDetailDrafts();
+        break;
+      case "investigations":
+        clearInvestigationsDrafts(context.repoSlug);
+        break;
+      case "repo":
+        if (defaultString(context.repoTab, "overview") === "controls") {
+          clearRepoControlsDrafts(context.repoSlug);
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  function clearDraftsForRouteTransition(nextContext = {}) {
+    const current = currentRouteDraftContext();
+    const next = {
+      view: defaultString(nextContext.view, current.view),
+      repoSlug: defaultString(nextContext.repoSlug, current.repoSlug),
+      repoTab: defaultString(nextContext.repoTab, current.repoTab),
+    };
+    if (current.view !== next.view || current.repoSlug !== next.repoSlug || (current.view === "repo" && current.repoTab !== next.repoTab)) {
+      clearDraftsForRouteContext(current);
+    }
+  }
+
+  function isDraftFocusableField(field) {
+    return field instanceof HTMLInputElement
+      || field instanceof HTMLTextAreaElement
+      || field instanceof HTMLSelectElement;
+  }
+
+  function draftFieldSupportsSelection(field) {
+    if (field instanceof HTMLTextAreaElement) return true;
+    if (!(field instanceof HTMLInputElement)) return false;
+    return ["text", "search", "url", "tel", "password"].includes(String(field.type || "").toLowerCase());
+  }
+
+  function readDraftFieldSelection(field) {
+    if (!draftFieldSupportsSelection(field)) return null;
+    try {
+      if (typeof field.selectionStart !== "number" || typeof field.selectionEnd !== "number") {
+        return null;
+      }
+      return {
+        start: field.selectionStart,
+        end: field.selectionEnd,
+        direction: typeof field.selectionDirection === "string" ? field.selectionDirection : "none",
+      };
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function captureDraftFocusSnapshot(root = document) {
+    if (!root) return null;
+    const field = document.activeElement;
+    if (!isDraftFocusableField(field)) return null;
+    const scope = draftScopeForField(field);
+    const key = draftFieldKey(field);
+    if (!scope || !key || !state.formDrafts[scope]) return null;
+    return {
+      scope,
+      key,
+      selection: readDraftFieldSelection(field),
+    };
+  }
+
+  function findDraftField(scope, key, root = document) {
+    if (!scope || !key || !root) return null;
+    const fields = root.querySelectorAll("input, textarea, select");
+    for (const field of fields) {
+      if (!isDraftFocusableField(field)) continue;
+      if (draftScopeForField(field) !== scope) continue;
+      if (draftFieldKey(field) !== key) continue;
+      return field;
+    }
+    return null;
+  }
+
+  function focusDraftField(field) {
+    if (!field || typeof field.focus !== "function") return;
+    try {
+      field.focus({ preventScroll: true });
+    } catch (_error) {
+      field.focus();
+    }
+  }
+
+  function restoreDraftFocusSnapshot(snapshot, root = document) {
+    if (!snapshot || !root) return false;
+    const field = findDraftField(snapshot.scope, snapshot.key, root);
+    if (!field || field.disabled) return false;
+    focusDraftField(field);
+    if (snapshot.selection && draftFieldSupportsSelection(field) && typeof field.setSelectionRange === "function") {
+      try {
+        field.setSelectionRange(snapshot.selection.start, snapshot.selection.end, snapshot.selection.direction || "none");
+      } catch (_error) {
+        // Ignore unsupported selection restoration for non-text controls.
+      }
+    }
+    return document.activeElement === field;
+  }
+
+  function renderAppPreservingDraftFocus() {
+    const snapshot = captureDraftFocusSnapshot();
+    renderApp();
+    restoreDraftFocusSnapshot(snapshot);
+  }
+
   function usageSummary() {
     return state.usage && state.usage.report ? state.usage.report.summary || null : null;
   }
@@ -768,9 +1042,16 @@
   function applyHashState() {
     const params = new URLSearchParams(String(window.location.hash || "").replace(/^#/, ""));
     const nextView = defaultString(params.get("view"), state.currentView);
+    const nextRepo = defaultString(params.get("repo"), state.selectedRepo);
+    const nextRepoTab = defaultString(params.get("tab"), nextView === "repo" ? state.repoTab : "overview");
+    clearDraftsForRouteTransition({
+      view: nextView,
+      repoSlug: nextRepo,
+      repoTab: nextRepoTab,
+    });
     state.currentView = nextView;
-    state.selectedRepo = defaultString(params.get("repo"), state.selectedRepo);
-    state.repoTab = defaultString(params.get("tab"), nextView === "repo" ? state.repoTab : "overview");
+    state.selectedRepo = nextRepo;
+    state.repoTab = nextRepoTab;
     if (nextView === "feedback") {
       state.feedbackTab = defaultString(params.get("tab"), state.feedbackTab);
     }
@@ -817,6 +1098,7 @@
       return;
     }
     if (option.action === "view") {
+      clearDraftsForRouteTransition({ view: option.target, repoSlug: state.selectedRepo, repoTab: state.repoTab });
       state.currentView = option.target;
       if (option.target !== "repo") {
         ensureViewData(option.target);
@@ -826,10 +1108,7 @@
       return;
     }
     if (option.action === "repo") {
-      state.currentView = "repo";
-      state.selectedRepo = option.target;
-      state.repoTab = "overview";
-      renderApp();
+      openRepoView(option.target, "overview");
       input.value = "";
       return;
     }
@@ -1718,13 +1997,13 @@
     if (state.currentView === "repo" && !state.repoList.loaded && !state.repoList.error) {
       return;
     }
-    renderApp();
+    renderAppPreservingDraftFocus();
   }
 
   function applyOverviewError(error, options = {}) {
     state.overviewError = error.message;
     if (state.currentView === "usage") {
-      renderApp();
+      renderAppPreservingDraftFocus();
     } else if (!state.overview && error && error.code === "work_db_repair_required") {
       announce(error.message);
       document.getElementById("page-body").innerHTML = buildMaintenanceNotice(error.message, error.repairCommand);
@@ -2045,6 +2324,11 @@
   }
 
   function openRepoView(repoSlug, tab = "overview") {
+    clearDraftsForRouteTransition({
+      view: "repo",
+      repoSlug: repoSlug || "",
+      repoTab: defaultString(tab, "overview"),
+    });
     state.currentView = "repo";
     state.repoTab = defaultString(tab, "overview");
     state.selectedRepo = repoSlug || "";
@@ -3186,6 +3470,7 @@
     const inputShare = totals && Number(totals.total_tokens || 0) > 0 ? (inputSide * 100) / Number(totals.total_tokens || 0) : 0;
     const outputShare = totals && Number(totals.total_tokens || 0) > 0 ? (outputSide * 100) / Number(totals.total_tokens || 0) : 0;
     const filters = state.usage.filters || defaultUsageState().filters;
+    const draftScope = usageFiltersDraftScope();
 
     ensureBodyStructure("usage", `
       <section class="surface">
@@ -3196,7 +3481,7 @@
           </div>
           <span id="usage-status-pill" class="status-pill">${escapeHTML(state.usage.loading ? "Refreshing" : "Ready")}</span>
         </div>
-        <form id="usage-filters-form" class="usage-filter-form">
+        <form id="usage-filters-form" class="usage-filter-form" data-draft-scope="${escapeHTML(draftScope)}">
           <div class="config-grid usage-filter-grid">
             <label class="selector config-selector">
               <span>Since</span>
@@ -3399,6 +3684,7 @@
       maxHeight: "420px",
       emptyMessage: state.usage.loading ? "Loading top sessions..." : defaultString(state.usage.error, "No sessions matched these usage filters."),
     });
+    restoreDraftScope(draftScope, document.getElementById("usage-filters-form"));
   }
 
   function filteredIssueQueueItems() {
@@ -3452,6 +3738,7 @@
   function renderIssuesPage() {
     const items = filteredIssueQueueItems();
     const selected = selectedIssueQueueItemFrom(items);
+    const draftScope = issuesDetailDraftScope(selected);
     ensureBodyStructure("issues", `
       <section class="layout-two-col">
         <div class="surface">
@@ -3537,7 +3824,7 @@
             <p>Override priority or schedule directly from the assistant workspace.</p>
           </div>
         </div>
-        <div class="config-grid">
+        <div class="config-grid" data-draft-scope="${escapeHTML(draftScope)}">
           <label class="selector config-selector">
             <span>Priority</span>
             <select id="issue-detail-priority">
@@ -3578,6 +3865,7 @@
         ${selected.triage_error ? `<div class="config-notice">${escapeHTML(selected.triage_error)}</div>` : ""}
       </div>
     `;
+    restoreDraftScope(draftScope, host);
   }
 
   function taskLaunchKindLabel(value) {
@@ -3683,6 +3971,7 @@
       host.innerHTML = '<div class="status-pill">No finding selected.</div>';
       return;
     }
+    const draftScope = taskFindingDraftScope(repo, finding);
     host.innerHTML = `
       <div class="drawer-summary">
         <div>
@@ -3698,7 +3987,7 @@
           <div class="drawer-summary-card"><span class="drawer-label">Promoted Task</span><span class="drawer-value">${escapeHTML(findingPromotedTaskLabel(finding))}</span></div>
         </div>
       </div>
-      <div class="config-grid">
+      <div class="config-grid" data-draft-scope="${escapeHTML(draftScope)}">
         <label class="selector config-selector config-field-wide">
           <span>Title</span>
           <input id="task-finding-title" type="text" value="${escapeHTML(defaultString(finding.title, ""))}" />
@@ -3740,6 +4029,7 @@
         <article class="queue-item"><span class="queue-label">Route / Page</span><p class="queue-copy">${escapeHTML([defaultString(finding.route, ""), defaultString(finding.page, "")].filter(Boolean).join(" / ") || "(none)")}</p></article>
       </div>
     `;
+    restoreDraftScope(draftScope, host);
   }
 
   function findingImportSessionRows(items) {
@@ -3789,6 +4079,7 @@
       `;
       return;
     }
+    const draftScope = findingImportCandidateDraftScope(repo, session, candidate);
     host.innerHTML = `
       <div class="drawer-summary">
         <div>
@@ -3797,7 +4088,7 @@
           <p class="drawer-copy">${escapeHTML(defaultString(candidate.summary, "(no summary)"))}</p>
         </div>
       </div>
-      <div class="config-grid">
+      <div class="config-grid" data-draft-scope="${escapeHTML(draftScope)}">
         <label class="selector config-selector config-field-wide">
           <span>Title</span>
           <input id="task-import-candidate-title" type="text" value="${escapeHTML(defaultString(candidate.title, ""))}" />
@@ -3834,6 +4125,7 @@
       </div>
       ${session.parse_error ? `<div class="config-notice">${escapeHTML(session.parse_error)}</div>` : ""}
     `;
+    restoreDraftScope(draftScope, host);
   }
 
   function renderTaskInvestigationDetail(detail) {
@@ -4688,6 +4980,7 @@
   function renderRepoSchedulerSearchPanel(repo) {
     const host = document.getElementById("repo-scheduler-search-panel");
     if (!host) return;
+    const draftScope = repoSchedulerSearchDraftScope(repo);
     host.innerHTML = `
       <div class="surface-head">
         <div>
@@ -4696,7 +4989,7 @@
         </div>
         <span class="status-pill">${escapeHTML(defaultString(repo.issue_pick_mode, "manual"))}</span>
       </div>
-      <form id="repo-scheduler-search-form" class="scheduler-search-form">
+      <form id="repo-scheduler-search-form" class="scheduler-search-form" data-draft-scope="${escapeHTML(draftScope)}">
         <label class="selector config-field-wide">
           <span>GitHub Issue Search</span>
           <input id="repo-scheduler-search-query" type="text" value="${escapeHTML(state.repoScheduler.query)}" placeholder="label:bug assignee:octocat sort:updated-desc" />
@@ -4707,6 +5000,7 @@
       <div id="repo-scheduler-search-results"></div>
     `;
     renderRepoSchedulerSearchResults(repo);
+    restoreDraftScope(draftScope, document.getElementById("repo-scheduler-search-form"));
   }
 
   function renderRepoSchedulerBoard(repo) {
@@ -4751,6 +5045,9 @@
         });
       },
       onCardClick(card) {
+        if (defaultString(selectedTrackedIssuePlannedItem(selectedRepoSummary()) && selectedTrackedIssuePlannedItem(selectedRepoSummary()).id, "") !== defaultString(card && card.id, "")) {
+          clearDraftScope(repoSchedulerDetailDraftScope(selectedRepoSummary(), selectedTrackedIssuePlannedItem(selectedRepoSummary())));
+        }
         state.repoScheduler.selectedPlannedItemID = card.id;
         renderRepoControlsPage(selectedRepoSummary());
       },
@@ -4766,6 +5063,7 @@
       return;
     }
     const issueNumber = schedulerIssueNumber(item.target_url);
+    const draftScope = repoSchedulerDetailDraftScope(repo, item);
     host.innerHTML = `
       <div class="drawer-summary">
         <div>
@@ -4782,7 +5080,7 @@
         </div>
       </div>
       ${item.last_error ? `<div class="config-notice">${escapeHTML(item.last_error)}</div>` : ""}
-      <div class="scheduler-detail-form">
+      <div class="scheduler-detail-form" data-draft-scope="${escapeHTML(draftScope)}">
         <label class="selector">
           <span>Title</span>
           <input id="repo-scheduler-detail-title" type="text" value="${escapeHTML(item.title)}" />
@@ -4816,6 +5114,7 @@
         </div>
       </div>
     `;
+    restoreDraftScope(draftScope, host);
   }
 
   function renderRepoOverviewPage(repo) {
@@ -4979,7 +5278,9 @@
       host.innerHTML = '<div class="status-pill">Select a tracked issue to edit.</div>';
       return;
     }
+    const draftScope = repoControlsIssueDraftScope();
     state.issueForm = Teryx.form("#issue-form", {
+      id: "repo-controls-issue-form",
       action: "#",
       method: "post",
       layout: "vertical",
@@ -5017,6 +5318,7 @@
             clear_schedule: !data.schedule_at,
           }),
         }).then((payload) => {
+          clearDraftScope(draftScope);
           mergeRepoState(payload.state);
           toast("success", "Issue updated", `Issue #${state.selectedIssue} saved.`);
         }).catch((error) => {
@@ -5025,6 +5327,8 @@
         return false;
       },
     });
+    state.issueForm.el.setAttribute("data-draft-scope", draftScope);
+    restoreDraftScope(draftScope, state.issueForm.el);
   }
 
   function renderPlannedForm() {
@@ -5038,7 +5342,9 @@
       return;
     }
     const launchDefault = repo.repo_mode === "local" ? "local_work" : "github_issue";
+    const draftScope = repoControlsPlannedDraftScope();
     state.plannedForm = Teryx.form("#planned-form", {
+      id: "repo-controls-planned-form",
       action: "#",
       method: "post",
       layout: "vertical",
@@ -5084,6 +5390,7 @@
             launch_kind: data.launch_kind,
           }),
         }).then((payload) => {
+          clearDraftScope(draftScope);
           mergeRepoState(payload.state);
           if (state.plannedForm && typeof state.plannedForm.reset === "function") {
             state.plannedForm.reset();
@@ -5095,6 +5402,8 @@
         return false;
       },
     });
+    state.plannedForm.el.setAttribute("data-draft-scope", draftScope);
+    restoreDraftScope(draftScope, state.plannedForm.el);
   }
 
   function scoutStatusLabel(status) {
@@ -5947,7 +6256,7 @@
       resetScoutItemsState(state.overview.repos[index]);
     }
     if (options.rerender !== false) {
-      renderApp();
+      renderAppPreservingDraftFocus();
     }
   }
 
@@ -5959,7 +6268,7 @@
     repo.updated_at = updatedState.updated_at;
     refreshCounts(repo, updatedState);
     reconcileRepoScheduler(repo);
-    renderApp();
+    renderAppPreservingDraftFocus();
   }
 
   function initLogDrawer() {
@@ -6504,6 +6813,7 @@
       }
       const onboardButton = event.target.closest("[data-open-onboard]");
       if (onboardButton) {
+        clearDraftsForRouteTransition({ view: "home", repoSlug: state.selectedRepo, repoTab: state.repoTab });
         state.currentView = "home";
         renderApp();
         window.setTimeout(() => {
@@ -6516,6 +6826,7 @@
       if (!button) return;
       const nextView = button.getAttribute("data-nav-view");
       if (nextView && nextView !== "repo") {
+        clearDraftsForRouteTransition({ view: nextView, repoSlug: state.selectedRepo, repoTab: state.repoTab });
         state.currentView = nextView;
         ensureViewData(nextView);
         renderApp();
@@ -6546,6 +6857,7 @@
       const group = button.getAttribute("data-tab-group");
       const tabID = button.getAttribute("data-tab-id") || "";
       if (group === "repo") {
+        clearDraftsForRouteTransition({ view: "repo", repoSlug: state.selectedRepo, repoTab: tabID || "overview" });
         state.repoTab = tabID || "overview";
         renderApp();
         return;
@@ -6595,6 +6907,9 @@
           const kind = rowSelect.getAttribute("data-row-select-kind");
           const value = rowSelect.getAttribute("data-row-select-id") || "";
           if (kind === "issue") {
+            if (defaultString(selectedIssueQueueItem() && selectedIssueQueueItem().id, "") !== value) {
+              clearDraftScope(issuesDetailDraftScope(selectedIssueQueueItem()));
+            }
             state.issueQueue.selectedID = value;
             renderIssuesPage();
             return;
@@ -6604,11 +6919,17 @@
             return;
           }
           if (kind === "finding") {
+            if (defaultString(selectedTaskFinding() && selectedTaskFinding().id, "") !== value) {
+              clearDraftScope(taskFindingDraftScope(selectedTaskRepoSummary(), selectedTaskFinding()));
+            }
             state.taskFindings.selectedFindingID = value;
             renderInvestigationsPage();
             return;
           }
           if (kind === "import-session") {
+            if (defaultString(selectedFindingImportSession() && selectedFindingImportSession().id, "") !== value) {
+              clearDraftScope(findingImportCandidateDraftScope(selectedTaskRepoSummary(), selectedFindingImportSession(), selectedFindingImportCandidate()));
+            }
             state.findingImports.selectedSessionID = value;
             state.findingImports.selectedCandidateID = "";
             const session = selectedFindingImportSession();
@@ -6619,6 +6940,9 @@
             return;
           }
           if (kind === "import-candidate") {
+            if (defaultString(selectedFindingImportCandidate() && selectedFindingImportCandidate().candidate_id, "") !== value) {
+              clearDraftScope(findingImportCandidateDraftScope(selectedTaskRepoSummary(), selectedFindingImportSession(), selectedFindingImportCandidate()));
+            }
             state.findingImports.selectedCandidateID = value;
             renderInvestigationsPage();
             return;
@@ -6650,7 +6974,11 @@
 
       const issueSelectButton = event.target.closest("[data-issue-select]");
       if (issueSelectButton) {
-        state.issueQueue.selectedID = issueSelectButton.getAttribute("data-issue-select") || "";
+        const nextIssueID = issueSelectButton.getAttribute("data-issue-select") || "";
+        if (defaultString(selectedIssueQueueItem() && selectedIssueQueueItem().id, "") !== nextIssueID) {
+          clearDraftScope(issuesDetailDraftScope(selectedIssueQueueItem()));
+        }
+        state.issueQueue.selectedID = nextIssueID;
         renderIssuesPage();
         return;
       }
@@ -6703,7 +7031,11 @@
 
       const schedulerOpenButton = event.target.closest("[data-scheduler-open]");
       if (schedulerOpenButton) {
-        state.repoScheduler.selectedPlannedItemID = schedulerOpenButton.getAttribute("data-scheduler-open") || "";
+        const nextPlannedItemID = schedulerOpenButton.getAttribute("data-scheduler-open") || "";
+        if (defaultString(selectedTrackedIssuePlannedItem(selectedRepoSummary()) && selectedTrackedIssuePlannedItem(selectedRepoSummary()).id, "") !== nextPlannedItemID) {
+          clearDraftScope(repoSchedulerDetailDraftScope(selectedRepoSummary(), selectedTrackedIssuePlannedItem(selectedRepoSummary())));
+        }
+        state.repoScheduler.selectedPlannedItemID = nextPlannedItemID;
         renderRepoControlsPage(selectedRepoSummary());
         return;
       }
@@ -6725,6 +7057,7 @@
             priority: result.priority,
           }),
         }).then((payload) => {
+          clearDraftScope(repoSchedulerDetailDraftScope(repo, selectedTrackedIssuePlannedItem(repo)));
           state.repoScheduler.selectedPlannedItemID = payload.planned_item.id;
           mergeRepoState(payload.state);
           toast("success", "Tracked issue scheduled", payload.planned_item.title);
@@ -6737,6 +7070,7 @@
       const schedulerSaveButton = event.target.closest("[data-scheduler-save]");
       if (schedulerSaveButton) {
         const itemID = schedulerSaveButton.getAttribute("data-scheduler-save") || "";
+        const draftScope = repoSchedulerDetailDraftScope(selectedRepoSummary(), selectedTrackedIssuePlannedItem(selectedRepoSummary()));
         const titleInput = document.getElementById("repo-scheduler-detail-title");
         const priorityInput = document.getElementById("repo-scheduler-detail-priority");
         const workTypeInput = document.getElementById("repo-scheduler-detail-work-type");
@@ -6753,6 +7087,7 @@
             clear_schedule: !(scheduleInput && String(scheduleInput.value || "").trim()),
           }),
         }).then((payload) => {
+          clearDraftScope(draftScope);
           state.repoScheduler.selectedPlannedItemID = payload.planned_item.id;
           mergeRepoState(payload.state);
           toast("success", "Scheduled issue updated", payload.planned_item.title);
@@ -6765,6 +7100,7 @@
       const schedulerDeleteButton = event.target.closest("[data-scheduler-delete]");
       if (schedulerDeleteButton) {
         const itemID = schedulerDeleteButton.getAttribute("data-scheduler-delete") || "";
+        clearDraftScope(repoSchedulerDetailDraftScope(selectedRepoSummary(), selectedTrackedIssuePlannedItem(selectedRepoSummary())));
         api(`/api/v1/planned-items/${encodeURIComponent(itemID)}`, {
           method: "DELETE",
         }).then((payload) => {
@@ -6780,6 +7116,7 @@
       const schedulerLaunchButton = event.target.closest("[data-scheduler-launch]");
       if (schedulerLaunchButton) {
         const itemID = schedulerLaunchButton.getAttribute("data-scheduler-launch") || "";
+        clearDraftScope(repoSchedulerDetailDraftScope(selectedRepoSummary(), selectedTrackedIssuePlannedItem(selectedRepoSummary())));
         api(`/api/v1/planned-items/${encodeURIComponent(itemID)}/launch-now`, {
           method: "POST",
         }).then((payload) => {
@@ -6796,6 +7133,7 @@
         const issueID = issueSaveButton.getAttribute("data-issue-save") || "";
         const selected = (state.issueQueue.items || []).find((item) => item.id === issueID);
         if (!selected) return;
+        const draftScope = issuesDetailDraftScope(selected);
         const priorityInput = document.getElementById("issue-detail-priority");
         const scheduleInput = document.getElementById("issue-detail-schedule");
         const deferredInput = document.getElementById("issue-detail-deferred");
@@ -6811,6 +7149,7 @@
             clear_schedule: !scheduleValue,
           }),
         }).then((payload) => {
+          clearDraftScope(draftScope);
           if (payload.state) {
             mergeRepoState(payload.state);
           }
@@ -6827,6 +7166,7 @@
         const issueID = issueClearScheduleButton.getAttribute("data-issue-clear-schedule") || "";
         const selected = (state.issueQueue.items || []).find((item) => item.id === issueID);
         if (!selected) return;
+        clearDraftScope(issuesDetailDraftScope(selected));
         api(`/api/v1/repos/${selected.repo_slug}/issues/${selected.source_number}`, {
           method: "PATCH",
           body: JSON.stringify({
@@ -7044,6 +7384,7 @@
           severity: String(document.getElementById("task-finding-severity") && document.getElementById("task-finding-severity").value || "medium").trim(),
           work_type: String(document.getElementById("task-finding-work-type") && document.getElementById("task-finding-work-type").value || "feature").trim(),
         }).then(() => {
+          clearDraftScope(taskFindingDraftScope(repo, finding));
           toast("success", "Finding saved", finding.title || findingID);
         });
         return;
@@ -7053,8 +7394,10 @@
       if (taskFindingPromoteButton) {
         const repo = selectedTaskRepoSummary();
         const findingID = taskFindingPromoteButton.getAttribute("data-task-finding-promote") || "";
-        if (!repo || !findingID) return;
+        const finding = selectedTaskFinding();
+        if (!repo || !findingID || !finding) return;
         mutateTaskFinding(repo.repo_slug, findingID, "promote").then((payload) => {
+          clearDraftScope(taskFindingDraftScope(repo, finding));
           loadApprovals({ silent: true });
           toast("success", "Finding promoted", payload.planned_item && payload.planned_item.id || findingID);
         });
@@ -7065,8 +7408,10 @@
       if (taskFindingDismissButton) {
         const repo = selectedTaskRepoSummary();
         const findingID = taskFindingDismissButton.getAttribute("data-task-finding-dismiss") || "";
-        if (!repo || !findingID) return;
+        const finding = selectedTaskFinding();
+        if (!repo || !findingID || !finding) return;
         mutateTaskFinding(repo.repo_slug, findingID, "dismiss").then(() => {
+          clearDraftScope(taskFindingDraftScope(repo, finding));
           toast("success", "Finding dismissed", findingID);
         });
         return;
@@ -7077,7 +7422,8 @@
         const repo = selectedTaskRepoSummary();
         const session = selectedFindingImportSession();
         const candidateID = taskImportCandidateSaveButton.getAttribute("data-task-import-candidate-save") || "";
-        if (!repo || !session || !candidateID) return;
+        const candidate = selectedFindingImportCandidate();
+        if (!repo || !session || !candidateID || !candidate) return;
         mutateFindingImportCandidate(repo.repo_slug, session.id, candidateID, "PATCH", {
           title: String(document.getElementById("task-import-candidate-title") && document.getElementById("task-import-candidate-title").value || "").trim(),
           summary: String(document.getElementById("task-import-candidate-summary") && document.getElementById("task-import-candidate-summary").value || "").trim(),
@@ -7086,6 +7432,7 @@
           severity: String(document.getElementById("task-import-candidate-severity") && document.getElementById("task-import-candidate-severity").value || "medium").trim(),
           work_type: String(document.getElementById("task-import-candidate-work-type") && document.getElementById("task-import-candidate-work-type").value || "feature").trim(),
         }).then(() => {
+          clearDraftScope(findingImportCandidateDraftScope(repo, session, candidate));
           toast("success", "Candidate saved", candidateID);
         });
         return;
@@ -7096,8 +7443,10 @@
         const repo = selectedTaskRepoSummary();
         const session = selectedFindingImportSession();
         const candidateID = taskImportCandidatePromoteButton.getAttribute("data-task-import-candidate-promote") || "";
-        if (!repo || !session || !candidateID) return;
+        const candidate = selectedFindingImportCandidate();
+        if (!repo || !session || !candidateID || !candidate) return;
         mutateFindingImportCandidate(repo.repo_slug, session.id, candidateID, "POST", "promote").then(() => {
+          clearDraftScope(findingImportCandidateDraftScope(repo, session, candidate));
           loadTaskFindings(repo.repo_slug, { silent: true });
           toast("success", "Candidate promoted", candidateID);
         });
@@ -7109,8 +7458,10 @@
         const repo = selectedTaskRepoSummary();
         const session = selectedFindingImportSession();
         const candidateID = taskImportCandidateDropButton.getAttribute("data-task-import-candidate-drop") || "";
-        if (!repo || !session || !candidateID) return;
+        const candidate = selectedFindingImportCandidate();
+        if (!repo || !session || !candidateID || !candidate) return;
         mutateFindingImportCandidate(repo.repo_slug, session.id, candidateID, "POST", "drop").then(() => {
+          clearDraftScope(findingImportCandidateDraftScope(repo, session, candidate));
           toast("success", "Candidate dropped", candidateID);
         });
         return;
@@ -7386,6 +7737,7 @@
     });
 
     document.getElementById("page-body").addEventListener("change", (event) => {
+      captureDraftField(event.target);
       const scoutToggle = event.target.getAttribute("data-scout-toggle");
       if (scoutToggle) {
         toggleScoutItemSelection(scoutToggle, Boolean(event.target.checked));
@@ -7393,7 +7745,13 @@
         return;
       }
       if (event.target.id === "task-composer-repo") {
-        state.taskComposer.repoSlug = String(event.target.value || "");
+        const nextRepoSlug = String(event.target.value || "");
+        clearDraftsForRouteTransition({
+          view: "investigations",
+          repoSlug: nextRepoSlug,
+          repoTab: state.repoTab,
+        });
+        state.taskComposer.repoSlug = nextRepoSlug;
         state.selectedRepo = state.taskComposer.repoSlug;
         state.scoutItems = defaultScoutItemsState();
         renderInvestigationsPage();
@@ -7432,7 +7790,11 @@
         return;
       }
       if (event.target.id === "issue-select") {
-        state.selectedIssue = String(event.target.value || "");
+        const nextIssue = String(event.target.value || "");
+        if (state.selectedIssue !== nextIssue) {
+          clearDraftScope(repoControlsIssueDraftScope());
+        }
+        state.selectedIssue = nextIssue;
         renderIssueForm(selectedIssueRecord());
         return;
       }
@@ -7496,6 +7858,7 @@
           method: "POST",
           body: JSON.stringify({ query }),
         }).then((payload) => {
+          clearDraftScope(repoSchedulerSearchDraftScope(repo));
           state.repoScheduler.searching = false;
           state.repoScheduler.error = "";
           state.repoScheduler.query = payload.query || query;
@@ -7512,6 +7875,7 @@
     });
 
     document.getElementById("page-body").addEventListener("input", (event) => {
+      captureDraftField(event.target);
       const repoOnboardField = event.target.getAttribute("data-repo-onboard-field");
       if (repoOnboardField) {
         state.repoOnboarding.draft[repoOnboardField] = String(event.target.value || "");
@@ -7568,6 +7932,7 @@
         phase: String(document.getElementById("usage-filter-phase") && document.getElementById("usage-filter-phase").value || "").trim(),
         model: String(document.getElementById("usage-filter-model") && document.getElementById("usage-filter-model").value || "").trim(),
       };
+      clearDraftScope(usageFiltersDraftScope());
       loadUsage();
     });
 
@@ -7596,6 +7961,7 @@
       const resetButton = event.target.closest("[data-usage-reset]");
       if (!resetButton) return;
       event.preventDefault();
+      clearDraftScope(usageFiltersDraftScope());
       state.usage = defaultUsageState();
       loadUsage();
     });

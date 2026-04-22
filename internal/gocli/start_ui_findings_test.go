@@ -308,6 +308,41 @@ func TestStartUIAppTasksPageReferencesFindingsInboxAndMarkdownImport(t *testing.
 	}
 }
 
+func TestStartUIAppPreservesDraftsForRefreshableForms(t *testing.T) {
+	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
+	if err != nil {
+		t.Fatalf("read app asset: %v", err)
+	}
+	content := string(appBody)
+	for _, needle := range []string{
+		"formDrafts: {}",
+		"function captureDraftField(field)",
+		"function restoreDraftScope(scope, root = document)",
+		"function clearDraftScope(scope)",
+		"function captureDraftFocusSnapshot(root = document)",
+		"function restoreDraftFocusSnapshot(snapshot, root = document)",
+		"function renderAppPreservingDraftFocus()",
+		"function usageFiltersDraftScope()",
+		"function issuesDetailDraftScope(issue)",
+		"function repoControlsIssueDraftScope()",
+		"function repoControlsPlannedDraftScope()",
+		"function repoSchedulerSearchDraftScope(repo)",
+		"function repoSchedulerDetailDraftScope(repo, item)",
+		"function taskFindingDraftScope(repo, finding)",
+		"function findingImportCandidateDraftScope(repo, session, candidate)",
+		`<form id="usage-filters-form" class="usage-filter-form" data-draft-scope="${escapeHTML(draftScope)}">`,
+		`state.issueForm.el.setAttribute("data-draft-scope", draftScope);`,
+		`state.plannedForm.el.setAttribute("data-draft-scope", draftScope);`,
+		"captureDraftField(event.target);",
+		"clearDraftScope(usageFiltersDraftScope());",
+		"clearDraftScope(repoSchedulerSearchDraftScope(repo));",
+	} {
+		if !strings.Contains(content, needle) {
+			t.Fatalf("expected app asset to contain %q", needle)
+		}
+	}
+}
+
 func mustJSONRequest(t *testing.T, method string, url string, body string) *http.Request {
 	t.Helper()
 	request, err := http.NewRequest(method, url, strings.NewReader(body))
