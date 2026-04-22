@@ -7251,6 +7251,9 @@ func startUITestRequireText(t *testing.T, output string, needle string, scenario
 
 func startUITestChromePath(t *testing.T) string {
 	t.Helper()
+	if os.Getenv("GITHUB_ACTIONS") == "true" {
+		return ""
+	}
 	for _, candidate := range []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser"} {
 		if path, err := exec.LookPath(candidate); err == nil {
 			return path
