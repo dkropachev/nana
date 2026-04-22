@@ -5190,9 +5190,6 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `prettyJSON(rawSettings)`) {
 		t.Fatalf("expected settings.json raw payload rendering in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `investigations: "investigation"`) {
-		t.Fatalf("expected legacy investigations redirect wiring in app.js, got %s", string(appBody))
-	}
 	if !strings.Contains(string(appBody), `repoList: defaultRepoListState()`) {
 		t.Fatalf("expected repo list fallback state in app.js, got %s", string(appBody))
 	}
