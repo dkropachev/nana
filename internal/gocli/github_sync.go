@@ -160,6 +160,9 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 		CheckpointPath:   filepath.Join(runDir, "leader-checkpoint.json"),
 		StepKey:          "github-leader",
 		ResumeStrategy:   codexResumeConversation,
+		UsageRunID:       manifest.RunID,
+		UsageBackend:     "github",
+		UsageSandboxPath: manifest.SandboxPath,
 		Env:              append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, apiBaseURL), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
 		RateLimitPolicy:  codexRateLimitPolicyDefault(options.RateLimitPolicy),
 		OnPause: func(info codexRateLimitPauseInfo) {

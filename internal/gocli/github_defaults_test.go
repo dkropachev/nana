@@ -307,8 +307,8 @@ func TestGithubWorkRetrospective(t *testing.T) {
 	if !strings.Contains(output, "Gauss: role=architect class=reviewer tokens=4321") {
 		t.Fatalf("missing thread usage row: %q", output)
 	}
-	if _, err := os.Stat(filepath.Join(managedRepoRoot, "runs", runID, "thread-usage.json")); err != nil {
-		t.Fatalf("expected thread-usage artifact: %v", err)
+	if _, err := os.Stat(filepath.Join(managedRepoRoot, "runs", runID, "thread-usage.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no thread-usage artifact, got err=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(managedRepoRoot, "runs", runID, "retrospective.md")); err != nil {
 		t.Fatalf("expected retrospective artifact: %v", err)
@@ -2594,13 +2594,18 @@ func TestGithubWorkStatusJSONIncludesCompletionFields(t *testing.T) {
 	}
 }
 
-func TestWriteThreadUsageArtifactReadsScopedGithubCodexHome(t *testing.T) {
+func TestSyncUsageForRunReadsScopedGithubCodexHome(t *testing.T) {
 	home := t.TempDir()
+	t.Setenv("HOME", home)
 	sandboxPath := filepath.Join(home, "sandbox")
 	runDir := filepath.Join(home, "run")
+	manifestPath := filepath.Join(runDir, "manifest.json")
 	sessionsDir := filepath.Join(sandboxPath, ".nana", "work", "codex-home", "github-hardener-round-1", "sessions", "2026", "04", "19")
 	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
 		t.Fatalf("mkdir sessions: %v", err)
+	}
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(sessionsDir, "rollout.jsonl"), []byte(strings.Join([]string{
 		`{"timestamp":"2026-04-19T12:00:01.000Z","type":"session_meta","payload":{"agent_nickname":"RoundOne","agent_role":"executor"}}`,
@@ -2609,19 +2614,31 @@ func TestWriteThreadUsageArtifactReadsScopedGithubCodexHome(t *testing.T) {
 	}, "\n")), 0o644); err != nil {
 		t.Fatalf("write rollout: %v", err)
 	}
-	artifact, err := writeThreadUsageArtifact(runDir, sandboxPath)
+	manifest := githubWorkManifest{
+		RunID:           "gh-usage-scope",
+		RepoSlug:        "acme/widget",
+		RepoOwner:       "acme",
+		RepoName:        "widget",
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: filepath.Join(sandboxPath, "repo"),
+		UpdatedAt:       "2026-04-19T12:00:11Z",
+		TargetKind:      "issue",
+	}
+	if err := writeGithubJSON(manifestPath, manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+		t.Fatalf("indexGithubWorkRunManifest: %v", err)
+	}
+	if err := syncUsageForRun(manifest.RunID); err != nil {
+		t.Fatalf("syncUsageForRun: %v", err)
+	}
+	artifact, err := loadGithubThreadUsageArtifactFromSQLite(manifest.RunID)
 	if err != nil {
-		t.Fatalf("writeThreadUsageArtifact: %v", err)
+		t.Fatalf("loadGithubThreadUsageArtifactFromSQLite: %v", err)
 	}
 	if artifact.TotalTokens != 321 || len(artifact.Rows) != 1 || artifact.Rows[0].Nickname != "RoundOne" {
 		t.Fatalf("unexpected thread usage artifact: %+v", artifact)
-	}
-	var history githubThreadUsageHistoryArtifact
-	if err := readGithubJSON(filepath.Join(runDir, threadUsageHistoryArtifactName), &history); err != nil {
-		t.Fatalf("read thread-usage-history artifact: %v", err)
-	}
-	if len(history.Rows) != 1 || len(history.Rows[0].Checkpoints) != 1 || history.Rows[0].Checkpoints[0].TotalTokens != 321 {
-		t.Fatalf("unexpected thread-usage-history artifact: %+v", history)
 	}
 }
 

@@ -1767,6 +1767,9 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 		return nil, err
 	} else if updated {
 		if err := writeGithubJSON(startWorkStatePath(state.SourceRepo), state); err != nil {
+			if os.IsPermission(err) {
+				return &state, nil
+			}
 			return nil, err
 		}
 	}

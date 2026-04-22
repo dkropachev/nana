@@ -780,7 +780,6 @@ func launchStartUISupervisor(cwd string, options startOptions) (*startUISupervis
 
 	api := &startUIAPI{cwd: cwd, allowedWebOrigin: webURL}
 	api.loadPersistedOverviewCache()
-	api.loadPersistedUsageIndex()
 	apiServer := &http.Server{Handler: api.routes()}
 	webServer := &http.Server{Handler: startUIWebHandler(apiURL)}
 	prewarmCtx, prewarmCancel := context.WithCancel(context.Background())
@@ -846,9 +845,6 @@ func (h *startUIAPI) prewarmStartUIData() error {
 	errs := []error{}
 	if _, err := h.buildOverview(); err != nil {
 		errs = append(errs, fmt.Errorf("overview: %w", err))
-	}
-	if _, err := h.loadUsageIndex(); err != nil {
-		errs = append(errs, fmt.Errorf("usage index: %w", err))
 	}
 	return errors.Join(errs...)
 }
@@ -1969,10 +1965,14 @@ func startUIUsageCacheVersion(index startUIUsageIndexState, options usageOptions
 	}, "\x00")
 }
 
+// startUIUsageIndexPath is retained only as a compatibility-import location for
+// old Start UI usage snapshots. Live usage state is read from SQLite.
 func startUIUsageIndexPath() string {
 	return filepath.Join(githubNanaHome(), "usage", "state.json")
 }
 
+// legacyStartUIUsageIndexPath is retained only as a compatibility-import
+// location for pre-SQLite Start UI usage snapshots.
 func legacyStartUIUsageIndexPath() string {
 	return filepath.Join(githubNanaHome(), "start", "ui", "usage-index.json")
 }
@@ -2008,18 +2008,6 @@ func (h *startUIAPI) loadPersistedOverviewCache() {
 	h.invalidateEventsCache()
 }
 
-func (h *startUIAPI) loadPersistedUsageIndex() {
-	state := readStartUIUsageIndexState(startUIUsageIndexPath())
-	if strings.TrimSpace(state.Version) == "" {
-		return
-	}
-	h.usageIndexMu.Lock()
-	defer h.usageIndexMu.Unlock()
-	h.usageIndexCache.valid = true
-	h.usageIndexCache.checkedAt = time.Time{}
-	h.usageIndexCache.value = state
-}
-
 func (h *startUIAPI) peekUsageDataVersion() string {
 	h.usageIndexMu.Lock()
 	if h.usageIndexCache.valid {
@@ -2028,21 +2016,7 @@ func (h *startUIAPI) peekUsageDataVersion() string {
 		return version
 	}
 	h.usageIndexMu.Unlock()
-
-	state := readStartUIUsageIndexState(startUIUsageIndexPath())
-	version := strings.TrimSpace(state.Version)
-	if version == "" {
-		return ""
-	}
-
-	h.usageIndexMu.Lock()
-	if !h.usageIndexCache.valid {
-		h.usageIndexCache.valid = true
-		h.usageIndexCache.checkedAt = time.Time{}
-		h.usageIndexCache.value = state
-	}
-	h.usageIndexMu.Unlock()
-	return version
+	return loadUsageSQLiteVersion()
 }
 
 func (h *startUIAPI) loadUsageIndex() (startUIUsageIndexState, error) {
@@ -2055,7 +2029,7 @@ func (h *startUIAPI) loadUsageIndex() (startUIUsageIndexState, error) {
 	}
 	h.usageIndexMu.Unlock()
 
-	index, err := refreshStartUIUsageIndex(h.cwd, startUIUsageIndexPath())
+	index, err := refreshStartUIUsageIndex(h.cwd, "")
 	if err != nil {
 		return startUIUsageIndexState{}, err
 	}
@@ -2075,7 +2049,7 @@ func (h *startUIAPI) loadUsageIndex() (startUIUsageIndexState, error) {
 
 func (h *startUIAPI) loadUsageIndexForReport(options usageOptions) (startUIUsageIndexState, error) {
 	if strings.TrimSpace(options.Since) != "" {
-		index, err := refreshStartUIUsageIndex(h.cwd, startUIUsageIndexPath())
+		index, err := refreshStartUIUsageIndex(h.cwd, "")
 		if err != nil {
 			return startUIUsageIndexState{}, err
 		}
@@ -2126,10 +2100,6 @@ func readStartUIPersistedOverviewCacheState(path string) startUIPersistedOvervie
 		return startUIPersistedOverviewCacheState{}
 	}
 	return state
-}
-
-func writeStartUIUsageIndexState(path string, value startUIUsageIndexState) error {
-	return writeStartUIRuntimeJSONAtomically(path, value)
 }
 
 func writeStartUIPersistedOverviewCacheState(path string, value startUIPersistedOverviewCacheState) error {
@@ -2192,7 +2162,7 @@ func startUIUsageSourceForReport(index startUIUsageIndexState, options usageOpti
 			Coverage:            usageCoverageFull,
 		}, nil
 	}
-	source, err := loadWindowedUsageReportSource(options)
+	source, err := loadWindowedUsageReportSourceFromSQLite(options, index.SessionRootsScanned)
 	if err != nil {
 		return usageReportSource{}, err
 	}
@@ -2349,10 +2319,12 @@ func (h *startUIAPI) unsubscribeEvents(subscriber chan map[string]any) {
 }
 
 func (h *startUIAPI) notifyEventsBroadcaster() {
-	h.ensureEventsBroadcasterStarted()
 	h.eventsStreamMu.Lock()
 	notifyCh := h.eventsNotifyCh
 	h.eventsStreamMu.Unlock()
+	if notifyCh == nil {
+		return
+	}
 	select {
 	case notifyCh <- struct{}{}:
 	default:
@@ -2440,6 +2412,13 @@ func (h *startUIAPI) expireOverviewSectionsForChangedDependencies(previousDeps [
 	if len(previousDeps) == 0 {
 		h.expireOverviewSectionCaches()
 		return
+	}
+	currentLocalWorkSnapshot := h.persistentLocalWorkReadSnapshot()
+	h.localWorkReadMu.Lock()
+	resetLocalWorkRead := h.localWorkRead != nil && h.localWorkToken != currentLocalWorkSnapshot.token
+	h.localWorkReadMu.Unlock()
+	if resetLocalWorkRead {
+		h.resetPersistentLocalWorkReadStore()
 	}
 	h.sectionCacheMu.Lock()
 	defer h.sectionCacheMu.Unlock()

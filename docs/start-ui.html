@@ -82,7 +82,7 @@ nana start</code></pre>
           <thead><tr><th>Endpoint</th><th>Use</th></tr></thead>
           <tbody>
             <tr><td><code>GET /api/v1/overview</code></td><td>Global totals, repo summaries, recent runs, work items, and HUD payload.</td></tr>
-            <tr><td><code>GET /api/v1/usage</code></td><td>Usage breakdowns, top sessions, and a usage-data <code>version</code> for the current filter set. The Usage view refreshes on entry, on manual/filter actions, and periodically while that view stays visible.</td></tr>
+            <tr><td><code>GET /api/v1/usage</code></td><td>Usage breakdowns, top sessions, and a usage-data <code>version</code> for the current filter set. The Usage view refreshes on entry, on manual/filter actions, and periodically while that view stays visible. Live usage reads are backed by SQLite; older usage JSON files and <code>thread-usage*.json</code> artifacts are treated only as compatibility import inputs.</td></tr>
             <tr><td><code>GET /api/v1/attention</code></td><td>Ranked attention queue plus the single best next item and recommended command.</td></tr>
             <tr><td><code>GET /api/v1/issues</code></td><td>Flattened tracked-issue queue with triage and publication state.</td></tr>
             <tr><td><code>GET /api/v1/investigations</code></td><td>Investigation runs discovered across the workspace and managed repo checkouts, including paused retry timing.</td></tr>

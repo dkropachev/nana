@@ -4341,7 +4341,7 @@ func TestLocalWorkDBInitAddsRepoSlugColumnToWorkRunIndex(t *testing.T) {
 	}
 }
 
-func TestRunLocalWorkCodexPromptPersistsTokenUsageArtifactAndManifest(t *testing.T) {
+func TestRunLocalWorkCodexPromptPersistsTokenUsageInSQLiteAndManifest(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	fakeBin := filepath.Join(home, "bin")
@@ -4417,20 +4417,20 @@ func TestRunLocalWorkCodexPromptPersistsTokenUsageArtifactAndManifest(t *testing
 		t.Fatalf("unexpected manifest token usage: %#v", updated.TokenUsage)
 	}
 
+	totals, err := loadLocalWorkTokenUsageTotalsFromSQLite(manifest.RunID)
+	if err != nil {
+		t.Fatalf("loadLocalWorkTokenUsageTotalsFromSQLite: %v", err)
+	}
+	if totals == nil || totals.TotalTokens != 135 || totals.SessionsAccounted != 1 {
+		t.Fatalf("unexpected SQLite token usage totals: %#v", totals)
+	}
+
 	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
-	var artifact localWorkThreadUsageArtifact
-	if err := readGithubJSON(filepath.Join(runDir, "thread-usage.json"), &artifact); err != nil {
-		t.Fatalf("read thread-usage artifact: %v", err)
+	if _, err := os.Stat(filepath.Join(runDir, "thread-usage.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no thread-usage artifact, got err=%v", err)
 	}
-	if artifact.Totals.TotalTokens != 135 || artifact.Totals.SessionsAccounted != 1 || len(artifact.Threads) != 1 {
-		t.Fatalf("unexpected thread-usage artifact: %#v", artifact)
-	}
-	var history localWorkThreadUsageHistoryArtifact
-	if err := readGithubJSON(filepath.Join(runDir, threadUsageHistoryArtifactName), &history); err != nil {
-		t.Fatalf("read thread-usage-history artifact: %v", err)
-	}
-	if len(history.Threads) != 1 || len(history.Threads[0].Checkpoints) != 1 || history.Threads[0].Checkpoints[0].TotalTokens != 135 {
-		t.Fatalf("unexpected thread-usage-history artifact: %#v", history)
+	if _, err := os.Stat(filepath.Join(runDir, threadUsageHistoryArtifactName)); !os.IsNotExist(err) {
+		t.Fatalf("expected no thread-usage-history artifact, got err=%v", err)
 	}
 
 	stale := manifest
@@ -4522,20 +4522,20 @@ func TestRunLocalWorkCodexPromptPersistsTokenUsageWhenCodexFails(t *testing.T) {
 		t.Fatalf("unexpected failed manifest token usage: %#v", updated.TokenUsage)
 	}
 
+	totals, err := loadLocalWorkTokenUsageTotalsFromSQLite(manifest.RunID)
+	if err != nil {
+		t.Fatalf("loadLocalWorkTokenUsageTotalsFromSQLite: %v", err)
+	}
+	if totals == nil || totals.TotalTokens != 266 || totals.SessionsAccounted != 1 {
+		t.Fatalf("unexpected failed SQLite token usage totals: %#v", totals)
+	}
+
 	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
-	var artifact localWorkThreadUsageArtifact
-	if err := readGithubJSON(filepath.Join(runDir, "thread-usage.json"), &artifact); err != nil {
-		t.Fatalf("read failed thread-usage artifact: %v", err)
+	if _, err := os.Stat(filepath.Join(runDir, "thread-usage.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no failed thread-usage artifact, got err=%v", err)
 	}
-	if artifact.Totals.TotalTokens != 266 || artifact.Totals.SessionsAccounted != 1 {
-		t.Fatalf("unexpected failed thread-usage artifact: %#v", artifact)
-	}
-	var history localWorkThreadUsageHistoryArtifact
-	if err := readGithubJSON(filepath.Join(runDir, threadUsageHistoryArtifactName), &history); err != nil {
-		t.Fatalf("read failed thread-usage-history artifact: %v", err)
-	}
-	if len(history.Threads) != 1 || len(history.Threads[0].Checkpoints) != 1 || history.Threads[0].Checkpoints[0].TotalTokens != 266 {
-		t.Fatalf("unexpected failed thread-usage-history artifact: %#v", history)
+	if _, err := os.Stat(filepath.Join(runDir, threadUsageHistoryArtifactName)); !os.IsNotExist(err) {
+		t.Fatalf("expected no failed thread-usage-history artifact, got err=%v", err)
 	}
 }
 

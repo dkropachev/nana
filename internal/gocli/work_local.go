@@ -3568,6 +3568,9 @@ func runLocalWorkCodexPrompt(manifest localWorkManifest, codexArgs []string, pro
 		CheckpointPath:   checkpointPath,
 		StepKey:          codexHomeAlias,
 		ResumeStrategy:   codexResumeSamePrompt,
+		UsageRunID:       manifest.RunID,
+		UsageBackend:     "local",
+		UsageSandboxPath: manifest.SandboxPath,
 		Env:              append(localWorkPromptEnv(manifest, scopedCodexHome), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
 		RateLimitPolicy:  codexRateLimitPolicyDefault(codexRateLimitPolicy(manifest.RateLimitPolicy)),
 		OnPause: func(info codexRateLimitPauseInfo) {
@@ -3598,12 +3601,8 @@ func persistPromptTokenUsage(manifest localWorkManifest) error {
 }
 
 func persistGithubWorkTokenUsage(manifest localWorkManifest) error {
-	if strings.TrimSpace(manifest.PauseManifestPath) == "" {
-		return nil
-	}
-	runDir := filepath.Dir(strings.TrimSpace(manifest.PauseManifestPath))
-	_, err := writeThreadUsageArtifact(runDir, manifest.SandboxPath)
-	return err
+	_ = manifest
+	return nil
 }
 
 func localWorkPromptEnv(manifest localWorkManifest, scopedCodexHome string) []string {
@@ -5233,75 +5232,15 @@ func persistLocalWorkTokenUsage(runID string) error {
 	if err != nil {
 		return err
 	}
-	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
-	sessionsRoot := filepath.Join(manifest.SandboxPath, ".nana", localWorkRuntimeName, "codex-home")
-	artifact, err := writeLocalWorkThreadUsageArtifact(runDir, manifest.SandboxPath, sessionsRoot)
+	totals, err := loadLocalWorkTokenUsageTotalsFromSQLite(runID)
 	if err != nil {
 		return err
 	}
-	if artifact == nil || len(artifact.Threads) == 0 {
+	if totals == nil || totals.SessionsAccounted == 0 {
 		return nil
 	}
-	manifest.TokenUsage = &artifact.Totals
+	manifest.TokenUsage = totals
 	return writeLocalWorkManifest(manifest)
-}
-
-func writeLocalWorkThreadUsageArtifact(runDir string, sandboxPath string, sessionsRoot string) (*localWorkThreadUsageArtifact, error) {
-	historyArtifact, err := writeLocalWorkThreadUsageHistoryArtifact(runDir, sandboxPath, sessionsRoot)
-	if err != nil {
-		return nil, err
-	}
-	artifact := &localWorkThreadUsageArtifact{
-		Version:     1,
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		SandboxPath: sandboxPath,
-	}
-	rows := make([]localWorkThreadUsageRow, 0, len(historyArtifact.Threads))
-	for _, row := range historyArtifact.Threads {
-		converted, ok := localWorkThreadUsageRowFromHistory(row)
-		if ok {
-			rows = append(rows, converted)
-		}
-	}
-	artifact.Threads = rows
-	artifact.Totals = localWorkTokenUsageTotalsFromRows(rows, artifact.GeneratedAt)
-
-	path := filepath.Join(runDir, "thread-usage.json")
-	if err := writeLocalWorkJSONAtomically(path, artifact); err != nil {
-		return nil, err
-	}
-	return artifact, nil
-}
-
-func writeLocalWorkThreadUsageHistoryArtifact(runDir string, sandboxPath string, sessionsRoot string) (*localWorkThreadUsageHistoryArtifact, error) {
-	artifact := &localWorkThreadUsageHistoryArtifact{
-		Version:     1,
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		SandboxPath: sandboxPath,
-	}
-	rows, err := usageHistoryRowsFromRollouts(sessionsRoot)
-	if err != nil {
-		if os.IsNotExist(err) {
-			path := usageHistoryArtifactPath(runDir)
-			if existing, readErr := readLocalWorkThreadUsageHistoryArtifact(path); readErr == nil {
-				return existing, nil
-			}
-			return artifact, nil
-		}
-		return nil, err
-	}
-	artifact.Threads = rows
-
-	path := usageHistoryArtifactPath(runDir)
-	if existing, err := readLocalWorkThreadUsageHistoryArtifact(path); err == nil {
-		artifact = mergeLocalWorkThreadUsageHistoryArtifacts(existing, artifact)
-	} else if err != nil && !os.IsNotExist(err) {
-		return nil, err
-	}
-	if err := writeLocalWorkJSONAtomically(path, artifact); err != nil {
-		return nil, err
-	}
-	return artifact, nil
 }
 
 func readLocalWorkThreadUsageArtifact(path string) (*localWorkThreadUsageArtifact, error) {
@@ -5312,130 +5251,12 @@ func readLocalWorkThreadUsageArtifact(path string) (*localWorkThreadUsageArtifac
 	return &artifact, nil
 }
 
-func mergeLocalWorkThreadUsageArtifacts(existing *localWorkThreadUsageArtifact, current *localWorkThreadUsageArtifact) *localWorkThreadUsageArtifact {
-	if existing == nil {
-		return current
-	}
-	if current == nil {
-		return existing
-	}
-	index := map[string]localWorkThreadUsageRow{}
-	addRow := func(row localWorkThreadUsageRow) {
-		key := localWorkThreadUsageRowKey(row)
-		merged, ok := index[key]
-		if !ok {
-			index[key] = row
-			return
-		}
-		if merged.SessionID == "" {
-			merged.SessionID = row.SessionID
-		}
-		if merged.Nickname == "" {
-			merged.Nickname = row.Nickname
-		}
-		if merged.Role == "" {
-			merged.Role = row.Role
-		}
-		if merged.Model == "" {
-			merged.Model = row.Model
-		}
-		if merged.CWD == "" {
-			merged.CWD = row.CWD
-		}
-		merged.InputTokens = max(merged.InputTokens, row.InputTokens)
-		merged.CachedInputTokens = max(merged.CachedInputTokens, row.CachedInputTokens)
-		merged.OutputTokens = max(merged.OutputTokens, row.OutputTokens)
-		merged.ReasoningOutputTokens = max(merged.ReasoningOutputTokens, row.ReasoningOutputTokens)
-		merged.TotalTokens = max(merged.TotalTokens, row.TotalTokens)
-		if merged.StartedAt == 0 || (row.StartedAt > 0 && row.StartedAt < merged.StartedAt) {
-			merged.StartedAt = row.StartedAt
-		}
-		if row.UpdatedAt > merged.UpdatedAt {
-			merged.UpdatedAt = row.UpdatedAt
-		}
-		index[key] = merged
-	}
-	for _, row := range existing.Threads {
-		addRow(row)
-	}
-	for _, row := range current.Threads {
-		addRow(row)
-	}
-	threads := make([]localWorkThreadUsageRow, 0, len(index))
-	for _, row := range index {
-		threads = append(threads, row)
-	}
-	sort.Slice(threads, func(i, j int) bool {
-		if threads[i].StartedAt == threads[j].StartedAt {
-			return localWorkThreadUsageRowKey(threads[i]) < localWorkThreadUsageRowKey(threads[j])
-		}
-		if threads[i].StartedAt == 0 {
-			return false
-		}
-		if threads[j].StartedAt == 0 {
-			return true
-		}
-		return threads[i].StartedAt < threads[j].StartedAt
-	})
-	generatedAt := current.GeneratedAt
-	if strings.TrimSpace(generatedAt) == "" {
-		generatedAt = existing.GeneratedAt
-	}
-	artifact := &localWorkThreadUsageArtifact{
-		Version:     max(existing.Version, current.Version),
-		GeneratedAt: generatedAt,
-		SandboxPath: defaultString(strings.TrimSpace(current.SandboxPath), existing.SandboxPath),
-		Threads:     threads,
-	}
-	artifact.Totals = localWorkTokenUsageTotalsFromRows(threads, artifact.GeneratedAt)
-	return artifact
-}
-
 func readLocalWorkThreadUsageHistoryArtifact(path string) (*localWorkThreadUsageHistoryArtifact, error) {
 	var artifact localWorkThreadUsageHistoryArtifact
 	if err := readGithubJSON(path, &artifact); err != nil {
 		return nil, err
 	}
 	return &artifact, nil
-}
-
-func mergeLocalWorkThreadUsageHistoryArtifacts(existing *localWorkThreadUsageHistoryArtifact, current *localWorkThreadUsageHistoryArtifact) *localWorkThreadUsageHistoryArtifact {
-	if existing == nil {
-		return current
-	}
-	if current == nil {
-		return existing
-	}
-	generatedAt := current.GeneratedAt
-	if strings.TrimSpace(generatedAt) == "" {
-		generatedAt = existing.GeneratedAt
-	}
-	return &localWorkThreadUsageHistoryArtifact{
-		Version:     max(existing.Version, current.Version),
-		GeneratedAt: generatedAt,
-		SandboxPath: defaultString(strings.TrimSpace(current.SandboxPath), existing.SandboxPath),
-		Threads:     mergeUsageHistoryRows(append(append([]usageHistoryRow{}, existing.Threads...), current.Threads...)),
-	}
-}
-
-func localWorkThreadUsageRowKey(row localWorkThreadUsageRow) string {
-	if strings.TrimSpace(row.SessionID) != "" {
-		return strings.TrimSpace(row.SessionID)
-	}
-	return fmt.Sprintf("%s|%s|%d|%d", strings.TrimSpace(row.Nickname), strings.TrimSpace(row.Role), row.StartedAt, row.UpdatedAt)
-}
-
-func localWorkTokenUsageTotalsFromRows(rows []localWorkThreadUsageRow, updatedAt string) localWorkTokenUsageTotals {
-	totals := localWorkTokenUsageTotals{UpdatedAt: updatedAt}
-	for _, row := range rows {
-		totals.InputTokens += row.InputTokens
-		totals.CachedInputTokens += row.CachedInputTokens
-		totals.OutputTokens += row.OutputTokens
-		totals.ReasoningOutputTokens += row.ReasoningOutputTokens
-		totals.TotalTokens += row.TotalTokens
-	}
-	totals.SessionsAccounted = len(rows)
-	return totals
 }
 
 func readLocalWorkThreadUsageRowsFromRollouts(sessionsRoot string) ([]localWorkThreadUsageRow, error) {

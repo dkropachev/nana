@@ -1,19 +1,12 @@
 package gocli
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-)
-
-const (
-	usageStoreSourceKindRollout      = "rollout"
-	usageStoreSourceKindLocalThread  = "local-thread"
-	usageStoreSourceKindGithubThread = "github-thread"
 )
 
 func loadUsageRecordsShared(options usageOptions) ([]usageRecord, int, error) {
@@ -25,11 +18,10 @@ func loadUsageRecordsShared(options usageOptions) ([]usageRecord, int, error) {
 }
 
 func loadUsageSharedState(cwd string) (startUIUsageIndexState, error) {
-	path := startUIUsageIndexPath()
-	existing := readStartUIUsageIndexState(path)
-	refreshed, err := refreshUsageStore(cwd, path)
+	refreshed, err := refreshUsageStore(cwd, "")
 	if err != nil {
-		if strings.TrimSpace(existing.Version) != "" || len(existing.Entries) > 0 {
+		existing, readErr := loadUsageSQLiteState()
+		if readErr == nil && (strings.TrimSpace(existing.Version) != "" || len(existing.Entries) > 0) {
 			return existing, nil
 		}
 		return startUIUsageIndexState{}, err
@@ -38,147 +30,7 @@ func loadUsageSharedState(cwd string) (startUIUsageIndexState, error) {
 }
 
 func refreshUsageStore(cwd string, path string) (startUIUsageIndexState, error) {
-	state := readStartUIUsageIndexState(path)
-	if state.SchemaVersion == 0 {
-		state.SchemaVersion = startUIUsageIndexSchemaVersion
-	}
-
-	changed := false
-	importedLegacy, err := usageStoreImportLegacyIndex(&state)
-	if err != nil {
-		return startUIUsageIndexState{}, err
-	}
-	changed = changed || importedLegacy
-
-	syncedDirectRoots, err := usageStoreSyncDirectRoots(cwd, &state)
-	if err != nil {
-		return startUIUsageIndexState{}, err
-	}
-	changed = changed || syncedDirectRoots
-
-	syncedWorkRuns, err := usageStoreSyncWorkRuns(&state)
-	if err != nil {
-		return startUIUsageIndexState{}, err
-	}
-	changed = changed || syncedWorkRuns
-
-	if state.SchemaVersion != startUIUsageIndexSchemaVersion {
-		state.SchemaVersion = startUIUsageIndexSchemaVersion
-		changed = true
-	}
-	if strings.TrimSpace(state.Version) == "" {
-		changed = true
-	}
-	if !changed {
-		return state, nil
-	}
-	usageFinalizeStoreState(&state)
-	if err := writeStartUIUsageIndexState(path, state); err != nil {
-		return startUIUsageIndexState{}, err
-	}
-	return state, nil
-}
-
-func usageStoreImportLegacyIndex(state *startUIUsageIndexState) (bool, error) {
-	if state == nil {
-		return false, nil
-	}
-	if strings.TrimSpace(state.Version) != "" || len(state.Entries) > 0 {
-		return false, nil
-	}
-	legacy := readStartUIUsageIndexState(legacyStartUIUsageIndexPath())
-	if strings.TrimSpace(legacy.Version) == "" || len(legacy.Entries) == 0 {
-		return false, nil
-	}
-	state.SchemaVersion = startUIUsageIndexSchemaVersion
-	state.Version = legacy.Version
-	state.UpdatedAt = legacy.UpdatedAt
-	state.SessionRootsScanned = legacy.SessionRootsScanned
-	state.WorkSyncUpdatedAt = strings.TrimSpace(legacy.UpdatedAt)
-	state.LegacyImportedAt = time.Now().UTC().Format(time.RFC3339)
-	state.LegacyImportedFrom = legacyStartUIUsageIndexPath()
-	state.Entries = append([]startUIUsageIndexEntry(nil), legacy.Entries...)
-	return true, nil
-}
-
-func usageStoreSyncDirectRoots(cwd string, state *startUIUsageIndexState) (bool, error) {
-	if state == nil {
-		return false, nil
-	}
-	roots, err := discoverUsageSharedSessionRoots(cwd)
-	if err != nil {
-		return false, err
-	}
-	changed := false
-	if state.SessionRootsScanned == 0 {
-		state.SessionRootsScanned = len(roots)
-		changed = len(roots) > 0
-	}
-
-	entriesByPath := map[string]startUIUsageIndexEntry{}
-	for _, entry := range state.Entries {
-		entriesByPath[filepath.Clean(entry.Path)] = entry
-	}
-	seen := map[string]bool{}
-	for _, root := range roots {
-		err := walkRolloutFiles(root.SessionsDir, 0, func(path string) (bool, error) {
-			info, err := os.Stat(path)
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					return false, nil
-				}
-				return false, err
-			}
-			cleanPath := filepath.Clean(path)
-			seen[cleanPath] = true
-			size := info.Size()
-			modified := info.ModTime().UnixNano()
-			if existing, ok := entriesByPath[cleanPath]; ok &&
-				existing.Root == root.Name &&
-				existing.Size == size &&
-				existing.ModifiedUnixNano == modified &&
-				(existing.SourceKind == "" || existing.SourceKind == usageStoreSourceKindRollout) {
-				return false, nil
-			}
-			record, err := loadUsageRollout(cleanPath, root.Name)
-			if err != nil {
-				return false, err
-			}
-			entriesByPath[cleanPath] = startUIUsageIndexEntry{
-				Path:             cleanPath,
-				Root:             root.Name,
-				Size:             size,
-				ModifiedUnixNano: modified,
-				SourceKind:       usageStoreSourceKindRollout,
-				Record:           record,
-			}
-			changed = true
-			return false, nil
-		})
-		if err != nil {
-			return false, err
-		}
-	}
-
-	for path, entry := range entriesByPath {
-		if entry.SourceKind != usageStoreSourceKindRollout {
-			continue
-		}
-		if !usagePathUnderAnyRoot(path, roots) {
-			continue
-		}
-		if seen[path] {
-			continue
-		}
-		delete(entriesByPath, path)
-		changed = true
-	}
-
-	if !changed {
-		return false, nil
-	}
-	state.Entries = usageEntriesFromMap(entriesByPath)
-	return true, nil
+	return refreshUsageSQLiteStore(cwd, path)
 }
 
 func discoverUsageSharedSessionRoots(cwd string) ([]usageSessionRoot, error) {
@@ -261,33 +113,6 @@ func usageEntriesFromMap(entriesByPath map[string]startUIUsageIndexEntry) []star
 	return entries
 }
 
-func usageStoreSyncWorkRuns(state *startUIUsageIndexState) (bool, error) {
-	if state == nil {
-		return false, nil
-	}
-	rows, err := usageListWorkRunIndexEntriesAfter(strings.TrimSpace(state.WorkSyncUpdatedAt))
-	if err != nil {
-		return false, nil
-	}
-	changed := false
-	latestUpdatedAt := strings.TrimSpace(state.WorkSyncUpdatedAt)
-	for _, entry := range rows {
-		if strings.TrimSpace(entry.UpdatedAt) != "" && strings.Compare(strings.TrimSpace(entry.UpdatedAt), latestUpdatedAt) > 0 {
-			latestUpdatedAt = strings.TrimSpace(entry.UpdatedAt)
-		}
-		synced, err := usageStoreSyncWorkRun(state, entry)
-		if err != nil {
-			continue
-		}
-		changed = changed || synced
-	}
-	if latestUpdatedAt != strings.TrimSpace(state.WorkSyncUpdatedAt) {
-		state.WorkSyncUpdatedAt = latestUpdatedAt
-		changed = true
-	}
-	return changed, nil
-}
-
 func usageListWorkRunIndexEntriesAfter(updatedAfter string) ([]workRunIndexEntry, error) {
 	return withLocalWorkReadStore(func(store *localWorkDBStore) ([]workRunIndexEntry, error) {
 		query := `SELECT run_id, backend, repo_key, repo_root, repo_name, repo_slug, manifest_path, updated_at, target_kind FROM work_run_index`
@@ -312,123 +137,6 @@ func usageListWorkRunIndexEntriesAfter(updatedAfter string) ([]workRunIndexEntry
 		}
 		return out, rows.Err()
 	})
-}
-
-func usageStoreSyncWorkRun(state *startUIUsageIndexState, entry workRunIndexEntry) (bool, error) {
-	switch strings.TrimSpace(entry.Backend) {
-	case "local":
-		manifest, err := readLocalWorkManifestByRunID(entry.RunID)
-		if err != nil {
-			return false, err
-		}
-		entries, artifactPath, err := usageEntriesForLocalWorkRun(manifest)
-		if err != nil {
-			return false, err
-		}
-		return usageReplaceWorkEntries(state, manifest.SandboxPath, artifactPath, entries), nil
-	case "github":
-		manifestPath, _, err := resolveGithubRunManifestPath(entry.RunID, false)
-		if err != nil {
-			return false, err
-		}
-		manifest := githubWorkManifest{}
-		if err := readGithubJSON(manifestPath, &manifest); err != nil {
-			return false, err
-		}
-		entries, artifactPath, err := usageEntriesForGithubWorkRun(filepath.Dir(manifestPath), manifest)
-		if err != nil {
-			return false, err
-		}
-		return usageReplaceWorkEntries(state, manifest.SandboxPath, artifactPath, entries), nil
-	default:
-		return false, nil
-	}
-}
-
-func usageReplaceWorkEntries(state *startUIUsageIndexState, sandboxPath string, artifactPath string, entries []startUIUsageIndexEntry) bool {
-	if state == nil {
-		return false
-	}
-	cleanSandbox := filepath.Clean(strings.TrimSpace(sandboxPath))
-	artifactPrefix := strings.TrimSpace(artifactPath)
-	next := make([]startUIUsageIndexEntry, 0, len(state.Entries)+len(entries))
-	changed := false
-	for _, entry := range state.Entries {
-		if artifactPrefix != "" && strings.HasPrefix(strings.TrimSpace(entry.Path), artifactPrefix+"#") {
-			changed = true
-			continue
-		}
-		if cleanSandbox != "" && strings.Contains(filepath.Clean(strings.TrimSpace(entry.Record.TranscriptPath)), cleanSandbox) {
-			changed = true
-			continue
-		}
-		next = append(next, entry)
-	}
-	if len(entries) > 0 {
-		next = append(next, entries...)
-		changed = true
-	}
-	if !changed {
-		return false
-	}
-	sort.Slice(next, func(i, j int) bool {
-		return next[i].Path < next[j].Path
-	})
-	state.Entries = next
-	return true
-}
-
-func usageEntriesForLocalWorkRun(manifest localWorkManifest) ([]startUIUsageIndexEntry, string, error) {
-	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
-	artifactPath := filepath.Join(runDir, "thread-usage.json")
-	artifact, err := readLocalWorkThreadUsageArtifact(artifactPath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return nil, "", err
-		}
-		artifact = nil
-	}
-	if artifact != nil && len(artifact.Threads) > 0 {
-		entries := make([]startUIUsageIndexEntry, 0, len(artifact.Threads))
-		for _, row := range artifact.Threads {
-			record := usageRecordFromLocalThreadRow(manifest, artifactPath, row)
-			entries = append(entries, startUIUsageIndexEntry{
-				Path:            usageWorkEntryKey(artifactPath, record.SessionID, record.Lane, row.StartedAt),
-				Root:            record.Root,
-				SourceKind:      usageStoreSourceKindLocalThread,
-				SourceUpdatedAt: defaultString(strings.TrimSpace(manifest.UpdatedAt), strings.TrimSpace(artifact.GeneratedAt)),
-				Record:          record,
-			})
-		}
-		return entries, artifactPath, nil
-	}
-	if manifest.TokenUsage == nil || manifest.TokenUsage.TotalTokens == 0 {
-		return nil, artifactPath, nil
-	}
-	record := usageRecord{
-		SessionID:             defaultString(strings.TrimSpace(manifest.RunID), "(unknown)"),
-		Timestamp:             defaultString(strings.TrimSpace(manifest.UpdatedAt), strings.TrimSpace(manifest.CreatedAt)),
-		Day:                   usageRecordDay(defaultString(strings.TrimSpace(manifest.UpdatedAt), strings.TrimSpace(manifest.CreatedAt)), artifactPath),
-		CWD:                   defaultString(strings.TrimSpace(manifest.SandboxRepoPath), strings.TrimSpace(manifest.RepoRoot)),
-		TranscriptPath:        artifactPath,
-		Root:                  "work",
-		Lane:                  "leader",
-		Activity:              "work",
-		Phase:                 "implementation",
-		InputTokens:           manifest.TokenUsage.InputTokens,
-		CachedInputTokens:     manifest.TokenUsage.CachedInputTokens,
-		OutputTokens:          manifest.TokenUsage.OutputTokens,
-		ReasoningOutputTokens: manifest.TokenUsage.ReasoningOutputTokens,
-		TotalTokens:           manifest.TokenUsage.TotalTokens,
-		HasTokenUsage:         true,
-	}
-	return []startUIUsageIndexEntry{{
-		Path:            usageWorkEntryKey(artifactPath, record.SessionID, record.Lane, 0),
-		Root:            record.Root,
-		SourceKind:      usageStoreSourceKindLocalThread,
-		SourceUpdatedAt: strings.TrimSpace(manifest.UpdatedAt),
-		Record:          record,
-	}}, artifactPath, nil
 }
 
 func usageRecordFromLocalThreadRow(manifest localWorkManifest, artifactPath string, row localWorkThreadUsageRow) usageRecord {
@@ -456,32 +164,6 @@ func usageRecordFromLocalThreadRow(manifest localWorkManifest, artifactPath stri
 	return record
 }
 
-func usageEntriesForGithubWorkRun(runDir string, manifest githubWorkManifest) ([]startUIUsageIndexEntry, string, error) {
-	artifactPath := filepath.Join(runDir, "thread-usage.json")
-	artifact, err := readGithubThreadUsageArtifact(artifactPath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return nil, "", err
-		}
-		return nil, artifactPath, nil
-	}
-	if artifact == nil || len(artifact.Rows) == 0 {
-		return nil, artifactPath, nil
-	}
-	entries := make([]startUIUsageIndexEntry, 0, len(artifact.Rows))
-	for _, row := range artifact.Rows {
-		record := usageRecordFromGithubThreadRow(manifest, artifactPath, row)
-		entries = append(entries, startUIUsageIndexEntry{
-			Path:            usageWorkEntryKey(artifactPath, record.SessionID, record.Lane, row.StartedAt),
-			Root:            record.Root,
-			SourceKind:      usageStoreSourceKindGithubThread,
-			SourceUpdatedAt: defaultString(strings.TrimSpace(manifest.UpdatedAt), strings.TrimSpace(artifact.GeneratedAt)),
-			Record:          record,
-		})
-	}
-	return entries, artifactPath, nil
-}
-
 func usageRecordFromGithubThreadRow(manifest githubWorkManifest, artifactPath string, row githubThreadUsageRow) usageRecord {
 	timestamp := usageUsageTimestamp(row.UpdatedAt, row.StartedAt, strings.TrimSpace(manifest.UpdatedAt))
 	record := usageRecord{
@@ -501,10 +183,6 @@ func usageRecordFromGithubThreadRow(manifest githubWorkManifest, artifactPath st
 	}
 	record.Phase = classifyUsagePhase(record)
 	return record
-}
-
-func usageWorkEntryKey(artifactPath string, sessionID string, lane string, startedAt int64) string {
-	return strings.TrimSpace(artifactPath) + "#" + defaultString(strings.TrimSpace(sessionID), defaultString(strings.TrimSpace(lane), "(unknown)")+"-"+strconv.FormatInt(startedAt, 10))
 }
 
 func usageAnonymousWorkSessionID(runID string, role string, startedAt int64) string {
@@ -527,18 +205,6 @@ func usageUsageTimestamp(updatedAt int64, startedAt int64, fallback string) stri
 	default:
 		return strings.TrimSpace(fallback)
 	}
-}
-
-func usageFinalizeStoreState(state *startUIUsageIndexState) {
-	if state == nil {
-		return
-	}
-	state.SchemaVersion = startUIUsageIndexSchemaVersion
-	sort.Slice(state.Entries, func(i, j int) bool {
-		return state.Entries[i].Path < state.Entries[j].Path
-	})
-	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	state.Version = startUIUsageIndexVersion(state.Entries, state.SessionRootsScanned)
 }
 
 func usageRecordsForState(index startUIUsageIndexState, options usageOptions) []usageRecord {
