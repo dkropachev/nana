@@ -522,9 +522,27 @@
     });
   }
 
+  function canRenderWithoutOverview(view) {
+    return view === "usage"
+      || view === "issues"
+      || view === "investigations"
+      || view === "feedback"
+      || view === "approvals";
+  }
+
   function selectedRepoSummary() {
-    if (!state.overview || !state.selectedRepo) return null;
-    return state.overview.repos.find((repo) => repo.repo_slug === state.selectedRepo) || null;
+    if (!state.selectedRepo) return null;
+    const overviewSummary = state.overview && Array.isArray(state.overview.repos)
+      ? state.overview.repos.find((repo) => repo.repo_slug === state.selectedRepo) || null
+      : null;
+    const repoListSummary = (state.repoList.items || []).find((repo) => repo.repo_slug === state.selectedRepo) || null;
+    if (!overviewSummary) return repoListSummary;
+    if (!repoListSummary) return overviewSummary;
+    return {
+      ...overviewSummary,
+      ...repoListSummary,
+      state: repoListSummary.state || overviewSummary.state || null,
+    };
   }
 
   function selectedIssueRecord() {
@@ -1341,10 +1359,19 @@
     state.overview = payload;
     state.overviewError = "";
     if (Array.isArray(payload && payload.repos)) {
-      state.repoList.items = payload.repos;
-      state.repoList.loading = false;
-      state.repoList.loaded = true;
-      state.repoList.error = "";
+      const existing = Array.isArray(state.repoList.items) ? state.repoList.items : [];
+      state.repoList.items = payload.repos.map((repo) => {
+        const match = existing.find((item) => item.repo_slug === repo.repo_slug);
+        if (!match) return repo;
+        return {
+          ...repo,
+          ...match,
+          state: match.state || repo.state || null,
+        };
+      });
+    }
+    if (state.currentView === "repo" && !state.repoList.loaded && !state.repoList.error) {
+      return;
     }
     renderApp();
   }
@@ -1409,6 +1436,51 @@
       return repos;
     }).catch((error) => {
       applyRepoListError(error, options);
+      throw error;
+    });
+  }
+
+  function applySelectedRepoPayload(repo) {
+    if (!repo || !repo.repo_slug) return;
+    const items = Array.isArray(state.repoList.items) ? [ ...state.repoList.items ] : [];
+    const index = items.findIndex((item) => item.repo_slug === repo.repo_slug);
+    if (index === -1) {
+      items.push(repo);
+    } else {
+      items[index] = {
+        ...items[index],
+        ...repo,
+        state: repo.state || items[index].state || null,
+      };
+    }
+    state.repoList.items = items;
+    state.repoList.loading = false;
+    state.repoList.loaded = true;
+    state.repoList.error = "";
+    if (state.overview && Array.isArray(state.overview.repos)) {
+      const overviewIndex = state.overview.repos.findIndex((item) => item.repo_slug === repo.repo_slug);
+      if (overviewIndex >= 0) {
+        state.overview.repos[overviewIndex] = {
+          ...state.overview.repos[overviewIndex],
+          ...repo,
+          state: repo.state || state.overview.repos[overviewIndex].state || null,
+        };
+      }
+    }
+    renderApp();
+  }
+
+  function loadSelectedRepoSummary(options = {}) {
+    if (!state.selectedRepo) {
+      return Promise.resolve(null);
+    }
+    return api(`/api/v1/repos/${state.selectedRepo}/start-state`).then((repo) => {
+      applySelectedRepoPayload(repo);
+      return repo;
+    }).catch((error) => {
+      if (!options.silent) {
+        toast("danger", "Repo state failed", error.message);
+      }
       throw error;
     });
   }
@@ -1512,6 +1584,8 @@
         return loadApprovals(options);
       case "usage":
         return loadUsage(options);
+      case "repo":
+        return loadSelectedRepoSummary(options);
       default:
         return Promise.resolve();
     }
@@ -1610,6 +1684,7 @@
     state.selectedRepo = repoSlug || "";
     state.selectedIssue = "";
     renderApp();
+    refreshCurrentView({ silent: true }).catch(() => {});
   }
 
   function destroyWidgets() {
@@ -1967,8 +2042,8 @@
     const updated = document.getElementById("overview-updated");
 
     if (!state.overview) {
-      title.textContent = state.currentView === "usage" ? "Usage" : "Home";
       if (state.currentView === "usage") {
+        title.textContent = "Usage";
         if (state.overviewError) {
           subtitle.textContent = "Usage data can still load while the workspace overview is unavailable.";
           updated.textContent = "Overview unavailable.";
@@ -1982,7 +2057,26 @@
           subtitle.textContent = "Loading usage data and workspace overview.";
           updated.textContent = "Waiting for state...";
         }
+      } else if (state.currentView === "issues") {
+        title.textContent = "Issues";
+        subtitle.textContent = "Tracked issues, triage evidence, scheduling, and direct launch actions.";
+        updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
+      } else if (state.currentView === "investigations") {
+        title.textContent = "Investigations";
+        subtitle.textContent = "Source-backed investigation runs with proofs and validator status.";
+        updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
+      } else if (state.currentView === "feedback") {
+        title.textContent = "Feedback";
+        subtitle.textContent = state.feedbackTab === "reviews"
+          ? "Review requests and drafted PR feedback."
+          : "Drafted thread replies and comment follow-ups.";
+        updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
+      } else if (state.currentView === "approvals") {
+        title.textContent = "Approvals";
+        subtitle.textContent = "Human-gate queue across publication, feedback submission, and planned launches.";
+        updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
       } else {
+        title.textContent = "Home";
         subtitle.textContent = state.overviewError ? "Workspace overview is unavailable." : "Waiting for state...";
         updated.textContent = state.overviewError ? "Overview unavailable." : "Waiting for state...";
       }
@@ -5393,7 +5487,7 @@
   }
 
   function renderApp() {
-    if (!state.overview && state.currentView !== "usage") {
+    if (!state.overview && !canRenderWithoutOverview(state.currentView)) {
       syncUsageAutoRefresh();
       return;
     }
@@ -6226,7 +6320,9 @@
 
     window.addEventListener("hashchange", () => {
       applyHashState();
-      if (state.currentView !== "repo") {
+      if (state.currentView === "repo") {
+        refreshCurrentView({ silent: true }).catch(() => {});
+      } else {
         ensureViewData(state.currentView);
       }
       renderApp();
@@ -6425,10 +6521,15 @@
         loadUsage({ silent: true }),
       ]);
     }
+    const currentViewLoad = refreshCurrentView({ silent: true });
+    if (canRenderWithoutOverview(state.currentView)) {
+      renderApp();
+    }
     return Promise.allSettled([
       loadOverview(),
       loadRepos({ silent: true }),
-    ]).then(() => refreshCurrentView({ silent: true })).catch(() => {});
+      currentViewLoad,
+    ]).catch(() => {});
   }
 
   initLogDrawer();

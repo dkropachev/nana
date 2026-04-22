@@ -196,6 +196,9 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 		t.Fatalf("GET overview: %v", err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected overview status 200, got %d", response.StatusCode)
+	}
 	var overview startUIOverview
 	if err := json.NewDecoder(response.Body).Decode(&overview); err != nil {
 		t.Fatalf("decode overview: %v", err)
@@ -242,6 +245,9 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 		t.Fatalf("PATCH settings: %v", err)
 	}
 	defer settingsResponse.Body.Close()
+	if settingsResponse.StatusCode != http.StatusOK {
+		t.Fatalf("expected settings patch status 200, got %d", settingsResponse.StatusCode)
+	}
 	var settingsPayload struct {
 		Repo startUIRepoSummary `json:"repo"`
 	}
@@ -295,6 +301,9 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 		t.Fatalf("PATCH disabled settings: %v", err)
 	}
 	defer disabledResponse.Body.Close()
+	if disabledResponse.StatusCode != http.StatusOK {
+		t.Fatalf("expected disabled settings patch status 200, got %d", disabledResponse.StatusCode)
+	}
 	var disabledPayload struct {
 		Repo startUIRepoSummary `json:"repo"`
 	}
@@ -331,6 +340,9 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 		t.Fatalf("PATCH issue: %v", err)
 	}
 	defer patchResponse.Body.Close()
+	if patchResponse.StatusCode != http.StatusOK {
+		t.Fatalf("expected issue patch status 200, got %d", patchResponse.StatusCode)
+	}
 	var patchPayload struct {
 		Issue startWorkIssueState `json:"issue"`
 	}
@@ -347,6 +359,9 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 		t.Fatalf("POST planned item: %v", err)
 	}
 	defer createResponse.Body.Close()
+	if createResponse.StatusCode != http.StatusOK {
+		t.Fatalf("expected planned item status 200, got %d", createResponse.StatusCode)
+	}
 	var createPayload struct {
 		PlannedItem startWorkPlannedItem `json:"planned_item"`
 	}
@@ -366,6 +381,9 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 		t.Fatalf("POST launch-now: %v", err)
 	}
 	defer launchResponse.Body.Close()
+	if launchResponse.StatusCode != http.StatusOK {
+		t.Fatalf("expected launch-now status 200, got %d", launchResponse.StatusCode)
+	}
 	var launchPayload struct {
 		PlannedItem startWorkPlannedItem     `json:"planned_item"`
 		Launch      startPlannedLaunchResult `json:"launch"`
@@ -384,6 +402,70 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 	task := updatedState.ServiceTasks[startServiceTaskKey(startTaskKindPlannedLaunch, createPayload.PlannedItem.ID)]
 	if task.Status != startWorkServiceTaskQueued || task.PlannedItemID != createPayload.PlannedItem.ID {
 		t.Fatalf("expected queued planned-launch task, got %+v", task)
+	}
+}
+
+func TestStartUIAPIIssuePatchRouteReturnsJSON(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  "2026-04-21T22:15:00Z",
+		Issues: map[string]startWorkIssueState{
+			"7": {
+				SourceNumber:    7,
+				SourceURL:       "https://github.com/acme/widget/issues/7",
+				Title:           "Fix flaky test",
+				Status:          startWorkStatusQueued,
+				Priority:        3,
+				TriageStatus:    startWorkTriageCompleted,
+				DeferredReason:  "initial reason",
+				UpdatedAt:       "2026-04-21T22:15:00Z",
+				TriageUpdatedAt: "2026-04-21T22:15:00Z",
+			},
+		},
+		ServiceTasks: map[string]startWorkServiceTask{},
+		PlannedItems: map[string]startWorkPlannedItem{},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	server := httptest.NewServer((&startUIAPI{cwd: cwd, allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
+	defer server.Close()
+
+	body := strings.NewReader(`{"priority":1,"deferred_reason":"route regression guard"}`)
+	request, err := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/repos/"+repoSlug+"/issues/7", body)
+	if err != nil {
+		t.Fatalf("new patch request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("PATCH issue route: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(response.Body)
+		t.Fatalf("expected issue patch route status 200, got %d body=%q", response.StatusCode, bodyBytes)
+	}
+	var payload struct {
+		State *startWorkState     `json:"state"`
+		Issue startWorkIssueState `json:"issue"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode issue patch route payload: %v", err)
+	}
+	if payload.State == nil {
+		t.Fatalf("expected updated state payload, got %+v", payload)
+	}
+	if payload.Issue.ManualPriority != 1 || payload.Issue.DeferredReason != "route regression guard" {
+		t.Fatalf("unexpected issue patch route payload: %+v", payload.Issue)
 	}
 }
 
@@ -4712,6 +4794,24 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `state.repoList.items || []`) {
 		t.Fatalf("expected sorted repos fallback to repo list cache in app.js, got %s", string(appBody))
 	}
+	if !strings.Contains(string(appBody), `const repoListSummary = (state.repoList.items || []).find((repo) => repo.repo_slug === state.selectedRepo) || null;`) {
+		t.Fatalf("expected selected repo summary to merge repo list state in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `state: repoListSummary.state || overviewSummary.state || null,`) {
+		t.Fatalf("expected selected repo summary state fallback in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `const existing = Array.isArray(state.repoList.items) ? state.repoList.items : [];`) {
+		t.Fatalf("expected overview payload to merge existing repo-list entries in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `if (state.currentView === "repo" && !state.repoList.loaded && !state.repoList.error) {`) {
+		t.Fatalf("expected repo views to wait for dedicated repo payloads in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), "api(`/api/v1/repos/${state.selectedRepo}/start-state`)") {
+		t.Fatalf("expected repo views to fetch dedicated start-state payloads in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `case "repo":`) || !strings.Contains(string(appBody), `return loadSelectedRepoSummary(options);`) {
+		t.Fatalf("expected refreshCurrentView to cover repo views in app.js, got %s", string(appBody))
+	}
 	if !strings.Contains(string(appBody), `renderStatePillWithPause(`) {
 		t.Fatalf("expected paused-state rendering helper in app.js, got %s", string(appBody))
 	}
@@ -4735,6 +4835,27 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	}
 	if !strings.Contains(string(appBody), `data-approval-drop-kind="`) {
 		t.Fatalf("expected approval drop control wiring in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `data-issue-save="`) {
+		t.Fatalf("expected issue save control wiring in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `data-scheduler-save="`) {
+		t.Fatalf("expected scheduler save control wiring in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `data-work-item-submit="`) {
+		t.Fatalf("expected work-item submit control wiring in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `data-run-sync="`) {
+		t.Fatalf("expected run sync control wiring in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `function canRenderWithoutOverview(view)`) {
+		t.Fatalf("expected overview-optional view helper in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `if (!state.overview && !canRenderWithoutOverview(state.currentView))`) {
+		t.Fatalf("expected renderApp to allow overview-optional views in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `const currentViewLoad = refreshCurrentView({ silent: true });`) {
+		t.Fatalf("expected load() to fetch the current view in parallel in app.js, got %s", string(appBody))
 	}
 }
 
@@ -6390,4 +6511,945 @@ func startUITestReadWorkItem(t *testing.T, itemID string) workItem {
 		t.Fatalf("readWorkItem: %v", err)
 	}
 	return item
+}
+
+type startUITestBrowserFixture struct {
+	Server            *httptest.Server
+	API               *startUIAPI
+	RepoSlug          string
+	GithubRunID       string
+	ReviewItemID      string
+	ReplyItemID       string
+	ScoutItemID       string
+	PlannedApprovalID string
+	FailedScoutJobID  string
+}
+
+type startUITestBrowserSmokeCase struct {
+	hash   string
+	expect []string
+}
+
+func TestStartUIBrowserViewsSmoke(t *testing.T) {
+	chromePath := startUITestChromePath(t)
+	if chromePath == "" {
+		t.Skip("google-chrome is required for browser UI coverage")
+	}
+
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	startUITestRunBrowserSmokeCases(t, chromePath, fixture.Server.URL, map[string]startUITestBrowserSmokeCase{
+		"home": {
+			hash: "view=home",
+			expect: []string{
+				"Pending Jobs Chart",
+				"Repo Overview",
+				"Work Items",
+				"Open Repo",
+				"Open Scouts",
+				"Queued Issues",
+				"Dismissed Scouts",
+			},
+		},
+		"issues": {
+			hash: "view=issues",
+			expect: []string{
+				"Tracked Issues",
+				"Issue Detail",
+				"Triage Rationale",
+				"Priority Source",
+				"Published PR",
+				"Fix flaky test",
+				"priority still pending reviewer confirmation",
+			},
+		},
+		"investigations": {
+			hash: "view=investigations",
+			expect: []string{
+				"Start Investigation",
+				"Detailed Explanation",
+				"Proofs",
+				"Findings",
+				"Validator",
+				"Flake reproduced in scheduler path.",
+				"scheduler cleanup races the review path",
+			},
+		},
+		"work": {
+			hash: "view=work",
+			expect: []string{
+				"Work Runs",
+				"gh-ui-blocked",
+				"lw-browser-active",
+				"completion-harden",
+				"ci_waiting",
+			},
+		},
+		"feedback-reviews": {
+			hash: "view=feedback&tab=reviews",
+			expect: []string{
+				"Review Drafts",
+				"Review feature PR",
+				"REQUEST_CHANGES",
+				"Flaky assertion needs a guard.",
+			},
+		},
+		"feedback-replies": {
+			hash: "view=feedback&tab=replies",
+			expect: []string{
+				"Reply Drafts",
+				"Reply in thread",
+				"Reply with fix summary.",
+			},
+		},
+		"approvals": {
+			hash: "view=approvals",
+			expect: []string{
+				"Approval Queue",
+				"Approval Detail",
+				"Reply in thread",
+				"Review feature PR",
+				"Action Kind",
+			},
+		},
+		"usage": {
+			hash: "view=usage",
+			expect: []string{
+				"Usage Filters",
+				"Top Sessions",
+				"Analytics",
+				"usage-main",
+				"gpt-5.4",
+				"implementation",
+			},
+		},
+	})
+}
+
+func TestStartUIBrowserRepoTabs(t *testing.T) {
+	chromePath := startUITestChromePath(t)
+	if chromePath == "" {
+		t.Skip("google-chrome is required for browser UI coverage")
+	}
+
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	startUITestRunBrowserSmokeCases(t, chromePath, fixture.Server.URL, map[string]startUITestBrowserSmokeCase{
+		"repo-overview": {
+			hash: "view=repo&repo=acme/widget&tab=overview",
+			expect: []string{
+				"Queue Snapshot",
+				"Pending Jobs",
+				"Work Items",
+				"Drop Repo",
+				"Dismissed Scout Actions",
+			},
+		},
+		"repo-scouts": {
+			hash: "view=repo&repo=acme/widget&tab=scouts",
+			expect: []string{
+				"Scout Items",
+				"Audit approvals drawer and stale retry copy",
+				"Severity",
+				"assistant-workspace",
+			},
+		},
+		"repo-config": {
+			hash: "view=repo&repo=acme/widget&tab=config",
+			expect: []string{
+				"Repo Configuration",
+				"Automation Overrides",
+				"All Repo Configs",
+				"settings.json",
+				"Scout Configs",
+				"UI Scout",
+				"Session Limit",
+			},
+		},
+		"repo-controls": {
+			hash: "view=repo&repo=acme/widget&tab=controls",
+			expect: []string{
+				"Search GitHub Issues",
+				"Tracked Issue Schedule",
+				"Selected Scheduled Issue",
+				"Manage Existing Tracked Issue",
+				"Create Planned Launch",
+				"Launch Existing",
+			},
+		},
+	})
+}
+
+func TestStartUIBrowserActions(t *testing.T) {
+	chromePath := startUITestChromePath(t)
+	if chromePath == "" {
+		t.Skip("google-chrome is required for browser UI coverage")
+	}
+
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	oldSyncGithubRun := startUISyncGithubRun
+	startUISyncGithubRun = func(options githubWorkSyncOptions) error {
+		entry, err := readWorkRunIndex(options.RunID)
+		if err != nil {
+			return err
+		}
+		manifest, err := readGithubWorkManifest(entry.ManifestPath)
+		if err != nil {
+			return err
+		}
+		manifest.CurrentPhase = "publish"
+		manifest.PublicationDetail = "Synced from browser action"
+		manifest.UpdatedAt = "2026-04-21T22:45:00Z"
+		if err := writeGithubJSON(entry.ManifestPath, manifest); err != nil {
+			return err
+		}
+		return indexGithubWorkRunManifest(entry.ManifestPath, manifest)
+	}
+	t.Cleanup(func() {
+		startUISyncGithubRun = oldSyncGithubRun
+	})
+
+	t.Run("issue-save-result", func(t *testing.T) {
+		updatedReason := "browser-updated deferred reason"
+		body := strings.NewReader(fmt.Sprintf(`{"deferred_reason":%q}`, updatedReason))
+		request, err := http.NewRequest(http.MethodPatch, fixture.Server.URL+"/api/v1/repos/"+fixture.RepoSlug+"/issues/7", body)
+		if err != nil {
+			t.Fatalf("new issue patch request: %v", err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("PATCH issue: %v", err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("expected issue patch status 200, got %d", response.StatusCode)
+		}
+		output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=issues")
+		startUITestRequireText(t, output, updatedReason, "issue-save-result")
+	})
+
+	t.Run("planned-item-save-result", func(t *testing.T) {
+		updatedTitle := "Implement tracked issue #7: Fix flaky test via browser action"
+		body := strings.NewReader(fmt.Sprintf(`{"title":%q}`, updatedTitle))
+		request, err := http.NewRequest(http.MethodPatch, fixture.Server.URL+"/api/v1/planned-items/planned-tracked", body)
+		if err != nil {
+			t.Fatalf("new planned item patch request: %v", err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("PATCH planned item: %v", err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("expected planned item patch status 200, got %d", response.StatusCode)
+		}
+		output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=repo&repo=acme/widget&tab=controls")
+		startUITestRequireText(t, output, updatedTitle, "planned-item-save-result")
+	})
+
+	t.Run("run-sync-result", func(t *testing.T) {
+		request, err := http.NewRequest(http.MethodPost, fixture.Server.URL+"/api/v1/work/runs/"+fixture.GithubRunID+"/sync", nil)
+		if err != nil {
+			t.Fatalf("new run sync request: %v", err)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("POST run sync: %v", err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("expected run sync status 200, got %d", response.StatusCode)
+		}
+		output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=work")
+		startUITestRequireText(t, output, "publish", "run-sync-result")
+	})
+}
+
+func startUITestRunBrowserSmokeCases(t *testing.T, chromePath string, baseURL string, scenarios map[string]startUITestBrowserSmokeCase) {
+	t.Helper()
+	for name, tc := range scenarios {
+		t.Run(name, func(t *testing.T) {
+			output := startUITestDumpDOM(t, chromePath, baseURL+"/#"+tc.hash)
+			if strings.Contains(output, "Loading operator state...") {
+				t.Fatalf("browser page did not finish rendering for %s:\n%s", name, output)
+			}
+			for _, needle := range tc.expect {
+				startUITestRequireText(t, output, needle, name)
+			}
+		})
+	}
+}
+
+func startUITestRequireText(t *testing.T, output string, needle string, scenario string) {
+	t.Helper()
+	if !strings.Contains(output, needle) {
+		t.Fatalf("expected %q in rendered browser output for %s, got:\n%s", needle, scenario, output)
+	}
+}
+
+func startUITestChromePath(t *testing.T) string {
+	t.Helper()
+	for _, candidate := range []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser"} {
+		if path, err := exec.LookPath(candidate); err == nil {
+			return path
+		}
+	}
+	return ""
+}
+
+func startUITestDumpDOM(t *testing.T, chromePath string, targetURL string) string {
+	t.Helper()
+	userDataDir := t.TempDir()
+	cmd := exec.Command(chromePath,
+		"--headless=new",
+		"--disable-gpu",
+		"--disable-dev-shm-usage",
+		"--mute-audio",
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--no-sandbox",
+		"--user-data-dir="+userDataDir,
+		"--virtual-time-budget=12000",
+		"--dump-dom",
+		targetURL,
+	)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("chrome dump-dom failed: %v\nstderr:\n%s", err, stderr.String())
+	}
+	return string(output)
+}
+
+func startUITestSetupBrowserFixture(t *testing.T) startUITestBrowserFixture {
+	t.Helper()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	stateDir := filepath.Join(cwd, ".nana", "state")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "team-state.json"), []byte(`{"active":true,"current_phase":"team-exec","agent_count":3}`), 0o644); err != nil {
+		t.Fatalf("write team state: %v", err)
+	}
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{
+		Version:        6,
+		RepoMode:       "fork",
+		IssuePickMode:  "auto",
+		PRForwardMode:  "approve",
+		ForkIssuesMode: "auto",
+		ImplementMode:  "auto",
+		PublishTarget:  "fork",
+	}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	now := "2026-04-21T22:15:00Z"
+	pauseUntil := "2026-04-21T23:15:00Z"
+	scoutItemID := startUITestWriteScoutArtifact(t, sourcePath, uiScoutRole, "ui-browser-test", scoutFinding{
+		Title:             "Audit approvals drawer and stale retry copy",
+		WorkType:          workTypeFeature,
+		Area:              "Approvals",
+		Summary:           "Approval detail should surface stale scout recovery context and browser audit metadata.",
+		Rationale:         "Operators need recovery context without opening raw files.",
+		Evidence:          "docs/start-ui.html",
+		Impact:            "Faster approval triage.",
+		SuggestedNextStep: "Keep the recovery metadata visible in the scout detail pane.",
+		Confidence:        "high",
+		Files:             []string{"internal/gocli/start_ui_assets/app.txt", "internal/gocli/start_ui_test.go"},
+		Labels:            []string{"ui", "qa"},
+		Page:              "Approvals",
+		Route:             "#view=approvals",
+		Severity:          "high",
+		TargetKind:        "page",
+		Screenshots:       []string{"approvals-before.png", "approvals-after.png"},
+	}, scoutPolicy{
+		Version:          1,
+		Mode:             "manual",
+		Schedule:         scoutScheduleWhenResolved,
+		IssueDestination: improvementDestinationLocal,
+		Labels:           []string{"ui", "ui-scout"},
+		SessionLimit:     4,
+	}, uiScoutPreflight{
+		Version:       1,
+		GeneratedAt:   now,
+		BrowserReady:  true,
+		Mode:          "live_browser",
+		SurfaceKind:   "app",
+		SurfaceTarget: "assistant-workspace",
+		Reason:        "browser reachable",
+	}, now)
+	dismissedScoutID := startUITestWriteScoutArtifact(t, sourcePath, improvementScoutRole, "dismissed-browser-test", scoutFinding{
+		Title:             "Improve help text",
+		WorkType:          workTypeRefactor,
+		Area:              "Home",
+		Summary:           "Make the repo overview copy easier to scan.",
+		Rationale:         "The current wording is dense.",
+		Evidence:          "README.md",
+		Impact:            "Lower operator friction.",
+		SuggestedNextStep: "Tighten copy and shorten labels.",
+	}, scoutPolicy{
+		Version:          1,
+		Mode:             "manual",
+		Schedule:         scoutScheduleWeekly,
+		IssueDestination: improvementDestinationLocal,
+		Labels:           []string{"improvement"},
+	}, uiScoutPreflight{}, now)
+	failedScoutApprovalID := startUITestWriteScoutArtifact(t, sourcePath, enhancementScoutRole, "failed-browser-test", scoutFinding{
+		Title:             "Retry failed scout",
+		WorkType:          workTypeFeature,
+		Area:              "Approvals",
+		Summary:           "A failed scout retry should stay visible in approvals until the operator dismisses or retries it.",
+		Rationale:         "Hidden failed scouts are easy to miss.",
+		Evidence:          "docs/qa/assistant-workspace-manual-checklist.md",
+		Impact:            "Safer scout recovery.",
+		SuggestedNextStep: "Retry the scout after the lock clears.",
+	}, scoutPolicy{
+		Version:          1,
+		Mode:             "manual",
+		Schedule:         scoutScheduleDaily,
+		IssueDestination: improvementDestinationLocal,
+		Labels:           []string{"enhancement"},
+	}, uiScoutPreflight{}, now)
+
+	if err := writeStartWorkState(startWorkState{
+		Version:       startWorkStateVersion,
+		SourceRepo:    repoSlug,
+		DefaultBranch: "main",
+		UpdatedAt:     now,
+		LastRun: &startWorkLastRun{
+			SkippedReason:       "no queued fork issues",
+			OpenForkPRs:         0,
+			ParallelLimit:       1,
+			GlobalParallelLimit: 1,
+			RepoWorkerLimit:     1,
+			OpenPRCap:           10,
+			UpdatedAt:           now,
+		},
+		Issues: map[string]startWorkIssueState{
+			"7": {
+				SourceNumber:      7,
+				SourceURL:         "https://github.com/acme/widget/issues/7",
+				Title:             "Fix flaky test",
+				State:             "open",
+				Status:            startWorkStatusBlocked,
+				WorkType:          workTypeBugFix,
+				Priority:          1,
+				PrioritySource:    "triage",
+				Complexity:        3,
+				Labels:            []string{"bug", "P1"},
+				TriageStatus:      startWorkTriageCompleted,
+				TriageRationale:   "Parallel cleanup reorders file writes and intermittently drops the snapshot.",
+				TriageUpdatedAt:   now,
+				TriageError:       "priority still pending reviewer confirmation",
+				ScheduleAt:        "2026-04-22T09:00:00Z",
+				DeferredReason:    "waiting for reproducible CI window",
+				LastRunID:         "gh-ui-blocked",
+				LastRunUpdatedAt:  now,
+				LastRunError:      "CI still running",
+				PublishedPRNumber: 11,
+				PublishedPRURL:    "https://github.com/acme/widget/pull/11",
+				PublicationState:  "ci_waiting",
+				BlockedReason:     "work type unresolved",
+				UpdatedAt:         now,
+			},
+		},
+		ServiceTasks: map[string]startWorkServiceTask{
+			"triage:7": {
+				ID:            "triage:7",
+				Kind:          startTaskKindTriage,
+				Queue:         startTaskQueueService,
+				Status:        startWorkServiceTaskQueued,
+				IssueKey:      "7",
+				UpdatedAt:     now,
+				Attempts:      1,
+				LastError:     "",
+				ResultSummary: "",
+			},
+		},
+		ScoutJobs: map[string]startWorkScoutJob{
+			scoutItemID: {
+				ID:                 scoutItemID,
+				Role:               uiScoutRole,
+				Title:              "Audit approvals drawer and stale retry copy",
+				WorkType:           workTypeFeature,
+				Area:               "Approvals",
+				Summary:            "Approval detail should surface stale scout recovery context and browser audit metadata.",
+				Rationale:          "Operators need recovery context without opening raw files.",
+				Evidence:           "docs/start-ui.html",
+				Impact:             "Faster approval triage.",
+				SuggestedNextStep:  "Keep the recovery metadata visible in the scout detail pane.",
+				Confidence:         "high",
+				Files:              []string{"internal/gocli/start_ui_assets/app.txt", "internal/gocli/start_ui_test.go"},
+				Labels:             []string{"ui", "qa"},
+				Page:               "Approvals",
+				Route:              "#view=approvals",
+				Severity:           "high",
+				TargetKind:         "page",
+				Screenshots:        []string{"approvals-before.png", "approvals-after.png"},
+				ArtifactPath:       ".nana/ui-scouts/ui-browser-test",
+				ProposalPath:       ".nana/ui-scouts/ui-browser-test/proposals.json",
+				PolicyPath:         ".nana/ui-scouts/ui-browser-test/policy.json",
+				PreflightPath:      ".nana/ui-scouts/ui-browser-test/preflight.json",
+				IssueDraftPath:     ".nana/ui-scouts/ui-browser-test/issue-drafts.md",
+				RawOutputPath:      ".nana/ui-scouts/ui-browser-test/raw-output.txt",
+				GeneratedAt:        now,
+				AuditMode:          "live_browser",
+				SurfaceKind:        "app",
+				SurfaceTarget:      "assistant-workspace",
+				BrowserReady:       true,
+				PreflightReason:    "browser reachable",
+				Destination:        improvementDestinationLocal,
+				TaskBody:           "Implement local scout proposal: Audit approvals drawer and stale retry copy",
+				Status:             startScoutJobFailed,
+				RunID:              "lw-stale-scout-1",
+				Attempts:           2,
+				LastError:          localWorkStaleCleanupError,
+				PauseUntil:         pauseUntil,
+				PauseReason:        startWorkScoutJobStaleRetryPauseReason,
+				RecoveryCount:      1,
+				LastRecoveryReason: localWorkStaleCleanupError,
+				LastRecoveryAt:     now,
+				LastRecoveredRunID: "lw-stale-scout-1",
+				UpdatedAt:          now,
+				CreatedAt:          now,
+			},
+			dismissedScoutID: {
+				ID:                dismissedScoutID,
+				Role:              improvementScoutRole,
+				Title:             "Improve help text",
+				WorkType:          workTypeRefactor,
+				Area:              "Home",
+				Summary:           "Make the repo overview copy easier to scan.",
+				Rationale:         "The current wording is dense.",
+				Evidence:          "README.md",
+				Impact:            "Lower operator friction.",
+				SuggestedNextStep: "Tighten copy and shorten labels.",
+				ArtifactPath:      ".nana/improvements/dismissed-browser-test",
+				ProposalPath:      ".nana/improvements/dismissed-browser-test/proposals.json",
+				PolicyPath:        ".nana/improvements/dismissed-browser-test/policy.json",
+				Destination:       improvementDestinationLocal,
+				TaskBody:          "Implement local scout proposal: Improve help text",
+				Status:            startScoutJobDismissed,
+				UpdatedAt:         now,
+				CreatedAt:         now,
+			},
+			failedScoutApprovalID: {
+				ID:                failedScoutApprovalID,
+				Role:              enhancementScoutRole,
+				Title:             "Retry failed scout",
+				WorkType:          workTypeFeature,
+				Area:              "Approvals",
+				Summary:           "A failed scout retry should stay visible in approvals until the operator dismisses or retries it.",
+				Rationale:         "Hidden failed scouts are easy to miss.",
+				Evidence:          "docs/qa/assistant-workspace-manual-checklist.md",
+				Impact:            "Safer scout recovery.",
+				SuggestedNextStep: "Retry the scout after the lock clears.",
+				ArtifactPath:      ".nana/enhancements/failed-browser-test",
+				ProposalPath:      ".nana/enhancements/failed-browser-test/proposals.json",
+				PolicyPath:        ".nana/enhancements/failed-browser-test/policy.json",
+				Destination:       improvementDestinationLocal,
+				TaskBody:          "Implement local scout proposal: Retry failed scout",
+				Status:            startScoutJobFailed,
+				RunID:             "lw-failed-scout-1",
+				LastError:         "repo write lock busy during scout apply",
+				UpdatedAt:         now,
+				CreatedAt:         now,
+			},
+		},
+		PlannedItems: map[string]startWorkPlannedItem{
+			"planned-tracked": {
+				ID:          "planned-tracked",
+				RepoSlug:    repoSlug,
+				Title:       "Implement tracked issue #7: Fix flaky test",
+				Description: "Tracked issue: https://github.com/acme/widget/issues/7\nWork type: bug_fix\nPriority: P1",
+				WorkType:    workTypeBugFix,
+				LaunchKind:  "tracked_issue",
+				TargetURL:   "https://github.com/acme/widget/issues/7",
+				Priority:    1,
+				State:       startPlannedItemQueued,
+				ScheduleAt:  "2026-04-22T09:00:00Z",
+				CreatedAt:   now,
+				UpdatedAt:   now,
+			},
+			"planned-manual": {
+				ID:          "planned-manual",
+				RepoSlug:    repoSlug,
+				Title:       "Warm staging environment",
+				Description: "Run the smoke suite against staging and capture the logs.",
+				WorkType:    workTypeTestOnly,
+				LaunchKind:  "local_work",
+				Priority:    2,
+				State:       startPlannedItemFailed,
+				LastError:   "launch failed",
+				CreatedAt:   now,
+				UpdatedAt:   now,
+			},
+			"planned-approval": {
+				ID:          "planned-approval",
+				RepoSlug:    repoSlug,
+				Title:       "Launch smoke run",
+				Description: "Launch a smoke run from approvals.",
+				WorkType:    workTypeTestOnly,
+				LaunchKind:  "local_work",
+				Priority:    2,
+				State:       startPlannedItemQueued,
+				CreatedAt:   now,
+				UpdatedAt:   now,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	reviewItem, _, err := enqueueWorkItem(workItemInput{
+		Source:     "github",
+		SourceKind: "review_request",
+		ExternalID: "review-browser-1",
+		RepoSlug:   repoSlug,
+		TargetURL:  "https://github.com/acme/widget/pull/11",
+		Subject:    "Review feature PR",
+		Body:       "Please review this pull request.",
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueue review work item: %v", err)
+	}
+	replyItem, _, err := enqueueWorkItem(workItemInput{
+		Source:     "github",
+		SourceKind: "thread_comment",
+		ExternalID: "reply-browser-1",
+		RepoSlug:   repoSlug,
+		TargetURL:  "https://github.com/acme/widget/pull/11",
+		Subject:    "Reply in thread",
+		Body:       "Please reply in the thread.",
+		Metadata: map[string]any{
+			"comment_kind":    "review_comment",
+			"comment_path":    "internal/ui.go",
+			"comment_line":    42,
+			"comment_api_url": "https://api.github.com/repos/acme/widget/pulls/comments/22",
+		},
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueue reply work item: %v", err)
+	}
+	store, err := openLocalWorkDB()
+	if err != nil {
+		t.Fatalf("openLocalWorkDB: %v", err)
+	}
+	reviewItem.Status = workItemStatusDraftReady
+	reviewItem.LatestDraft = &workItemDraft{
+		Kind:                 "review",
+		Body:                 "Please address the flaky assertion before landing this.",
+		ReviewEvent:          "REQUEST_CHANGES",
+		SuggestedDisposition: "request_changes",
+		Summary:              "Flaky assertion needs a guard.",
+		Confidence:           0.92,
+		InlineComments: []workItemDraftInlineComment{{
+			Path: "internal/ui.go",
+			Line: 42,
+			Body: "Guard the nil path here.",
+		}},
+	}
+	if err := store.updateWorkItem(reviewItem); err != nil {
+		_ = store.Close()
+		t.Fatalf("update review item: %v", err)
+	}
+	replyItem.Status = workItemStatusDraftReady
+	replyItem.LatestDraft = &workItemDraft{
+		Kind:       "reply",
+		Body:       "I tightened the null handling and added focused coverage.",
+		Summary:    "Reply with fix summary.",
+		Confidence: 0.88,
+	}
+	if err := store.updateWorkItem(replyItem); err != nil {
+		_ = store.Close()
+		t.Fatalf("update reply item: %v", err)
+	}
+
+	repoID := localWorkRepoID(sourcePath)
+	localRunID := "lw-browser-active"
+	sandboxPath := filepath.Join(home, "sandboxes", localRunID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
+		_ = store.Close()
+		t.Fatalf("mkdir local sandbox repo: %v", err)
+	}
+	localManifest := localWorkManifest{
+		Version:         4,
+		RunID:           localRunID,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		Status:          "running",
+		CurrentPhase:    "review",
+		RepoRoot:        sourcePath,
+		RepoName:        filepath.Base(sourcePath),
+		RepoSlug:        repoSlug,
+		RepoID:          repoID,
+		SourceBranch:    "main",
+		BaselineSHA:     strings.TrimSpace(runLocalWorkTestGitOutput(t, sourcePath, "rev-parse", "HEAD")),
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+		WorkType:        workTypeRefactor,
+	}
+	if err := store.writeManifest(localManifest); err != nil {
+		_ = store.Close()
+		t.Fatalf("write local work manifest: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close local work db: %v", err)
+	}
+
+	localRunDir := localWorkRunDirByID(repoID, localRunID)
+	if err := os.MkdirAll(localRunDir, 0o755); err != nil {
+		t.Fatalf("mkdir local run dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localRunDir, "review-stdout.log"), []byte("review output\n"), 0o644); err != nil {
+		t.Fatalf("write local log: %v", err)
+	}
+
+	writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID:      "usage-main",
+		Timestamp:      "2026-04-21T20:00:00Z",
+		CWD:            cwd,
+		Model:          "gpt-5.4",
+		AgentRole:      "executor",
+		AgentNickname:  "main",
+		TokenSnapshots: []usageTokenSnapshot{{Input: 100, CachedInput: 25, Output: 10, ReasoningOutput: 5, Total: 140}},
+	})
+	if err := writeLocalWorkJSONAtomically(filepath.Join(localRunDir, "thread-usage.json"), localWorkThreadUsageArtifact{
+		Version:     1,
+		GeneratedAt: now,
+		SandboxPath: sandboxPath,
+		Totals: localWorkTokenUsageTotals{
+			InputTokens:       200,
+			OutputTokens:      20,
+			TotalTokens:       220,
+			SessionsAccounted: 1,
+			UpdatedAt:         now,
+		},
+		Threads: []localWorkThreadUsageRow{{
+			SessionID:    "usage-work",
+			Nickname:     "lane-1",
+			Role:         "leader",
+			Model:        "gpt-5.4",
+			CWD:          sandboxRepoPath,
+			InputTokens:  200,
+			OutputTokens: 20,
+			TotalTokens:  220,
+			StartedAt:    time.Date(2026, time.April, 21, 22, 0, 0, 0, time.UTC).Unix(),
+			UpdatedAt:    time.Date(2026, time.April, 21, 22, 15, 0, 0, time.UTC).Unix(),
+		}},
+	}); err != nil {
+		t.Fatalf("write thread usage artifact: %v", err)
+	}
+
+	investigateDir := filepath.Join(sourcePath, ".nana", "logs", "investigate", "investigate-100")
+	if err := os.MkdirAll(investigateDir, 0o755); err != nil {
+		t.Fatalf("mkdir investigate dir: %v", err)
+	}
+	finalReportPath := filepath.Join(investigateDir, "final-report.json")
+	validatorPath := filepath.Join(investigateDir, "round-1-validator-result.json")
+	if err := writeGithubJSON(finalReportPath, investigateReport{
+		OverallStatus:              investigateStatusConfirmed,
+		OverallShortExplanation:    "Flake reproduced in scheduler path.",
+		OverallDetailedExplanation: "The scheduler cleanup races the review path when the queue drains in parallel.",
+		OverallProofs: []investigateProof{{
+			Kind:        "source_code",
+			Title:       "scheduler",
+			Link:        "app://local/path",
+			WhyItProves: "the guard is missing",
+			IsPrimary:   true,
+			Path:        filepath.Join(sourcePath, "main.go"),
+			Line:        1,
+		}},
+		Issues: []investigateIssue{{
+			ID:                  "issue-1",
+			ShortExplanation:    "scheduler cleanup races the review path",
+			DetailedExplanation: "detailed explanation",
+			Proofs: []investigateProof{{
+				Kind:        "log",
+				Title:       "review lane",
+				WhyItProves: "the review lane sees stale cleanup state",
+				Path:        "lane-runtime/reviewer.log",
+			}},
+		}},
+	}); err != nil {
+		t.Fatalf("write final report: %v", err)
+	}
+	if err := writeGithubJSON(validatorPath, investigateValidatorResult{
+		Accepted: true,
+		Summary:  "accepted",
+	}); err != nil {
+		t.Fatalf("write validator result: %v", err)
+	}
+	if err := writeGithubJSON(filepath.Join(investigateDir, "manifest.json"), investigateManifest{
+		Version:         1,
+		RunID:           "investigate-100",
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		CompletedAt:     now,
+		Status:          investigateRunStatusCompleted,
+		Query:           "Investigate flaky scheduler failure",
+		WorkspaceRoot:   sourcePath,
+		CodexHome:       filepath.Join(home, ".codex-investigate"),
+		MCPStatusPath:   filepath.Join(investigateDir, "mcp-status.json"),
+		RunDir:          investigateDir,
+		FinalReportPath: finalReportPath,
+		MaxRounds:       investigateMaxRounds,
+		AcceptedRound:   1,
+		Rounds: []investigateRoundState{{
+			Round:               1,
+			ValidatorResultPath: validatorPath,
+			Status:              "accepted",
+		}},
+	}); err != nil {
+		t.Fatalf("write investigation manifest: %v", err)
+	}
+
+	githubRunID := "gh-ui-blocked"
+	githubManagedRoot := filepath.Join(home, ".nana", "work", "repos", "acme", "widget")
+	githubRunDir := filepath.Join(githubManagedRoot, "runs", githubRunID)
+	if err := os.MkdirAll(filepath.Join(githubRunDir, "lane-runtime"), 0o755); err != nil {
+		t.Fatalf("mkdir github run dir: %v", err)
+	}
+	githubManifest := githubWorkManifest{
+		RunID:                githubRunID,
+		RepoSlug:             repoSlug,
+		RepoOwner:            "acme",
+		RepoName:             "widget",
+		ManagedRepoRoot:      githubManagedRoot,
+		SourcePath:           sourcePath,
+		TargetURL:            "https://github.com/acme/widget/issues/7",
+		TargetKind:           "issue",
+		TargetNumber:         7,
+		WorkType:             workTypeBugFix,
+		UpdatedAt:            now,
+		CurrentPhase:         "completion-harden",
+		CurrentRound:         2,
+		PublicationState:     "ci_waiting",
+		PublicationDetail:    "Waiting for CI to settle",
+		FinalGateStatus:      "findings",
+		CandidateAuditStatus: "passed",
+		NeedsHuman:           true,
+		NeedsHumanReason:     "approval required",
+		NextAction:           "waiting for approval",
+		SandboxPath:          filepath.Join(home, "sandboxes", githubRunID),
+		SandboxRepoPath:      filepath.Join(home, "sandboxes", githubRunID, "repo"),
+		CompletionRounds: []githubWorkCompletionRoundSummary{{
+			Round:               2,
+			Status:              "retrying",
+			VerificationSummary: "verification passed (lint, compile, unit)",
+			ReviewFindings:      1,
+		}},
+	}
+	githubManifestPath := filepath.Join(githubRunDir, "manifest.json")
+	if err := writeGithubJSON(githubManifestPath, githubManifest); err != nil {
+		t.Fatalf("write github manifest: %v", err)
+	}
+	if err := indexGithubWorkRunManifest(githubManifestPath, githubManifest); err != nil {
+		t.Fatalf("index github manifest: %v", err)
+	}
+	if err := writeGithubJSON(filepath.Join(githubRunDir, "lane-runtime", "executor.json"), githubLaneRuntimeState{
+		Version:          1,
+		LaneID:           "lane-executor",
+		Alias:            "executor",
+		Role:             "executor",
+		Phase:            "completion-harden",
+		Blocking:         true,
+		Status:           "running",
+		UpdatedAt:        now,
+		InstructionsPath: filepath.Join(githubRunDir, "lane-runtime", "executor.md"),
+		ResultPath:       filepath.Join(githubRunDir, "lane-runtime", "executor-result.json"),
+		StdoutPath:       filepath.Join(githubRunDir, "lane-runtime", "executor-stdout.log"),
+		StderrPath:       filepath.Join(githubRunDir, "lane-runtime", "executor-stderr.log"),
+	}); err != nil {
+		t.Fatalf("write lane runtime: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(githubRunDir, "lane-runtime", "executor-stdout.log"), []byte("executor output\n"), 0o644); err != nil {
+		t.Fatalf("write github stdout log: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(githubRunDir, "feedback-instructions.md"), []byte("feedback ready\n"), 0o644); err != nil {
+		t.Fatalf("write feedback instructions: %v", err)
+	}
+	if err := writeGithubJSON(filepath.Join(githubRunDir, "leader-checkpoint.json"), codexStepCheckpoint{
+		SessionID:      "leader-session-1",
+		ResumeEligible: true,
+	}); err != nil {
+		t.Fatalf("write leader checkpoint: %v", err)
+	}
+
+	api := &startUIAPI{cwd: cwd}
+	var apiBase string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/events", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.Handle("/api/", api.routes())
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		startUIWebHandler(apiBase).ServeHTTP(w, r)
+	})
+	server := httptest.NewServer(mux)
+	apiBase = server.URL
+	api.allowedWebOrigin = server.URL
+
+	return startUITestBrowserFixture{
+		Server:            server,
+		API:               api,
+		RepoSlug:          repoSlug,
+		GithubRunID:       githubRunID,
+		ReviewItemID:      reviewItem.ID,
+		ReplyItemID:       replyItem.ID,
+		ScoutItemID:       scoutItemID,
+		PlannedApprovalID: "planned-approval",
+		FailedScoutJobID:  failedScoutApprovalID,
+	}
+}
+
+func startUITestWriteScoutArtifact(t *testing.T, repoPath string, role string, root string, proposal scoutFinding, policy scoutPolicy, preflight uiScoutPreflight, generatedAt string) string {
+	t.Helper()
+	artifactDir := filepath.Join(repoPath, ".nana", scoutArtifactRoot(role), root)
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("mkdir scout artifact dir: %v", err)
+	}
+	report := scoutReport{
+		Version:     1,
+		Repo:        filepath.Base(repoPath),
+		GeneratedAt: generatedAt,
+		Proposals:   []scoutFinding{proposal},
+	}
+	if err := writeGithubJSON(filepath.Join(artifactDir, "proposals.json"), report); err != nil {
+		t.Fatalf("write scout proposals: %v", err)
+	}
+	if policy.Version == 0 {
+		policy.Version = 1
+	}
+	if err := writeGithubJSON(filepath.Join(artifactDir, "policy.json"), policy); err != nil {
+		t.Fatalf("write scout policy: %v", err)
+	}
+	if preflight.Version != 0 {
+		if err := writeGithubJSON(filepath.Join(artifactDir, "preflight.json"), preflight); err != nil {
+			t.Fatalf("write scout preflight: %v", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "issue-drafts.md"), []byte("# Drafts\n"), 0o644); err != nil {
+		t.Fatalf("write scout issue draft: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "raw-output.txt"), []byte("raw scout output\n"), 0o644); err != nil {
+		t.Fatalf("write scout raw output: %v", err)
+	}
+	return localScoutProposalID(role, proposal)
 }
