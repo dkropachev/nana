@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -1767,13 +1768,17 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 		return nil, err
 	} else if updated {
 		if err := writeGithubJSON(startWorkStatePath(state.SourceRepo), state); err != nil {
-			if os.IsPermission(err) {
+			if startWorkReadCanIgnoreNormalizeWritebackError(err) {
 				return &state, nil
 			}
 			return nil, err
 		}
 	}
 	return &state, nil
+}
+
+func startWorkReadCanIgnoreNormalizeWritebackError(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EROFS)
 }
 
 func writeStartWorkState(state startWorkState) error {

@@ -70,6 +70,7 @@ type startUIAPI struct {
 	eventsLastPayload    map[string]any
 	localWorkReadMu      sync.Mutex
 	localWorkRead        *localWorkDBStore
+	localWorkReadRetired *localWorkDBStore
 	localWorkReadBuildCh chan struct{}
 	localWorkToken       string
 	workMetaCache        startUIWorkMetadataCache
@@ -2445,15 +2446,24 @@ func (h *startUIAPI) expireOverviewSectionsForChangedDependencies(previousDeps [
 func (h *startUIAPI) closePersistentLocalWorkReadStore() error {
 	h.localWorkReadMu.Lock()
 	store := h.localWorkRead
+	retired := h.localWorkReadRetired
 	h.localWorkRead = nil
+	h.localWorkReadRetired = nil
 	h.localWorkReadBuildCh = nil
 	h.localWorkToken = ""
 	h.workMetaCache = startUIWorkMetadataCache{}
 	h.localWorkReadMu.Unlock()
-	if store == nil {
-		return nil
+
+	var closeErr error
+	if store != nil {
+		closeErr = store.Close()
 	}
-	return store.Close()
+	if retired != nil {
+		if err := retired.Close(); closeErr == nil {
+			closeErr = err
+		}
+	}
+	return closeErr
 }
 
 func (h *startUIAPI) persistentLocalWorkReadSnapshot() startUIDependencySnapshot {
@@ -2462,21 +2472,42 @@ func (h *startUIAPI) persistentLocalWorkReadSnapshot() startUIDependencySnapshot
 
 func (h *startUIAPI) persistentLocalWorkReadStore(snapshot startUIDependencySnapshot) (*localWorkDBStore, error) {
 	for {
+		var staleStore *localWorkDBStore
+		var closeStore *localWorkDBStore
 		h.localWorkReadMu.Lock()
 		if h.localWorkRead != nil {
-			store := h.localWorkRead
-			h.localWorkReadMu.Unlock()
-			return store, nil
+			if h.localWorkToken != snapshot.token {
+				// The dependency snapshot changed, so swap in a fresh reader. Keep the
+				// previous handle alive until the next refresh/close so in-flight reads
+				// are less likely to trip over an immediate close.
+				staleStore = h.localWorkRead
+				closeStore = h.localWorkReadRetired
+				h.localWorkReadRetired = staleStore
+				h.localWorkRead = nil
+				h.localWorkToken = ""
+				h.workMetaCache = startUIWorkMetadataCache{}
+			} else {
+				store := h.localWorkRead
+				h.localWorkReadMu.Unlock()
+				return store, nil
+			}
 		}
 		if h.localWorkReadBuildCh != nil {
 			waitCh := h.localWorkReadBuildCh
 			h.localWorkReadMu.Unlock()
+			if closeStore != nil {
+				_ = closeStore.Close()
+			}
 			<-waitCh
 			continue
 		}
 		buildCh := make(chan struct{})
 		h.localWorkReadBuildCh = buildCh
 		h.localWorkReadMu.Unlock()
+
+		if closeStore != nil {
+			_ = closeStore.Close()
+		}
 
 		store, err := localWorkOpenReadStore()
 		h.localWorkReadMu.Lock()
