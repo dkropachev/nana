@@ -232,6 +232,7 @@ func assertStartManagedNanaLaunchUsesSocketPresence(t *testing.T, cmd *exec.Cmd)
 	if _, err := os.Stat(socketPath); err != nil {
 		t.Fatalf("expected fixed DB proxy socket at %q: %v", socketPath, err)
 	}
+	foundInternalServiceBypass := false
 	for _, entry := range cmd.Env {
 		if strings.HasPrefix(entry, "NANA_WORK_DB_PROXY_SOCKET=") {
 			t.Fatalf("expected no DB proxy socket env injection, got %q", entry)
@@ -239,5 +240,11 @@ func assertStartManagedNanaLaunchUsesSocketPresence(t *testing.T, cmd *exec.Cmd)
 		if strings.HasPrefix(entry, "NANA_START_DB_PROXY_REQUIRED=") {
 			t.Fatalf("expected no DB proxy required env injection, got %q", entry)
 		}
+		if entry == nanaServiceInternalEnv+"=1" {
+			foundInternalServiceBypass = true
+		}
+	}
+	if !foundInternalServiceBypass {
+		t.Fatalf("expected managed Nana launch to set %s=1, got env=%#v", nanaServiceInternalEnv, cmd.Env)
 	}
 }

@@ -776,5 +776,13 @@ func localWorkDBProxySocketPresent(socketPath string) (bool, error) {
 }
 
 func startManagedNanaCommand(args ...string) (*exec.Cmd, error) {
-	return startManagedNanaCommandFactory(args...)
+	cmd, err := startManagedNanaCommandFactory(args...)
+	if err != nil {
+		return nil, err
+	}
+	// Managed child Nana processes must execute directly instead of routing
+	// back through the per-user service socket, or detached/background work
+	// can queue behind the command that spawned it.
+	cmd.Env = append(cmd.Environ(), nanaServiceInternalEnv+"=1")
+	return cmd, nil
 }
