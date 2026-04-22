@@ -775,8 +775,8 @@ func TestStartUIOperatorGuideDocsAndHelp(t *testing.T) {
 			"nana start",
 			"--no-ui",
 			"/api/v1/overview",
-			"Attention",
-			"Repo tabs",
+			"Issues and investigations",
+			"Feedback and approvals",
 		},
 		"docs/work.md": {
 			"Start UI guide",

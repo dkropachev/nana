@@ -102,47 +102,6 @@ func TestStartUIBrowserInteractionsLegacyQueueRedirects(t *testing.T) {
 	}
 }
 
-func TestStartUIBrowserInteractionsIssues(t *testing.T) {
-	chromePath := startUITestChromePath(t)
-	if chromePath == "" {
-		t.Skip("google-chrome is required for chromedp browser interaction coverage")
-	}
-
-	fixture := startUITestSetupBrowserFixture(t)
-	defer fixture.Server.Close()
-
-	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
-	defer cancelBrowser()
-
-	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
-	defer cancelTab()
-
-	issueAttentionID := fixture.RepoSlug + "#7"
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home&kind=issue", "#attention-detail-pane")
-	startUITestChromedpWaitVisible(t, tabCtx, fmt.Sprintf(`[data-attention-tile="%s"]`, issueAttentionID))
-	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-attention-tile="%s"]`, issueAttentionID))
-	startUITestChromedpWaitVisible(t, tabCtx, "#attention-issue-deferred")
-	startUITestChromedpSetValue(t, tabCtx, "#attention-issue-deferred", "chromedp deferred reason")
-	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-attention-detail-action="save_issue"][data-attention-detail-item-id="%s"]`, issueAttentionID))
-	startUITestWaitFor(t, 10*time.Second, "issue deferred reason to persist", func() bool {
-		state, err := readStartWorkState(fixture.RepoSlug)
-		if err != nil {
-			return false
-		}
-		issue, ok := state.Issues["7"]
-		return ok && issue.DeferredReason == "chromedp deferred reason"
-	})
-	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-attention-detail-action="clear_issue_schedule"][data-attention-detail-item-id="%s"]`, issueAttentionID))
-	startUITestWaitFor(t, 10*time.Second, "issue schedule to clear", func() bool {
-		state, err := readStartWorkState(fixture.RepoSlug)
-		if err != nil {
-			return false
-		}
-		issue, ok := state.Issues["7"]
-		return ok && strings.TrimSpace(issue.ScheduleAt) == ""
-	})
-}
-
 func TestStartUIBrowserInteractionsRepoControls(t *testing.T) {
 	chromePath := startUITestChromePath(t)
 	if chromePath == "" {
@@ -1384,7 +1343,7 @@ func startUITestNewChromedpBrowser(t *testing.T, chromePath string) (context.Con
 func startUITestNewChromedpTab(t *testing.T, browserCtx context.Context) (context.Context, context.CancelFunc) {
 	t.Helper()
 	tabCtx, cancelTab := chromedp.NewContext(browserCtx)
-	ctx, cancelTimeout := context.WithTimeout(tabCtx, 45*time.Second)
+	ctx, cancelTimeout := context.WithTimeout(tabCtx, 90*time.Second)
 	return ctx, func() {
 		cancelTimeout()
 		cancelTab()

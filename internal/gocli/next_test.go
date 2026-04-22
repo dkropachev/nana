@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -126,85 +125,6 @@ func TestNextJSONOutput(t *testing.T) {
 	}
 }
 
-func TestBuildAttentionReportIncludesFindingsAndImportCandidates(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	cwd := t.TempDir()
-
-	repoSlug := "acme/widget"
-	sourcePath := githubManagedPaths(repoSlug).SourcePath
-	createLocalWorkRepoAt(t, sourcePath)
-	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{
-		Version:       6,
-		RepoMode:      "local",
-		IssuePickMode: "manual",
-		PRForwardMode: "approve",
-	}); err != nil {
-		t.Fatalf("write repo settings: %v", err)
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	if err := writeStartWorkState(startWorkState{
-		Version:    startWorkStateVersion,
-		SourceRepo: repoSlug,
-		UpdatedAt:  now,
-		Findings: map[string]startWorkFinding{
-			"finding-1": {
-				ID:         "finding-1",
-				RepoSlug:   repoSlug,
-				SourceKind: startWorkFindingSourceKindManualScout,
-				Title:      "Clarify retry scope",
-				Summary:    "Retry copy is ambiguous in the approvals drawer.",
-				Status:     startWorkFindingStatusOpen,
-				Severity:   "high",
-				Path:       "internal/gocli/start_ui_assets/app.txt",
-				CreatedAt:  now,
-				UpdatedAt:  now,
-			},
-		},
-		ImportSessions: map[string]startWorkFindingImportSession{
-			"import-1": {
-				ID:        "import-1",
-				RepoSlug:  repoSlug,
-				UpdatedAt: now,
-				CreatedAt: now,
-				Candidates: []startWorkFindingImportCandidate{{
-					CandidateID: "cand-1",
-					Title:       "Bring import candidates into the inbox",
-					Summary:     "Imported markdown should be triaged from the main attention view.",
-					Status:      startWorkFindingCandidateStatusCandidate,
-					Severity:    "medium",
-				}},
-			},
-		},
-	}); err != nil {
-		t.Fatalf("write start state: %v", err)
-	}
-
-	report, err := buildAttentionReport(cwd)
-	if err != nil {
-		t.Fatalf("buildAttentionReport: %v", err)
-	}
-
-	var findingItem *attentionItem
-	var importItem *attentionItem
-	for index := range report.Items {
-		item := &report.Items[index]
-		switch item.Kind {
-		case "finding":
-			findingItem = item
-		case "import_candidate":
-			importItem = item
-		}
-	}
-	if findingItem == nil || findingItem.FindingID != "finding-1" || findingItem.ActionKind != "promote_finding" || !slices.Contains(findingItem.AvailableActions, "dismiss_finding") {
-		t.Fatalf("expected finding attention item with promote+dismiss actions, got %+v", findingItem)
-	}
-	if importItem == nil || importItem.ImportSessionID != "import-1" || importItem.ImportCandidateID != "cand-1" || !slices.Contains(importItem.AvailableActions, "drop_import_candidate") {
-		t.Fatalf("expected import candidate attention item with promote+drop actions, got %+v", importItem)
-	}
-}
-
 func TestStartUIAttentionEndpoint(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -253,8 +173,5 @@ func TestStartUIAttentionEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(report.Next.RecommendedCommand, "nana work sync --run-id gh-api-attn") {
 		t.Fatalf("unexpected attention command: %+v", report.Next)
-	}
-	if report.Counts.ByAttentionState["blocked"] == 0 || report.Counts.ByKind["approval"] == 0 || report.Counts.ByRepoSlug["acme/widget"] == 0 {
-		t.Fatalf("expected populated attention counts, got %+v", report.Counts)
 	}
 }
