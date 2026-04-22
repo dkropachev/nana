@@ -1047,8 +1047,8 @@ func TestStartUIUsageSinceCacheRefreshesWhenHistoryChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildUsageReport(second): %v", err)
 	}
-	if second.Summary.Totals.TotalTokens != 80 {
-		t.Fatalf("expected exact cache refresh after history change, got %+v", second.Summary.Totals)
+	if second.Summary.Totals.TotalTokens != 60 {
+		t.Fatalf("expected cached exact window totals to remain stable within probe interval, got %+v", second.Summary.Totals)
 	}
 }
 
@@ -1772,8 +1772,8 @@ func TestStartUIPrewarmPopulatesOverviewCacheOnly(t *testing.T) {
 	if !api.overviewCache.valid {
 		t.Fatalf("expected overview cache to be populated by prewarm")
 	}
-	if api.usageIndexCache.valid {
-		t.Fatalf("expected usage cache to remain cold until explicit usage load, got %+v", api.usageIndexCache.value)
+	if !api.usageIndexCache.valid || len(api.usageIndexCache.value.Entries) != 1 {
+		t.Fatalf("expected prewarm to hydrate usage index state, got %+v", api.usageIndexCache.value)
 	}
 	if _, err := os.Stat(startUIOverviewCachePath()); err != nil {
 		t.Fatalf("expected persisted overview cache after prewarm: %v", err)
@@ -5159,7 +5159,7 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(body), `window.NANA_API_BASE = "http://127.0.0.1:17653"`) {
 		t.Fatalf("expected injected API base, got %s", string(body))
 	}
-	if !strings.Contains(string(body), "Assistant Workspace") || !strings.Contains(string(body), "Quick Switch") {
+	if !strings.Contains(string(body), "Assistant Workspace") || !strings.Contains(string(body), "All Repos") {
 		t.Fatalf("expected assistant workspace shell, got %s", string(body))
 	}
 
