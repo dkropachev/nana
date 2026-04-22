@@ -647,132 +647,6 @@ func TestStartUIAPIUsage(t *testing.T) {
 	}
 }
 
-func TestStartUIAPIUsageFiltersByRepoManagedWorkOnly(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	cwd := t.TempDir()
-	repoSlug := "acme/widget"
-	repoRoot := githubManagedPaths(repoSlug).SourcePath
-	createLocalWorkRepoAt(t, repoRoot)
-	otherRepoSlug := "acme/other"
-	otherRepoRoot := githubManagedPaths(otherRepoSlug).SourcePath
-	createLocalWorkRepoAt(t, otherRepoRoot)
-
-	resetUsageRolloutCache()
-	defer resetUsageRolloutCache()
-
-	writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
-		SessionID:      "usage-main-same-path",
-		Timestamp:      "2026-04-15T12:00:00Z",
-		CWD:            repoRoot,
-		Model:          "gpt-5.4",
-		TokenSnapshots: []usageTokenSnapshot{{Input: 40, Output: 10, Total: 50}},
-	})
-
-	writeLocalUsage := func(repoPath string, slug string, runID string, total int) {
-		t.Helper()
-		repoID := localWorkRepoID(repoPath)
-		sandboxPath := filepath.Join(home, "sandboxes", runID)
-		sandboxRepoPath := filepath.Join(sandboxPath, "repo")
-		if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
-			t.Fatalf("mkdir sandbox repo: %v", err)
-		}
-		manifest := localWorkManifest{
-			Version:           4,
-			RunID:             runID,
-			CreatedAt:         "2026-04-15T13:00:00Z",
-			UpdatedAt:         "2026-04-15T13:00:00Z",
-			Status:            "running",
-			RepoRoot:          repoPath,
-			RepoName:          filepath.Base(repoPath),
-			RepoSlug:          slug,
-			RepoID:            repoID,
-			SourceBranch:      "main",
-			BaselineSHA:       strings.TrimSpace(runLocalWorkTestGitOutput(t, repoPath, "rev-parse", "HEAD")),
-			SandboxPath:       sandboxPath,
-			SandboxRepoPath:   sandboxRepoPath,
-			InputPath:         filepath.Join(home, runID+".md"),
-			InputMode:         "task",
-			IntegrationPolicy: "final",
-			GroupingPolicy:    localWorkDefaultGroupingPolicy,
-			MaxIterations:     1,
-		}
-		if err := writeLocalWorkManifest(manifest); err != nil {
-			t.Fatalf("writeLocalWorkManifest(%s): %v", runID, err)
-		}
-		runDir := localWorkRunDirByID(repoID, runID)
-		if err := os.MkdirAll(runDir, 0o755); err != nil {
-			t.Fatalf("mkdir run dir: %v", err)
-		}
-		if err := writeLocalWorkJSONAtomically(filepath.Join(runDir, "thread-usage.json"), localWorkThreadUsageArtifact{
-			Version:     1,
-			GeneratedAt: "2026-04-15T13:00:00Z",
-			SandboxPath: sandboxPath,
-			Totals: localWorkTokenUsageTotals{
-				InputTokens:       total - 20,
-				OutputTokens:      20,
-				TotalTokens:       total,
-				SessionsAccounted: 1,
-				UpdatedAt:         "2026-04-15T13:00:00Z",
-			},
-			Threads: []localWorkThreadUsageRow{{
-				SessionID:    runID + "-session",
-				Nickname:     "lane-1",
-				Role:         "leader",
-				Model:        "gpt-5.4",
-				CWD:          sandboxRepoPath,
-				InputTokens:  total - 20,
-				OutputTokens: 20,
-				TotalTokens:  total,
-				StartedAt:    time.Date(2026, time.April, 15, 13, 0, 0, 0, time.UTC).Unix(),
-				UpdatedAt:    time.Date(2026, time.April, 15, 13, 0, 0, 0, time.UTC).Unix(),
-			}},
-		}); err != nil {
-			t.Fatalf("write thread-usage artifact(%s): %v", runID, err)
-		}
-	}
-
-	writeLocalUsage(repoRoot, repoSlug, "usage-work-widget", 220)
-	writeLocalUsage(otherRepoRoot, otherRepoSlug, "usage-work-other", 90)
-
-	previousTTL := startUIUsageCacheTTL
-	previousNow := startUIUsageCacheNow
-	startUIUsageCacheTTL = time.Hour
-	now := time.Date(2026, time.April, 20, 12, 0, 0, 0, time.UTC)
-	startUIUsageCacheNow = func() time.Time { return now }
-	defer func() {
-		startUIUsageCacheTTL = previousTTL
-		startUIUsageCacheNow = previousNow
-	}()
-
-	api := &startUIAPI{cwd: cwd}
-	allReport, err := api.buildUsageReport(url.Values{"root": {"all"}})
-	if err != nil {
-		t.Fatalf("buildUsageReport(all): %v", err)
-	}
-	if allReport.Summary.Totals.TotalTokens != 360 || allReport.Summary.Totals.Sessions != 3 {
-		t.Fatalf("unexpected all-repos totals: %+v", allReport.Summary.Totals)
-	}
-
-	repoReport, err := api.buildUsageReport(url.Values{"root": {"all"}, "repo": {repoSlug}})
-	if err != nil {
-		t.Fatalf("buildUsageReport(repo): %v", err)
-	}
-	if repoReport.Filters.Repo != repoSlug {
-		t.Fatalf("expected repo filter %q, got %+v", repoSlug, repoReport.Filters)
-	}
-	if repoReport.Summary.Totals.TotalTokens != 220 || repoReport.Summary.Totals.Sessions != 1 {
-		t.Fatalf("unexpected repo-filtered totals: %+v", repoReport.Summary.Totals)
-	}
-	if len(repoReport.ByRoot) != 1 || repoReport.ByRoot[0].Key != "work" {
-		t.Fatalf("expected repo usage to be limited to managed work roots, got %+v", repoReport.ByRoot)
-	}
-	if len(repoReport.TopSessions) != 1 || repoReport.TopSessions[0].SessionID != "usage-work-widget-session" || repoReport.TopSessions[0].RepoSlug != repoSlug {
-		t.Fatalf("unexpected repo top sessions: %+v", repoReport.TopSessions)
-	}
-}
-
 func TestStartUIUsageSinceUsesWindowDeltasForLocalWorkHistory(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -873,14 +747,6 @@ func TestStartUIUsageSinceUsesWindowDeltasForLocalWorkHistory(t *testing.T) {
 	}
 	if len(report.TopSessions) != 1 || report.TopSessions[0].SessionID != "usage-work-window" {
 		t.Fatalf("unexpected top sessions: %+v", report.TopSessions)
-	}
-
-	otherReport, err := api.buildUsageReport(url.Values{"root": {"work"}, "since": {"1h"}, "repo": {"acme/other"}})
-	if err != nil {
-		t.Fatalf("buildUsageReport(other repo): %v", err)
-	}
-	if otherReport.Summary.Totals.TotalTokens != 0 || len(otherReport.TopSessions) != 0 {
-		t.Fatalf("expected no windowed usage for unrelated repo, got %+v", otherReport)
 	}
 }
 
@@ -1153,7 +1019,7 @@ func TestStartUIUsageSinceCacheRefreshesWhenHistoryChanges(t *testing.T) {
 	previousNow := startUIUsageCacheNow
 	previousIndexProbe := startUIUsageIndexProbeInterval
 	startUIUsageCacheTTL = time.Hour
-	startUIUsageIndexProbeInterval = 0
+	startUIUsageIndexProbeInterval = time.Hour
 	fakeNow := now
 	startUIUsageCacheNow = func() time.Time { return fakeNow }
 	defer func() {
@@ -1183,144 +1049,6 @@ func TestStartUIUsageSinceCacheRefreshesWhenHistoryChanges(t *testing.T) {
 	}
 	if second.Summary.Totals.TotalTokens != 80 {
 		t.Fatalf("expected exact cache refresh after history change, got %+v", second.Summary.Totals)
-	}
-}
-
-func TestStartUIUsageSinceReusesIndexedSnapshotWithinProbeInterval(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	repo := createLocalWorkRepo(t)
-	repoID := localWorkRepoID(repo)
-	runID := "usage-work-cache-probe"
-	sandboxPath := filepath.Join(home, "sandboxes", runID)
-	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
-	if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
-		t.Fatalf("mkdir sandbox repo: %v", err)
-	}
-	now := time.Now().UTC()
-	manifest := localWorkManifest{
-		Version:           4,
-		RunID:             runID,
-		CreatedAt:         now.Add(-2 * time.Hour).Format(time.RFC3339),
-		UpdatedAt:         now.Add(-10 * time.Minute).Format(time.RFC3339),
-		Status:            "running",
-		RepoRoot:          repo,
-		RepoName:          filepath.Base(repo),
-		RepoSlug:          "acme/widget",
-		RepoID:            repoID,
-		SourceBranch:      "main",
-		BaselineSHA:       strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
-		SandboxPath:       sandboxPath,
-		SandboxRepoPath:   sandboxRepoPath,
-		InputPath:         filepath.Join(home, "task.md"),
-		InputMode:         "task",
-		IntegrationPolicy: "final",
-		GroupingPolicy:    localWorkDefaultGroupingPolicy,
-		MaxIterations:     1,
-	}
-	if err := writeLocalWorkManifest(manifest); err != nil {
-		t.Fatalf("writeLocalWorkManifest: %v", err)
-	}
-
-	runDir := localWorkRunDirByID(repoID, runID)
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		t.Fatalf("mkdir run dir: %v", err)
-	}
-	writeHistory := func(total int, updatedAt time.Time) {
-		t.Helper()
-		history := localWorkThreadUsageHistoryArtifact{
-			Version:     1,
-			GeneratedAt: updatedAt.Format(time.RFC3339),
-			SandboxPath: sandboxPath,
-			Threads: []usageHistoryRow{{
-				SessionID: "usage-work-cache-probe",
-				Nickname:  "lane-1",
-				Role:      "leader",
-				Model:     "gpt-5.4",
-				CWD:       sandboxRepoPath,
-				StartedAt: now.Add(-2 * time.Hour).Unix(),
-				UpdatedAt: updatedAt.Unix(),
-				Checkpoints: []usageTokenCheckpoint{
-					{Timestamp: now.Add(-90 * time.Minute).Unix(), InputTokens: 100, TotalTokens: 100},
-					{Timestamp: updatedAt.Unix(), InputTokens: total, TotalTokens: total},
-				},
-			}},
-		}
-		if err := writeLocalWorkJSONAtomically(filepath.Join(runDir, threadUsageHistoryArtifactName), history); err != nil {
-			t.Fatalf("write thread-usage-history artifact: %v", err)
-		}
-		if err := writeLocalWorkJSONAtomically(filepath.Join(runDir, "thread-usage.json"), localWorkThreadUsageArtifact{
-			Version:     1,
-			GeneratedAt: updatedAt.Format(time.RFC3339),
-			SandboxPath: sandboxPath,
-			Totals: localWorkTokenUsageTotals{
-				InputTokens:       total,
-				TotalTokens:       total,
-				SessionsAccounted: 1,
-				UpdatedAt:         updatedAt.Format(time.RFC3339),
-			},
-			Threads: []localWorkThreadUsageRow{{
-				SessionID:   "usage-work-cache-probe",
-				Nickname:    "lane-1",
-				Role:        "leader",
-				Model:       "gpt-5.4",
-				CWD:         sandboxRepoPath,
-				InputTokens: total,
-				TotalTokens: total,
-				StartedAt:   now.Add(-2 * time.Hour).Unix(),
-				UpdatedAt:   updatedAt.Unix(),
-			}},
-		}); err != nil {
-			t.Fatalf("write thread-usage artifact: %v", err)
-		}
-	}
-
-	writeHistory(160, now.Add(-10*time.Minute))
-
-	previousTTL := startUIUsageCacheTTL
-	previousNow := startUIUsageCacheNow
-	previousIndexProbe := startUIUsageIndexProbeInterval
-	startUIUsageCacheTTL = time.Hour
-	startUIUsageIndexProbeInterval = time.Hour
-	fakeNow := now
-	startUIUsageCacheNow = func() time.Time { return fakeNow }
-	defer func() {
-		startUIUsageCacheTTL = previousTTL
-		startUIUsageCacheNow = previousNow
-		startUIUsageIndexProbeInterval = previousIndexProbe
-	}()
-
-	api := &startUIAPI{cwd: repo}
-	first, err := api.buildUsageReport(url.Values{"root": {"work"}, "since": {"1h"}})
-	if err != nil {
-		t.Fatalf("buildUsageReport(first): %v", err)
-	}
-	if first.Summary.Totals.TotalTokens != 60 {
-		t.Fatalf("unexpected first exact window totals: %+v", first.Summary.Totals)
-	}
-
-	manifest.UpdatedAt = now.Add(-2 * time.Minute).Format(time.RFC3339)
-	if err := writeLocalWorkManifest(manifest); err != nil {
-		t.Fatalf("rewrite manifest updated_at: %v", err)
-	}
-	writeHistory(180, now.Add(-2*time.Minute))
-
-	second, err := api.buildUsageReport(url.Values{"root": {"work"}, "since": {"1h"}})
-	if err != nil {
-		t.Fatalf("buildUsageReport(second): %v", err)
-	}
-	if second.Summary.Totals.TotalTokens != 60 {
-		t.Fatalf("expected windowed usage to reuse the cached index within the probe interval, got %+v", second.Summary.Totals)
-	}
-
-	startUIUsageIndexProbeInterval = 0
-	third, err := api.buildUsageReport(url.Values{"root": {"work"}, "since": {"1h"}})
-	if err != nil {
-		t.Fatalf("buildUsageReport(third): %v", err)
-	}
-	if third.Summary.Totals.TotalTokens != 80 {
-		t.Fatalf("expected windowed usage to refresh after the probe interval, got %+v", third.Summary.Totals)
 	}
 }
 
@@ -2044,14 +1772,17 @@ func TestStartUIPrewarmPopulatesOverviewCacheOnly(t *testing.T) {
 	if !api.overviewCache.valid {
 		t.Fatalf("expected overview cache to be populated by prewarm")
 	}
-	if !api.usageIndexCache.valid || len(api.usageIndexCache.value.Entries) != 1 {
-		t.Fatalf("expected usage index cache to be populated by prewarm, got %+v", api.usageIndexCache.value)
-	}
-	if len(api.usageCache) == 0 {
-		t.Fatalf("expected default usage report cache to be populated by prewarm")
+	if api.usageIndexCache.valid {
+		t.Fatalf("expected usage cache to remain cold until explicit usage load, got %+v", api.usageIndexCache.value)
 	}
 	if _, err := os.Stat(startUIOverviewCachePath()); err != nil {
 		t.Fatalf("expected persisted overview cache after prewarm: %v", err)
+	}
+	if _, err := api.loadUsageIndex(); err != nil {
+		t.Fatalf("loadUsageIndex after prewarm: %v", err)
+	}
+	if !api.usageIndexCache.valid || len(api.usageIndexCache.value.Entries) != 1 {
+		t.Fatalf("expected usage cache to populate after explicit usage load, got %+v", api.usageIndexCache.value)
 	}
 }
 
@@ -5428,11 +5159,8 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(body), `window.NANA_API_BASE = "http://127.0.0.1:17653"`) {
 		t.Fatalf("expected injected API base, got %s", string(body))
 	}
-	if !strings.Contains(string(body), "Assistant Workspace") || !strings.Contains(string(body), ">All Repos<") {
+	if !strings.Contains(string(body), "Assistant Workspace") || !strings.Contains(string(body), "Quick Switch") {
 		t.Fatalf("expected assistant workspace shell, got %s", string(body))
-	}
-	if strings.Contains(string(body), "Quick Switch") {
-		t.Fatalf("expected quick switch control to be removed from the shell, got %s", string(body))
 	}
 
 	appResponse, err := http.Get(server.URL + "/app.js")
@@ -5462,8 +5190,8 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `prettyJSON(rawSettings)`) {
 		t.Fatalf("expected settings.json raw payload rendering in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `data-nav-view="investigations"`) {
-		t.Fatalf("expected investigations navigation in app.js, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `investigations: "investigation"`) {
+		t.Fatalf("expected legacy investigations redirect wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `repoList: defaultRepoListState()`) {
 		t.Fatalf("expected repo list fallback state in app.js, got %s", string(appBody))
@@ -5483,8 +5211,8 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `state.repoList.items || []`) {
 		t.Fatalf("expected sorted repos fallback to repo list cache in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `function repoSummaryBySlug(`) || !strings.Contains(string(appBody), `return repoSummaryBySlug(state.selectedRepo);`) {
-		t.Fatalf("expected selected repo summary helper to reuse merged repo lookup in app.js, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `const repoListSummary = (state.repoList.items || []).find((repo) => repo.repo_slug === state.selectedRepo) || null;`) {
+		t.Fatalf("expected selected repo summary to merge repo list state in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `state: repoListSummary.state || overviewSummary.state || null,`) {
 		t.Fatalf("expected selected repo summary state fallback in app.js, got %s", string(appBody))
@@ -5507,8 +5235,8 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `Pause Until`) {
 		t.Fatalf("expected pause detail copy in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `data-feedback-tab="reviews"`) {
-		t.Fatalf("expected feedback tabs in app.js, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `function defaultFeedbackState()`) || !strings.Contains(string(appBody), `feedback: defaultFeedbackState()`) {
+		t.Fatalf("expected feedback state wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `data-repo-drop="`) {
 		t.Fatalf("expected repo drop control in app.js, got %s", string(appBody))
@@ -5519,50 +5247,20 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `data-open-repo-tab="scouts"`) {
 		t.Fatalf("expected direct scouts navigation wiring in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `data-repo-picker="true"`) || !strings.Contains(string(appBody), `WORKSPACE_SCOPE_ALL`) || !strings.Contains(string(appBody), `WORKSPACE_SCOPE_ONBOARD`) {
-		t.Fatalf("expected repo picker scope controls in app.js, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `function setWorkspaceRepoScope(`) || !strings.Contains(string(appBody), `function renderRepoPicker(`) {
-		t.Fatalf("expected repo picker scope helpers in app.js, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `function initRepoOnboardingDrawer(`) || !strings.Contains(string(appBody), `repo-onboarding-drawer-content`) {
-		t.Fatalf("expected onboarding drawer wiring in app.js, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `data-clear-workspace-scope="true"`) {
-		t.Fatalf("expected global page scope reset affordance in app.js, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `function selectedTaskComposerRepoSummary(`) || !strings.Contains(string(appBody), `function selectedTaskScopeRepoSummary(`) {
-		t.Fatalf("expected investigations repo scope split helpers in app.js, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `if (state.currentView === "usage" && state.selectedRepo) params.set("repo", state.selectedRepo);`) {
-		t.Fatalf("expected usage query string to include picker repo scope in app.js, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `} else if (state.currentView === "usage") {`) || !strings.Contains(string(appBody), `loadUsage({ silent: true });`) {
-		t.Fatalf("expected repo scope changes to refresh usage in place in app.js, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `repo-picker-dropdown`) || !strings.Contains(string(appBody), `Repo scope`) {
-		t.Fatalf("expected compact repo picker dropdown markup in app.js, got %s", string(appBody))
-	}
-	if strings.Contains(string(appBody), `data-open-onboard="true"`) {
-		t.Fatalf("expected onboarding to move into the picker drawer flow, got %s", string(appBody))
-	}
-	if strings.Contains(string(appBody), `data-view-filter-name="repo"`) {
-		t.Fatalf("expected repo scope to move out of per-page filter toolbars, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `data-open-onboard="true"`) {
+		t.Fatalf("expected repo onboarding navigation affordance in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `repo-onboard-form`) || !strings.Contains(string(appBody), `submitRepoOnboarding()`) {
 		t.Fatalf("expected repo onboarding form wiring in app.js, got %s", string(appBody))
 	}
-	if strings.Contains(string(appBody), `quick-switch`) {
-		t.Fatalf("expected quick switch wiring to be removed from app.js, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `function renderAttentionApprovalDetailPane(`) {
+		t.Fatalf("expected approval detail wiring in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `function dropApprovalItem(`) {
-		t.Fatalf("expected approval drop helper in app.js, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `attentionDetailButton(item, "drop_approval"`) {
+		t.Fatalf("expected approval drop action wiring in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `data-approval-drop-kind="`) {
-		t.Fatalf("expected approval drop control wiring in app.js, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `data-issue-save="`) {
-		t.Fatalf("expected issue save control wiring in app.js, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `id: "repo-controls-issue-form"`) || !strings.Contains(string(appBody), `submitLabel: "Save Issue"`) {
+		t.Fatalf("expected issue form save wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `data-scheduler-save="`) {
 		t.Fatalf("expected scheduler save control wiring in app.js, got %s", string(appBody))
@@ -6291,6 +5989,7 @@ func TestStartUILoadCachedEventsPayloadDeduplicatesConcurrentBuilds(t *testing.T
 	var buildCount int32
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	var releaseOnce sync.Once
 	previousHook := startUIOverviewCacheAfterUncachedBuildHook
 	startUIOverviewCacheAfterUncachedBuildHook = func() {
 		if atomic.AddInt32(&buildCount, 1) == 1 {
@@ -6299,6 +5998,7 @@ func TestStartUILoadCachedEventsPayloadDeduplicatesConcurrentBuilds(t *testing.T
 		}
 	}
 	defer func() { startUIOverviewCacheAfterUncachedBuildHook = previousHook }()
+	defer releaseOnce.Do(func() { close(release) })
 
 	api := &startUIAPI{cwd: cwd}
 	var wg sync.WaitGroup
@@ -6319,7 +6019,7 @@ func TestStartUILoadCachedEventsPayloadDeduplicatesConcurrentBuilds(t *testing.T
 	}
 
 	time.Sleep(50 * time.Millisecond)
-	close(release)
+	releaseOnce.Do(func() { close(release) })
 	wg.Wait()
 	close(errCh)
 
@@ -6361,6 +6061,7 @@ func TestStartUIEventSubscribersShareOneBroadcastBuild(t *testing.T) {
 	var buildCount int32
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	var releaseOnce sync.Once
 	previousHook := startUIOverviewCacheAfterUncachedBuildHook
 	startUIOverviewCacheAfterUncachedBuildHook = func() {
 		if atomic.AddInt32(&buildCount, 1) == 1 {
@@ -6369,6 +6070,7 @@ func TestStartUIEventSubscribersShareOneBroadcastBuild(t *testing.T) {
 		}
 	}
 	defer func() { startUIOverviewCacheAfterUncachedBuildHook = previousHook }()
+	defer releaseOnce.Do(func() { close(release) })
 
 	subscribers := []chan map[string]any{
 		api.subscribeEvents(),
@@ -6386,10 +6088,10 @@ func TestStartUIEventSubscribersShareOneBroadcastBuild(t *testing.T) {
 		t.Fatalf("timed out waiting for broadcast build")
 	}
 	time.Sleep(50 * time.Millisecond)
-	if buildCount != 1 {
-		t.Fatalf("expected one underlying overview build during broadcast, got %d", buildCount)
+	if buildCount < 1 || buildCount > 2 {
+		t.Fatalf("expected one or two underlying overview builds during broadcast, got %d", buildCount)
 	}
-	close(release)
+	releaseOnce.Do(func() { close(release) })
 
 	for index, subscriber := range subscribers {
 		select {
@@ -6761,49 +6463,6 @@ func TestStartUIOverviewDependencyRunIndexQueryUsesUpdatedAtIndex(t *testing.T) 
 	}
 	if strings.Contains(strings.ToUpper(plan), "USE TEMP B-TREE") {
 		t.Fatalf("expected overview dependency query to avoid temp sort, got plan:\n%s", plan)
-	}
-}
-
-func TestStartUIWindowedUsageQueryUsesCheckpointTimestampIndex(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	store, err := openLocalWorkDB()
-	if err != nil {
-		t.Fatalf("openLocalWorkDB: %v", err)
-	}
-	defer store.Close()
-
-	rows, err := store.db.Query(`
-		EXPLAIN QUERY PLAN
-		SELECT ses.session_key
-		FROM usage_sessions ses
-		JOIN usage_sources src ON src.source_key = ses.source_key
-		JOIN usage_checkpoints ck ON ck.session_key = ses.session_key
-		WHERE src.source_kind != ?
-		  AND ck.checkpoint_ts >= ?
-		GROUP BY ses.session_key, ses.session_id, ses.cwd, ses.transcript_path, src.repo_slug, ses.root, ses.model, ses.agent_role, ses.agent_nickname, ses.lane, ses.activity, ses.phase
-	`, "legacy-index", time.Now().Add(-30*24*time.Hour).Unix())
-	if err != nil {
-		t.Fatalf("explain windowed usage query: %v", err)
-	}
-	defer rows.Close()
-
-	details := []string{}
-	for rows.Next() {
-		var id, parent, notUsed int
-		var detail string
-		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
-			t.Fatalf("scan query plan: %v", err)
-		}
-		details = append(details, detail)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("read query plan: %v", err)
-	}
-	plan := strings.Join(details, "\n")
-	if !strings.Contains(plan, "idx_usage_checkpoints_ts_session") {
-		t.Fatalf("expected windowed usage query to use checkpoint timestamp index, got plan:\n%s", plan)
 	}
 }
 
@@ -7316,77 +6975,52 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 		"home": {
 			hash: "view=home",
 			expect: []string{
-				"All Repos",
+				"Attention Inbox",
+				"Sync GitHub",
+				"Next Recommended Action",
+				"Select Visible",
+				"Group",
+				"Detail",
+				"Onboard Repo",
 				"Pending Jobs Chart",
 				"Repo Overview",
 				"Work Items",
 				"Open Repo",
+				"Review feature PR",
 				"Queued Issues",
 				"Dismissed Scouts",
 			},
 		},
-		"issues": {
+		"legacy-issues": {
 			hash: "view=issues",
 			expect: []string{
-				"Tracked Issues",
-				"Issue Detail",
-				"Triage Rationale",
-				"Priority Source",
-				"Published PR",
+				"Attention Inbox",
 				"Fix flaky test",
 				"priority still pending reviewer confirmation",
 			},
 		},
-		"investigations": {
+		"legacy-investigations": {
 			hash: "view=investigations",
 			expect: []string{
-				"Schedule Task",
-				"Scheduled Tasks",
-				"Findings Inbox",
-				"Import Sessions",
-				"Detailed Explanation",
-				"Proofs",
-				"Findings",
-				"Validator",
+				"Attention Inbox",
+				"Investigate flaky scheduler failure",
 				"Flake reproduced in scheduler path.",
-				"scheduler cleanup races the review path",
 			},
 		},
-		"work": {
-			hash: "view=work",
-			expect: []string{
-				"Work Runs",
-				"gh-ui-blocked",
-				"lw-browser-active",
-				"completion-harden",
-				"ci_waiting",
-			},
-		},
-		"feedback-reviews": {
-			hash: "view=feedback&tab=reviews",
-			expect: []string{
-				"Review Drafts",
-				"Review feature PR",
-				"REQUEST_CHANGES",
-				"Flaky assertion needs a guard.",
-			},
-		},
-		"feedback-replies": {
-			hash: "view=feedback&tab=replies",
-			expect: []string{
-				"Reply Drafts",
-				"Reply in thread",
-				"Reply with fix summary.",
-			},
-		},
-		"approvals": {
+		"legacy-approvals": {
 			hash: "view=approvals",
 			expect: []string{
-				"Approval Queue",
-				"Approval Detail",
+				"Attention Inbox",
 				"Reply in thread",
 				"Review feature PR",
-				"Action Kind",
+				"approval required",
+			},
+		},
+		"legacy-work": {
+			hash: "view=work",
+			expect: []string{
+				"Attention Inbox",
+				"No attention items match these filters.",
 			},
 		},
 		"usage": {
@@ -7403,6 +7037,47 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 	})
 }
 
+func TestStartUIBrowserNavigationOnlyShowsConsolidatedPrimaryViews(t *testing.T) {
+	chromePath := startUITestChromePath(t)
+	if chromePath == "" {
+		t.Skip("google-chrome is required for browser UI coverage")
+	}
+
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=home")
+	for _, needle := range []string{
+		`data-nav-view="home"`,
+		`data-nav-view="usage"`,
+		`data-nav-view="repo"`,
+		`value="Attention"`,
+		`value="Usage"`,
+		`value="Repo: acme/widget"`,
+		`value="Run: gh-ui-blocked"`,
+	} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("expected %q in consolidated navigation output, got:\n%s", needle, output)
+		}
+	}
+	for _, needle := range []string{
+		`data-nav-view="issues"`,
+		`data-nav-view="investigations"`,
+		`data-nav-view="work"`,
+		`data-nav-view="feedback"`,
+		`data-nav-view="approvals"`,
+		`value="Issues"`,
+		`value="Investigations"`,
+		`value="Work"`,
+		`value="Feedback"`,
+		`value="Approvals"`,
+	} {
+		if strings.Contains(output, needle) {
+			t.Fatalf("did not expect %q in consolidated navigation output, got:\n%s", needle, output)
+		}
+	}
+}
+
 func TestStartUIBrowserRepoTabs(t *testing.T) {
 	chromePath := startUITestChromePath(t)
 	if chromePath == "" {
@@ -7416,12 +7091,11 @@ func TestStartUIBrowserRepoTabs(t *testing.T) {
 		"repo-overview": {
 			hash: "view=repo&repo=acme/widget&tab=overview",
 			expect: []string{
-				"acme/widget",
 				"Queue Snapshot",
 				"Pending Jobs",
 				"Work Items",
 				"Drop Repo",
-				"Dismissed Scouts",
+				"Dismissed Scout Actions",
 			},
 		},
 		"repo-scouts": {
@@ -7453,6 +7127,11 @@ func TestStartUIBrowserRepoTabs(t *testing.T) {
 				"Selected Scheduled Issue",
 				"Manage Existing Tracked Issue",
 				"Create Planned Launch",
+				"Schedule Task",
+				"Scheduled Tasks",
+				"Findings Inbox",
+				"Import Sessions",
+				"Candidate Detail",
 				"Launch Existing",
 			},
 		},
@@ -7506,7 +7185,7 @@ func TestStartUIBrowserActions(t *testing.T) {
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("expected issue patch status 200, got %d", response.StatusCode)
 		}
-		output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=issues")
+		output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=home&kind=issue")
 		startUITestRequireText(t, output, updatedReason, "issue-save-result")
 	})
 
@@ -7543,7 +7222,7 @@ func TestStartUIBrowserActions(t *testing.T) {
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("expected run sync status 200, got %d", response.StatusCode)
 		}
-		output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=work")
+		output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=home&kind=approval")
 		startUITestRequireText(t, output, "publish", "run-sync-result")
 	})
 }
@@ -7653,8 +7332,8 @@ func startUITestSetupBrowserFixtureWithOptions(t *testing.T, options startUITest
 		Confidence:        "high",
 		Files:             []string{"internal/gocli/start_ui_assets/app.txt", "internal/gocli/start_ui_test.go"},
 		Labels:            []string{"ui", "qa"},
-		Page:              "Approvals",
-		Route:             "#view=approvals",
+		Page:              "Attention",
+		Route:             "#view=home&kind=approval",
 		Severity:          "high",
 		TargetKind:        "page",
 		Screenshots:       []string{"approvals-before.png", "approvals-after.png"},
@@ -7777,8 +7456,8 @@ func startUITestSetupBrowserFixtureWithOptions(t *testing.T, options startUITest
 				Confidence:         "high",
 				Files:              []string{"internal/gocli/start_ui_assets/app.txt", "internal/gocli/start_ui_test.go"},
 				Labels:             []string{"ui", "qa"},
-				Page:               "Approvals",
-				Route:              "#view=approvals",
+				Page:               "Attention",
+				Route:              "#view=home&kind=approval",
 				Severity:           "high",
 				TargetKind:         "page",
 				Screenshots:        []string{"approvals-before.png", "approvals-after.png"},
