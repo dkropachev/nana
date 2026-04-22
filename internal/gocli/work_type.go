@@ -127,19 +127,17 @@ func inferScoutWorkType(role string, proposal scoutFinding) workTypeResolution {
 		inferWorkTypeFromLabels(proposal.Labels),
 		inferWorkTypeFromText(proposal.Title, proposal.Summary, proposal.SuggestedNextStep, proposal.Rationale, proposal.Evidence, proposal.Impact),
 	)
-	if resolution.WorkType != "" || len(resolution.Ambiguous) > 0 {
+	if resolution.WorkType != "" {
 		return resolution
 	}
-	switch strings.TrimSpace(role) {
-	case enhancementScoutRole:
-		return workTypeResolution{WorkType: workTypeFeature, Source: "scout.role"}
-	case improvementScoutRole:
-		return workTypeResolution{WorkType: workTypeRefactor, Source: "scout.role"}
-	case uiScoutRole:
-		return workTypeResolution{WorkType: workTypeBugFix, Source: "scout.role"}
-	default:
-		return resolution
+	fallback := defaultScoutRoleWorkType(strings.TrimSpace(role), "scout.role")
+	if fallback.WorkType != "" {
+		if len(resolution.Ambiguous) > 0 {
+			fallback.Ambiguous = append([]string{}, resolution.Ambiguous...)
+		}
+		return fallback
 	}
+	return resolution
 }
 
 func inferPlannedItemWorkType(item startWorkPlannedItem) workTypeResolution {
@@ -162,18 +160,29 @@ func inferPersistedScoutJobWorkType(job startWorkScoutJob) workTypeResolution {
 		inferWorkTypeFromLabels(job.Labels),
 		inferWorkTypeFromText(job.Title, job.Summary, job.SuggestedNextStep, job.Rationale, job.Evidence, job.Impact),
 	)
-	if resolution.WorkType != "" || len(resolution.Ambiguous) > 0 {
+	if resolution.WorkType != "" {
 		return resolution
 	}
-	switch strings.TrimSpace(job.Role) {
+	fallback := defaultScoutRoleWorkType(strings.TrimSpace(job.Role), "scout_job.role")
+	if fallback.WorkType != "" {
+		if len(resolution.Ambiguous) > 0 {
+			fallback.Ambiguous = append([]string{}, resolution.Ambiguous...)
+		}
+		return fallback
+	}
+	return resolution
+}
+
+func defaultScoutRoleWorkType(role string, source string) workTypeResolution {
+	switch strings.TrimSpace(role) {
 	case enhancementScoutRole:
-		return workTypeResolution{WorkType: workTypeFeature, Source: "scout_job.role"}
+		return workTypeResolution{WorkType: workTypeFeature, Source: source}
 	case improvementScoutRole:
-		return workTypeResolution{WorkType: workTypeRefactor, Source: "scout_job.role"}
+		return workTypeResolution{WorkType: workTypeRefactor, Source: source}
 	case uiScoutRole:
-		return workTypeResolution{WorkType: workTypeBugFix, Source: "scout_job.role"}
+		return workTypeResolution{WorkType: workTypeBugFix, Source: source}
 	default:
-		return resolution
+		return workTypeResolution{}
 	}
 }
 

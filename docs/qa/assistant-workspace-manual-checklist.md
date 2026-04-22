@@ -5,7 +5,8 @@ Use this checklist when validating the `nana start` assistant workspace in a bro
 ## Startup
 
 - Run `nana start` and open the printed `[start-ui] Web` URL.
-- Confirm the sidebar shows `Home`, `Issues`, `Investigations`, `Work`, `Feedback`, `Approvals`, and `Repos`.
+- Confirm the sidebar shows `All Repos`, `Issues`, `Tasks`, `Work`, `Usage`, `Feedback`, and `Approvals`.
+- Confirm the header repo picker defaults to `All repos`.
 - Confirm the page loads without console syntax errors.
 
 ## Latency
@@ -20,11 +21,21 @@ Use this checklist when validating the `nana start` assistant workspace in a bro
 
 - Confirm totals update after refresh.
 - Confirm pending jobs and work items render.
+- Open `Onboard new repo...` from the header repo picker and confirm the onboarding drawer opens without leaving the page.
 - Confirm repo overview opens the selected repo.
+
+## Usage
+
+- Open `Usage` and confirm the existing charts and top sessions render.
+- Select a repo from the header repo picker while staying on `Usage` and confirm the page stays on `Usage`.
+- Confirm the Usage scope banner appears and `All repos` clears only repo scope while keeping the `Usage` page open.
+- Confirm repo-scoped Usage reflects only managed Nana work for that repo, not unrelated workspace-wide sessions.
+- Leave the workspace open on `Usage` for at least 30 seconds and confirm it refreshes only while the Usage view is visible.
+- Switch away from `Usage` or hide the tab and confirm Usage polling stops while overview SSE updates continue.
 
 ## Issues
 
-- Filter by repo and status.
+- Scope the page from the header repo picker and filter by status.
 - Open an issue and confirm triage rationale, triage error, last run, and publication state render.
 - Edit priority, schedule, and deferred reason and confirm the update persists.
 - Trigger `Investigate` and `Start Work` and confirm success toasts and queue refresh.
@@ -37,7 +48,7 @@ Use this checklist when validating the `nana start` assistant workspace in a bro
 
 ## Work
 
-- Filter by repo, status, and backend.
+- Scope the page from the header repo picker and filter by status and backend.
 - Open a run and confirm typed detail renders for phase, publication state, next action, and lane status.
 - Use `Sync Run` on a GitHub-backed run and confirm the workspace refreshes.
 
@@ -50,7 +61,7 @@ Use this checklist when validating the `nana start` assistant workspace in a bro
 
 ## Approvals
 
-- Filter by repo, status, and kind.
+- Scope the page from the header repo picker and filter by status and kind.
 - Open a blocked run approval and confirm reason, next action, and action kind render.
 - Open a draft-ready approval and confirm it routes to the work-item drawer.
 - Launch a planned-item approval from the workspace.
@@ -58,7 +69,7 @@ Use this checklist when validating the `nana start` assistant workspace in a bro
 
 ## Repo Tabs
 
-- Open a repo from the sidebar.
+- Open a repo from the header repo picker or a repo card.
 - Confirm `Overview`, `Scouts`, `Config`, and `Controls` still work.
 - Confirm settings save and scout actions still update the workspace state.
 - Confirm an auto-recovered scout item in `Scouts` shows recovery count, recovered run id, recovery timestamp, and cooldown metadata in the detail pane.

@@ -631,6 +631,132 @@ func TestStartUIAPIUsage(t *testing.T) {
 	}
 }
 
+func TestStartUIAPIUsageFiltersByRepoManagedWorkOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	repoSlug := "acme/widget"
+	repoRoot := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, repoRoot)
+	otherRepoSlug := "acme/other"
+	otherRepoRoot := githubManagedPaths(otherRepoSlug).SourcePath
+	createLocalWorkRepoAt(t, otherRepoRoot)
+
+	resetUsageRolloutCache()
+	defer resetUsageRolloutCache()
+
+	writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID:      "usage-main-same-path",
+		Timestamp:      "2026-04-15T12:00:00Z",
+		CWD:            repoRoot,
+		Model:          "gpt-5.4",
+		TokenSnapshots: []usageTokenSnapshot{{Input: 40, Output: 10, Total: 50}},
+	})
+
+	writeLocalUsage := func(repoPath string, slug string, runID string, total int) {
+		t.Helper()
+		repoID := localWorkRepoID(repoPath)
+		sandboxPath := filepath.Join(home, "sandboxes", runID)
+		sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+		if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
+			t.Fatalf("mkdir sandbox repo: %v", err)
+		}
+		manifest := localWorkManifest{
+			Version:           4,
+			RunID:             runID,
+			CreatedAt:         "2026-04-15T13:00:00Z",
+			UpdatedAt:         "2026-04-15T13:00:00Z",
+			Status:            "running",
+			RepoRoot:          repoPath,
+			RepoName:          filepath.Base(repoPath),
+			RepoSlug:          slug,
+			RepoID:            repoID,
+			SourceBranch:      "main",
+			BaselineSHA:       strings.TrimSpace(runLocalWorkTestGitOutput(t, repoPath, "rev-parse", "HEAD")),
+			SandboxPath:       sandboxPath,
+			SandboxRepoPath:   sandboxRepoPath,
+			InputPath:         filepath.Join(home, runID+".md"),
+			InputMode:         "task",
+			IntegrationPolicy: "final",
+			GroupingPolicy:    localWorkDefaultGroupingPolicy,
+			MaxIterations:     1,
+		}
+		if err := writeLocalWorkManifest(manifest); err != nil {
+			t.Fatalf("writeLocalWorkManifest(%s): %v", runID, err)
+		}
+		runDir := localWorkRunDirByID(repoID, runID)
+		if err := os.MkdirAll(runDir, 0o755); err != nil {
+			t.Fatalf("mkdir run dir: %v", err)
+		}
+		if err := writeLocalWorkJSONAtomically(filepath.Join(runDir, "thread-usage.json"), localWorkThreadUsageArtifact{
+			Version:     1,
+			GeneratedAt: "2026-04-15T13:00:00Z",
+			SandboxPath: sandboxPath,
+			Totals: localWorkTokenUsageTotals{
+				InputTokens:       total - 20,
+				OutputTokens:      20,
+				TotalTokens:       total,
+				SessionsAccounted: 1,
+				UpdatedAt:         "2026-04-15T13:00:00Z",
+			},
+			Threads: []localWorkThreadUsageRow{{
+				SessionID:    runID + "-session",
+				Nickname:     "lane-1",
+				Role:         "leader",
+				Model:        "gpt-5.4",
+				CWD:          sandboxRepoPath,
+				InputTokens:  total - 20,
+				OutputTokens: 20,
+				TotalTokens:  total,
+				StartedAt:    time.Date(2026, time.April, 15, 13, 0, 0, 0, time.UTC).Unix(),
+				UpdatedAt:    time.Date(2026, time.April, 15, 13, 0, 0, 0, time.UTC).Unix(),
+			}},
+		}); err != nil {
+			t.Fatalf("write thread-usage artifact(%s): %v", runID, err)
+		}
+	}
+
+	writeLocalUsage(repoRoot, repoSlug, "usage-work-widget", 220)
+	writeLocalUsage(otherRepoRoot, otherRepoSlug, "usage-work-other", 90)
+
+	previousTTL := startUIUsageCacheTTL
+	previousNow := startUIUsageCacheNow
+	startUIUsageCacheTTL = time.Hour
+	now := time.Date(2026, time.April, 20, 12, 0, 0, 0, time.UTC)
+	startUIUsageCacheNow = func() time.Time { return now }
+	defer func() {
+		startUIUsageCacheTTL = previousTTL
+		startUIUsageCacheNow = previousNow
+	}()
+
+	api := &startUIAPI{cwd: cwd}
+	allReport, err := api.buildUsageReport(url.Values{"root": {"all"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(all): %v", err)
+	}
+	if allReport.Summary.Totals.TotalTokens != 360 || allReport.Summary.Totals.Sessions != 3 {
+		t.Fatalf("unexpected all-repos totals: %+v", allReport.Summary.Totals)
+	}
+
+	repoReport, err := api.buildUsageReport(url.Values{"root": {"all"}, "repo": {repoSlug}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(repo): %v", err)
+	}
+	if repoReport.Filters.Repo != repoSlug {
+		t.Fatalf("expected repo filter %q, got %+v", repoSlug, repoReport.Filters)
+	}
+	if repoReport.Summary.Totals.TotalTokens != 220 || repoReport.Summary.Totals.Sessions != 1 {
+		t.Fatalf("unexpected repo-filtered totals: %+v", repoReport.Summary.Totals)
+	}
+	if len(repoReport.ByRoot) != 1 || repoReport.ByRoot[0].Key != "work" {
+		t.Fatalf("expected repo usage to be limited to managed work roots, got %+v", repoReport.ByRoot)
+	}
+	if len(repoReport.TopSessions) != 1 || repoReport.TopSessions[0].SessionID != "usage-work-widget-session" || repoReport.TopSessions[0].RepoSlug != repoSlug {
+		t.Fatalf("unexpected repo top sessions: %+v", repoReport.TopSessions)
+	}
+}
+
 func TestStartUIUsageSinceUsesWindowDeltasForLocalWorkHistory(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -731,6 +857,14 @@ func TestStartUIUsageSinceUsesWindowDeltasForLocalWorkHistory(t *testing.T) {
 	}
 	if len(report.TopSessions) != 1 || report.TopSessions[0].SessionID != "usage-work-window" {
 		t.Fatalf("unexpected top sessions: %+v", report.TopSessions)
+	}
+
+	otherReport, err := api.buildUsageReport(url.Values{"root": {"work"}, "since": {"1h"}, "repo": {"acme/other"}})
+	if err != nil {
+		t.Fatalf("buildUsageReport(other repo): %v", err)
+	}
+	if otherReport.Summary.Totals.TotalTokens != 0 || len(otherReport.TopSessions) != 0 {
+		t.Fatalf("expected no windowed usage for unrelated repo, got %+v", otherReport)
 	}
 }
 
@@ -5143,7 +5277,7 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(body), `window.NANA_API_BASE = "http://127.0.0.1:17653"`) {
 		t.Fatalf("expected injected API base, got %s", string(body))
 	}
-	if !strings.Contains(string(body), "Assistant Workspace") || !strings.Contains(string(body), ">Home<") {
+	if !strings.Contains(string(body), "Assistant Workspace") || !strings.Contains(string(body), ">All Repos<") {
 		t.Fatalf("expected assistant workspace shell, got %s", string(body))
 	}
 
@@ -5195,8 +5329,8 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `state.repoList.items || []`) {
 		t.Fatalf("expected sorted repos fallback to repo list cache in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `const repoListSummary = (state.repoList.items || []).find((repo) => repo.repo_slug === state.selectedRepo) || null;`) {
-		t.Fatalf("expected selected repo summary to merge repo list state in app.js, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `function repoSummaryBySlug(`) || !strings.Contains(string(appBody), `return repoSummaryBySlug(state.selectedRepo);`) {
+		t.Fatalf("expected selected repo summary helper to reuse merged repo lookup in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `state: repoListSummary.state || overviewSummary.state || null,`) {
 		t.Fatalf("expected selected repo summary state fallback in app.js, got %s", string(appBody))
@@ -5231,8 +5365,35 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `data-open-repo-tab="scouts"`) {
 		t.Fatalf("expected direct scouts navigation wiring in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `data-open-onboard="true"`) {
-		t.Fatalf("expected repo onboarding navigation affordance in app.js, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `data-repo-picker="true"`) || !strings.Contains(string(appBody), `WORKSPACE_SCOPE_ALL`) || !strings.Contains(string(appBody), `WORKSPACE_SCOPE_ONBOARD`) {
+		t.Fatalf("expected repo picker scope controls in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `function setWorkspaceRepoScope(`) || !strings.Contains(string(appBody), `function renderRepoPicker(`) {
+		t.Fatalf("expected repo picker scope helpers in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `function initRepoOnboardingDrawer(`) || !strings.Contains(string(appBody), `repo-onboarding-drawer-content`) {
+		t.Fatalf("expected onboarding drawer wiring in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `data-clear-workspace-scope="true"`) {
+		t.Fatalf("expected global page scope reset affordance in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `function selectedTaskComposerRepoSummary(`) || !strings.Contains(string(appBody), `function selectedTaskScopeRepoSummary(`) {
+		t.Fatalf("expected investigations repo scope split helpers in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `if (state.currentView === "usage" && state.selectedRepo) params.set("repo", state.selectedRepo);`) {
+		t.Fatalf("expected usage query string to include picker repo scope in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `} else if (state.currentView === "usage") {`) || !strings.Contains(string(appBody), `loadUsage({ silent: true });`) {
+		t.Fatalf("expected repo scope changes to refresh usage in place in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `Default scope is All repos.`) {
+		t.Fatalf("expected all-repos default picker copy in app.js, got %s", string(appBody))
+	}
+	if strings.Contains(string(appBody), `data-open-onboard="true"`) {
+		t.Fatalf("expected onboarding to move into the picker drawer flow, got %s", string(appBody))
+	}
+	if strings.Contains(string(appBody), `data-view-filter-name="repo"`) {
+		t.Fatalf("expected repo scope to move out of per-page filter toolbars, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `repo-onboard-form`) || !strings.Contains(string(appBody), `submitRepoOnboarding()`) {
 		t.Fatalf("expected repo onboarding form wiring in app.js, got %s", string(appBody))
@@ -6955,7 +7116,8 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 		"home": {
 			hash: "view=home",
 			expect: []string{
-				"Onboard Repo",
+				"Repo Picker",
+				"All Repos",
 				"Pending Jobs Chart",
 				"Repo Overview",
 				"Work Items",
@@ -7056,6 +7218,7 @@ func TestStartUIBrowserRepoTabs(t *testing.T) {
 		"repo-overview": {
 			hash: "view=repo&repo=acme/widget&tab=overview",
 			expect: []string{
+				"Repo Picker",
 				"Queue Snapshot",
 				"Pending Jobs",
 				"Work Items",

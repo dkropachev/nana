@@ -239,6 +239,7 @@ func localWorkCurrentSchemaDDL() []string {
 			source_path TEXT NOT NULL,
 			root TEXT NOT NULL,
 			run_id TEXT,
+			repo_slug TEXT,
 			backend TEXT,
 			sandbox_path TEXT,
 			source_updated_at TEXT,
@@ -248,6 +249,7 @@ func localWorkCurrentSchemaDDL() []string {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_sources_path ON usage_sources(source_path);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_sources_run_kind ON usage_sources(run_id, source_kind);`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_sources_repo_root ON usage_sources(repo_slug, root);`,
 		`CREATE TABLE IF NOT EXISTS usage_sessions (
 			session_key TEXT PRIMARY KEY,
 			source_key TEXT NOT NULL,
@@ -343,6 +345,9 @@ func ensureLocalWorkCurrentSchemaCompatibility(db *sql.DB) error {
 		return err
 	}
 	if err := ensureSQLiteColumn(db, "work_items", "pause_until", `ALTER TABLE work_items ADD COLUMN pause_until TEXT`); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumn(db, "usage_sources", "repo_slug", `ALTER TABLE usage_sources ADD COLUMN repo_slug TEXT`); err != nil {
 		return err
 	}
 	return nil

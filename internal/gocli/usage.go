@@ -80,6 +80,7 @@ type usageOptions struct {
 	View     string
 	Since    string
 	Project  string
+	Repo     string
 	Root     string
 	Activity string
 	Phase    string
@@ -110,6 +111,7 @@ type usageRecord struct {
 	Day                   string `json:"day"`
 	CWD                   string `json:"cwd"`
 	TranscriptPath        string `json:"transcript_path"`
+	RepoSlug              string `json:"repo_slug,omitempty"`
 	Root                  string `json:"root"`
 	Model                 string `json:"model,omitempty"`
 	AgentRole             string `json:"agent_role,omitempty"`
@@ -838,6 +840,9 @@ func usageRecordMatchesFilters(record usageRecord, options usageOptions, project
 		if !usageRecordMatchesProject(record, projectFilter, projectRepoID) {
 			return false
 		}
+	}
+	if strings.TrimSpace(options.Repo) != "" && !strings.EqualFold(strings.TrimSpace(record.RepoSlug), strings.TrimSpace(options.Repo)) {
+		return false
 	}
 	if options.Root != "all" && !strings.EqualFold(record.Root, options.Root) {
 		return false

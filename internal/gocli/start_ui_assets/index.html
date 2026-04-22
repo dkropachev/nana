@@ -15,11 +15,11 @@
       <div class="sidebar-brand">
         <p class="eyebrow">Nana</p>
         <h1>Assistant Workspace</h1>
-        <p class="sidebar-copy">Home</p>
+        <p class="sidebar-copy">All repos by default</p>
       </div>
       <div id="sidebar-nav" class="sidebar-nav">
         <button class="nav-item nav-item-active" type="button">
-          <span class="nav-label">Home</span>
+          <span class="nav-label">All Repos</span>
         </button>
       </div>
     </aside>
@@ -28,21 +28,24 @@
       <header class="app-header">
         <div class="header-copy">
           <p class="eyebrow">Workspace</p>
-          <h2 id="page-title">Home</h2>
+          <h2 id="page-title">All Repos</h2>
           <p id="page-subtitle" class="subtitle">Waiting for state...</p>
           <nav id="page-breadcrumb" class="breadcrumb-trail" aria-label="Breadcrumb"></nav>
         </div>
-        <div class="header-actions">
+        <div class="header-toolbar">
+          <div id="repo-picker-host" class="repo-picker-host"></div>
+          <div class="header-actions">
           <label class="quick-switch selector" for="quick-switch-input">
             <span>Quick Switch</span>
             <div class="quick-switch-row">
-              <input id="quick-switch-input" type="text" list="quick-switch-options" placeholder="Home, Repo: owner/repo, Run: abc123" autocomplete="off" />
+              <input id="quick-switch-input" type="text" list="quick-switch-options" placeholder="All Repos, Repo: owner/repo, Usage, Run: abc123" autocomplete="off" />
               <button id="quick-switch-button" class="tx-btn tx-btn-secondary" type="button">Go</button>
             </div>
             <datalist id="quick-switch-options"></datalist>
           </label>
           <p id="overview-updated" class="updated-copy">Waiting for state...</p>
           <button id="refresh-button" class="tx-btn tx-btn-secondary" type="button">Refresh</button>
+          </div>
         </div>
       </header>
 

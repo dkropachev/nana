@@ -3585,6 +3585,7 @@ func runLocalWorkCodexPrompt(manifest localWorkManifest, codexArgs []string, pro
 		StepKey:          codexHomeAlias,
 		ResumeStrategy:   codexResumeSamePrompt,
 		UsageRunID:       manifest.RunID,
+		UsageRepoSlug:    manifest.RepoSlug,
 		UsageBackend:     "local",
 		UsageSandboxPath: manifest.SandboxPath,
 		Env:              append(localWorkPromptEnv(manifest, scopedCodexHome), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),

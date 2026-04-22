@@ -174,7 +174,7 @@ textarea {
 
 .app-header {
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 18px;
@@ -184,10 +184,78 @@ textarea {
   min-width: 0;
 }
 
+.header-toolbar {
+  flex: 0 1 540px;
+  min-width: min(540px, 100%);
+  display: grid;
+  gap: 12px;
+}
+
 .header-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 12px;
+}
+
+.repo-picker-host {
+  min-width: 0;
+}
+
+.repo-picker-card {
+  display: grid;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1px solid #d6deea;
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.12), transparent 42%),
+    linear-gradient(180deg, #ffffff 0%, #f7faff 100%);
+  box-shadow: 0 18px 40px rgba(20, 32, 51, 0.08);
+}
+
+.repo-picker-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.repo-picker-title {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.2;
+  color: #142033;
+}
+
+.repo-picker-shell {
+  display: grid;
+  gap: 8px;
+}
+
+.repo-picker-shell select {
+  min-height: 46px;
+}
+
+.repo-picker-copy {
+  margin: 0;
+  color: #4e627a;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.repo-picker-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.repo-picker-meta-copy {
+  color: #35506e;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .breadcrumb-trail {
@@ -532,6 +600,18 @@ textarea {
   grid-column: 1 / -1;
 }
 
+.scope-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 10px 12px;
+  border: 1px solid #c7d5e8;
+  border-radius: 8px;
+  background: #f5f8fd;
+  color: #21324a;
+  font-weight: 600;
+}
+
 .config-meta {
   display: flex;
   flex-wrap: wrap;
@@ -611,6 +691,45 @@ textarea {
 
 .filter-panel {
   padding: 0 14px 14px;
+}
+
+.scope-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid #c7d5e8;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+
+.scope-banner-copy {
+  min-width: 0;
+}
+
+.scope-banner-label {
+  display: inline-block;
+  color: #4f6787;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.scope-banner-copy strong {
+  display: block;
+  margin-top: 6px;
+  color: #142033;
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.scope-banner-copy p {
+  margin: 6px 0 0;
+  color: #4e627a;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .filter-reset {
@@ -947,6 +1066,10 @@ textarea {
   gap: 16px;
 }
 
+.repo-onboarding-shell .config-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .drawer-summary {
   display: grid;
   gap: 10px;
@@ -1091,6 +1214,7 @@ textarea {
   .metrics-grid-wide,
   .queue-summary,
   .config-grid,
+  .repo-onboarding-shell .config-grid,
   .usage-filter-grid {
     grid-template-columns: 1fr;
   }
@@ -1123,6 +1247,7 @@ textarea {
   }
 
   .app-header,
+  .header-toolbar,
   .header-actions,
   .quick-switch-row,
   .drawer-toolbar,
@@ -1137,6 +1262,17 @@ textarea {
   .quick-switch {
     min-width: 0;
     width: 100%;
+  }
+
+  .repo-picker-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .scope-banner {
+    flex-direction: column;
+    align-items: stretch;
+  }
 
   .scheduler-search-form {
     grid-template-columns: 1fr;

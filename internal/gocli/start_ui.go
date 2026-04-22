@@ -248,6 +248,7 @@ type startUIOverview struct {
 type startUIUsageFilters struct {
 	Since    string `json:"since,omitempty"`
 	Project  string `json:"project,omitempty"`
+	Repo     string `json:"repo,omitempty"`
 	Root     string `json:"root,omitempty"`
 	Activity string `json:"activity,omitempty"`
 	Phase    string `json:"phase,omitempty"`
@@ -2101,6 +2102,7 @@ func (h *startUIAPI) buildUsageReport(query url.Values) (startUIUsageReport, err
 		CWD:      h.cwd,
 		Since:    strings.TrimSpace(query.Get("since")),
 		Project:  strings.TrimSpace(query.Get("project")),
+		Repo:     strings.TrimSpace(query.Get("repo")),
 		Root:     defaultString(strings.TrimSpace(query.Get("root")), "all"),
 		Activity: strings.TrimSpace(query.Get("activity")),
 		Phase:    strings.TrimSpace(query.Get("phase")),
@@ -2112,6 +2114,9 @@ func (h *startUIAPI) buildUsageReport(query url.Values) (startUIUsageReport, err
 	if _, err := parseSinceSpec(options.Since); err != nil {
 		return startUIUsageReport{}, err
 	}
+	if strings.TrimSpace(options.Repo) != "" && !validRepoSlug(options.Repo) {
+		return startUIUsageReport{}, fmt.Errorf("invalid usage repo %q", options.Repo)
+	}
 	index, err := h.loadUsageIndexForReport(options)
 	if err != nil {
 		return startUIUsageReport{}, err
@@ -2119,6 +2124,7 @@ func (h *startUIAPI) buildUsageReport(query url.Values) (startUIUsageReport, err
 	filters := startUIUsageFilters{
 		Since:    options.Since,
 		Project:  options.Project,
+		Repo:     options.Repo,
 		Root:     options.Root,
 		Activity: options.Activity,
 		Phase:    options.Phase,
@@ -2177,6 +2183,7 @@ func startUIUsageCacheKey(filters startUIUsageFilters, version string) string {
 		strings.TrimSpace(version),
 		strings.TrimSpace(filters.Since),
 		strings.TrimSpace(filters.Project),
+		strings.TrimSpace(filters.Repo),
 		defaultString(strings.TrimSpace(filters.Root), "all"),
 		strings.TrimSpace(filters.Activity),
 		strings.TrimSpace(filters.Phase),

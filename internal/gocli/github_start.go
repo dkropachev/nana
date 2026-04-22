@@ -217,6 +217,7 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 		StepKey:          "github-leader",
 		ResumeStrategy:   codexResumeConversation,
 		UsageRunID:       manifest.RunID,
+		UsageRepoSlug:    manifest.RepoSlug,
 		UsageBackend:     "github",
 		UsageSandboxPath: manifest.SandboxPath,
 		Env:              append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, apiBaseURL), "NANA_PROJECT_AGENTS_ROOT="+sandboxRepoPath),

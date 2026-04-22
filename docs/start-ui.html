@@ -42,7 +42,7 @@ nana start</code></pre>
         <div class="card-grid">
           <article class="card">
             <h3>Home and work queues</h3>
-            <p>See active runs, paused work, pending work items, approvals, queue pressure, and repo automation state in one surface.</p>
+            <p>See active runs, paused work, pending work items, approvals, queue pressure, and repo automation state in one surface. The header repo picker is the canonical scope control and defaults to <code>All repos</code>.</p>
           </article>
           <article class="card">
             <h3>Issues and investigations</h3>
@@ -54,7 +54,11 @@ nana start</code></pre>
           </article>
           <article class="card">
             <h3>Repo operations</h3>
-            <p>Keep the existing repo-scoped config, controls, scouts, planned work, and logs available without leaving the workspace. Manual planned work now requires an explicit work type, and tracked issues show the inferred type Nana will use.</p>
+            <p>Keep the existing repo-scoped config, controls, scouts, planned work, and logs available without leaving the workspace. Onboarding now opens from the picker in a drawer, manual planned work requires an explicit work type, and tracked issues show the inferred type Nana will use.</p>
+          </article>
+          <article class="card">
+            <h3>Usage analytics</h3>
+            <p>Stay on the Usage page while changing repo scope from the picker. Repo-scoped Usage now filters to managed Nana work for the selected repo instead of falling back to workspace-wide analytics.</p>
           </article>
         </div>
       </section>
@@ -64,7 +68,8 @@ nana start</code></pre>
         <ol>
           <li>Onboard and configure each target repo with <code>nana repo onboard</code>, <code>nana repo config</code>, or <code>nana repo explain</code>.</li>
           <li>Run bare <code>nana start</code> for the normal long-running loop, or <code>nana start --cycles &lt;n&gt;</code> for a bounded run.</li>
-          <li>Open the printed Web URL and use Home, Issues, Work, Feedback, Investigations, and Approvals to find paused work, blocked human-gate work, and active queue pressure.</li>
+          <li>Open the printed Web URL and use the header repo picker to stay in <code>All repos</code>, switch a global page into repo scope, or onboard a new repo without leaving the current view.</li>
+          <li>Use Home, Issues, Work, Feedback, Investigations, Approvals, and Usage to find paused work, blocked human-gate work, repo-filtered analytics, and active queue pressure.</li>
           <li>Use the repo-level Scouts tab to inspect auto-recovered scout proposals; stale startup cleanups are retried once there with explicit cooldown metadata before any failed approval is shown.</li>
           <li>Open a repo page when you need repo-local Scouts, Config, Controls, or queue posture.</li>
           <li>Use run detail, retry timing, and logs when verification, publication, or review feedback needs investigation.</li>
@@ -82,7 +87,7 @@ nana start</code></pre>
           <thead><tr><th>Endpoint</th><th>Use</th></tr></thead>
           <tbody>
             <tr><td><code>GET /api/v1/overview</code></td><td>Global totals, repo summaries, recent runs, work items, and HUD payload.</td></tr>
-            <tr><td><code>GET /api/v1/usage</code></td><td>Usage breakdowns, top sessions, and a usage-data <code>version</code> for the current filter set. The Usage view refreshes on entry, on manual/filter actions, and periodically while that view stays visible. Live usage reads are backed by SQLite; older usage JSON files and <code>thread-usage*.json</code> artifacts are treated only as compatibility import inputs.</td></tr>
+            <tr><td><code>GET /api/v1/usage</code></td><td>Usage breakdowns, top sessions, and a usage-data <code>version</code> for the current filter set. Supports <code>repo=&lt;owner/repo&gt;</code> to limit analytics to managed Nana work for the selected repo. The Usage view refreshes on entry, on manual/filter actions, and periodically while that view stays visible. Live usage reads are backed by SQLite; older usage JSON files and <code>thread-usage*.json</code> artifacts are treated only as compatibility import inputs.</td></tr>
             <tr><td><code>GET /api/v1/attention</code></td><td>Ranked attention queue plus the single best next item and recommended command.</td></tr>
             <tr><td><code>GET /api/v1/issues</code></td><td>Flattened tracked-issue queue with triage and publication state.</td></tr>
             <tr><td><code>GET /api/v1/investigations</code></td><td>Investigation runs discovered across the workspace and managed repo checkouts, including paused retry timing.</td></tr>

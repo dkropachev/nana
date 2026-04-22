@@ -698,6 +698,7 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 		StepKey:          "github-leader",
 		ResumeStrategy:   codexResumeConversation,
 		UsageRunID:       manifest.RunID,
+		UsageRepoSlug:    manifest.RepoSlug,
 		UsageBackend:     "github",
 		UsageSandboxPath: manifest.SandboxPath,
 		Env:              append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, manifest.APIBaseURL), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),

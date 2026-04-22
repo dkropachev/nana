@@ -8,6 +8,8 @@
     completed: 4,
   };
   const USAGE_AUTO_REFRESH_INTERVAL_MS = 30 * 1000;
+  const WORKSPACE_SCOPE_ALL = "__all_repos__";
+  const WORKSPACE_SCOPE_ONBOARD = "__onboard_repo__";
   let usageRefreshTimer = 0;
 
   const state = {
@@ -27,6 +29,7 @@
     widgetStateKeys: {},
     logDrawer: null,
     logSelection: defaultLogSelection(),
+    repoOnboardingDrawer: null,
     configEditor: defaultConfigEditor(),
     scoutItems: defaultScoutItemsState(),
     taskFindings: defaultTaskFindingsState(),
@@ -267,6 +270,13 @@
       repo: "",
       attention: "all",
       kind: "all",
+    };
+  }
+
+  function defaultScopedViewFilter(repoSlug) {
+    return {
+      ...defaultViewFilter(),
+      repo: defaultString(repoSlug, ""),
     };
   }
 
@@ -872,6 +882,22 @@
     });
   }
 
+  function repoSummaryBySlug(repoSlug) {
+    const normalized = String(repoSlug || "").trim();
+    if (!normalized) return null;
+    const overviewSummary = state.overview && Array.isArray(state.overview.repos)
+      ? state.overview.repos.find((repo) => repo.repo_slug === normalized) || null
+      : null;
+    const repoListSummary = (state.repoList.items || []).find((repo) => repo.repo_slug === normalized) || null;
+    if (!overviewSummary) return repoListSummary;
+    if (!repoListSummary) return overviewSummary;
+    return {
+      ...overviewSummary,
+      ...repoListSummary,
+      state: repoListSummary.state || overviewSummary.state || null,
+    };
+  }
+
   function canRenderWithoutOverview(view) {
     return view === "usage"
       || view === "issues"
@@ -882,17 +908,7 @@
 
   function selectedRepoSummary() {
     if (!state.selectedRepo) return null;
-    const overviewSummary = state.overview && Array.isArray(state.overview.repos)
-      ? state.overview.repos.find((repo) => repo.repo_slug === state.selectedRepo) || null
-      : null;
-    const repoListSummary = (state.repoList.items || []).find((repo) => repo.repo_slug === state.selectedRepo) || null;
-    if (!overviewSummary) return repoListSummary;
-    if (!repoListSummary) return overviewSummary;
-    return {
-      ...overviewSummary,
-      ...repoListSummary,
-      state: repoListSummary.state || overviewSummary.state || null,
-    };
+    return repoSummaryBySlug(state.selectedRepo);
   }
 
   function ensureTaskComposerRepo() {
@@ -904,14 +920,18 @@
     const preferred = defaultString(state.taskComposer.repoSlug, defaultString(state.selectedRepo, repos[0].repo_slug));
     const match = repos.find((repo) => repo.repo_slug === preferred) || repos[0];
     state.taskComposer.repoSlug = match.repo_slug;
-    state.selectedRepo = match.repo_slug;
     return match;
   }
 
-  function selectedTaskRepoSummary() {
+  function selectedTaskComposerRepoSummary() {
     const repo = ensureTaskComposerRepo();
     if (!repo) return null;
-    return selectedRepoSummary() || repo;
+    return repoSummaryBySlug(repo.repo_slug) || repo;
+  }
+
+  function selectedTaskScopeRepoSummary() {
+    if (!state.selectedRepo) return null;
+    return selectedRepoSummary();
   }
 
   function selectedIssueRecord() {
@@ -1001,19 +1021,22 @@
 
   function activeFilterCount(filter) {
     if (!filter) return 0;
-    return ["query", "repo", "kind"].filter((key) => String(filter[key] || "").trim()).length +
+    return (String(filter.query || "").trim() ? 1 : 0) +
+      (filter.kind && filter.kind !== "all" ? 1 : 0) +
       (filter.attention && filter.attention !== "all" ? 1 : 0);
   }
 
   function resetFilter(view) {
-    state.filters[view] = defaultViewFilter();
+    state.filters[view] = defaultScopedViewFilter(state.selectedRepo);
   }
 
   function buildRouteHash() {
     const params = new URLSearchParams();
     params.set("view", state.currentView);
-    if (state.currentView === "repo" && state.selectedRepo) {
+    if (state.selectedRepo) {
       params.set("repo", state.selectedRepo);
+    }
+    if (state.currentView === "repo" && state.selectedRepo) {
       params.set("tab", state.repoTab);
     } else if (state.currentView === "feedback") {
       params.set("tab", state.feedbackTab);
@@ -1042,7 +1065,7 @@
   function applyHashState() {
     const params = new URLSearchParams(String(window.location.hash || "").replace(/^#/, ""));
     const nextView = defaultString(params.get("view"), state.currentView);
-    const nextRepo = defaultString(params.get("repo"), state.selectedRepo);
+    const nextRepo = params.has("repo") ? defaultString(params.get("repo"), "") : "";
     const nextRepoTab = defaultString(params.get("tab"), nextView === "repo" ? state.repoTab : "overview");
     clearDraftsForRouteTransition({
       view: nextView,
@@ -1052,6 +1075,10 @@
     state.currentView = nextView;
     state.selectedRepo = nextRepo;
     state.repoTab = nextRepoTab;
+    syncWorkspaceRepoFilters(state.selectedRepo);
+    if (state.selectedRepo) {
+      state.taskComposer.repoSlug = state.selectedRepo;
+    }
     if (nextView === "feedback") {
       state.feedbackTab = defaultString(params.get("tab"), state.feedbackTab);
     }
@@ -1068,7 +1095,7 @@
 
   function quickSwitchOptions() {
     const options = [
-      { value: "Home", action: "view", target: "home" },
+      { value: "All Repos", action: "view", target: "home" },
       { value: "Issues", action: "view", target: "issues" },
       { value: "Tasks", action: "view", target: "investigations" },
       { value: "Work", action: "view", target: "work" },
@@ -1098,8 +1125,11 @@
       return;
     }
     if (option.action === "view") {
-      clearDraftsForRouteTransition({ view: option.target, repoSlug: state.selectedRepo, repoTab: state.repoTab });
+      const nextRepo = option.target === "home" ? "" : state.selectedRepo;
+      clearDraftsForRouteTransition({ view: option.target, repoSlug: nextRepo, repoTab: state.repoTab });
       state.currentView = option.target;
+      state.selectedRepo = nextRepo;
+      syncWorkspaceRepoFilters(nextRepo);
       if (option.target !== "repo") {
         ensureViewData(option.target);
       }
@@ -1156,13 +1186,24 @@
     return fields.some((field) => defaultString(item && item[field], "").toLowerCase().includes(normalized));
   }
 
+  function buildWorkspaceScopeNotice() {
+    const repo = selectedRepoSummary();
+    if (!repo) return "";
+    return `
+      <div class="scope-banner">
+        <div class="scope-banner-copy">
+          <span class="scope-banner-label">Repo Scope</span>
+          <strong>${escapeHTML(repo.repo_slug)}</strong>
+          <p>This page is filtered to the repo selected in the header picker.</p>
+        </div>
+        <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-clear-workspace-scope="true">All repos</button>
+      </div>
+    `;
+  }
+
   function buildFilterToolbar(view, options = {}) {
     const filter = filterState(view);
     const activeCount = activeFilterCount(filter);
-    const repoOptions = ['<option value="">All repos</option>'].concat(sortedRepos().map((repo) => {
-      const selected = filter.repo === repo.repo_slug ? "selected" : "";
-      return `<option value="${escapeHTML(repo.repo_slug)}" ${selected}>${escapeHTML(repo.repo_slug)}</option>`;
-    })).join("");
     const attentionOptions = [
       { value: "all", label: "All states" },
       { value: "failed", label: "Failed" },
@@ -1188,6 +1229,7 @@
       `
       : "";
     return `
+      ${buildWorkspaceScopeNotice()}
       <details class="filter-disclosure" ${activeCount ? "open" : ""}>
         <summary class="filter-summary">
           <span class="filter-summary-copy">
@@ -1203,10 +1245,6 @@
             <label class="selector config-selector config-field-wide">
               <span>Search</span>
               <input type="text" value="${escapeHTML(filter.query)}" placeholder="${escapeHTML(defaultString(options.placeholder, "Search"))}" data-view-filter="${escapeHTML(view)}" data-view-filter-name="query" />
-            </label>
-            <label class="selector config-selector">
-              <span>Repo</span>
-              <select data-view-filter="${escapeHTML(view)}" data-view-filter-name="repo">${repoOptions}</select>
             </label>
             <label class="selector config-selector">
               <span>Status</span>
@@ -1958,6 +1996,7 @@
     const params = new URLSearchParams();
     const filters = state.usage.filters || {};
     if (filters.since && filters.since !== "all") params.set("since", filters.since);
+    if (state.currentView === "usage" && state.selectedRepo) params.set("repo", state.selectedRepo);
     if (filters.root && filters.root !== "all") params.set("root", filters.root);
     if (filters.activity) params.set("activity", filters.activity);
     if (filters.phase) params.set("phase", filters.phase);
@@ -2179,7 +2218,7 @@
           loadInvestigations({ silent: true });
         }
         {
-          const repo = selectedTaskRepoSummary();
+          const repo = selectedTaskScopeRepoSummary();
           if (repo) {
             ensureTaskFindingsState(repo);
             ensureFindingImportsState(repo);
@@ -2312,18 +2351,69 @@
       pendingWorkItemsForRepo(repo.repo_slug).length;
   }
 
+  function syncWorkspaceRepoFilters(repoSlug) {
+    ["issues", "investigations", "work", "feedback", "approvals"].forEach((view) => {
+      filterState(view).repo = defaultString(repoSlug, "");
+    });
+  }
+
+  function openRepoOnboardingFlow() {
+    initRepoOnboardingDrawer();
+    renderRepoPicker();
+    renderRepoOnboardingDrawer();
+    state.repoOnboardingDrawer.open();
+    window.setTimeout(() => {
+      const input = document.getElementById("repo-onboard-slug");
+      if (input) input.focus();
+    }, 0);
+  }
+
+  function setWorkspaceRepoScope(repoSlug) {
+    const normalized = String(repoSlug || "").trim();
+    const nextRepo = normalized && sortedRepos().some((repo) => repo.repo_slug === normalized)
+      ? normalized
+      : "";
+    const nextView = nextRepo
+      ? ((state.currentView === "home" || state.currentView === "repo") ? "repo" : state.currentView)
+      : (state.currentView === "repo" ? "home" : state.currentView);
+    const nextRepoTab = nextRepo ? defaultString(state.repoTab, "overview") : "overview";
+    clearDraftsForRouteTransition({
+      view: nextView,
+      repoSlug: nextRepo,
+      repoTab: nextRepoTab,
+    });
+    state.selectedRepo = nextRepo;
+    state.selectedIssue = "";
+    if (nextRepo) {
+      state.taskComposer.repoSlug = nextRepo;
+    }
+    syncWorkspaceRepoFilters(nextRepo);
+    state.currentView = nextView;
+    state.repoTab = nextRepoTab;
+    renderApp();
+    if (state.currentView === "repo") {
+      refreshCurrentView({ silent: true }).catch(() => {});
+    } else if (state.currentView === "usage") {
+      loadUsage({ silent: true });
+    }
+  }
+
   function ensureSelection() {
     const repos = sortedRepos();
     if (state.selectedRepo && repos.some((repo) => repo.repo_slug === state.selectedRepo)) {
       return;
     }
-    state.selectedRepo = repos[0] ? repos[0].repo_slug : "";
-    if (!state.selectedRepo && state.currentView === "repo") {
+    state.selectedRepo = "";
+    syncWorkspaceRepoFilters("");
+    if (state.currentView === "repo") {
       state.currentView = "home";
+      state.repoTab = "overview";
     }
   }
 
   function openRepoView(repoSlug, tab = "overview") {
+    syncWorkspaceRepoFilters(repoSlug);
+    state.taskComposer.repoSlug = repoSlug || state.taskComposer.repoSlug;
     clearDraftsForRouteTransition({
       view: "repo",
       repoSlug: repoSlug || "",
@@ -2415,7 +2505,7 @@
   function buildBreadcrumbs() {
     const items = [{ label: "Workspace" }];
     if (state.currentView === "home") {
-      items.push({ label: "Home", current: true });
+      items.push({ label: "All Repos", current: true });
       return items;
     }
     if (state.currentView === "repo") {
@@ -2626,22 +2716,15 @@
 
   function renderSidebar() {
     const nav = document.getElementById("sidebar-nav");
-    const repos = sortedRepos();
     const totals = state.overview ? state.overview.totals || {} : {};
     const homeActive = state.currentView === "home";
     const homeCount = pendingRuns().length + pendingWorkItems().length + Number(totals.approval_items || 0);
     const taskCount = Number(totals.investigations || 0) + Number(totals.planned_queued || 0) + Number(totals.planned_launching || 0);
-    const repoQuery = String(state.sidebarQuery || "").trim().toLowerCase();
-    const visibleRepos = repos.filter((repo) => !repoQuery || repo.repo_slug.toLowerCase().includes(repoQuery));
     nav.innerHTML = `
       <div class="sidebar-nav-shell">
-        <label class="selector sidebar-search">
-          <span>Find Repo</span>
-          <input type="search" value="${escapeHTML(state.sidebarQuery)}" placeholder="owner/repo" data-sidebar-query="true" />
-        </label>
         <div class="nav-main-links" role="navigation" aria-label="Workspace views">
           <button class="nav-item ${homeActive ? "nav-item-active" : ""}" type="button" data-nav-view="home" aria-current="${homeActive ? "page" : "false"}">
-            <span class="nav-label">Home</span>
+            <span class="nav-label">All Repos</span>
             <span class="nav-count">${homeCount}</span>
           </button>
           <button class="nav-item ${state.currentView === "issues" ? "nav-item-active" : ""}" type="button" data-nav-view="issues" aria-current="${state.currentView === "issues" ? "page" : "false"}">
@@ -2669,24 +2752,6 @@
             <span class="nav-count">${Number(totals.approval_items || 0)}</span>
           </button>
         </div>
-        <details class="nav-disclosure" ${state.currentView === "repo" || repoQuery ? "open" : ""}>
-          <summary>Repos</summary>
-          <div class="nav-disclosure-body">
-            <button class="nav-item" type="button" data-open-onboard="true">
-              <span class="nav-label">Onboard Repo</span>
-              <span class="nav-count">+</span>
-            </button>
-            ${visibleRepos.length ? visibleRepos.map((repo) => {
-              const active = state.currentView === "repo" && state.selectedRepo === repo.repo_slug;
-              return `
-                <button class="nav-item ${active ? "nav-item-active" : ""}" type="button" data-nav-view="repo" data-repo-slug="${escapeHTML(repo.repo_slug)}" aria-current="${active ? "page" : "false"}">
-                  <span class="nav-label">${escapeHTML(repo.repo_slug)}</span>
-                  <span class="nav-count">${outstandingRepoCount(repo)}</span>
-                </button>
-              `;
-            }).join("") : `<p class="empty-copy">${repoQuery ? "No repos match this filter." : "No repos are onboarded yet."}</p>`}
-          </div>
-        </details>
       </div>
     `;
   }
@@ -2731,7 +2796,7 @@
         subtitle.textContent = "Human-gate queue across publication, feedback submission, and planned launches.";
         updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
       } else {
-        title.textContent = "Home";
+        title.textContent = "All Repos";
         subtitle.textContent = state.overviewError ? "Workspace overview is unavailable." : "Waiting for state...";
         updated.textContent = state.overviewError ? "Overview unavailable." : "Waiting for state...";
       }
@@ -2741,23 +2806,29 @@
     updated.textContent = `Updated ${formatDateTime(state.overview.generated_at)}`;
 
     if (state.currentView === "home") {
-      title.textContent = "Home";
+      title.textContent = "All Repos";
       subtitle.textContent = "Assistant queue across issues, runs, feedback, approvals, and repo automation.";
       return;
     }
     if (state.currentView === "issues") {
       title.textContent = "Issues";
-      subtitle.textContent = "Tracked issues, triage evidence, scheduling, and direct launch actions.";
+      subtitle.textContent = state.selectedRepo
+        ? `Tracked issues, triage evidence, scheduling, and direct launch actions for ${state.selectedRepo}.`
+        : "Tracked issues, triage evidence, scheduling, and direct launch actions.";
       return;
     }
     if (state.currentView === "investigations") {
       title.textContent = "Tasks";
-      subtitle.textContent = "Unified scheduling for investigations, coding work, manual scouts, and resulting findings.";
+      subtitle.textContent = state.selectedRepo
+        ? `Unified scheduling, findings, and manual scout work for ${state.selectedRepo}.`
+        : "Unified scheduling for investigations, coding work, manual scouts, and resulting findings.";
       return;
     }
     if (state.currentView === "work") {
       title.textContent = "Work";
-      subtitle.textContent = "Local and GitHub-backed work runs with detail, state, and logs.";
+      subtitle.textContent = state.selectedRepo
+        ? `Local and GitHub-backed work runs for ${state.selectedRepo}.`
+        : "Local and GitHub-backed work runs with detail, state, and logs.";
       return;
     }
     if (state.currentView === "usage") {
@@ -2768,19 +2839,21 @@
     if (state.currentView === "feedback") {
       title.textContent = "Feedback";
       subtitle.textContent = state.feedbackTab === "reviews"
-        ? "Review requests and drafted PR feedback."
-        : "Drafted thread replies and comment follow-ups.";
+        ? (state.selectedRepo ? `Review requests and drafted PR feedback for ${state.selectedRepo}.` : "Review requests and drafted PR feedback.")
+        : (state.selectedRepo ? `Drafted thread replies and comment follow-ups for ${state.selectedRepo}.` : "Drafted thread replies and comment follow-ups.");
       return;
     }
     if (state.currentView === "approvals") {
       title.textContent = "Approvals";
-      subtitle.textContent = "Human-gate queue across publication, feedback submission, and planned launches.";
+      subtitle.textContent = state.selectedRepo
+        ? `Human-gate queue across publication, feedback submission, and planned launches for ${state.selectedRepo}.`
+        : "Human-gate queue across publication, feedback submission, and planned launches.";
       return;
     }
 
     const repo = selectedRepoSummary();
     if (!repo) {
-      title.textContent = "Home";
+      title.textContent = "All Repos";
       subtitle.textContent = "Assistant queue across issues, runs, feedback, approvals, and repo automation.";
       return;
     }
@@ -2793,6 +2866,48 @@
       : state.repoTab === "config"
         ? "Start-facing repo configuration and participation controls."
         : "Repo queue posture, pending jobs, and tracked work.";
+  }
+
+  function renderRepoPicker() {
+    const host = document.getElementById("repo-picker-host");
+    if (!host) return;
+    const repos = sortedRepos();
+    const selected = selectedRepoSummary();
+    const countLabel = !repos.length
+      ? "No repos"
+      : selected
+        ? `${outstandingRepoCount(selected)} queued`
+        : `${repos.length} onboarded`;
+    const copy = selected
+      ? `Showing repo-specific overview and filtered workspace queues for ${selected.repo_slug}. Choose All repos to return to the shared dashboard.`
+      : "Default scope is All repos. Use this picker to focus one repo or onboard a new GitHub repository.";
+    host.innerHTML = `
+      <div class="repo-picker-card">
+        <div class="repo-picker-head">
+          <div>
+            <p class="eyebrow">Repo Picker</p>
+            <h3 class="repo-picker-title">${escapeHTML(selected ? selected.repo_slug : "All Repos")}</h3>
+            <p class="repo-picker-copy">${escapeHTML(copy)}</p>
+          </div>
+          <div class="repo-picker-meta">
+            <span class="status-pill">${escapeHTML(countLabel)}</span>
+            <span class="repo-picker-meta-copy">${escapeHTML(selected ? defaultString(selected.repo_mode, "repo") : "Workspace scope")}</span>
+          </div>
+        </div>
+        <label class="selector repo-picker-shell" for="repo-scope-select">
+          <span>Scope</span>
+          <select id="repo-scope-select" data-repo-picker="true">
+            <optgroup label="Scope">
+              <option value="${WORKSPACE_SCOPE_ALL}" ${selected ? "" : "selected"}>All repos</option>
+              ${repos.map((repo) => `<option value="${escapeHTML(repo.repo_slug)}" ${selected && selected.repo_slug === repo.repo_slug ? "selected" : ""}>${escapeHTML(repo.repo_slug)}</option>`).join("")}
+            </optgroup>
+            <optgroup label="Actions">
+              <option value="${WORKSPACE_SCOPE_ONBOARD}">Onboard new repo...</option>
+            </optgroup>
+          </select>
+        </label>
+      </div>
+    `;
   }
 
   function renderTabs() {
@@ -3212,8 +3327,18 @@
     syncUsageFilterControl("usage-filter-model", filters.model || "");
   }
 
-  function renderRepoOnboardingPanel() {
-    const host = document.getElementById("global-repo-onboard");
+  function initRepoOnboardingDrawer() {
+    if (state.repoOnboardingDrawer) return;
+    state.repoOnboardingDrawer = Teryx.drawer({
+      title: "Onboard Repo",
+      position: "right",
+      size: "560px",
+      content: '<div id="repo-onboarding-drawer-content" class="drawer-shell repo-onboarding-shell"></div>',
+    });
+  }
+
+  function renderRepoOnboardingDrawer() {
+    const host = document.getElementById("repo-onboarding-drawer-content");
     if (!host) return;
     const onboarding = state.repoOnboarding || defaultRepoOnboardingState();
     const draft = onboarding.draft || defaultRepoOnboardingState().draft;
@@ -3222,12 +3347,22 @@
       ? "Add another GitHub repo to the workspace. Advanced routing and scout policies stay editable in the repo Config tab."
       : "No repos are onboarded yet. Add an owner/repo slug or GitHub repo URL to start managing it from this workspace.";
     host.innerHTML = `
-      <div class="surface-head">
+      <div class="drawer-summary">
         <div>
-          <h3>Onboard Repo</h3>
-          <p>${escapeHTML(summaryCopy)}</p>
+          <span class="drawer-label">Workspace</span>
+          <span class="drawer-value">Onboard Repo</span>
+          <p class="drawer-copy">${escapeHTML(summaryCopy)}</p>
         </div>
-        <span class="status-pill">${escapeHTML(repoCount ? `${repoCount} live` : "No repos")}</span>
+        <div class="drawer-summary-grid">
+          <div class="drawer-summary-card">
+            <span class="drawer-label">Tracked Repos</span>
+            <span class="drawer-value">${escapeHTML(repoCount ? `${repoCount}` : "0")}</span>
+          </div>
+          <div class="drawer-summary-card">
+            <span class="drawer-label">Mode</span>
+            <span class="drawer-value">${escapeHTML(defaultString(draft.repo_mode, "local"))}</span>
+          </div>
+        </div>
       </div>
       ${onboarding.error ? `<div id="repo-onboard-error" class="config-notice">${escapeHTML(onboarding.error)}</div>` : `<div id="repo-onboard-error"></div>`}
       <form id="repo-onboard-form" class="config-form">
@@ -3266,13 +3401,13 @@
     const payload = repoOnboardingPayload();
     if (!payload.repo_slug) {
       state.repoOnboarding.error = "Enter an owner/repo slug or GitHub repo URL.";
-      renderRepoOnboardingPanel();
+      renderRepoOnboardingDrawer();
       toast("warning", "Repo slug required", "Use owner/repo or a GitHub repo URL.");
       return;
     }
     state.repoOnboarding.submitting = true;
     state.repoOnboarding.error = "";
-    renderRepoOnboardingPanel();
+    renderRepoOnboardingDrawer();
     api("/api/v1/repos", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -3280,18 +3415,21 @@
       const repo = response.repo || null;
       const created = Boolean(response.created);
       state.repoOnboarding = defaultRepoOnboardingState();
+      renderRepoOnboardingDrawer();
+      if (state.repoOnboardingDrawer) {
+        state.repoOnboardingDrawer.close();
+      }
       if (repo && repo.repo_slug) {
         applySelectedRepoPayload(repo);
         openRepoView(repo.repo_slug, "config");
       }
       loadOverview({ silent: true });
+      loadRepos({ silent: true });
       toast(created ? "success" : "warning", created ? "Repo onboarded" : "Repo already onboarded", repo && repo.repo_slug ? repo.repo_slug : payload.repo_slug);
     }).catch((error) => {
       state.repoOnboarding.submitting = false;
       state.repoOnboarding.error = error.message;
-      if (state.currentView === "home") {
-        renderRepoOnboardingPanel();
-      }
+      renderRepoOnboardingDrawer();
       toast("danger", "Repo onboarding failed", error.message);
     });
   }
@@ -3351,9 +3489,6 @@
     const showWorkItems = workItems.length > 0;
     ensureBodyStructure("global", `
       <section id="global-metrics" class="metrics-grid"></section>
-      <section class="surface">
-        <div id="global-repo-onboard"></div>
-      </section>
       <section class="layout-two-col">
         <div class="surface">
           <div class="surface-head">
@@ -3433,7 +3568,6 @@
     const metricsHost = document.getElementById("global-metrics");
     metricsHost.className = showWorkItems ? "metrics-grid metrics-grid-wide" : "metrics-grid";
     metricsHost.innerHTML = buildMetricCards(metricCards);
-    renderRepoOnboardingPanel();
     renderPendingJobsChart("global-pending-chart", runs);
     renderRepoCards("global-repo-grid", sortedRepos());
     renderGrid("global-pending-grid", pendingRunColumns(true), runGridRows(runs, true), {
@@ -3472,7 +3606,8 @@
     const filters = state.usage.filters || defaultUsageState().filters;
     const draftScope = usageFiltersDraftScope();
 
-    ensureBodyStructure("usage", `
+    ensureBodyStructure(`usage:${defaultString(state.selectedRepo, "all")}`, `
+      ${buildWorkspaceScopeNotice()}
       <section class="surface">
         <div class="surface-head">
           <div>
@@ -3739,7 +3874,7 @@
     const items = filteredIssueQueueItems();
     const selected = selectedIssueQueueItemFrom(items);
     const draftScope = issuesDetailDraftScope(selected);
-    ensureBodyStructure("issues", `
+    ensureBodyStructure(`issues:${defaultString(state.selectedRepo, "all")}`, `
       <section class="layout-two-col">
         <div class="surface">
           <div class="surface-head">
@@ -4236,18 +4371,19 @@
   function renderInvestigationsPage() {
     const items = filteredInvestigations();
     const detail = state.investigations.detail;
-    const repo = selectedTaskRepoSummary();
-    ensureTaskFindingsState(repo);
-    ensureFindingImportsState(repo);
-    if (repo && (!state.taskFindings.loaded || state.taskFindings.repoSlug !== repo.repo_slug) && !state.taskFindings.loading) {
-      loadTaskFindings(repo.repo_slug, { silent: true });
+    const scopedRepo = selectedTaskScopeRepoSummary();
+    const composerRepo = selectedTaskComposerRepoSummary();
+    ensureTaskFindingsState(scopedRepo);
+    ensureFindingImportsState(scopedRepo);
+    if (scopedRepo && (!state.taskFindings.loaded || state.taskFindings.repoSlug !== scopedRepo.repo_slug) && !state.taskFindings.loading) {
+      loadTaskFindings(scopedRepo.repo_slug, { silent: true });
     }
-    if (repo && (!state.findingImports.loaded || state.findingImports.repoSlug !== repo.repo_slug) && !state.findingImports.loading) {
-      loadFindingImports(repo.repo_slug, { silent: true });
+    if (scopedRepo && (!state.findingImports.loaded || state.findingImports.repoSlug !== scopedRepo.repo_slug) && !state.findingImports.loading) {
+      loadFindingImports(scopedRepo.repo_slug, { silent: true });
     }
-    const supportsSessionLimit = repoScoutMeta(state.taskComposer.scoutRole, repo).supportsSessionLimit;
-    const scheduledRows = taskScheduledRows(repo);
-    ensureBodyStructure("investigations", `
+    const supportsSessionLimit = repoScoutMeta(state.taskComposer.scoutRole, composerRepo).supportsSessionLimit;
+    const scheduledRows = taskScheduledRows(scopedRepo);
+    ensureBodyStructure(`investigations:${defaultString(state.selectedRepo, "all")}`, `
       <section class="layout-two-col">
         <div class="surface">
           <div class="surface-head">
@@ -4257,12 +4393,19 @@
             </div>
           </div>
           <div class="config-grid">
-            <label class="config-field">
-              <span class="config-label">Repo</span>
-              <select id="task-composer-repo">
-                ${sortedRepos().map((entry) => `<option value="${escapeHTML(entry.repo_slug)}" ${state.taskComposer.repoSlug === entry.repo_slug ? "selected" : ""}>${escapeHTML(entry.repo_slug)}</option>`).join("")}
-              </select>
-            </label>
+            ${state.selectedRepo ? `
+              <div class="config-field">
+                <span class="config-label">Repo</span>
+                <div class="scope-chip">${escapeHTML(state.selectedRepo)}</div>
+              </div>
+            ` : `
+              <label class="config-field">
+                <span class="config-label">Repo</span>
+                <select id="task-composer-repo">
+                  ${sortedRepos().map((entry) => `<option value="${escapeHTML(entry.repo_slug)}" ${state.taskComposer.repoSlug === entry.repo_slug ? "selected" : ""}>${escapeHTML(entry.repo_slug)}</option>`).join("")}
+                </select>
+              </label>
+            `}
             <label class="config-field">
               <span class="config-label">Task Type</span>
               <select id="task-composer-kind">
@@ -4314,7 +4457,7 @@
               <label class="config-field">
                 <span class="config-label">Scout Role</span>
                 <select id="task-scout-role">
-                  ${repoScoutCatalog(repo).map((entry) => `<option value="${escapeHTML(entry.role)}" ${state.taskComposer.scoutRole === entry.role ? "selected" : ""}>${escapeHTML(entry.display_label)}</option>`).join("")}
+                  ${repoScoutCatalog(composerRepo).map((entry) => `<option value="${escapeHTML(entry.role)}" ${state.taskComposer.scoutRole === entry.role ? "selected" : ""}>${escapeHTML(entry.display_label)}</option>`).join("")}
                 </select>
               </label>
               ${supportsSessionLimit ? `
@@ -4330,14 +4473,14 @@
             ` : ""}
           </div>
           <div class="config-actions">
-            <button id="task-schedule-button" class="tx-btn tx-btn-primary" type="button" ${state.taskComposer.creating || !repo ? "disabled" : ""}>${state.taskComposer.creating ? "Scheduling..." : "Schedule Task"}</button>
+            <button id="task-schedule-button" class="tx-btn tx-btn-primary" type="button" ${state.taskComposer.creating || !composerRepo ? "disabled" : ""}>${state.taskComposer.creating ? "Scheduling..." : "Schedule Task"}</button>
           </div>
         </div>
         <div class="surface">
           <div class="surface-head">
             <div>
               <h3>Scheduled Tasks</h3>
-              <p>${repo ? `Queued task launches for ${escapeHTML(repo.repo_slug)}.` : "Select a repo to inspect scheduled tasks."}</p>
+              <p>${scopedRepo ? `Queued task launches for ${escapeHTML(scopedRepo.repo_slug)}.` : "Select a repo from the header picker to inspect scheduled tasks."}</p>
             </div>
           </div>
           <div id="task-planned-grid"></div>
@@ -4369,11 +4512,11 @@
           <div class="surface-head">
             <div>
               <h3>Findings Inbox</h3>
-              <p>${repo ? `Persisted findings for ${escapeHTML(repo.repo_slug)} with source lineage and promotion controls.` : "Select a repo to inspect findings."}</p>
+              <p>${scopedRepo ? `Persisted findings for ${escapeHTML(scopedRepo.repo_slug)} with source lineage and promotion controls.` : "Select a repo from the header picker to inspect findings."}</p>
             </div>
             <div class="config-actions">
-              <input id="task-findings-import-file" type="file" accept=".md,text/markdown" ${repo ? "" : "disabled"} />
-              <button id="task-findings-import-button" class="tx-btn tx-btn-secondary tx-btn-sm" type="button" ${repo && !state.findingImports.importing ? "" : "disabled"}>${state.findingImports.importing ? "Importing..." : "Import Findings from Markdown"}</button>
+              <input id="task-findings-import-file" type="file" accept=".md,text/markdown" ${scopedRepo ? "" : "disabled"} />
+              <button id="task-findings-import-button" class="tx-btn tx-btn-secondary tx-btn-sm" type="button" ${scopedRepo && !state.findingImports.importing ? "" : "disabled"}>${state.findingImports.importing ? "Importing..." : "Import Findings from Markdown"}</button>
             </div>
           </div>
           <div id="task-findings-grid"></div>
@@ -4393,7 +4536,7 @@
           <div class="surface-head">
             <div>
               <h3>Import Sessions</h3>
-              <p>${repo ? `Markdown imports and candidate findings for ${escapeHTML(repo.repo_slug)}.` : "Select a repo to inspect import sessions."}</p>
+              <p>${scopedRepo ? `Markdown imports and candidate findings for ${escapeHTML(scopedRepo.repo_slug)}.` : "Select a repo from the header picker to inspect import sessions."}</p>
             </div>
           </div>
           <div id="task-import-sessions-grid"></div>
@@ -4433,7 +4576,7 @@
       },
     ], scheduledRows, {
       maxHeight: "340px",
-      emptyMessage: repo ? "No scheduled tasks are queued for this repo." : "No repos are onboarded yet.",
+      emptyMessage: scopedRepo ? "No scheduled tasks are queued for this repo." : "Select a repo from the header picker to inspect scheduled tasks.",
     });
     renderGrid("investigations-grid", [
       { field: "repo_slug", label: "Repo", render: (row) => `<span class="data-value-text">${escapeHTML(defaultString(row.repo_slug, "Workspace"))}</span>` },
@@ -4464,9 +4607,9 @@
       { field: "updated_at", label: "Updated" },
     ], taskFindingRows(state.taskFindings.items), {
       maxHeight: "420px",
-      emptyMessage: repo
+      emptyMessage: scopedRepo
         ? (state.taskFindings.loading ? "Loading findings..." : defaultString(state.taskFindings.error, "No findings are available for this repo."))
-        : "Select a repo to inspect findings.",
+        : "Select a repo from the header picker to inspect findings.",
       rowSelect(row) {
         return {
           kind: "finding",
@@ -4475,7 +4618,7 @@
         };
       },
     });
-    renderTaskFindingDetail(repo, selectedTaskFinding());
+    renderTaskFindingDetail(scopedRepo, selectedTaskFinding());
     renderGrid("task-import-sessions-grid", [
       { field: "id", label: "Session" },
       { field: "file_path", label: "Source File" },
@@ -4484,9 +4627,9 @@
       { field: "updated_at", label: "Updated" },
     ], findingImportSessionRows(state.findingImports.items), {
       maxHeight: "220px",
-      emptyMessage: repo
+      emptyMessage: scopedRepo
         ? (state.findingImports.loading ? "Loading import sessions..." : defaultString(state.findingImports.error, "No import sessions exist for this repo."))
-        : "Select a repo to inspect import sessions.",
+        : "Select a repo from the header picker to inspect import sessions.",
       rowSelect(row) {
         return {
           kind: "import-session",
@@ -4512,12 +4655,12 @@
         };
       },
     });
-    renderFindingImportDetail(repo, selectedFindingImportSession(), selectedFindingImportCandidate());
+    renderFindingImportDetail(scopedRepo, selectedFindingImportSession(), selectedFindingImportCandidate());
   }
 
   function renderWorkPage() {
     const runs = filteredWorkRuns();
-    ensureBodyStructure("work", `
+    ensureBodyStructure(`work:${defaultString(state.selectedRepo, "all")}`, `
       <section class="surface">
         <div class="surface-head">
           <div>
@@ -4551,7 +4694,7 @@
 
   function renderFeedbackPage() {
     const items = filteredFeedbackItems();
-    ensureBodyStructure(`feedback:${state.feedbackTab}`, `
+    ensureBodyStructure(`feedback:${state.feedbackTab}:${defaultString(state.selectedRepo, "all")}`, `
       <section class="surface">
         <div class="surface-head">
           <div>
@@ -4587,7 +4730,7 @@
   function renderApprovalsPage() {
     const items = filteredApprovalItems();
     const selected = selectedApprovalItem(items);
-    ensureBodyStructure("approvals", `
+    ensureBodyStructure(`approvals:${defaultString(state.selectedRepo, "all")}`, `
       <section class="layout-two-col">
         <div class="surface">
           <div class="surface-head">
@@ -6768,6 +6911,8 @@
     ensureSelection();
     renderSidebar();
     renderHeader();
+    renderRepoPicker();
+    renderRepoOnboardingDrawer();
     renderBreadcrumbs();
     renderQuickSwitchOptions();
     renderTabs();
@@ -6805,29 +6950,56 @@
       }
     });
 
+    document.getElementById("repo-picker-host").addEventListener("change", (event) => {
+      if (!event.target.matches("[data-repo-picker]")) return;
+      const value = String(event.target.value || "");
+      if (value === WORKSPACE_SCOPE_ONBOARD) {
+        openRepoOnboardingFlow();
+        return;
+      }
+      if (value === WORKSPACE_SCOPE_ALL) {
+        setWorkspaceRepoScope("");
+        return;
+      }
+      setWorkspaceRepoScope(value);
+    });
+
+    document.body.addEventListener("change", (event) => {
+      const repoOnboardField = event.target.getAttribute("data-repo-onboard-field");
+      if (!repoOnboardField) return;
+      state.repoOnboarding.draft[repoOnboardField] = String(event.target.value || "");
+      state.repoOnboarding.error = "";
+      renderRepoOnboardingDrawer();
+    });
+
+    document.body.addEventListener("input", (event) => {
+      const repoOnboardField = event.target.getAttribute("data-repo-onboard-field");
+      if (!repoOnboardField) return;
+      state.repoOnboarding.draft[repoOnboardField] = String(event.target.value || "");
+      state.repoOnboarding.error = "";
+    });
+
+    document.body.addEventListener("submit", (event) => {
+      if (event.target.id !== "repo-onboard-form") return;
+      event.preventDefault();
+      submitRepoOnboarding();
+    });
+
     document.getElementById("sidebar-nav").addEventListener("click", (event) => {
       if (event.target.closest("[data-view-filter-reset]")) {
         event.preventDefault();
         event.stopPropagation();
         return;
       }
-      const onboardButton = event.target.closest("[data-open-onboard]");
-      if (onboardButton) {
-        clearDraftsForRouteTransition({ view: "home", repoSlug: state.selectedRepo, repoTab: state.repoTab });
-        state.currentView = "home";
-        renderApp();
-        window.setTimeout(() => {
-          const input = document.getElementById("repo-onboard-slug");
-          if (input) input.focus();
-        }, 0);
-        return;
-      }
       const button = event.target.closest("[data-nav-view]");
       if (!button) return;
       const nextView = button.getAttribute("data-nav-view");
       if (nextView && nextView !== "repo") {
-        clearDraftsForRouteTransition({ view: nextView, repoSlug: state.selectedRepo, repoTab: state.repoTab });
+        const nextRepo = nextView === "home" ? "" : state.selectedRepo;
+        clearDraftsForRouteTransition({ view: nextView, repoSlug: nextRepo, repoTab: state.repoTab });
         state.currentView = nextView;
+        state.selectedRepo = nextRepo;
+        syncWorkspaceRepoFilters(nextRepo);
         ensureViewData(nextView);
         renderApp();
         return;
@@ -6835,20 +7007,6 @@
       const repoSlug = button.getAttribute("data-repo-slug");
       if (!repoSlug) return;
       openRepoView(repoSlug, "overview");
-    });
-
-    document.getElementById("sidebar-nav").addEventListener("input", (event) => {
-      if (!event.target.matches("[data-sidebar-query]")) return;
-      const caret = typeof event.target.selectionStart === "number" ? event.target.selectionStart : null;
-      state.sidebarQuery = String(event.target.value || "");
-      renderSidebar();
-      const nextInput = document.querySelector("[data-sidebar-query]");
-      if (nextInput) {
-        nextInput.focus();
-        if (caret !== null && typeof nextInput.setSelectionRange === "function") {
-          nextInput.setSelectionRange(caret, caret);
-        }
-      }
     });
 
     document.getElementById("page-tabs").addEventListener("click", (event) => {
@@ -6901,6 +7059,12 @@
         return;
       }
 
+      const clearWorkspaceScopeButton = event.target.closest("[data-clear-workspace-scope]");
+      if (clearWorkspaceScopeButton) {
+        setWorkspaceRepoScope("");
+        return;
+      }
+
       if (!event.target.closest("button, a, input, select, textarea, summary")) {
         const rowSelect = event.target.closest("[data-row-select-kind]");
         if (rowSelect) {
@@ -6920,7 +7084,7 @@
           }
           if (kind === "finding") {
             if (defaultString(selectedTaskFinding() && selectedTaskFinding().id, "") !== value) {
-              clearDraftScope(taskFindingDraftScope(selectedTaskRepoSummary(), selectedTaskFinding()));
+              clearDraftScope(taskFindingDraftScope(selectedTaskScopeRepoSummary(), selectedTaskFinding()));
             }
             state.taskFindings.selectedFindingID = value;
             renderInvestigationsPage();
@@ -6928,7 +7092,7 @@
           }
           if (kind === "import-session") {
             if (defaultString(selectedFindingImportSession() && selectedFindingImportSession().id, "") !== value) {
-              clearDraftScope(findingImportCandidateDraftScope(selectedTaskRepoSummary(), selectedFindingImportSession(), selectedFindingImportCandidate()));
+              clearDraftScope(findingImportCandidateDraftScope(selectedTaskScopeRepoSummary(), selectedFindingImportSession(), selectedFindingImportCandidate()));
             }
             state.findingImports.selectedSessionID = value;
             state.findingImports.selectedCandidateID = "";
@@ -6941,7 +7105,7 @@
           }
           if (kind === "import-candidate") {
             if (defaultString(selectedFindingImportCandidate() && selectedFindingImportCandidate().candidate_id, "") !== value) {
-              clearDraftScope(findingImportCandidateDraftScope(selectedTaskRepoSummary(), selectedFindingImportSession(), selectedFindingImportCandidate()));
+              clearDraftScope(findingImportCandidateDraftScope(selectedTaskScopeRepoSummary(), selectedFindingImportSession(), selectedFindingImportCandidate()));
             }
             state.findingImports.selectedCandidateID = value;
             renderInvestigationsPage();
@@ -7222,7 +7386,7 @@
       }
 
       if (event.target.id === "task-schedule-button") {
-        const repo = selectedTaskRepoSummary();
+        const repo = selectedTaskComposerRepoSummary();
         if (!repo) {
           toast("warning", "No repo selected", "Pick a repo before scheduling a task.");
           return;
@@ -7349,7 +7513,7 @@
       }
 
       if (event.target.id === "task-findings-import-button") {
-        const repo = selectedTaskRepoSummary();
+        const repo = selectedTaskScopeRepoSummary();
         const fileInput = document.getElementById("task-findings-import-file");
         const file = fileInput && fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
         if (!repo) {
@@ -7372,7 +7536,7 @@
 
       const taskFindingSaveButton = event.target.closest("[data-task-finding-save]");
       if (taskFindingSaveButton) {
-        const repo = selectedTaskRepoSummary();
+        const repo = selectedTaskScopeRepoSummary();
         const findingID = taskFindingSaveButton.getAttribute("data-task-finding-save") || "";
         const finding = selectedTaskFinding();
         if (!repo || !findingID || !finding) return;
@@ -7392,7 +7556,7 @@
 
       const taskFindingPromoteButton = event.target.closest("[data-task-finding-promote]");
       if (taskFindingPromoteButton) {
-        const repo = selectedTaskRepoSummary();
+        const repo = selectedTaskScopeRepoSummary();
         const findingID = taskFindingPromoteButton.getAttribute("data-task-finding-promote") || "";
         const finding = selectedTaskFinding();
         if (!repo || !findingID || !finding) return;
@@ -7406,7 +7570,7 @@
 
       const taskFindingDismissButton = event.target.closest("[data-task-finding-dismiss]");
       if (taskFindingDismissButton) {
-        const repo = selectedTaskRepoSummary();
+        const repo = selectedTaskScopeRepoSummary();
         const findingID = taskFindingDismissButton.getAttribute("data-task-finding-dismiss") || "";
         const finding = selectedTaskFinding();
         if (!repo || !findingID || !finding) return;
@@ -7419,7 +7583,7 @@
 
       const taskImportCandidateSaveButton = event.target.closest("[data-task-import-candidate-save]");
       if (taskImportCandidateSaveButton) {
-        const repo = selectedTaskRepoSummary();
+        const repo = selectedTaskScopeRepoSummary();
         const session = selectedFindingImportSession();
         const candidateID = taskImportCandidateSaveButton.getAttribute("data-task-import-candidate-save") || "";
         const candidate = selectedFindingImportCandidate();
@@ -7440,7 +7604,7 @@
 
       const taskImportCandidatePromoteButton = event.target.closest("[data-task-import-candidate-promote]");
       if (taskImportCandidatePromoteButton) {
-        const repo = selectedTaskRepoSummary();
+        const repo = selectedTaskScopeRepoSummary();
         const session = selectedFindingImportSession();
         const candidateID = taskImportCandidatePromoteButton.getAttribute("data-task-import-candidate-promote") || "";
         const candidate = selectedFindingImportCandidate();
@@ -7455,7 +7619,7 @@
 
       const taskImportCandidateDropButton = event.target.closest("[data-task-import-candidate-drop]");
       if (taskImportCandidateDropButton) {
-        const repo = selectedTaskRepoSummary();
+        const repo = selectedTaskScopeRepoSummary();
         const session = selectedFindingImportSession();
         const candidateID = taskImportCandidateDropButton.getAttribute("data-task-import-candidate-drop") || "";
         const candidate = selectedFindingImportCandidate();
@@ -7752,7 +7916,6 @@
           repoTab: state.repoTab,
         });
         state.taskComposer.repoSlug = nextRepoSlug;
-        state.selectedRepo = state.taskComposer.repoSlug;
         state.scoutItems = defaultScoutItemsState();
         renderInvestigationsPage();
         return;
@@ -7781,12 +7944,6 @@
       }
       if (event.target.id === "task-scout-session-limit") {
         state.taskComposer.scoutSessionLimit = String(event.target.value || "");
-        return;
-      }
-      const repoOnboardField = event.target.getAttribute("data-repo-onboard-field");
-      if (repoOnboardField) {
-        state.repoOnboarding.draft[repoOnboardField] = String(event.target.value || "");
-        state.repoOnboarding.error = "";
         return;
       }
       if (event.target.id === "issue-select") {
@@ -7834,11 +7991,6 @@
     });
 
     document.getElementById("page-body").addEventListener("submit", (event) => {
-      if (event.target.id === "repo-onboard-form") {
-        event.preventDefault();
-        submitRepoOnboarding();
-        return;
-      }
       if (event.target.id === "repo-config-form") {
         event.preventDefault();
         saveConfigDraft(selectedRepoSummary());
@@ -7876,12 +8028,6 @@
 
     document.getElementById("page-body").addEventListener("input", (event) => {
       captureDraftField(event.target);
-      const repoOnboardField = event.target.getAttribute("data-repo-onboard-field");
-      if (repoOnboardField) {
-        state.repoOnboarding.draft[repoOnboardField] = String(event.target.value || "");
-        state.repoOnboarding.error = "";
-        return;
-      }
       if (event.target.id === "task-composer-title") {
         state.taskComposer.title = String(event.target.value || "");
         return;

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -39,6 +40,36 @@ func TestStartUIBrowserInteractionsQuickSwitch(t *testing.T) {
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Usage Filters")
 }
 
+func TestStartUIBrowserInteractionsRepoPicker(t *testing.T) {
+	chromePath := startUITestChromePath(t)
+	if chromePath == "" {
+		t.Skip("google-chrome is required for chromedp browser interaction coverage")
+	}
+
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
+	defer cancelBrowser()
+
+	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
+	defer cancelTab()
+
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home", "#repo-scope-select")
+	startUITestChromedpSetValue(t, tabCtx, "#repo-scope-select", fixture.RepoSlug)
+	startUITestChromedpWaitHash(t, tabCtx, "#view=repo&repo="+url.QueryEscape(fixture.RepoSlug)+"&tab=overview")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Queue Snapshot")
+
+	startUITestChromedpSetValue(t, tabCtx, "#repo-scope-select", "__all_repos__")
+	startUITestChromedpWaitHash(t, tabCtx, "#view=home")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Pending Jobs Chart")
+
+	startUITestChromedpDispatchValue(t, tabCtx, "#repo-scope-select", "__onboard_repo__")
+	startUITestChromedpWaitHash(t, tabCtx, "#view=home")
+	startUITestChromedpWaitVisible(t, tabCtx, "#repo-onboard-form")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Onboard Repo")
+}
+
 func TestStartUIBrowserInteractionsIssues(t *testing.T) {
 	chromePath := startUITestChromePath(t)
 	if chromePath == "" {
@@ -55,11 +86,44 @@ func TestStartUIBrowserInteractionsIssues(t *testing.T) {
 	defer cancelTab()
 
 	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=issues", "#issues-grid")
+	startUITestChromedpSetValue(t, tabCtx, "#repo-scope-select", fixture.RepoSlug)
+	startUITestChromedpWaitHash(t, tabCtx, "#view=issues&repo="+url.QueryEscape(fixture.RepoSlug)+"&issue="+url.QueryEscape("acme/widget#7"))
+	startUITestChromedpWaitVisible(t, tabCtx, `[data-clear-workspace-scope="true"]`)
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "This page is filtered to the repo selected in the header picker.")
+	startUITestChromedpClick(t, tabCtx, `[data-clear-workspace-scope="true"]`)
+	startUITestChromedpWaitHash(t, tabCtx, "#view=issues&issue="+url.QueryEscape("acme/widget#7"))
 	startUITestChromedpSetValue(t, tabCtx, "#issue-detail-deferred", "chromedp deferred reason")
 	startUITestChromedpClick(t, tabCtx, `[data-issue-save="acme/widget#7"]`)
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "chromedp deferred reason")
 	startUITestChromedpClick(t, tabCtx, `[data-issue-clear-schedule="acme/widget#7"]`)
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Not scheduled")
+}
+
+func TestStartUIBrowserInteractionsUsageScope(t *testing.T) {
+	chromePath := startUITestChromePath(t)
+	if chromePath == "" {
+		t.Skip("google-chrome is required for chromedp browser interaction coverage")
+	}
+
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
+	defer cancelBrowser()
+
+	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
+	defer cancelTab()
+
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=usage", "#usage-filters-form")
+	startUITestChromedpSetValue(t, tabCtx, "#repo-scope-select", fixture.RepoSlug)
+	startUITestChromedpWaitHash(t, tabCtx, "#view=usage&repo="+url.QueryEscape(fixture.RepoSlug))
+	startUITestChromedpWaitVisible(t, tabCtx, `[data-clear-workspace-scope="true"]`)
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "This page is filtered to the repo selected in the header picker.")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Top Sessions")
+
+	startUITestChromedpClick(t, tabCtx, `[data-clear-workspace-scope="true"]`)
+	startUITestChromedpWaitHash(t, tabCtx, "#view=usage")
+	startUITestChromedpWaitVisible(t, tabCtx, "#usage-filters-form")
 }
 
 func TestStartUIBrowserInteractionsRepoControls(t *testing.T) {
@@ -1280,6 +1344,36 @@ func startUITestChromedpSetValue(t *testing.T, ctx context.Context, selector str
 		}
 		return latest == value, latest, nil
 	})
+}
+
+func startUITestChromedpDispatchValue(t *testing.T, ctx context.Context, selector string, value string) {
+	t.Helper()
+	script := fmt.Sprintf(`(() => {
+		const el = document.querySelector(%q);
+		if (!el) return "";
+		let proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
+		if (el instanceof HTMLTextAreaElement) {
+			proto = window.HTMLTextAreaElement.prototype;
+		} else if (el instanceof HTMLSelectElement) {
+			proto = window.HTMLSelectElement.prototype;
+		}
+		const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, "value") : null;
+		if (descriptor && typeof descriptor.set === "function") {
+			descriptor.set.call(el, %q);
+		} else {
+			el.value = %q;
+		}
+		el.dispatchEvent(new Event("input", { bubbles: true }));
+		el.dispatchEvent(new Event("change", { bubbles: true }));
+		return "ok";
+	})()`, selector, value, value)
+	var result string
+	if err := chromedp.Run(ctx,
+		chromedp.WaitVisible(selector, chromedp.ByQuery),
+		chromedp.Evaluate(script, &result),
+	); err != nil {
+		t.Fatalf("dispatch value %s: %v", selector, err)
+	}
 }
 
 func startUITestChromedpSetSelectionRange(t *testing.T, ctx context.Context, selector string, start int, end int) {

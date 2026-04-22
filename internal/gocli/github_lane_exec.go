@@ -142,6 +142,7 @@ func executeGithubLane(runID string, useLast bool, laneAlias string, task string
 		StepKey:          fmt.Sprintf("github-lane-%s", lane.Alias),
 		ResumeStrategy:   codexResumeConversation,
 		UsageRunID:       manifest.RunID,
+		UsageRepoSlug:    manifest.RepoSlug,
 		UsageBackend:     "github",
 		UsageSandboxPath: manifest.SandboxPath,
 		Env: append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, manifest.APIBaseURL),

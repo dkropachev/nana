@@ -35,6 +35,7 @@ type usageSQLiteSourceSpec struct {
 	Path            string
 	Root            string
 	RunID           string
+	RepoSlug        string
 	Backend         string
 	SandboxPath     string
 	SourceUpdatedAt string
@@ -79,6 +80,7 @@ func recordManagedPromptUsage(options codexManagedPromptOptions, result codexMan
 	return withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
 		_, err := store.ingestRolloutUsageSource(root, sessionPath, usageSQLiteSourceSpec{
 			RunID:       strings.TrimSpace(options.UsageRunID),
+			RepoSlug:    strings.TrimSpace(options.UsageRepoSlug),
 			Backend:     strings.TrimSpace(options.UsageBackend),
 			SandboxPath: strings.TrimSpace(options.UsageSandboxPath),
 		})
@@ -139,6 +141,11 @@ func (s *localWorkDBStore) syncUsageSQLite(cwd string) (usageSQLiteSyncResult, e
 		return result, err
 	}
 	changed = changed || rolloutsChanged
+	repoBackfillChanged, err := s.backfillUsageRunRepoSlugs()
+	if err != nil {
+		return result, err
+	}
+	changed = changed || repoBackfillChanged
 	workSyncUpdatedAt, workRunsChanged, err := s.syncUsageWorkRuns()
 	if err != nil {
 		return result, err
@@ -407,14 +414,19 @@ func (s *localWorkDBStore) syncUsageWorkRun(entry workRunIndexEntry) (bool, erro
 	if strings.TrimSpace(entry.RunID) == "" {
 		return false, nil
 	}
-	if hasRollout, err := s.usageRunHasRolloutSource(entry.RunID); err == nil && hasRollout {
-		return false, nil
-	}
-	payloads, err := usageSQLitePayloadsForWorkRun(entry)
+	changed, err := s.updateUsageRunRepoSlug(entry.RunID, entry.RepoSlug)
 	if err != nil {
 		return false, err
 	}
-	return s.replaceUsageRunSources(entry.RunID, payloads)
+	if hasRollout, err := s.usageRunHasRolloutSource(entry.RunID); err == nil && hasRollout {
+		return changed, nil
+	}
+	payloads, err := usageSQLitePayloadsForWorkRun(entry)
+	if err != nil {
+		return changed, err
+	}
+	replaced, err := s.replaceUsageRunSources(entry.RunID, payloads)
+	return changed || replaced, err
 }
 
 func usageSQLitePayloadsForWorkRun(entry workRunIndexEntry) ([]usageSQLiteUpsertPayload, error) {
@@ -617,13 +629,14 @@ func replaceUsageSourceTx(tx *sql.Tx, payload usageSQLiteUpsertPayload) error {
 		return err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO usage_sources(source_key, source_kind, source_path, root, run_id, backend, sandbox_path, source_updated_at, size_bytes, modified_unix_nano, updated_at)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO usage_sources(source_key, source_kind, source_path, root, run_id, repo_slug, backend, sandbox_path, source_updated_at, size_bytes, modified_unix_nano, updated_at)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sourceKey,
 		strings.TrimSpace(payload.Source.Kind),
 		strings.TrimSpace(payload.Source.Path),
 		strings.TrimSpace(payload.Source.Root),
 		nullableString(payload.Source.RunID),
+		nullableString(payload.Source.RepoSlug),
 		nullableString(payload.Source.Backend),
 		nullableString(payload.Source.SandboxPath),
 		nullableString(payload.Source.SourceUpdatedAt),
@@ -698,6 +711,47 @@ func replaceUsageSourceTx(tx *sql.Tx, payload usageSQLiteUpsertPayload) error {
 		}
 	}
 	return nil
+}
+
+func (s *localWorkDBStore) updateUsageRunRepoSlug(runID string, repoSlug string) (bool, error) {
+	trimmedRunID := strings.TrimSpace(runID)
+	if trimmedRunID == "" {
+		return false, nil
+	}
+	trimmedRepoSlug := strings.TrimSpace(repoSlug)
+	if trimmedRepoSlug != "" && !validRepoSlug(trimmedRepoSlug) {
+		trimmedRepoSlug = ""
+	}
+	result, err := s.db.Exec(`UPDATE usage_sources SET repo_slug = ? WHERE run_id = ? AND COALESCE(repo_slug, '') != ?`, nullableString(trimmedRepoSlug), trimmedRunID, trimmedRepoSlug)
+	if err != nil {
+		return false, err
+	}
+	affected, _ := result.RowsAffected()
+	return affected > 0, nil
+}
+
+func (s *localWorkDBStore) backfillUsageRunRepoSlugs() (bool, error) {
+	result, err := s.db.Exec(`
+		UPDATE usage_sources
+		SET repo_slug = (
+			SELECT idx.repo_slug
+			FROM work_run_index idx
+			WHERE idx.run_id = usage_sources.run_id
+		)
+		WHERE COALESCE(usage_sources.repo_slug, '') = ''
+		  AND COALESCE(usage_sources.run_id, '') != ''
+		  AND EXISTS (
+			SELECT 1
+			FROM work_run_index idx
+			WHERE idx.run_id = usage_sources.run_id
+			  AND COALESCE(idx.repo_slug, '') != ''
+		  )
+	`)
+	if err != nil {
+		return false, err
+	}
+	affected, _ := result.RowsAffected()
+	return affected > 0, nil
 }
 
 func (s *localWorkDBStore) deleteUsageSource(sourceKey string) (bool, error) {
@@ -783,6 +837,7 @@ func usageSQLitePayloadFromLocalHistoryRowsWithMeta(path string, manifest localW
 		Path:            filepath.Clean(path),
 		Root:            "work",
 		RunID:           strings.TrimSpace(manifest.RunID),
+		RepoSlug:        strings.TrimSpace(manifest.RepoSlug),
 		Backend:         "local",
 		SandboxPath:     strings.TrimSpace(manifest.SandboxPath),
 		SourceUpdatedAt: strings.TrimSpace(manifest.UpdatedAt),
@@ -822,6 +877,7 @@ func usageSQLitePayloadFromLocalThreadArtifact(path string, manifest localWorkMa
 		Path:            filepath.Clean(path),
 		Root:            "work",
 		RunID:           strings.TrimSpace(manifest.RunID),
+		RepoSlug:        strings.TrimSpace(manifest.RepoSlug),
 		Backend:         "local",
 		SandboxPath:     strings.TrimSpace(manifest.SandboxPath),
 		SourceUpdatedAt: defaultString(strings.TrimSpace(manifest.UpdatedAt), strings.TrimSpace(artifact.GeneratedAt)),
@@ -870,6 +926,7 @@ func usageSQLitePayloadFromLocalManifest(manifest localWorkManifest, artifactPat
 		Path:            artifactPath,
 		Root:            "work",
 		RunID:           strings.TrimSpace(manifest.RunID),
+		RepoSlug:        strings.TrimSpace(manifest.RepoSlug),
 		Backend:         "local",
 		SandboxPath:     strings.TrimSpace(manifest.SandboxPath),
 		SourceUpdatedAt: strings.TrimSpace(manifest.UpdatedAt),
@@ -908,6 +965,7 @@ func usageSQLitePayloadFromGithubHistoryRowsWithMeta(path string, manifest githu
 		Path:            filepath.Clean(path),
 		Root:            "work",
 		RunID:           strings.TrimSpace(manifest.RunID),
+		RepoSlug:        strings.TrimSpace(manifest.RepoSlug),
 		Backend:         "github",
 		SandboxPath:     strings.TrimSpace(manifest.SandboxPath),
 		SourceUpdatedAt: strings.TrimSpace(manifest.UpdatedAt),
@@ -947,6 +1005,7 @@ func usageSQLitePayloadFromGithubThreadArtifact(path string, manifest githubWork
 		Path:            filepath.Clean(path),
 		Root:            "work",
 		RunID:           strings.TrimSpace(manifest.RunID),
+		RepoSlug:        strings.TrimSpace(manifest.RepoSlug),
 		Backend:         "github",
 		SandboxPath:     strings.TrimSpace(manifest.SandboxPath),
 		SourceUpdatedAt: defaultString(strings.TrimSpace(manifest.UpdatedAt), strings.TrimSpace(artifact.GeneratedAt)),
@@ -1072,6 +1131,7 @@ func (s *localWorkDBStore) buildUsageIndexStateFromSQLite(snapshot usageSQLiteSy
 			COALESCE(src.source_updated_at, ''),
 			src.size_bytes,
 			src.modified_unix_nano,
+			COALESCE(src.repo_slug, ''),
 			ses.session_id,
 			ses.timestamp,
 			ses.day,
@@ -1118,6 +1178,7 @@ func (s *localWorkDBStore) buildUsageIndexStateFromSQLite(snapshot usageSQLiteSy
 			sourceUpdatedAt   string
 			sizeBytes         int64
 			modifiedUnixNano  int64
+			repoSlug          string
 			sessionID         string
 			timestamp         string
 			day               string
@@ -1144,6 +1205,7 @@ func (s *localWorkDBStore) buildUsageIndexStateFromSQLite(snapshot usageSQLiteSy
 			&sourceUpdatedAt,
 			&sizeBytes,
 			&modifiedUnixNano,
+			&repoSlug,
 			&sessionID,
 			&timestamp,
 			&day,
@@ -1179,6 +1241,7 @@ func (s *localWorkDBStore) buildUsageIndexStateFromSQLite(snapshot usageSQLiteSy
 				Day:                   day,
 				CWD:                   cwd,
 				TranscriptPath:        transcriptPath,
+				RepoSlug:              repoSlug,
 				Root:                  recordRoot,
 				Model:                 model,
 				AgentRole:             agentRole,
@@ -1396,6 +1459,7 @@ func (s *localWorkDBStore) queryWindowedUsageRecords(options usageOptions, proje
 			MAX(ck.checkpoint_ts),
 			COALESCE(ses.cwd, ''),
 			ses.transcript_path,
+			COALESCE(src.repo_slug, ''),
 			ses.root,
 			COALESCE(ses.model, ''),
 			COALESCE(ses.agent_role, ''),
@@ -1413,7 +1477,7 @@ func (s *localWorkDBStore) queryWindowedUsageRecords(options usageOptions, proje
 		JOIN usage_checkpoints ck ON ck.session_key = ses.session_key
 		WHERE %s
 		  AND ck.checkpoint_ts >= ?%s
-		GROUP BY ses.session_key, ses.session_id, ses.cwd, ses.transcript_path, ses.root, ses.model, ses.agent_role, ses.agent_nickname, ses.lane, ses.activity, ses.phase
+		GROUP BY ses.session_key, ses.session_id, ses.cwd, ses.transcript_path, src.repo_slug, ses.root, ses.model, ses.agent_role, ses.agent_nickname, ses.lane, ses.activity, ses.phase
 	`, usageEffectiveSourceCondition("src"), filterSQL)
 	args := []any{sinceCutoffUnix}
 	args = append(args, filterArgs...)
@@ -1429,6 +1493,7 @@ func (s *localWorkDBStore) queryWindowedUsageRecords(options usageOptions, proje
 			latestTs          int64
 			cwd               string
 			transcriptPath    string
+			repoSlug          string
 			root              string
 			model             string
 			agentRole         string
@@ -1447,6 +1512,7 @@ func (s *localWorkDBStore) queryWindowedUsageRecords(options usageOptions, proje
 			&latestTs,
 			&cwd,
 			&transcriptPath,
+			&repoSlug,
 			&root,
 			&model,
 			&agentRole,
@@ -1469,6 +1535,7 @@ func (s *localWorkDBStore) queryWindowedUsageRecords(options usageOptions, proje
 			Day:                   time.Unix(latestTs, 0).UTC().Format("2006-01-02"),
 			CWD:                   cwd,
 			TranscriptPath:        transcriptPath,
+			RepoSlug:              repoSlug,
 			Root:                  root,
 			Model:                 model,
 			AgentRole:             agentRole,
@@ -1583,6 +1650,10 @@ func usageWindowedSessionFilters(alias string, options usageOptions, projectFilt
 	if strings.TrimSpace(options.Model) != "" {
 		conditions = append(conditions, fmt.Sprintf(` AND instr(lower(COALESCE(%s.model, '')), lower(?)) > 0`, alias))
 		args = append(args, strings.TrimSpace(options.Model))
+	}
+	if strings.TrimSpace(options.Repo) != "" {
+		conditions = append(conditions, ` AND lower(COALESCE(src.repo_slug, '')) = lower(?)`)
+		args = append(args, strings.TrimSpace(options.Repo))
 	}
 	if strings.TrimSpace(projectFilter) != "" {
 		projectNeedle := strings.ToLower(strings.TrimSpace(projectFilter))

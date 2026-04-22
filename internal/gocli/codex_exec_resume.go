@@ -59,6 +59,7 @@ type codexManagedPromptOptions struct {
 	StepKey            string
 	ResumeStrategy     codexResumeStrategy
 	UsageRunID         string
+	UsageRepoSlug      string
 	UsageBackend       string
 	UsageSandboxPath   string
 	Env                []string

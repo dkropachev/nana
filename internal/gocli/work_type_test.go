@@ -19,6 +19,33 @@ func TestInferScoutWorkTypeFallsBackByRole(t *testing.T) {
 	}
 }
 
+func TestInferScoutWorkTypeAmbiguousStillFallsBackByRole(t *testing.T) {
+	resolution := inferScoutWorkType(enhancementScoutRole, scoutFinding{
+		Title:  "Add performance budgets",
+		Labels: []string{"enhancement", "perf"},
+	})
+	if resolution.WorkType != workTypeFeature {
+		t.Fatalf("expected enhancement scout fallback to feature for ambiguous proposal, got %+v", resolution)
+	}
+	if len(resolution.Ambiguous) == 0 {
+		t.Fatalf("expected ambiguous candidates to be preserved, got %+v", resolution)
+	}
+}
+
+func TestInferPersistedScoutJobWorkTypeAmbiguousStillFallsBackByRole(t *testing.T) {
+	resolution := inferPersistedScoutJobWorkType(startWorkScoutJob{
+		Role:   enhancementScoutRole,
+		Title:  "Add performance budgets",
+		Labels: []string{"enhancement", "perf"},
+	})
+	if resolution.WorkType != workTypeFeature {
+		t.Fatalf("expected persisted enhancement scout fallback to feature for ambiguous proposal, got %+v", resolution)
+	}
+	if len(resolution.Ambiguous) == 0 {
+		t.Fatalf("expected ambiguous candidates to be preserved, got %+v", resolution)
+	}
+}
+
 func TestStartWorkIssueReadyForImplementationRequiresWorkType(t *testing.T) {
 	issue := startWorkIssueState{
 		Status:         startWorkStatusQueued,
