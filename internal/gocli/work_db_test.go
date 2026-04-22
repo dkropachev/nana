@@ -1,9 +1,12 @@
 package gocli
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpenLocalWorkReadDBDoesNotCreateMissingStateDB(t *testing.T) {
@@ -89,6 +92,109 @@ func TestWorkRoutesDBCheckCommand(t *testing.T) {
 	}
 	if !strings.Contains(output, `"exists": false`) {
 		t.Fatalf("expected missing DB JSON output, got %q", output)
+	}
+}
+
+func TestWorkRoutesDBInspectCommand(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	output, err := captureStdout(t, func() error {
+		return Work(".", []string{"db-inspect", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("Work(db-inspect): %v\n%s", err, output)
+	}
+	if !strings.Contains(output, `"exists": false`) {
+		t.Fatalf("expected missing DB inspect JSON output, got %q", output)
+	}
+}
+
+func TestWorkDBMaintainArchivesStaleUsageData(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	now := time.Now().UTC()
+	writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID:      "usage-stale",
+		Timestamp:      now.Add(-40 * 24 * time.Hour).Format(time.RFC3339),
+		CWD:            cwd,
+		Model:          "gpt-5.4",
+		TokenSnapshots: []usageTokenSnapshot{{Input: 100, Output: 20, Total: 120}},
+	})
+	writeUsageRollout(t, filepath.Join(home, ".nana", "codex-home", "sessions"), usageRolloutFixture{
+		SessionID:      "usage-fresh",
+		Timestamp:      now.Add(-2 * time.Hour).Format(time.RFC3339),
+		CWD:            cwd,
+		Model:          "gpt-5.4",
+		TokenSnapshots: []usageTokenSnapshot{{Input: 90, Output: 10, Total: 100}},
+	})
+
+	resetUsageRolloutCache()
+	defer resetUsageRolloutCache()
+
+	if _, err := loadUsageSharedState(cwd); err != nil {
+		t.Fatalf("loadUsageSharedState: %v", err)
+	}
+
+	inspectBefore, err := inspectLocalWorkDBDetailed()
+	if err != nil {
+		t.Fatalf("inspectLocalWorkDBDetailed(before): %v", err)
+	}
+	beforeSources := int64(0)
+	for _, table := range inspectBefore.Tables {
+		if table.Name == "usage_sources" {
+			beforeSources = table.Rows
+		}
+	}
+	if beforeSources < 2 {
+		t.Fatalf("expected at least two usage sources before maintenance, got %+v", inspectBefore.Tables)
+	}
+
+	archiveDir := filepath.Join(home, "usage-archive")
+	report, err := maintainLocalWorkDB(localWorkDBMaintainOptions{
+		UsageRetentionDays: 30,
+		ArchiveDir:         archiveDir,
+	})
+	if err != nil {
+		t.Fatalf("maintainLocalWorkDB: %v", err)
+	}
+	if report.Archive.SourceRows == 0 || strings.TrimSpace(report.Archive.ArchivePath) == "" {
+		t.Fatalf("expected stale usage archive to be created, got %+v", report.Archive)
+	}
+	if _, err := os.Stat(report.Archive.ArchivePath); err != nil {
+		t.Fatalf("expected archive file at %s: %v", report.Archive.ArchivePath, err)
+	}
+	content, err := os.ReadFile(report.Archive.ArchivePath)
+	if err != nil {
+		t.Fatalf("read archive file: %v", err)
+	}
+	var archive localWorkDBUsageArchiveFile
+	if err := json.Unmarshal(content, &archive); err != nil {
+		t.Fatalf("decode archive file: %v", err)
+	}
+	if len(archive.Sources) != report.Archive.SourceRows || len(archive.Sessions) != report.Archive.SessionRows {
+		t.Fatalf("expected archive counts to match report, archive=%+v report=%+v", archive, report.Archive)
+	}
+	for _, source := range archive.Sources {
+		if source.SourceKey == "" {
+			t.Fatalf("expected archived source keys, got %+v", archive.Sources)
+		}
+	}
+
+	inspectAfter, err := inspectLocalWorkDBDetailed()
+	if err != nil {
+		t.Fatalf("inspectLocalWorkDBDetailed(after): %v", err)
+	}
+	afterSources := int64(0)
+	for _, table := range inspectAfter.Tables {
+		if table.Name == "usage_sources" {
+			afterSources = table.Rows
+		}
+	}
+	if afterSources >= beforeSources {
+		t.Fatalf("expected fewer usage sources after archival, before=%d after=%d", beforeSources, afterSources)
 	}
 }
 

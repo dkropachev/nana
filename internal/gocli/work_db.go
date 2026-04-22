@@ -6,7 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const localWorkDBSchemaVersion = 2
@@ -45,6 +49,135 @@ type localWorkDBRepairReport struct {
 	Changed      bool                   `json:"changed"`
 	Actions      []string               `json:"actions,omitempty"`
 	Check        localWorkDBCheckReport `json:"check"`
+}
+
+type localWorkDBInspectTableStat struct {
+	Name string `json:"name"`
+	Rows int64  `json:"rows"`
+}
+
+type localWorkDBInspectIndexStat struct {
+	Name    string `json:"name"`
+	Table   string `json:"table"`
+	Present bool   `json:"present"`
+}
+
+type localWorkDBInspectMetadata struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+type localWorkDBInspectReport struct {
+	DatabasePath         string                        `json:"database_path"`
+	Exists               bool                          `json:"exists"`
+	Empty                bool                          `json:"empty,omitempty"`
+	SchemaVersion        int                           `json:"schema_version"`
+	CurrentSchemaVersion int                           `json:"current_schema_version"`
+	SizeBytes            int64                         `json:"size_bytes,omitempty"`
+	WALSizeBytes         int64                         `json:"wal_size_bytes,omitempty"`
+	SHMSizeBytes         int64                         `json:"shm_size_bytes,omitempty"`
+	Tables               []localWorkDBInspectTableStat `json:"tables,omitempty"`
+	Indices              []localWorkDBInspectIndexStat `json:"indices,omitempty"`
+	Metadata             []localWorkDBInspectMetadata  `json:"metadata,omitempty"`
+}
+
+type localWorkDBMaintainOptions struct {
+	JSON               bool
+	Vacuum             bool
+	UsageRetentionDays int
+	ArchiveDir         string
+}
+
+type localWorkDBUsageArchiveSource struct {
+	SourceKey        string `json:"source_key"`
+	SourceKind       string `json:"source_kind"`
+	SourcePath       string `json:"source_path"`
+	Root             string `json:"root"`
+	RunID            string `json:"run_id,omitempty"`
+	RepoSlug         string `json:"repo_slug,omitempty"`
+	Backend          string `json:"backend,omitempty"`
+	SandboxPath      string `json:"sandbox_path,omitempty"`
+	SourceUpdatedAt  string `json:"source_updated_at,omitempty"`
+	SizeBytes        int64  `json:"size_bytes"`
+	ModifiedUnixNano int64  `json:"modified_unix_nano"`
+	UpdatedAt        string `json:"updated_at"`
+}
+
+type localWorkDBUsageArchiveSession struct {
+	SessionKey            string `json:"session_key"`
+	SourceKey             string `json:"source_key"`
+	SessionID             string `json:"session_id,omitempty"`
+	Timestamp             string `json:"timestamp"`
+	TimestampUnix         int64  `json:"timestamp_unix"`
+	Day                   string `json:"day"`
+	CWD                   string `json:"cwd,omitempty"`
+	TranscriptPath        string `json:"transcript_path"`
+	Root                  string `json:"root"`
+	Model                 string `json:"model,omitempty"`
+	AgentRole             string `json:"agent_role,omitempty"`
+	AgentNickname         string `json:"agent_nickname,omitempty"`
+	Lane                  string `json:"lane,omitempty"`
+	Activity              string `json:"activity"`
+	Phase                 string `json:"phase"`
+	InputTokens           int    `json:"input_tokens"`
+	CachedInputTokens     int    `json:"cached_input_tokens"`
+	OutputTokens          int    `json:"output_tokens"`
+	ReasoningOutputTokens int    `json:"reasoning_output_tokens"`
+	TotalTokens           int    `json:"total_tokens"`
+	HasTokenUsage         bool   `json:"has_token_usage"`
+	StartedAt             int64  `json:"started_at"`
+	UpdatedAt             int64  `json:"updated_at"`
+	PartialWindowCoverage bool   `json:"partial_window_coverage"`
+}
+
+type localWorkDBUsageArchiveCheckpoint struct {
+	SessionKey                 string `json:"session_key"`
+	Seq                        int    `json:"seq"`
+	CheckpointTS               int64  `json:"checkpoint_ts"`
+	CheckpointAt               string `json:"checkpoint_at"`
+	Day                        string `json:"day"`
+	InputTokens                int    `json:"input_tokens"`
+	CachedInputTokens          int    `json:"cached_input_tokens"`
+	OutputTokens               int    `json:"output_tokens"`
+	ReasoningOutputTokens      int    `json:"reasoning_output_tokens"`
+	TotalTokens                int    `json:"total_tokens"`
+	DeltaInputTokens           int    `json:"delta_input_tokens"`
+	DeltaCachedInputTokens     int    `json:"delta_cached_input_tokens"`
+	DeltaOutputTokens          int    `json:"delta_output_tokens"`
+	DeltaReasoningOutputTokens int    `json:"delta_reasoning_output_tokens"`
+	DeltaTotalTokens           int    `json:"delta_total_tokens"`
+}
+
+type localWorkDBUsageArchiveFile struct {
+	GeneratedAt    string                             `json:"generated_at"`
+	DatabasePath   string                             `json:"database_path"`
+	RetentionDays  int                                `json:"retention_days"`
+	CutoffRFC3339  string                             `json:"cutoff_rfc3339"`
+	CutoffUnix     int64                              `json:"cutoff_unix"`
+	Sources        []localWorkDBUsageArchiveSource    `json:"sources"`
+	Sessions       []localWorkDBUsageArchiveSession   `json:"sessions"`
+	Checkpoints    []localWorkDBUsageArchiveCheckpoint `json:"checkpoints"`
+}
+
+type localWorkDBUsageArchiveReport struct {
+	ArchivePath  string `json:"archive_path,omitempty"`
+	RetentionDays int   `json:"retention_days,omitempty"`
+	CutoffRFC3339 string `json:"cutoff_rfc3339,omitempty"`
+	SourceRows   int    `json:"source_rows,omitempty"`
+	SessionRows  int    `json:"session_rows,omitempty"`
+	CheckpointRows int  `json:"checkpoint_rows,omitempty"`
+}
+
+type localWorkDBMaintainReport struct {
+	DatabasePath string                     `json:"database_path"`
+	Exists       bool                       `json:"exists"`
+	Analyzed     bool                       `json:"analyzed"`
+	Optimized    bool                       `json:"optimized"`
+	Vacuumed     bool                       `json:"vacuumed,omitempty"`
+	Actions      []string                   `json:"actions,omitempty"`
+	Archive      localWorkDBUsageArchiveReport `json:"archive,omitempty"`
+	Inspect      localWorkDBInspectReport   `json:"inspect"`
+	Check        localWorkDBCheckReport     `json:"check"`
 }
 
 type localWorkDBSchemaError struct {
@@ -1159,20 +1292,36 @@ func isMissingLocalWorkRepairTableError(err error) bool {
 
 func runWorkDBCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("Usage: nana work db-check [--json]\n       nana work db-repair [--json]\n\n%s", WorkHelp)
+		return fmt.Errorf("Usage: nana work db-check [--json]\n       nana work db-inspect [--json]\n       nana work db-maintain [--json] [--vacuum] [--usage-retention-days <n>] [--archive-dir <path>]\n       nana work db-repair [--json]\n\n%s", WorkHelp)
 	}
 	subcommand := strings.TrimSpace(args[0])
-	jsonOutput, err := parseLocalWorkDBJSONArgs(args[1:], subcommand)
-	if err != nil {
-		return err
-	}
 	switch subcommand {
 	case "db-check":
+		jsonOutput, err := parseLocalWorkDBJSONArgs(args[1:], subcommand)
+		if err != nil {
+			return err
+		}
 		return runWorkDBCheck(jsonOutput)
+	case "db-inspect":
+		jsonOutput, err := parseLocalWorkDBJSONArgs(args[1:], subcommand)
+		if err != nil {
+			return err
+		}
+		return runWorkDBInspect(jsonOutput)
+	case "db-maintain":
+		options, err := parseLocalWorkDBMaintainArgs(args[1:])
+		if err != nil {
+			return err
+		}
+		return runWorkDBMaintain(options)
 	case "db-repair":
+		jsonOutput, err := parseLocalWorkDBJSONArgs(args[1:], subcommand)
+		if err != nil {
+			return err
+		}
 		return runWorkDBRepair(jsonOutput)
 	default:
-		return fmt.Errorf("Usage: nana work db-check [--json]\n       nana work db-repair [--json]\n\n%s", WorkHelp)
+		return fmt.Errorf("Usage: nana work db-check [--json]\n       nana work db-inspect [--json]\n       nana work db-maintain [--json] [--vacuum] [--usage-retention-days <n>] [--archive-dir <path>]\n       nana work db-repair [--json]\n\n%s", WorkHelp)
 	}
 }
 
@@ -1186,6 +1335,48 @@ func parseLocalWorkDBJSONArgs(args []string, subcommand string) (bool, error) {
 		return false, fmt.Errorf("Usage: nana work %s [--json]\n\n%s", subcommand, WorkHelp)
 	}
 	return jsonOutput, nil
+}
+
+func parseLocalWorkDBMaintainArgs(args []string) (localWorkDBMaintainOptions, error) {
+	options := localWorkDBMaintainOptions{}
+	for i := 0; i < len(args); i++ {
+		token := strings.TrimSpace(args[i])
+		switch {
+		case token == "--json":
+			options.JSON = true
+		case token == "--vacuum":
+			options.Vacuum = true
+		case token == "--usage-retention-days":
+			if i+1 >= len(args) {
+				return options, fmt.Errorf("Usage: nana work db-maintain [--json] [--vacuum] [--usage-retention-days <n>] [--archive-dir <path>]\n\n%s", WorkHelp)
+			}
+			i++
+			value := strings.TrimSpace(args[i])
+			retentionDays, err := strconv.Atoi(value)
+			if err != nil || retentionDays < 0 {
+				return options, fmt.Errorf("Usage: nana work db-maintain [--json] [--vacuum] [--usage-retention-days <n>] [--archive-dir <path>]\n\n%s", WorkHelp)
+			}
+			options.UsageRetentionDays = retentionDays
+		case strings.HasPrefix(token, "--usage-retention-days="):
+			value := strings.TrimSpace(strings.TrimPrefix(token, "--usage-retention-days="))
+			retentionDays, err := strconv.Atoi(value)
+			if err != nil || retentionDays < 0 {
+				return options, fmt.Errorf("Usage: nana work db-maintain [--json] [--vacuum] [--usage-retention-days <n>] [--archive-dir <path>]\n\n%s", WorkHelp)
+			}
+			options.UsageRetentionDays = retentionDays
+		case token == "--archive-dir":
+			if i+1 >= len(args) {
+				return options, fmt.Errorf("Usage: nana work db-maintain [--json] [--vacuum] [--usage-retention-days <n>] [--archive-dir <path>]\n\n%s", WorkHelp)
+			}
+			i++
+			options.ArchiveDir = strings.TrimSpace(args[i])
+		case strings.HasPrefix(token, "--archive-dir="):
+			options.ArchiveDir = strings.TrimSpace(strings.TrimPrefix(token, "--archive-dir="))
+		default:
+			return options, fmt.Errorf("Usage: nana work db-maintain [--json] [--vacuum] [--usage-retention-days <n>] [--archive-dir <path>]\n\n%s", WorkHelp)
+		}
+	}
+	return options, nil
 }
 
 func runWorkDBCheck(jsonOutput bool) error {
@@ -1206,6 +1397,30 @@ func runWorkDBCheck(jsonOutput bool) error {
 	return nil
 }
 
+func runWorkDBInspect(jsonOutput bool) error {
+	report, err := inspectLocalWorkDBDetailed()
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeIndentedJSON(report)
+	}
+	printLocalWorkDBInspectReport(report)
+	return nil
+}
+
+func runWorkDBMaintain(options localWorkDBMaintainOptions) error {
+	report, err := maintainLocalWorkDB(options)
+	if options.JSON {
+		if writeErr := writeIndentedJSON(report); writeErr != nil {
+			return writeErr
+		}
+	} else {
+		printLocalWorkDBMaintainReport(report)
+	}
+	return err
+}
+
 func runWorkDBRepair(jsonOutput bool) error {
 	report, err := repairLocalWorkDB()
 	if jsonOutput {
@@ -1224,15 +1439,374 @@ func runWorkDBRepair(jsonOutput bool) error {
 	return nil
 }
 
-func printLocalWorkDBCheckReport(report localWorkDBCheckReport) {
-	fmt.Fprintf(os.Stdout, "[work-db] Path: %s\n", report.DatabasePath)
+func inspectLocalWorkDBDetailed() (localWorkDBInspectReport, error) {
+	report := localWorkDBInspectReport{
+		DatabasePath:         localWorkDBPath(),
+		CurrentSchemaVersion: localWorkDBSchemaVersion,
+	}
+	if info, err := os.Stat(report.DatabasePath); err == nil {
+		report.Exists = true
+		report.SizeBytes = info.Size()
+	} else if !os.IsNotExist(err) {
+		return report, err
+	}
+	if info, err := os.Stat(report.DatabasePath + "-wal"); err == nil {
+		report.WALSizeBytes = info.Size()
+	}
+	if info, err := os.Stat(report.DatabasePath + "-shm"); err == nil {
+		report.SHMSizeBytes = info.Size()
+	}
 	if !report.Exists {
-		fmt.Fprintln(os.Stdout, "[work-db] State DB: not created yet")
+		return report, nil
+	}
+
+	store, err := openLocalWorkReadDB()
+	if err != nil {
+		return report, err
+	}
+	defer store.Close()
+
+	version, hasTables, err := localWorkDBSchemaState(store.db)
+	if err != nil {
+		return report, err
+	}
+	report.SchemaVersion = version
+	report.Empty = !hasTables
+	if report.Empty {
+		return report, nil
+	}
+
+	tableQueries := []string{"usage_sources", "usage_sessions", "usage_checkpoints", "work_run_index", "work_items"}
+	for _, table := range tableQueries {
+		var count int64
+		if err := store.db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM %s`, table)).Scan(&count); err != nil {
+			if isMissingLocalWorkRepairTableError(err) {
+				continue
+			}
+			return report, err
+		}
+		report.Tables = append(report.Tables, localWorkDBInspectTableStat{Name: table, Rows: count})
+	}
+	sort.Slice(report.Tables, func(i, j int) bool {
+		return report.Tables[i].Name < report.Tables[j].Name
+	})
+
+	for _, index := range []struct {
+		Name  string
+		Table string
+	}{
+		{Name: "idx_usage_checkpoints_ts_session", Table: "usage_checkpoints"},
+		{Name: "idx_usage_checkpoints_session_ts", Table: "usage_checkpoints"},
+		{Name: "idx_usage_sources_repo_root", Table: "usage_sources"},
+		{Name: "idx_usage_sessions_root_timestamp", Table: "usage_sessions"},
+		{Name: "idx_work_run_index_updated", Table: "work_run_index"},
+	} {
+		var count int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, index.Name).Scan(&count); err != nil {
+			return report, err
+		}
+		report.Indices = append(report.Indices, localWorkDBInspectIndexStat{
+			Name:    index.Name,
+			Table:   index.Table,
+			Present: count > 0,
+		})
+	}
+
+	rows, err := store.db.Query(`SELECT key, value FROM usage_metadata ORDER BY key`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var key, value string
+			if err := rows.Scan(&key, &value); err != nil {
+				return report, err
+			}
+			report.Metadata = append(report.Metadata, localWorkDBInspectMetadata{Key: key, Value: value})
+		}
+		if err := rows.Err(); err != nil {
+			return report, err
+		}
+	} else if !isMissingLocalWorkRepairTableError(err) {
+		return report, err
+	}
+
+	return report, nil
+}
+
+func maintainLocalWorkDB(options localWorkDBMaintainOptions) (localWorkDBMaintainReport, error) {
+	report := localWorkDBMaintainReport{DatabasePath: localWorkDBPath()}
+	if _, err := os.Stat(report.DatabasePath); err != nil {
+		if os.IsNotExist(err) {
+			report.Inspect, _ = inspectLocalWorkDBDetailed()
+			report.Check, _ = inspectLocalWorkDB()
+			return report, nil
+		}
+		return report, err
+	}
+	report.Exists = true
+
+	store, err := openLocalWorkDBDirect()
+	if err != nil {
+		return report, err
+	}
+	defer store.Close()
+
+	if options.UsageRetentionDays > 0 {
+		archiveReport, err := store.archiveAndTrimUsageData(options.UsageRetentionDays, options.ArchiveDir)
+		report.Archive = archiveReport
+		if err != nil {
+			return report, err
+		}
+		if archiveReport.SourceRows > 0 {
+			report.Actions = append(report.Actions, fmt.Sprintf("archived %d usage source(s), %d session(s), and %d checkpoint(s)", archiveReport.SourceRows, archiveReport.SessionRows, archiveReport.CheckpointRows))
+		}
+	}
+
+	if _, err := store.db.Exec(`ANALYZE`); err != nil {
+		return report, err
+	}
+	report.Analyzed = true
+	report.Actions = append(report.Actions, "ran ANALYZE")
+	if _, err := store.db.Exec(`PRAGMA optimize`); err != nil {
+		return report, err
+	}
+	report.Optimized = true
+	report.Actions = append(report.Actions, "ran PRAGMA optimize")
+	if options.Vacuum {
+		if _, err := store.db.Exec(`VACUUM`); err != nil {
+			return report, err
+		}
+		report.Vacuumed = true
+		report.Actions = append(report.Actions, "ran VACUUM")
+	}
+
+	report.Inspect, err = inspectLocalWorkDBDetailed()
+	if err != nil {
+		return report, err
+	}
+	report.Check, err = inspectLocalWorkDB()
+	if err != nil {
+		return report, err
+	}
+	return report, nil
+}
+
+func (s *localWorkDBStore) archiveAndTrimUsageData(retentionDays int, archiveDir string) (localWorkDBUsageArchiveReport, error) {
+	report := localWorkDBUsageArchiveReport{RetentionDays: retentionDays}
+	if retentionDays <= 0 {
+		return report, nil
+	}
+	if strings.TrimSpace(archiveDir) == "" {
+		archiveDir = filepath.Join(localWorkHomeRoot(), "archive")
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+	report.CutoffRFC3339 = cutoff.Format(time.RFC3339)
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		return report, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return report, err
+	}
+	defer tx.Rollback()
+
+	sources, err := collectUsageArchiveSources(tx, cutoff.Unix())
+	if err != nil {
+		return report, err
+	}
+	if len(sources) == 0 {
+		return report, tx.Commit()
+	}
+	sessions, err := collectUsageArchiveSessions(tx, cutoff.Unix())
+	if err != nil {
+		return report, err
+	}
+	checkpoints, err := collectUsageArchiveCheckpoints(tx, cutoff.Unix())
+	if err != nil {
+		return report, err
+	}
+
+	archivePath := filepath.Join(archiveDir, fmt.Sprintf("usage-retention-%s.json", time.Now().UTC().Format("20060102T150405Z")))
+	archive := localWorkDBUsageArchiveFile{
+		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		DatabasePath:  localWorkDBPath(),
+		RetentionDays: retentionDays,
+		CutoffRFC3339: cutoff.Format(time.RFC3339),
+		CutoffUnix:    cutoff.Unix(),
+		Sources:       sources,
+		Sessions:      sessions,
+		Checkpoints:   checkpoints,
+	}
+	if err := writeLocalWorkJSONAtomically(archivePath, archive); err != nil {
+		return report, err
+	}
+
+	result, err := tx.Exec(buildStaleUsageSourceDeleteSQL(), cutoff.Unix())
+	if err != nil {
+		return report, err
+	}
+	if _, err := result.RowsAffected(); err != nil {
+		return report, err
+	}
+	if err := tx.Commit(); err != nil {
+		return report, err
+	}
+
+	report.ArchivePath = archivePath
+	report.SourceRows = len(sources)
+	report.SessionRows = len(sessions)
+	report.CheckpointRows = len(checkpoints)
+	return report, nil
+}
+
+func buildStaleUsageSourceSubquery() string {
+	return `
+		SELECT src.source_key
+		FROM usage_sources src
+		LEFT JOIN usage_sessions ses ON ses.source_key = src.source_key
+		LEFT JOIN usage_checkpoints ck ON ck.session_key = ses.session_key
+		GROUP BY src.source_key
+		HAVING COALESCE(MAX(ck.checkpoint_ts), MAX(ses.timestamp_unix), 0) < ?
+	`
+}
+
+func buildStaleUsageSourceDeleteSQL() string {
+	return fmt.Sprintf(`DELETE FROM usage_sources WHERE source_key IN (%s)`, buildStaleUsageSourceSubquery())
+}
+
+func collectUsageArchiveSources(tx *sql.Tx, cutoffUnix int64) ([]localWorkDBUsageArchiveSource, error) {
+	rows, err := tx.Query(fmt.Sprintf(`
+		SELECT source_key, source_kind, source_path, root, COALESCE(run_id, ''), COALESCE(repo_slug, ''), COALESCE(backend, ''), COALESCE(sandbox_path, ''), COALESCE(source_updated_at, ''), size_bytes, modified_unix_nano, updated_at
+		FROM usage_sources
+		WHERE source_key IN (%s)
+		ORDER BY source_key
+	`, buildStaleUsageSourceSubquery()), cutoffUnix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []localWorkDBUsageArchiveSource{}
+	for rows.Next() {
+		var item localWorkDBUsageArchiveSource
+		if err := rows.Scan(
+			&item.SourceKey,
+			&item.SourceKind,
+			&item.SourcePath,
+			&item.Root,
+			&item.RunID,
+			&item.RepoSlug,
+			&item.Backend,
+			&item.SandboxPath,
+			&item.SourceUpdatedAt,
+			&item.SizeBytes,
+			&item.ModifiedUnixNano,
+			&item.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func collectUsageArchiveSessions(tx *sql.Tx, cutoffUnix int64) ([]localWorkDBUsageArchiveSession, error) {
+	rows, err := tx.Query(fmt.Sprintf(`
+		SELECT session_key, source_key, COALESCE(session_id, ''), timestamp, timestamp_unix, day, COALESCE(cwd, ''), transcript_path, root, COALESCE(model, ''), COALESCE(agent_role, ''), COALESCE(agent_nickname, ''), COALESCE(lane, ''), activity, phase, input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens, total_tokens, has_token_usage, started_at, updated_at, partial_window_coverage
+		FROM usage_sessions
+		WHERE source_key IN (%s)
+		ORDER BY source_key, session_key
+	`, buildStaleUsageSourceSubquery()), cutoffUnix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []localWorkDBUsageArchiveSession{}
+	for rows.Next() {
+		var item localWorkDBUsageArchiveSession
+		var hasTokenUsage int
+		var partialCoverage int
+		if err := rows.Scan(
+			&item.SessionKey,
+			&item.SourceKey,
+			&item.SessionID,
+			&item.Timestamp,
+			&item.TimestampUnix,
+			&item.Day,
+			&item.CWD,
+			&item.TranscriptPath,
+			&item.Root,
+			&item.Model,
+			&item.AgentRole,
+			&item.AgentNickname,
+			&item.Lane,
+			&item.Activity,
+			&item.Phase,
+			&item.InputTokens,
+			&item.CachedInputTokens,
+			&item.OutputTokens,
+			&item.ReasoningOutputTokens,
+			&item.TotalTokens,
+			&hasTokenUsage,
+			&item.StartedAt,
+			&item.UpdatedAt,
+			&partialCoverage,
+		); err != nil {
+			return nil, err
+		}
+		item.HasTokenUsage = hasTokenUsage == 1
+		item.PartialWindowCoverage = partialCoverage == 1
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func collectUsageArchiveCheckpoints(tx *sql.Tx, cutoffUnix int64) ([]localWorkDBUsageArchiveCheckpoint, error) {
+	rows, err := tx.Query(fmt.Sprintf(`
+		SELECT ck.session_key, ck.seq, ck.checkpoint_ts, ck.checkpoint_at, ck.day, ck.input_tokens, ck.cached_input_tokens, ck.output_tokens, ck.reasoning_output_tokens, ck.total_tokens, ck.delta_input_tokens, ck.delta_cached_input_tokens, ck.delta_output_tokens, ck.delta_reasoning_output_tokens, ck.delta_total_tokens
+		FROM usage_checkpoints ck
+		JOIN usage_sessions ses ON ses.session_key = ck.session_key
+		WHERE ses.source_key IN (%s)
+		ORDER BY ck.session_key, ck.seq
+	`, buildStaleUsageSourceSubquery()), cutoffUnix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []localWorkDBUsageArchiveCheckpoint{}
+	for rows.Next() {
+		var item localWorkDBUsageArchiveCheckpoint
+		if err := rows.Scan(
+			&item.SessionKey,
+			&item.Seq,
+			&item.CheckpointTS,
+			&item.CheckpointAt,
+			&item.Day,
+			&item.InputTokens,
+			&item.CachedInputTokens,
+			&item.OutputTokens,
+			&item.ReasoningOutputTokens,
+			&item.TotalTokens,
+			&item.DeltaInputTokens,
+			&item.DeltaCachedInputTokens,
+			&item.DeltaOutputTokens,
+			&item.DeltaReasoningOutputTokens,
+			&item.DeltaTotalTokens,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func printLocalWorkDBCheckReport(report localWorkDBCheckReport) {
+	fmt.Fprintf(currentWorkStdout(), "[work-db] Path: %s\n", report.DatabasePath)
+	if !report.Exists {
+		fmt.Fprintln(currentWorkStdout(), "[work-db] State DB: not created yet")
 		return
 	}
-	fmt.Fprintf(os.Stdout, "[work-db] Schema version: %d (current=%d)\n", report.SchemaVersion, report.CurrentSchemaVersion)
+	fmt.Fprintf(currentWorkStdout(), "[work-db] Schema version: %d (current=%d)\n", report.SchemaVersion, report.CurrentSchemaVersion)
 	if report.Empty {
-		fmt.Fprintln(os.Stdout, "[work-db] Database is empty.")
+		fmt.Fprintln(currentWorkStdout(), "[work-db] Database is empty.")
 		return
 	}
 	for _, diagnostic := range report.Diagnostics {
@@ -1243,22 +1817,61 @@ func printLocalWorkDBCheckReport(report localWorkDBCheckReport) {
 		case "fail":
 			prefix = "[XX]"
 		}
-		fmt.Fprintf(os.Stdout, "[work-db] %s %s: %s\n", prefix, diagnostic.Code, diagnostic.Message)
+		fmt.Fprintf(currentWorkStdout(), "[work-db] %s %s: %s\n", prefix, diagnostic.Code, diagnostic.Message)
 	}
 }
 
 func printLocalWorkDBRepairReport(report localWorkDBRepairReport) {
-	fmt.Fprintf(os.Stdout, "[work-db] Path: %s\n", report.DatabasePath)
+	fmt.Fprintf(currentWorkStdout(), "[work-db] Path: %s\n", report.DatabasePath)
 	if !report.Exists {
-		fmt.Fprintln(os.Stdout, "[work-db] State DB: not created yet")
+		fmt.Fprintln(currentWorkStdout(), "[work-db] State DB: not created yet")
 		return
 	}
 	if len(report.Actions) == 0 {
-		fmt.Fprintln(os.Stdout, "[work-db] No repair actions were required.")
+		fmt.Fprintln(currentWorkStdout(), "[work-db] No repair actions were required.")
 	} else {
 		for _, action := range report.Actions {
-			fmt.Fprintf(os.Stdout, "[work-db] Repaired: %s\n", action)
+			fmt.Fprintf(currentWorkStdout(), "[work-db] Repaired: %s\n", action)
 		}
 	}
+	printLocalWorkDBCheckReport(report.Check)
+}
+
+func printLocalWorkDBInspectReport(report localWorkDBInspectReport) {
+	fmt.Fprintf(currentWorkStdout(), "[work-db] Path: %s\n", report.DatabasePath)
+	if !report.Exists {
+		fmt.Fprintln(currentWorkStdout(), "[work-db] State DB: not created yet")
+		return
+	}
+	fmt.Fprintf(currentWorkStdout(), "[work-db] Size: db=%d wal=%d shm=%d bytes\n", report.SizeBytes, report.WALSizeBytes, report.SHMSizeBytes)
+	fmt.Fprintf(currentWorkStdout(), "[work-db] Schema version: %d (current=%d)\n", report.SchemaVersion, report.CurrentSchemaVersion)
+	for _, table := range report.Tables {
+		fmt.Fprintf(currentWorkStdout(), "[work-db] Table %s: %d row(s)\n", table.Name, table.Rows)
+	}
+	for _, index := range report.Indices {
+		state := "missing"
+		if index.Present {
+			state = "present"
+		}
+		fmt.Fprintf(currentWorkStdout(), "[work-db] Index %s (%s): %s\n", index.Name, index.Table, state)
+	}
+	for _, item := range report.Metadata {
+		fmt.Fprintf(currentWorkStdout(), "[work-db] Metadata %s=%s\n", item.Key, item.Value)
+	}
+}
+
+func printLocalWorkDBMaintainReport(report localWorkDBMaintainReport) {
+	fmt.Fprintf(currentWorkStdout(), "[work-db] Path: %s\n", report.DatabasePath)
+	if !report.Exists {
+		fmt.Fprintln(currentWorkStdout(), "[work-db] State DB: not created yet")
+		return
+	}
+	for _, action := range report.Actions {
+		fmt.Fprintf(currentWorkStdout(), "[work-db] Maintained: %s\n", action)
+	}
+	if report.Archive.ArchivePath != "" {
+		fmt.Fprintf(currentWorkStdout(), "[work-db] Usage archive: %s\n", report.Archive.ArchivePath)
+	}
+	printLocalWorkDBInspectReport(report.Inspect)
 	printLocalWorkDBCheckReport(report.Check)
 }

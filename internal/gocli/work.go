@@ -21,6 +21,8 @@ Usage:
   nana work retrospective [--run-id <id> | --last | --global-last] [--repo <path>]
   nana work explain [--run-id <id> | --last] [--json]
   nana work db-check [--json]
+  nana work db-inspect [--json]
+  nana work db-maintain [--json] [--vacuum] [--usage-retention-days <n>] [--archive-dir <path>]
   nana work db-repair [--json]
   nana work verify-refresh [--run-id <id> | --last | --global-last] [--repo <path>]
   nana work sync [--run-id <id> | --last] [--reviewer <login|@me>] [--resume-last] [codex-args...]
@@ -88,7 +90,7 @@ func Work(cwd string, args []string) error {
 		return workRetrospective(cwd, args[1:])
 	case "verify-refresh":
 		return workVerifyRefresh(cwd, args[1:])
-	case "db-check", "db-repair":
+	case "db-check", "db-inspect", "db-maintain", "db-repair":
 		return runWorkDBCommand(args)
 	case "items":
 		return workItemsCommand(cwd, args[1:])

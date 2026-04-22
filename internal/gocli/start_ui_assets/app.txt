@@ -3640,6 +3640,13 @@
         </div>
         <div id="usage-sessions-grid"></div>
       </section>
+      <details class="surface diagnostics-surface">
+        <summary class="details-summary">Usage Diagnostics</summary>
+        <div class="details-body">
+          <p class="queue-copy">Current request timing and cache status for the Usage view.</p>
+          <pre id="usage-diagnostics" class="hud-json"></pre>
+        </div>
+      </details>
     `);
 
     syncUsagePageState(filters);
@@ -3725,6 +3732,10 @@
       maxHeight: "420px",
       emptyMessage: state.usage.loading ? "Loading top sessions..." : defaultString(state.usage.error, "No sessions matched these usage filters."),
     });
+    const diagnosticsHost = document.getElementById("usage-diagnostics");
+    if (diagnosticsHost) {
+      diagnosticsHost.textContent = JSON.stringify(report ? report.diagnostics || {} : {}, null, 2);
+    }
     restoreDraftScope(draftScope, document.getElementById("usage-filters-form"));
   }
 

@@ -277,6 +277,23 @@ type startUIUsageReport struct {
 	ByModel     []usageGroupRow         `json:"by_model"`
 	TopSessions []usageRecord           `json:"top_sessions"`
 	Insights    []usageAnalyticsInsight `json:"insights"`
+	Diagnostics startUIUsageDiagnostics `json:"diagnostics,omitempty"`
+}
+
+type startUIUsageDiagnostics struct {
+	SampledAt         string `json:"sampled_at,omitempty"`
+	DataVersion       string `json:"data_version,omitempty"`
+	CacheStatus       string `json:"cache_status,omitempty"`
+	CacheExpiresAt    string `json:"cache_expires_at,omitempty"`
+	DefaultWindow     bool   `json:"default_window,omitempty"`
+	SessionRoots      int    `json:"session_roots_scanned,omitempty"`
+	IndexLoadMS       int64  `json:"index_load_ms,omitempty"`
+	SourceBuildMS     int64  `json:"source_build_ms,omitempty"`
+	SummaryBuildMS    int64  `json:"summary_build_ms,omitempty"`
+	AnalyticsBuildMS  int64  `json:"analytics_build_ms,omitempty"`
+	GroupBuildMS      int64  `json:"group_build_ms,omitempty"`
+	TopSessionsMS     int64  `json:"top_sessions_ms,omitempty"`
+	TotalBuildMS      int64  `json:"total_build_ms,omitempty"`
 }
 
 type startUIWorkRun struct {
@@ -2133,6 +2150,7 @@ func (h *startUIAPI) buildOverviewUncached() (startUIOverview, error) {
 }
 
 func (h *startUIAPI) buildUsageReport(query url.Values) (startUIUsageReport, error) {
+	requestStarted := time.Now()
 	options := usageOptions{
 		View:     "summary",
 		Limit:    10,
@@ -2154,10 +2172,12 @@ func (h *startUIAPI) buildUsageReport(query url.Values) (startUIUsageReport, err
 	if strings.TrimSpace(options.Repo) != "" && !validRepoSlug(options.Repo) {
 		return startUIUsageReport{}, fmt.Errorf("invalid usage repo %q", options.Repo)
 	}
+	indexLoadStarted := time.Now()
 	index, err := h.loadUsageIndexForReport(options)
 	if err != nil {
 		return startUIUsageReport{}, err
 	}
+	indexLoadDuration := time.Since(indexLoadStarted)
 	filters := startUIUsageFilters{
 		Since:    options.Since,
 		Project:  options.Project,
@@ -2174,17 +2194,42 @@ func (h *startUIAPI) buildUsageReport(query url.Values) (startUIUsageReport, err
 		if entry, ok := h.usageCache[cacheKey]; ok && now.Before(entry.expiresAt) {
 			report := entry.report
 			h.usageCacheMu.Unlock()
-			return report, nil
+			return startUIUsageReportWithDiagnostics(report, startUIUsageDiagnostics{
+				SampledAt:      time.Now().UTC().Format(time.RFC3339),
+				DataVersion:    index.Version,
+				CacheStatus:    "hit",
+				CacheExpiresAt: entry.expiresAt.UTC().Format(time.RFC3339),
+				DefaultWindow:  startUIUsageQueryIsDefaultWindow(filters),
+				SessionRoots:   index.SessionRootsScanned,
+				IndexLoadMS:    durationMillis(indexLoadDuration),
+				TotalBuildMS:   durationMillis(time.Since(requestStarted)),
+			}), nil
 		}
 		h.usageCacheMu.Unlock()
 	}
 
+	sourceBuildStarted := time.Now()
 	source, err := startUIUsageSourceForReport(index, options)
 	if err != nil {
 		return startUIUsageReport{}, err
 	}
+	sourceBuildDuration := time.Since(sourceBuildStarted)
+	summaryBuildStarted := time.Now()
 	summary := buildUsageSummaryReportFromSource(source)
+	summaryBuildDuration := time.Since(summaryBuildStarted)
+	analyticsBuildStarted := time.Now()
 	analytics := buildUsageAnalyticsReportFromSource(source)
+	analyticsBuildDuration := time.Since(analyticsBuildStarted)
+	groupBuildStarted := time.Now()
+	byRoot := buildUsageGroups(source.Records, "root")
+	byActivity := buildUsageGroups(source.Records, "activity")
+	byPhase := buildUsageGroups(source.Records, "phase")
+	byLane := buildUsageGroups(source.Records, "lane")
+	byModel := buildUsageGroups(source.Records, "model")
+	groupBuildDuration := time.Since(groupBuildStarted)
+	topSessionsStarted := time.Now()
+	topSessions := buildUsageTopReportFromSource(source, "session", 10).Sessions
+	topSessionsDuration := time.Since(topSessionsStarted)
 	report := startUIUsageReport{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		Version:     index.Version,
@@ -2192,27 +2237,72 @@ func (h *startUIAPI) buildUsageReport(query url.Values) (startUIUsageReport, err
 		Coverage:    source.Coverage,
 		Filters:     filters,
 		Summary:     summary,
-		ByRoot:      buildUsageGroups(source.Records, "root"),
-		ByActivity:  buildUsageGroups(source.Records, "activity"),
-		ByPhase:     buildUsageGroups(source.Records, "phase"),
-		ByLane:      buildUsageGroups(source.Records, "lane"),
+		ByRoot:      byRoot,
+		ByActivity:  byActivity,
+		ByPhase:     byPhase,
+		ByLane:      byLane,
 		ByDay:       append([]usageGroupRow(nil), source.DayGroups...),
-		ByModel:     buildUsageGroups(source.Records, "model"),
-		TopSessions: buildUsageTopReportFromSource(source, "session", 10).Sessions,
+		ByModel:     byModel,
+		TopSessions: topSessions,
 		Insights:    analytics.Insights,
 	}
+	cacheExpiresAt := time.Time{}
 	if startUIUsageCacheTTL > 0 {
 		h.usageCacheMu.Lock()
 		if h.usageCache == nil {
 			h.usageCache = map[string]startUIUsageCacheEntry{}
 		}
+		cacheExpiresAt = now.Add(startUIUsageCacheTTL)
+		cached := report
+		cached.Diagnostics = startUIUsageDiagnostics{}
 		h.usageCache[cacheKey] = startUIUsageCacheEntry{
-			expiresAt: now.Add(startUIUsageCacheTTL),
-			report:    report,
+			expiresAt: cacheExpiresAt,
+			report:    cached,
 		}
 		h.usageCacheMu.Unlock()
 	}
-	return report, nil
+	cacheExpiresAtValue := ""
+	if !cacheExpiresAt.IsZero() {
+		cacheExpiresAtValue = cacheExpiresAt.UTC().Format(time.RFC3339)
+	}
+	return startUIUsageReportWithDiagnostics(report, startUIUsageDiagnostics{
+		SampledAt:        time.Now().UTC().Format(time.RFC3339),
+		DataVersion:      index.Version,
+		CacheStatus:      "miss",
+		CacheExpiresAt:   cacheExpiresAtValue,
+		DefaultWindow:    startUIUsageQueryIsDefaultWindow(filters),
+		SessionRoots:     index.SessionRootsScanned,
+		IndexLoadMS:      durationMillis(indexLoadDuration),
+		SourceBuildMS:    durationMillis(sourceBuildDuration),
+		SummaryBuildMS:   durationMillis(summaryBuildDuration),
+		AnalyticsBuildMS: durationMillis(analyticsBuildDuration),
+		GroupBuildMS:     durationMillis(groupBuildDuration),
+		TopSessionsMS:    durationMillis(topSessionsDuration),
+		TotalBuildMS:     durationMillis(time.Since(requestStarted)),
+	}), nil
+}
+
+func startUIUsageReportWithDiagnostics(report startUIUsageReport, diagnostics startUIUsageDiagnostics) startUIUsageReport {
+	clone := report
+	clone.Diagnostics = diagnostics
+	return clone
+}
+
+func startUIUsageQueryIsDefaultWindow(filters startUIUsageFilters) bool {
+	return strings.TrimSpace(filters.Since) == "30d" &&
+		defaultString(strings.TrimSpace(filters.Root), "all") == "all" &&
+		strings.TrimSpace(filters.Project) == "" &&
+		strings.TrimSpace(filters.Repo) == "" &&
+		strings.TrimSpace(filters.Activity) == "" &&
+		strings.TrimSpace(filters.Phase) == "" &&
+		strings.TrimSpace(filters.Model) == ""
+}
+
+func durationMillis(value time.Duration) int64 {
+	if value <= 0 {
+		return 0
+	}
+	return value.Milliseconds()
 }
 
 func startUIUsageCacheKey(filters startUIUsageFilters, version string) string {

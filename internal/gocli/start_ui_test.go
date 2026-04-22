@@ -623,11 +623,27 @@ func TestStartUIAPIUsage(t *testing.T) {
 	if strings.TrimSpace(payload.Version) == "" {
 		t.Fatalf("expected usage version, got %+v", payload)
 	}
+	if payload.Diagnostics.CacheStatus != "miss" || payload.Diagnostics.DataVersion != payload.Version {
+		t.Fatalf("expected usage diagnostics on cache miss, got %+v", payload.Diagnostics)
+	}
 	if len(payload.ByRoot) != 2 || payload.ByRoot[0].Key != "work" {
 		t.Fatalf("unexpected root breakdown: %+v", payload.ByRoot)
 	}
 	if len(payload.TopSessions) != 2 || payload.TopSessions[0].SessionID != "usage-work" {
 		t.Fatalf("unexpected top sessions: %+v", payload.TopSessions)
+	}
+
+	second, err := http.Get(server.URL + "/api/v1/usage?root=all")
+	if err != nil {
+		t.Fatalf("GET usage second: %v", err)
+	}
+	defer second.Body.Close()
+	var secondPayload startUIUsageReport
+	if err := json.NewDecoder(second.Body).Decode(&secondPayload); err != nil {
+		t.Fatalf("decode second usage payload: %v", err)
+	}
+	if secondPayload.Diagnostics.CacheStatus != "hit" || strings.TrimSpace(secondPayload.Diagnostics.CacheExpiresAt) == "" {
+		t.Fatalf("expected usage diagnostics on cache hit, got %+v", secondPayload.Diagnostics)
 	}
 }
 
