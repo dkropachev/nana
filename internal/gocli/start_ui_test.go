@@ -1102,7 +1102,7 @@ func TestStartUIUsageCacheReusesRecentReportAndRefreshesAfterTTL(t *testing.T) {
 	}
 }
 
-func TestStartUIUsageIndexWritesPersistentState(t *testing.T) {
+func TestStartUIUsageIndexBuildsStateFromSQLite(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -1131,7 +1131,10 @@ func TestStartUIUsageIndexWritesPersistentState(t *testing.T) {
 		t.Fatalf("expected usage report version")
 	}
 
-	index := readStartUIUsageIndexState(startUIUsageIndexPath())
+	index, err := loadUsageSQLiteState()
+	if err != nil {
+		t.Fatalf("loadUsageSQLiteState: %v", err)
+	}
 	if index.SessionRootsScanned != 1 {
 		t.Fatalf("unexpected session roots scanned: %+v", index)
 	}
@@ -1144,8 +1147,8 @@ func TestStartUIUsageIndexWritesPersistentState(t *testing.T) {
 	if index.Version != report.Version {
 		t.Fatalf("expected persisted index version to match report version: index=%q report=%q", index.Version, report.Version)
 	}
-	if _, err := os.Stat(startUIUsageIndexPath() + ".tmp"); !os.IsNotExist(err) {
-		t.Fatalf("expected no lingering temp index file, got err=%v", err)
+	if got := loadUsageSQLiteVersion(); got != report.Version {
+		t.Fatalf("expected SQLite usage version to match report version: version=%q report=%q", got, report.Version)
 	}
 }
 
@@ -1177,7 +1180,7 @@ func TestStartUIUsageIndexImportsLegacyStartUIIndex(t *testing.T) {
 			},
 		}},
 	}
-	if err := writeStartUIUsageIndexState(legacyStartUIUsageIndexPath(), legacy); err != nil {
+	if err := writeStartUIRuntimeJSONAtomically(legacyStartUIUsageIndexPath(), legacy); err != nil {
 		t.Fatalf("write legacy usage index: %v", err)
 	}
 
@@ -1190,7 +1193,10 @@ func TestStartUIUsageIndexImportsLegacyStartUIIndex(t *testing.T) {
 		t.Fatalf("expected imported legacy usage data, got %+v", report)
 	}
 
-	persisted := readStartUIUsageIndexState(startUIUsageIndexPath())
+	persisted, err := loadUsageSQLiteState()
+	if err != nil {
+		t.Fatalf("loadUsageSQLiteState: %v", err)
+	}
 	if len(persisted.Entries) != 1 || persisted.Entries[0].Record.SessionID != "legacy-work" {
 		t.Fatalf("expected shared usage store to import legacy entries, got %+v", persisted)
 	}
@@ -1282,7 +1288,10 @@ func TestStartUIUsageIndexSyncsLocalWorkRunFromArtifact(t *testing.T) {
 	if len(report.ByModel) != 1 || report.ByModel[0].Key != "gpt-5.4" {
 		t.Fatalf("expected model breakdown from persisted artifact, got %+v", report.ByModel)
 	}
-	persisted := readStartUIUsageIndexState(startUIUsageIndexPath())
+	persisted, err := loadUsageSQLiteState()
+	if err != nil {
+		t.Fatalf("loadUsageSQLiteState: %v", err)
+	}
 	if strings.TrimSpace(persisted.WorkSyncUpdatedAt) == "" {
 		t.Fatalf("expected work sync watermark, got %+v", persisted)
 	}
@@ -1445,12 +1454,13 @@ func TestStartUIEventsPayloadLoadsPersistedUsageVersionWarmState(t *testing.T) {
 	}
 
 	warmAPI := &startUIAPI{cwd: cwd}
-	warmAPI.loadPersistedUsageIndex()
-	if !warmAPI.usageIndexCache.valid {
-		t.Fatalf("expected loadPersistedUsageIndex to populate cache")
+	warmState, err := loadUsageSQLiteState()
+	if err != nil {
+		t.Fatalf("loadUsageSQLiteState: %v", err)
 	}
-	if !warmAPI.usageIndexCache.checkedAt.IsZero() {
-		t.Fatalf("expected persisted usage cache warm state to remain stale for the next usage refresh")
+	warmAPI.usageIndexCache = startUISectionCache[startUIUsageIndexState]{
+		valid: true,
+		value: warmState,
 	}
 
 	payload, err := warmAPI.buildEventsPayload()
@@ -1462,7 +1472,7 @@ func TestStartUIEventsPayloadLoadsPersistedUsageVersionWarmState(t *testing.T) {
 	}
 }
 
-func TestStartUIUsageIndexRebuildsWhenPersistedFileIsCorrupt(t *testing.T) {
+func TestStartUIUsageIndexIgnoresCorruptCompatibilityFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -1486,8 +1496,11 @@ func TestStartUIUsageIndexRebuildsWhenPersistedFileIsCorrupt(t *testing.T) {
 	if _, err := api.buildUsageReport(url.Values{"root": {"all"}}); err != nil {
 		t.Fatalf("seed buildUsageReport(): %v", err)
 	}
+	if err := os.MkdirAll(filepath.Dir(startUIUsageIndexPath()), 0o755); err != nil {
+		t.Fatalf("mkdir usage compat dir: %v", err)
+	}
 	if err := os.WriteFile(startUIUsageIndexPath(), []byte("{invalid-json"), 0o644); err != nil {
-		t.Fatalf("write corrupt usage index: %v", err)
+		t.Fatalf("write corrupt usage compat file: %v", err)
 	}
 	api.usageIndexCache = startUISectionCache[startUIUsageIndexState]{}
 
@@ -1498,9 +1511,12 @@ func TestStartUIUsageIndexRebuildsWhenPersistedFileIsCorrupt(t *testing.T) {
 	if report.Summary.Totals.TotalTokens != 42 {
 		t.Fatalf("expected rebuild from transcripts after corrupt index, got %+v", report.Summary.Totals)
 	}
-	index := readStartUIUsageIndexState(startUIUsageIndexPath())
+	index, err := loadUsageSQLiteState()
+	if err != nil {
+		t.Fatalf("loadUsageSQLiteState: %v", err)
+	}
 	if index.SchemaVersion != startUIUsageIndexSchemaVersion || len(index.Entries) != 1 {
-		t.Fatalf("expected rebuilt persisted index, got %+v", index)
+		t.Fatalf("expected SQLite-backed usage state, got %+v", index)
 	}
 }
 
@@ -1641,7 +1657,7 @@ func TestStartUIOverviewRebuildsWhenPersistedFileSchemaIsStale(t *testing.T) {
 	}
 }
 
-func TestStartUIUsageIndexRebuildsWhenSchemaVersionIsStale(t *testing.T) {
+func TestStartUIUsageIndexIgnoresStaleCompatibilityFileSchema(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -1672,8 +1688,8 @@ func TestStartUIUsageIndexRebuildsWhenSchemaVersionIsStale(t *testing.T) {
 			Record: usageRecord{SessionID: "stale", TotalTokens: 999, HasTokenUsage: true},
 		}},
 	}
-	if err := writeStartUIUsageIndexState(startUIUsageIndexPath(), stale); err != nil {
-		t.Fatalf("write stale schema usage index: %v", err)
+	if err := writeStartUIRuntimeJSONAtomically(startUIUsageIndexPath(), stale); err != nil {
+		t.Fatalf("write stale schema usage compat file: %v", err)
 	}
 
 	api := &startUIAPI{cwd: cwd}
@@ -1684,13 +1700,16 @@ func TestStartUIUsageIndexRebuildsWhenSchemaVersionIsStale(t *testing.T) {
 	if report.Summary.Totals.TotalTokens != 42 {
 		t.Fatalf("expected rebuild from transcripts after stale schema, got %+v", report.Summary.Totals)
 	}
-	index := readStartUIUsageIndexState(startUIUsageIndexPath())
+	index, err := loadUsageSQLiteState()
+	if err != nil {
+		t.Fatalf("loadUsageSQLiteState: %v", err)
+	}
 	if index.SchemaVersion != startUIUsageIndexSchemaVersion || index.Version == "stale" {
-		t.Fatalf("expected rebuilt current-schema index, got %+v", index)
+		t.Fatalf("expected SQLite-backed current-schema usage state, got %+v", index)
 	}
 }
 
-func TestStartUIPrewarmPopulatesOverviewAndUsageIndexCaches(t *testing.T) {
+func TestStartUIPrewarmPopulatesOverviewCacheOnly(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -1730,14 +1749,17 @@ func TestStartUIPrewarmPopulatesOverviewAndUsageIndexCaches(t *testing.T) {
 	if !api.overviewCache.valid {
 		t.Fatalf("expected overview cache to be populated by prewarm")
 	}
-	if !api.usageIndexCache.valid || len(api.usageIndexCache.value.Entries) != 1 {
-		t.Fatalf("expected usage index cache to be populated by prewarm, got %+v", api.usageIndexCache.value)
+	if api.usageIndexCache.valid {
+		t.Fatalf("expected usage cache to remain cold until explicit usage load, got %+v", api.usageIndexCache.value)
 	}
 	if _, err := os.Stat(startUIOverviewCachePath()); err != nil {
 		t.Fatalf("expected persisted overview cache after prewarm: %v", err)
 	}
-	if _, err := os.Stat(startUIUsageIndexPath()); err != nil {
-		t.Fatalf("expected persisted usage index after prewarm: %v", err)
+	if _, err := api.loadUsageIndex(); err != nil {
+		t.Fatalf("loadUsageIndex after prewarm: %v", err)
+	}
+	if !api.usageIndexCache.valid || len(api.usageIndexCache.value.Entries) != 1 {
+		t.Fatalf("expected usage cache to populate after explicit usage load, got %+v", api.usageIndexCache.value)
 	}
 }
 
@@ -6477,36 +6499,28 @@ func startUITestCreateDraftWorkItem(t *testing.T, externalID string) workItem {
 
 func startUITestUpdateWorkItem(t *testing.T, item workItem) {
 	t.Helper()
-	store, err := openLocalWorkDB()
-	if err != nil {
-		t.Fatalf("openLocalWorkDB: %v", err)
-	}
-	defer store.Close()
-	if err := store.updateWorkItem(item); err != nil {
+	if err := withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+		return store.updateWorkItem(item)
+	}); err != nil {
 		t.Fatalf("updateWorkItem: %v", err)
 	}
 }
 
 func startUITestFailWorkItemEvents(t *testing.T) {
 	t.Helper()
-	store, err := openLocalWorkDB()
-	if err != nil {
-		t.Fatalf("openLocalWorkDB: %v", err)
-	}
-	defer store.Close()
-	if _, err := store.db.Exec(`CREATE TRIGGER fail_work_item_events BEFORE INSERT ON work_item_events BEGIN SELECT RAISE(FAIL, 'event insert failed'); END;`); err != nil {
+	if err := withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+		_, err := store.db.Exec(`CREATE TRIGGER fail_work_item_events BEFORE INSERT ON work_item_events BEGIN SELECT RAISE(FAIL, 'event insert failed'); END;`)
+		return err
+	}); err != nil {
 		t.Fatalf("create failing work item event trigger: %v", err)
 	}
 }
 
 func startUITestReadWorkItem(t *testing.T, itemID string) workItem {
 	t.Helper()
-	store, err := openLocalWorkDB()
-	if err != nil {
-		t.Fatalf("openLocalWorkDB: %v", err)
-	}
-	defer store.Close()
-	item, err := store.readWorkItem(itemID)
+	item, err := withLocalWorkReadStore(func(store *localWorkDBStore) (workItem, error) {
+		return store.readWorkItem(itemID)
+	})
 	if err != nil {
 		t.Fatalf("readWorkItem: %v", err)
 	}

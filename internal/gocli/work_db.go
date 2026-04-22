@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const localWorkDBSchemaVersion = 1
+const localWorkDBSchemaVersion = 2
 
 type localWorkDBMigration struct {
 	From  int
@@ -19,6 +19,7 @@ type localWorkDBMigration struct {
 
 var localWorkDBMigrations = []localWorkDBMigration{
 	{From: 0, To: 1, Apply: migrateLegacyLocalWorkDB},
+	{From: 1, To: 2, Apply: migrateLocalWorkDBV2UsageSQLite},
 }
 
 type localWorkDBDiagnostic struct {
@@ -232,6 +233,76 @@ func localWorkCurrentSchemaDDL() []string {
 			FOREIGN KEY(item_id) REFERENCES work_items(id) ON DELETE CASCADE
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_work_item_links_target ON work_item_links(link_type, target_id);`,
+		`CREATE TABLE IF NOT EXISTS usage_sources (
+			source_key TEXT PRIMARY KEY,
+			source_kind TEXT NOT NULL,
+			source_path TEXT NOT NULL,
+			root TEXT NOT NULL,
+			run_id TEXT,
+			backend TEXT,
+			sandbox_path TEXT,
+			source_updated_at TEXT,
+			size_bytes INTEGER NOT NULL DEFAULT 0,
+			modified_unix_nano INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_sources_path ON usage_sources(source_path);`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_sources_run_kind ON usage_sources(run_id, source_kind);`,
+		`CREATE TABLE IF NOT EXISTS usage_sessions (
+			session_key TEXT PRIMARY KEY,
+			source_key TEXT NOT NULL,
+			session_id TEXT,
+			timestamp TEXT NOT NULL,
+			timestamp_unix INTEGER NOT NULL DEFAULT 0,
+			day TEXT NOT NULL,
+			cwd TEXT,
+			transcript_path TEXT NOT NULL,
+			root TEXT NOT NULL,
+			model TEXT,
+			agent_role TEXT,
+			agent_nickname TEXT,
+			lane TEXT,
+			activity TEXT NOT NULL,
+			phase TEXT NOT NULL,
+			input_tokens INTEGER NOT NULL DEFAULT 0,
+			cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+			output_tokens INTEGER NOT NULL DEFAULT 0,
+			reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+			total_tokens INTEGER NOT NULL DEFAULT 0,
+			has_token_usage INTEGER NOT NULL DEFAULT 0 CHECK(has_token_usage IN (0, 1)),
+			started_at INTEGER NOT NULL DEFAULT 0,
+			updated_at INTEGER NOT NULL DEFAULT 0,
+			partial_window_coverage INTEGER NOT NULL DEFAULT 0 CHECK(partial_window_coverage IN (0, 1)),
+			FOREIGN KEY(source_key) REFERENCES usage_sources(source_key) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_sessions_root_timestamp ON usage_sessions(root, timestamp_unix DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_sessions_source ON usage_sessions(source_key);`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_sessions_run_partial ON usage_sessions(partial_window_coverage, updated_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS usage_checkpoints (
+			session_key TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			checkpoint_ts INTEGER NOT NULL,
+			checkpoint_at TEXT NOT NULL,
+			day TEXT NOT NULL,
+			input_tokens INTEGER NOT NULL DEFAULT 0,
+			cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+			output_tokens INTEGER NOT NULL DEFAULT 0,
+			reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+			total_tokens INTEGER NOT NULL DEFAULT 0,
+			delta_input_tokens INTEGER NOT NULL DEFAULT 0,
+			delta_cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+			delta_output_tokens INTEGER NOT NULL DEFAULT 0,
+			delta_reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+			delta_total_tokens INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY(session_key, seq),
+			FOREIGN KEY(session_key) REFERENCES usage_sessions(session_key) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_checkpoints_session_ts ON usage_checkpoints(session_key, checkpoint_ts);`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_checkpoints_day ON usage_checkpoints(day, checkpoint_ts);`,
+		`CREATE TABLE IF NOT EXISTS usage_metadata (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);`,
 	}
 }
 
@@ -632,6 +703,26 @@ func migrateLegacyLocalWorkDB(db *sql.DB) ([]string, error) {
 		return actions, err
 	}
 	return actions, nil
+}
+
+func migrateLocalWorkDBV2UsageSQLite(db *sql.DB) ([]string, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	for _, stmt := range localWorkCurrentSchemaDDL() {
+		if _, err := tx.Exec(stmt); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version=%d`, localWorkDBSchemaVersion)); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return []string{fmt.Sprintf("migrated SQLite schema to version %d", localWorkDBSchemaVersion)}, nil
 }
 
 func inspectLocalWorkDB() (localWorkDBCheckReport, error) {

@@ -58,6 +58,9 @@ type codexManagedPromptOptions struct {
 	CheckpointPath     string
 	StepKey            string
 	ResumeStrategy     codexResumeStrategy
+	UsageRunID         string
+	UsageBackend       string
+	UsageSandboxPath   string
 	Env                []string
 	RateLimitPolicy    codexRateLimitPolicy
 	OnPause            func(codexRateLimitPauseInfo)
@@ -68,6 +71,7 @@ type codexManagedPromptResult struct {
 	Stdout         string
 	Stderr         string
 	SessionID      string
+	SessionPath    string
 	Resumed        bool
 	ResumeEligible bool
 }
@@ -207,13 +211,19 @@ func executeManagedCodexPrompt(options codexManagedPromptOptions, sessionID stri
 	if resumed {
 		result.SessionID = strings.TrimSpace(sessionID)
 	} else if !hasCodexEphemeralArg(options.CommonArgs) {
-		result.SessionID = discoverCodexSessionID(options.CodexHome, startedAt)
+		result.SessionID, result.SessionPath = discoverCodexSession(options.CodexHome, startedAt)
+	}
+	if result.SessionPath == "" && strings.TrimSpace(result.SessionID) != "" {
+		result.SessionPath = findCodexSessionPathByID(options.CodexHome, result.SessionID)
 	}
 	result.ResumeEligible = strings.TrimSpace(result.SessionID) != "" && err != nil
 	return result, err
 }
 
 func finalizeManagedCodexPrompt(options codexManagedPromptOptions, promptFingerprint string, result codexManagedPromptResult, runErr error) (codexManagedPromptResult, error) {
+	if strings.TrimSpace(result.SessionID) != "" {
+		_ = recordManagedPromptUsage(options, result)
+	}
 	if strings.TrimSpace(options.CheckpointPath) == "" {
 		return result, runErr
 	}
@@ -336,12 +346,18 @@ func codexResumeSessionMissing(output string) bool {
 }
 
 func discoverCodexSessionID(codexHome string, notBefore time.Time) string {
+	sessionID, _ := discoverCodexSession(codexHome, notBefore)
+	return sessionID
+}
+
+func discoverCodexSession(codexHome string, notBefore time.Time) (string, string) {
 	sessionsRoot := filepath.Join(strings.TrimSpace(codexHome), "sessions")
 	if strings.TrimSpace(codexHome) == "" {
-		return ""
+		return "", ""
 	}
 	type candidate struct {
 		SessionID string
+		Path      string
 		When      time.Time
 	}
 	best := candidate{}
@@ -362,11 +378,34 @@ func discoverCodexSessionID(codexHome string, notBefore time.Time) string {
 			return nil
 		}
 		if strings.TrimSpace(best.SessionID) == "" || when.After(best.When) {
-			best = candidate{SessionID: strings.TrimSpace(meta.SessionID), When: when}
+			best = candidate{SessionID: strings.TrimSpace(meta.SessionID), Path: path, When: when}
 		}
 		return nil
 	})
-	return best.SessionID
+	return best.SessionID, best.Path
+}
+
+func findCodexSessionPathByID(codexHome string, sessionID string) string {
+	sessionsRoot := filepath.Join(strings.TrimSpace(codexHome), "sessions")
+	if strings.TrimSpace(codexHome) == "" || strings.TrimSpace(sessionID) == "" {
+		return ""
+	}
+	found := ""
+	_ = filepath.Walk(sessionsRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() || !strings.HasSuffix(path, ".jsonl") {
+			return nil
+		}
+		meta, ok := readCodexRolloutSessionMeta(path)
+		if !ok || !strings.EqualFold(strings.TrimSpace(meta.SessionID), strings.TrimSpace(sessionID)) {
+			return nil
+		}
+		found = path
+		return io.EOF
+	})
+	if found != "" {
+		return found
+	}
+	return ""
 }
 
 func readCodexRolloutSessionMeta(path string) (struct {

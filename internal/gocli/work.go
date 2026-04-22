@@ -586,8 +586,6 @@ func githubWorkLogFiles(runDir string) ([]string, error) {
 		"start-instructions.md",
 		"feedback-instructions.md",
 		"retrospective.md",
-		"thread-usage.json",
-		"thread-usage-history.json",
 		"completion/*",
 		"completion/*/*",
 		"lane-runtime/*",
@@ -699,6 +697,9 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 		CheckpointPath:   filepath.Join(runDir, "leader-checkpoint.json"),
 		StepKey:          "github-leader",
 		ResumeStrategy:   codexResumeConversation,
+		UsageRunID:       manifest.RunID,
+		UsageBackend:     "github",
+		UsageSandboxPath: manifest.SandboxPath,
 		Env:              append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, manifest.APIBaseURL), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
 		OnPause: func(info codexRateLimitPauseInfo) {
 			manifest.ExecutionStatus = "paused"

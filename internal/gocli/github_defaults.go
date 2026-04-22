@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -749,12 +748,18 @@ func githubWorkRetrospectiveWithIO(args []string, stdout io.Writer) error {
 	if err := readGithubJSON(manifestPath, &manifest); err != nil {
 		return err
 	}
-	runDir := filepath.Dir(manifestPath)
-	artifact, err := writeThreadUsageArtifact(runDir, manifest.SandboxPath)
+	if err := syncUsageForRun(manifest.RunID); err != nil {
+		return err
+	}
+	artifact, err := loadGithubThreadUsageArtifactFromSQLite(manifest.RunID)
 	if err != nil {
 		return err
 	}
+	if artifact == nil {
+		artifact = &githubThreadUsageArtifact{Version: 1, GeneratedAt: ISOTimeNow(), SandboxPath: manifest.SandboxPath}
+	}
 	markdown := buildGithubRetrospectiveMarkdown(manifest, artifact)
+	runDir := filepath.Dir(manifestPath)
 	if err := os.WriteFile(filepath.Join(runDir, "retrospective.md"), []byte(markdown), 0o644); err != nil {
 		return err
 	}
@@ -1722,71 +1727,11 @@ func indexGithubWorkRunManifest(manifestPath string, manifest githubWorkManifest
 	})
 }
 
-func writeThreadUsageArtifact(runDir string, sandboxPath string) (*githubThreadUsageArtifact, error) {
-	historyArtifact, err := writeGithubThreadUsageHistoryArtifact(runDir, sandboxPath)
-	if err != nil {
-		return nil, err
-	}
-	rows := make([]githubThreadUsageRow, 0, len(historyArtifact.Rows))
-	for _, row := range historyArtifact.Rows {
-		converted, ok := githubThreadUsageRowFromHistory(row)
-		if ok {
-			rows = append(rows, converted)
-		}
-	}
-	artifact := &githubThreadUsageArtifact{
-		Version:     1,
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		SandboxPath: sandboxPath,
-		Rows:        rows,
-		TotalTokens: githubThreadUsageTotal(rows),
-	}
-	if err := writeGithubJSON(filepath.Join(runDir, "thread-usage.json"), artifact); err != nil {
-		return nil, err
-	}
-	return artifact, nil
-}
-
-func writeGithubThreadUsageHistoryArtifact(runDir string, sandboxPath string) (*githubThreadUsageHistoryArtifact, error) {
-	rows := []usageHistoryRow{}
-	for _, root := range githubThreadUsageRoots(sandboxPath) {
-		found, err := usageHistoryRowsFromRollouts(root)
-		if err != nil && !os.IsNotExist(err) {
-			return nil, err
-		}
-		rows = append(rows, found...)
-	}
-	artifact := &githubThreadUsageHistoryArtifact{
-		Version:     1,
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		SandboxPath: sandboxPath,
-		Rows:        mergeUsageHistoryRows(rows),
-	}
-	path := usageHistoryArtifactPath(runDir)
-	if existing, err := readGithubThreadUsageHistoryArtifact(path); err == nil {
-		artifact = mergeGithubThreadUsageHistoryArtifacts(existing, artifact)
-	} else if err != nil && !os.IsNotExist(err) {
-		return nil, err
-	}
-	if err := writeGithubJSON(path, artifact); err != nil {
-		return nil, err
-	}
-	return artifact, nil
-}
-
 func githubThreadUsageRoots(sandboxPath string) []string {
 	return []string{
 		filepath.Join(sandboxPath, ".codex", "sessions"),
 		filepath.Join(sandboxPath, ".nana", "work", "codex-home"),
 	}
-}
-
-func githubThreadUsageTotal(rows []githubThreadUsageRow) int {
-	total := 0
-	for _, row := range rows {
-		total += row.TokensUsed
-	}
-	return total
 }
 
 func readGithubThreadUsageArtifact(path string) (*githubThreadUsageArtifact, error) {
@@ -1797,97 +1742,12 @@ func readGithubThreadUsageArtifact(path string) (*githubThreadUsageArtifact, err
 	return &artifact, nil
 }
 
-func mergeGithubThreadUsageRows(rows []githubThreadUsageRow) []githubThreadUsageRow {
-	index := map[string]githubThreadUsageRow{}
-	order := []string{}
-	for _, row := range rows {
-		key := defaultString(strings.TrimSpace(row.SessionID), fmt.Sprintf("%s|%s|%d", strings.TrimSpace(row.Nickname), strings.TrimSpace(row.Role), row.StartedAt))
-		existing, ok := index[key]
-		if !ok {
-			index[key] = row
-			order = append(order, key)
-			continue
-		}
-		if row.TokensUsed > existing.TokensUsed {
-			existing.TokensUsed = row.TokensUsed
-		}
-		if existing.StartedAt == 0 || (row.StartedAt > 0 && row.StartedAt < existing.StartedAt) {
-			existing.StartedAt = row.StartedAt
-		}
-		if row.UpdatedAt > existing.UpdatedAt {
-			existing.UpdatedAt = row.UpdatedAt
-		}
-		if existing.Nickname == "" {
-			existing.Nickname = row.Nickname
-		}
-		if existing.Role == "" {
-			existing.Role = row.Role
-		}
-		if existing.SessionID == "" {
-			existing.SessionID = row.SessionID
-		}
-		if existing.Model == "" {
-			existing.Model = row.Model
-		}
-		if existing.CWD == "" {
-			existing.CWD = row.CWD
-		}
-		index[key] = existing
-	}
-	merged := make([]githubThreadUsageRow, 0, len(order))
-	for _, key := range order {
-		merged = append(merged, index[key])
-	}
-	sort.Slice(merged, func(i, j int) bool {
-		if merged[i].StartedAt != merged[j].StartedAt {
-			return merged[i].StartedAt < merged[j].StartedAt
-		}
-		if merged[i].Nickname != merged[j].Nickname {
-			return merged[i].Nickname < merged[j].Nickname
-		}
-		return merged[i].Role < merged[j].Role
-	})
-	return merged
-}
-
-func mergeGithubThreadUsageArtifacts(existing *githubThreadUsageArtifact, current *githubThreadUsageArtifact) *githubThreadUsageArtifact {
-	if existing == nil {
-		return current
-	}
-	if current == nil {
-		return existing
-	}
-	merged := &githubThreadUsageArtifact{
-		Version:     maxInt(existing.Version, current.Version),
-		GeneratedAt: defaultString(strings.TrimSpace(current.GeneratedAt), existing.GeneratedAt),
-		SandboxPath: defaultString(strings.TrimSpace(current.SandboxPath), existing.SandboxPath),
-	}
-	merged.Rows = mergeGithubThreadUsageRows(append(append([]githubThreadUsageRow{}, existing.Rows...), current.Rows...))
-	merged.TotalTokens = githubThreadUsageTotal(merged.Rows)
-	return merged
-}
-
 func readGithubThreadUsageHistoryArtifact(path string) (*githubThreadUsageHistoryArtifact, error) {
 	var artifact githubThreadUsageHistoryArtifact
 	if err := readGithubJSON(path, &artifact); err != nil {
 		return nil, err
 	}
 	return &artifact, nil
-}
-
-func mergeGithubThreadUsageHistoryArtifacts(existing *githubThreadUsageHistoryArtifact, current *githubThreadUsageHistoryArtifact) *githubThreadUsageHistoryArtifact {
-	if existing == nil {
-		return current
-	}
-	if current == nil {
-		return existing
-	}
-	return &githubThreadUsageHistoryArtifact{
-		Version:     maxInt(existing.Version, current.Version),
-		GeneratedAt: defaultString(strings.TrimSpace(current.GeneratedAt), existing.GeneratedAt),
-		SandboxPath: defaultString(strings.TrimSpace(current.SandboxPath), existing.SandboxPath),
-		Rows:        mergeUsageHistoryRows(append(append([]usageHistoryRow{}, existing.Rows...), current.Rows...)),
-	}
 }
 
 func readThreadRowsFromRollouts(sessionsRoot string) ([]githubThreadUsageRow, error) {
