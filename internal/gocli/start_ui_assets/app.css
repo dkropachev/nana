@@ -269,16 +269,6 @@ textarea {
   font-weight: 600;
 }
 
-.quick-switch {
-  min-width: min(360px, 100%);
-}
-
-.quick-switch-row {
-  display: flex;
-  align-items: stretch;
-  gap: 8px;
-}
-
 .updated-copy {
   margin: 0;
 }
@@ -1229,7 +1219,6 @@ textarea {
   .app-header,
   .header-toolbar,
   .header-actions,
-  .quick-switch-row,
   .drawer-toolbar,
   .config-actions,
   .config-footer,
@@ -1237,11 +1226,6 @@ textarea {
   .scheduler-detail-actions {
     flex-direction: column;
     align-items: stretch;
-  }
-
-  .quick-switch {
-    min-width: 0;
-    width: 100%;
   }
 
   .repo-picker-host {

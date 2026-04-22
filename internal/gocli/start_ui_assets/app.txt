@@ -1087,73 +1087,6 @@
     state.approvals.selectedID = defaultString(params.get("approval"), state.approvals.selectedID);
   }
 
-  function findQuickSwitchOption(value) {
-    const input = String(value || "").trim().toLowerCase();
-    if (!input) return null;
-    return quickSwitchOptions().find((option) => option.value.toLowerCase() === input) || null;
-  }
-
-  function quickSwitchOptions() {
-    const options = [
-      { value: "All Repos", action: "view", target: "home" },
-      { value: "Issues", action: "view", target: "issues" },
-      { value: "Tasks", action: "view", target: "investigations" },
-      { value: "Work", action: "view", target: "work" },
-      { value: "Usage", action: "view", target: "usage" },
-      { value: "Feedback", action: "view", target: "feedback" },
-      { value: "Approvals", action: "view", target: "approvals" },
-    ];
-    sortedRepos().forEach((repo) => {
-      options.push({ value: `Repo: ${repo.repo_slug}`, action: "repo", target: repo.repo_slug });
-    });
-    (state.overview ? state.overview.work_runs || [] : []).slice(0, 8).forEach((run) => {
-      options.push({ value: `Run: ${run.run_id}`, action: "run", target: run.run_id });
-    });
-    (state.overview ? state.overview.work_items || [] : []).slice(0, 8).forEach((item) => {
-      options.push({ value: `Work Item: ${item.id}`, action: "work-item", target: item.id });
-    });
-    return options;
-  }
-
-  function runQuickSwitch() {
-    const input = document.getElementById("quick-switch-input");
-    if (!input) return;
-    const value = input.value;
-    const option = findQuickSwitchOption(value);
-    if (!option) {
-      announce("Quick switch target not found.");
-      return;
-    }
-    if (option.action === "view") {
-      const nextRepo = option.target === "home" ? "" : state.selectedRepo;
-      clearDraftsForRouteTransition({ view: option.target, repoSlug: nextRepo, repoTab: state.repoTab });
-      state.currentView = option.target;
-      state.selectedRepo = nextRepo;
-      syncWorkspaceRepoFilters(nextRepo);
-      if (option.target !== "repo") {
-        ensureViewData(option.target);
-      }
-      renderApp();
-      input.value = "";
-      return;
-    }
-    if (option.action === "repo") {
-      openRepoView(option.target, "overview");
-      input.value = "";
-      return;
-    }
-    if (option.action === "run") {
-      openLogDrawer(option.target);
-      input.value = "";
-      return;
-    }
-    if (option.action === "work-item") {
-      openWorkItemDrawer(option.target);
-      input.value = "";
-      return;
-    }
-  }
-
   function filterState(view) {
     if (!state.filters[view]) {
       state.filters[view] = defaultViewFilter();
@@ -2534,12 +2467,6 @@
         `).join("")}
       </ol>
     `;
-  }
-
-  function renderQuickSwitchOptions() {
-    const host = document.getElementById("quick-switch-options");
-    if (!host) return;
-    host.innerHTML = quickSwitchOptions().map((option) => `<option value="${escapeHTML(option.value)}"></option>`).join("");
   }
 
   function tabButtonMarkup(group, id, label, selected, index, total) {
@@ -6893,7 +6820,6 @@
     renderRepoPicker();
     renderRepoOnboardingDrawer();
     renderBreadcrumbs();
-    renderQuickSwitchOptions();
     renderTabs();
     renderBody();
     renderConfirmDialog();
@@ -6915,17 +6841,6 @@
       if (state.logSelection.runID) {
         loadRunDetail(state.logSelection.runID);
         loadLogMetadata(state.logSelection.runID, { preserveFile: true });
-      }
-    });
-
-    document.getElementById("quick-switch-button").addEventListener("click", () => {
-      runQuickSwitch();
-    });
-
-    document.getElementById("quick-switch-input").addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        runQuickSwitch();
       }
     });
 

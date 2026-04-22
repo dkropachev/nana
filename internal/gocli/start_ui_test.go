@@ -5280,6 +5280,9 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(body), "Assistant Workspace") || !strings.Contains(string(body), ">All Repos<") {
 		t.Fatalf("expected assistant workspace shell, got %s", string(body))
 	}
+	if strings.Contains(string(body), "Quick Switch") {
+		t.Fatalf("expected quick switch control to be removed from the shell, got %s", string(body))
+	}
 
 	appResponse, err := http.Get(server.URL + "/app.js")
 	if err != nil {
@@ -5397,6 +5400,9 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	}
 	if !strings.Contains(string(appBody), `repo-onboard-form`) || !strings.Contains(string(appBody), `submitRepoOnboarding()`) {
 		t.Fatalf("expected repo onboarding form wiring in app.js, got %s", string(appBody))
+	}
+	if strings.Contains(string(appBody), `quick-switch`) {
+		t.Fatalf("expected quick switch wiring to be removed from app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `function dropApprovalItem(`) {
 		t.Fatalf("expected approval drop helper in app.js, got %s", string(appBody))
@@ -7121,7 +7127,6 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 				"Repo Overview",
 				"Work Items",
 				"Open Repo",
-				"Open Scouts",
 				"Queued Issues",
 				"Dismissed Scouts",
 			},
