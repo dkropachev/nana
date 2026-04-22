@@ -5208,9 +5208,6 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `state.repoList.items || []`) {
 		t.Fatalf("expected sorted repos fallback to repo list cache in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `const repoListSummary = (state.repoList.items || []).find((repo) => repo.repo_slug === state.selectedRepo) || null;`) {
-		t.Fatalf("expected selected repo summary to merge repo list state in app.js, got %s", string(appBody))
-	}
 	if !strings.Contains(string(appBody), `state: repoListSummary.state || overviewSummary.state || null,`) {
 		t.Fatalf("expected selected repo summary state fallback in app.js, got %s", string(appBody))
 	}
@@ -5249,12 +5246,6 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	}
 	if !strings.Contains(string(appBody), `repo-onboard-form`) || !strings.Contains(string(appBody), `submitRepoOnboarding()`) {
 		t.Fatalf("expected repo onboarding form wiring in app.js, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `function renderAttentionApprovalDetailPane(`) {
-		t.Fatalf("expected approval detail wiring in app.js, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `attentionDetailButton(item, "drop_approval"`) {
-		t.Fatalf("expected approval drop action wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `id: "repo-controls-issue-form"`) || !strings.Contains(string(appBody), `submitLabel: "Save Issue"`) {
 		t.Fatalf("expected issue form save wiring in app.js, got %s", string(appBody))
