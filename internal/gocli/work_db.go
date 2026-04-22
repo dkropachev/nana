@@ -149,35 +149,35 @@ type localWorkDBUsageArchiveCheckpoint struct {
 }
 
 type localWorkDBUsageArchiveFile struct {
-	GeneratedAt    string                             `json:"generated_at"`
-	DatabasePath   string                             `json:"database_path"`
-	RetentionDays  int                                `json:"retention_days"`
-	CutoffRFC3339  string                             `json:"cutoff_rfc3339"`
-	CutoffUnix     int64                              `json:"cutoff_unix"`
-	Sources        []localWorkDBUsageArchiveSource    `json:"sources"`
-	Sessions       []localWorkDBUsageArchiveSession   `json:"sessions"`
-	Checkpoints    []localWorkDBUsageArchiveCheckpoint `json:"checkpoints"`
+	GeneratedAt   string                              `json:"generated_at"`
+	DatabasePath  string                              `json:"database_path"`
+	RetentionDays int                                 `json:"retention_days"`
+	CutoffRFC3339 string                              `json:"cutoff_rfc3339"`
+	CutoffUnix    int64                               `json:"cutoff_unix"`
+	Sources       []localWorkDBUsageArchiveSource     `json:"sources"`
+	Sessions      []localWorkDBUsageArchiveSession    `json:"sessions"`
+	Checkpoints   []localWorkDBUsageArchiveCheckpoint `json:"checkpoints"`
 }
 
 type localWorkDBUsageArchiveReport struct {
-	ArchivePath  string `json:"archive_path,omitempty"`
-	RetentionDays int   `json:"retention_days,omitempty"`
-	CutoffRFC3339 string `json:"cutoff_rfc3339,omitempty"`
-	SourceRows   int    `json:"source_rows,omitempty"`
-	SessionRows  int    `json:"session_rows,omitempty"`
-	CheckpointRows int  `json:"checkpoint_rows,omitempty"`
+	ArchivePath    string `json:"archive_path,omitempty"`
+	RetentionDays  int    `json:"retention_days,omitempty"`
+	CutoffRFC3339  string `json:"cutoff_rfc3339,omitempty"`
+	SourceRows     int    `json:"source_rows,omitempty"`
+	SessionRows    int    `json:"session_rows,omitempty"`
+	CheckpointRows int    `json:"checkpoint_rows,omitempty"`
 }
 
 type localWorkDBMaintainReport struct {
-	DatabasePath string                     `json:"database_path"`
-	Exists       bool                       `json:"exists"`
-	Analyzed     bool                       `json:"analyzed"`
-	Optimized    bool                       `json:"optimized"`
-	Vacuumed     bool                       `json:"vacuumed,omitempty"`
-	Actions      []string                   `json:"actions,omitempty"`
+	DatabasePath string                        `json:"database_path"`
+	Exists       bool                          `json:"exists"`
+	Analyzed     bool                          `json:"analyzed"`
+	Optimized    bool                          `json:"optimized"`
+	Vacuumed     bool                          `json:"vacuumed,omitempty"`
+	Actions      []string                      `json:"actions,omitempty"`
 	Archive      localWorkDBUsageArchiveReport `json:"archive,omitempty"`
-	Inspect      localWorkDBInspectReport   `json:"inspect"`
-	Check        localWorkDBCheckReport     `json:"check"`
+	Inspect      localWorkDBInspectReport      `json:"inspect"`
+	Check        localWorkDBCheckReport        `json:"check"`
 }
 
 type localWorkDBSchemaError struct {

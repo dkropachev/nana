@@ -283,19 +283,19 @@ type startUIUsageReport struct {
 }
 
 type startUIUsageDiagnostics struct {
-	SampledAt         string `json:"sampled_at,omitempty"`
-	DataVersion       string `json:"data_version,omitempty"`
-	CacheStatus       string `json:"cache_status,omitempty"`
-	CacheExpiresAt    string `json:"cache_expires_at,omitempty"`
-	DefaultWindow     bool   `json:"default_window,omitempty"`
-	SessionRoots      int    `json:"session_roots_scanned,omitempty"`
-	IndexLoadMS       int64  `json:"index_load_ms,omitempty"`
-	SourceBuildMS     int64  `json:"source_build_ms,omitempty"`
-	SummaryBuildMS    int64  `json:"summary_build_ms,omitempty"`
-	AnalyticsBuildMS  int64  `json:"analytics_build_ms,omitempty"`
-	GroupBuildMS      int64  `json:"group_build_ms,omitempty"`
-	TopSessionsMS     int64  `json:"top_sessions_ms,omitempty"`
-	TotalBuildMS      int64  `json:"total_build_ms,omitempty"`
+	SampledAt        string `json:"sampled_at,omitempty"`
+	DataVersion      string `json:"data_version,omitempty"`
+	CacheStatus      string `json:"cache_status,omitempty"`
+	CacheExpiresAt   string `json:"cache_expires_at,omitempty"`
+	DefaultWindow    bool   `json:"default_window,omitempty"`
+	SessionRoots     int    `json:"session_roots_scanned,omitempty"`
+	IndexLoadMS      int64  `json:"index_load_ms,omitempty"`
+	SourceBuildMS    int64  `json:"source_build_ms,omitempty"`
+	SummaryBuildMS   int64  `json:"summary_build_ms,omitempty"`
+	AnalyticsBuildMS int64  `json:"analytics_build_ms,omitempty"`
+	GroupBuildMS     int64  `json:"group_build_ms,omitempty"`
+	TopSessionsMS    int64  `json:"top_sessions_ms,omitempty"`
+	TotalBuildMS     int64  `json:"total_build_ms,omitempty"`
 }
 
 type startUIWorkRun struct {
