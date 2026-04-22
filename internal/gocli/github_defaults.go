@@ -2567,11 +2567,45 @@ func resolveGithubRepoSlugLocator(locator string) (string, error) {
 	if validRepoSlug(trimmed) {
 		return trimmed, nil
 	}
+	if repoSlug := githubRepoSlugFromLocator(trimmed); validRepoSlug(repoSlug) {
+		return repoSlug, nil
+	}
 	target, err := parseGithubTargetURL(trimmed)
 	if err != nil {
 		return "", err
 	}
 	return target.repoSlug, nil
+}
+
+func githubRepoSlugFromLocator(locator string) string {
+	trimmed := strings.TrimSpace(locator)
+	if trimmed == "" {
+		return ""
+	}
+	path := ""
+	if strings.HasPrefix(trimmed, "git@github.com:") {
+		path = strings.TrimPrefix(trimmed, "git@github.com:")
+	} else {
+		parsed, err := url.Parse(trimmed)
+		if err != nil {
+			return ""
+		}
+		host := strings.ToLower(strings.TrimSpace(parsed.Host))
+		if host != "github.com" && host != "www.github.com" {
+			return ""
+		}
+		path = parsed.Path
+	}
+	path = strings.Trim(strings.TrimSuffix(strings.TrimSpace(path), ".git"), "/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	repoSlug := parts[0] + "/" + parts[1]
+	if !validRepoSlug(repoSlug) {
+		return ""
+	}
+	return repoSlug
 }
 
 func resolveGithubReviewRuleScanSource(locator string) (githubReviewRuleScanSource, error) {

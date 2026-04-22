@@ -396,6 +396,8 @@ Use `--github` to write shareable `.github/nana-*-policy.json` files instead of 
 
 `.nana/...` takes precedence. Improvement labels are normalized to include `improvement` and `improvement-scout` while excluding `enhancement`. Enhancement labels include `enhancement` and `enhancement-scout`. Scouts return and publish every grounded proposal or finding they produce.
 
+For managed GitHub repos, the active scout policies live under `~/.nana/work/repos/<owner>/<repo>/scouts/<role>-policy.json`. Repo-native `.nana/...` and `.github/...` policy files are legacy fallback read paths only. Start UI/API surfaces `policy_path` only when a real policy file exists, and saving scout settings from Start UI hydrates a missing managed checkout before writing the managed policy file.
+
 For GitHub targets, `issue_destination: "repo"` publishes to the target repo and `issue_destination: "fork"` publishes to `fork_repo`. For local repos, `nana start` treats `mode: "auto"` in every supported scout policy as permission to switch to the repo's default branch, commit generated scout artifacts there, and run `nana work start --task ... --work-type ...` for one pending local discovered item per cycle. Auto mode requires a clean worktree and a resolvable local default branch.
 
 ## Start Automation
@@ -405,6 +407,8 @@ Use `nana repo defaults set --repo-mode disabled|local|fork|repo --issue-pick ma
 ```bash
 nana start
 ```
+
+Manual GitHub onboarding writes the repo settings under `~/.nana/work/repos/<owner>/<repo>/settings.json`. The managed source checkout plus derived files such as `repo.json`, `repo-profile.json`, and `verification-plan.json` are created lazily by source-prep flows like `nana improve`, `nana enhance`, `nana ui-scout`, scout-settings save in Start UI, or automation paths that need the checkout.
 
 Automatically onboarded repos use system defaults, meaning `repo-mode=local`, `issue-pick=manual`, and `pr-forward=approve` unless later configured. `repo-mode=disabled` keeps a repo onboarded for observation only and blocks any work launch until the mode changes. `nana start` scans all onboarded GitHub repos under `~/.nana/work/repos`, skips repos where `repo-mode` is `disabled` or `local`, or where `issue-pick` is `manual`, triages mirrored issues locally before implementation pickup, keeps separate per-repo service and implementation queues, and runs up to three repos at a time by default while each repo may use up to three workers. Manual `P0` labels always sort first; Nana only auto-triages `P1` through `P5`. The ten-open-PR cap still applies per repo to PR-producing implementation work. Service tasks such as scout runs, issue-sync, triage, and implementation reconciliation are persisted in start state, retried conservatively on transient failures, and requeued safely after restart so stale `in_progress` issues can be reconciled instead of occupying capacity forever. When the managed source checkout declares scout policies, scout runs enter the repo service queue, feed an issue-sync pass, and newly-created proposal issues are mirrored, triaged, and become eligible for implementation in the same cycle. Bare `nana start` repeats forever with a one-minute target cadence between cycle starts; use `--once` for one pass, `--cycles <n>` for a bounded run, or `--interval <duration>` to change that target cadence. Published PR reconcile now refreshes live CI state, treats repos with no CI as green, and surfaces GitHub CI API failures as explicit blocked publication errors instead of passive waiting.
 
@@ -419,7 +423,7 @@ Mode behavior:
 - `pr-forward approve`: wait for approval before going forward with the PR
 - `pr-forward auto`: go forward automatically; fork creates the target-repo PR, repo merges the PR
 
-Use `nana repo explain <owner/repo>` to see the effective settings, label gate, repo mode, state paths, and caps for a repo.
+Use `nana repo explain <owner/repo>` to see the effective settings, label gate, repo mode, source path, source-checkout readiness, actual scout policy paths, state paths, and caps for a repo.
 
 
 ## PR Review Rules

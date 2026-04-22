@@ -208,30 +208,31 @@ type startUITotals struct {
 }
 
 type startUIRepoSummary struct {
-	RepoSlug           string                            `json:"repo_slug"`
-	SettingsPath       string                            `json:"settings_path,omitempty"`
-	RepoMode           string                            `json:"repo_mode,omitempty"`
-	IssuePickMode      string                            `json:"issue_pick_mode,omitempty"`
-	PRForwardMode      string                            `json:"pr_forward_mode,omitempty"`
-	ForkIssuesMode     string                            `json:"fork_issues_mode,omitempty"`
-	ImplementMode      string                            `json:"implement_mode,omitempty"`
-	PublishTarget      string                            `json:"publish_target,omitempty"`
-	StartParticipation bool                              `json:"start_participation"`
-	UpdatedAt          string                            `json:"updated_at,omitempty"`
-	StatePath          string                            `json:"state_path,omitempty"`
-	SourcePath         string                            `json:"source_path,omitempty"`
-	ScoutCatalog       []startUIScoutCatalogEntry        `json:"scout_catalog,omitempty"`
-	ScoutsByRole       map[string]startUIRepoScoutConfig `json:"scouts_by_role,omitempty"`
-	Scouts             startUIRepoScouts                 `json:"scouts"`
-	IssueCounts        map[string]int                    `json:"issue_counts"`
-	ServiceTaskCounts  map[string]int                    `json:"service_task_counts"`
-	ScoutJobCounts     map[string]int                    `json:"scout_job_counts"`
-	PlannedItemCounts  map[string]int                    `json:"planned_item_counts"`
-	LastRun            *startWorkLastRun                 `json:"last_run,omitempty"`
-	DefaultBranch      string                            `json:"default_branch,omitempty"`
-	LockState          *repoAccessLockStateSnapshot      `json:"lock_state,omitempty"`
-	Settings           *githubRepoSettings               `json:"settings,omitempty"`
-	State              *startWorkState                   `json:"state,omitempty"`
+	RepoSlug            string                            `json:"repo_slug"`
+	SettingsPath        string                            `json:"settings_path,omitempty"`
+	RepoMode            string                            `json:"repo_mode,omitempty"`
+	IssuePickMode       string                            `json:"issue_pick_mode,omitempty"`
+	PRForwardMode       string                            `json:"pr_forward_mode,omitempty"`
+	ForkIssuesMode      string                            `json:"fork_issues_mode,omitempty"`
+	ImplementMode       string                            `json:"implement_mode,omitempty"`
+	PublishTarget       string                            `json:"publish_target,omitempty"`
+	StartParticipation  bool                              `json:"start_participation"`
+	UpdatedAt           string                            `json:"updated_at,omitempty"`
+	StatePath           string                            `json:"state_path,omitempty"`
+	SourcePath          string                            `json:"source_path,omitempty"`
+	SourceCheckoutReady bool                              `json:"source_checkout_ready"`
+	ScoutCatalog        []startUIScoutCatalogEntry        `json:"scout_catalog,omitempty"`
+	ScoutsByRole        map[string]startUIRepoScoutConfig `json:"scouts_by_role,omitempty"`
+	Scouts              startUIRepoScouts                 `json:"scouts"`
+	IssueCounts         map[string]int                    `json:"issue_counts"`
+	ServiceTaskCounts   map[string]int                    `json:"service_task_counts"`
+	ScoutJobCounts      map[string]int                    `json:"scout_job_counts"`
+	PlannedItemCounts   map[string]int                    `json:"planned_item_counts"`
+	LastRun             *startWorkLastRun                 `json:"last_run,omitempty"`
+	DefaultBranch       string                            `json:"default_branch,omitempty"`
+	LockState           *repoAccessLockStateSnapshot      `json:"lock_state,omitempty"`
+	Settings            *githubRepoSettings               `json:"settings,omitempty"`
+	State               *startWorkState                   `json:"state,omitempty"`
 }
 
 type startUIOverview struct {
@@ -4220,11 +4221,19 @@ func addStartUIInvestigationDependencies(cwd string, add func(string)) {
 }
 
 func ensureStartUIRepoInvestigationWorkspace(repoSlug string) (string, error) {
-	repoPath := strings.TrimSpace(githubManagedPaths(repoSlug).SourcePath)
-	if info, err := os.Stat(repoPath); err == nil && info.IsDir() {
+	repoPath, ready, err := githubManagedSourceCheckoutState(repoSlug)
+	if err != nil {
+		return "", err
+	}
+	if ready {
 		return repoPath, nil
 	}
-	return ensureImproveGithubCheckout(repoSlug)
+	return ensureGithubManagedCheckout(repoSlug, repoAccessLockOwner{
+		Backend: "start-ui",
+		RunID:   sanitizePathToken(repoSlug),
+		Purpose: "investigation-source-setup",
+		Label:   "start-ui-investigation-source",
+	})
 }
 
 func spawnStartUIIssueInvestigation(repoSlug string, issue startWorkIssueState) (startUIBackgroundLaunch, error) {
@@ -4425,18 +4434,23 @@ func loadStartUIRepoSummary(repoSlug string, includeState bool) (startUIRepoSumm
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return startUIRepoSummary{}, err
 	}
+	sourcePath, sourceCheckoutReady, err := githubManagedSourceCheckoutState(repoSlug)
+	if err != nil {
+		return startUIRepoSummary{}, err
+	}
 	summary := startUIRepoSummary{
-		RepoSlug:          repoSlug,
-		SettingsPath:      githubRepoSettingsPath(repoSlug),
-		StatePath:         startWorkStatePath(repoSlug),
-		SourcePath:        githubManagedPaths(repoSlug).SourcePath,
-		ScoutCatalog:      startUIScoutCatalog(),
-		ScoutsByRole:      startUIDefaultRepoScoutsByRole(strings.TrimSpace(githubManagedPaths(repoSlug).SourcePath)),
-		Scouts:            startUIDefaultRepoScouts(strings.TrimSpace(githubManagedPaths(repoSlug).SourcePath)),
-		IssueCounts:       map[string]int{},
-		ServiceTaskCounts: map[string]int{},
-		ScoutJobCounts:    map[string]int{},
-		PlannedItemCounts: map[string]int{},
+		RepoSlug:            repoSlug,
+		SettingsPath:        githubRepoSettingsPath(repoSlug),
+		StatePath:           startWorkStatePath(repoSlug),
+		SourcePath:          sourcePath,
+		SourceCheckoutReady: sourceCheckoutReady,
+		ScoutCatalog:        startUIScoutCatalog(),
+		ScoutsByRole:        startUIDefaultRepoScoutsByRole(strings.TrimSpace(sourcePath)),
+		Scouts:              startUIDefaultRepoScouts(strings.TrimSpace(sourcePath)),
+		IssueCounts:         map[string]int{},
+		ServiceTaskCounts:   map[string]int{},
+		ScoutJobCounts:      map[string]int{},
+		PlannedItemCounts:   map[string]int{},
 	}
 	lockState, err := buildRepoAccessLockState(summary.SourcePath, repoAccessLockRead)
 	if err != nil {
@@ -4502,7 +4516,6 @@ func applyStartUIRepoSettings(summary *startUIRepoSummary, settings *githubRepoS
 func startUIDefaultRepoScoutConfig(repoPath string, role string) startUIRepoScoutConfig {
 	config := startUIRepoScoutConfig{
 		Enabled:          false,
-		PolicyPath:       startUIRepoScoutPolicyPath(repoPath, role, ""),
 		Mode:             "auto",
 		Schedule:         scoutScheduleWhenResolved,
 		IssueDestination: "local",
@@ -5027,9 +5040,9 @@ func patchStartUIRepoSettings(repoSlug string, payload startUIRepoSettingsPatchR
 }
 
 func createStartUIRepo(payload startUIRepoCreateRequest) (startUIRepoSummary, bool, error) {
-	repoSlug := strings.TrimSpace(payload.RepoSlug)
-	if !validRepoSlug(repoSlug) {
-		return startUIRepoSummary{}, false, fmt.Errorf("repo_slug must be owner/repo")
+	repoSlug, err := resolveGithubRepoSlugLocator(payload.RepoSlug)
+	if err != nil {
+		return startUIRepoSummary{}, false, fmt.Errorf("repo_slug must be owner/repo or a GitHub repo URL")
 	}
 	repoSlugs, err := listStartUIRepoSlugs()
 	if err != nil {
@@ -5088,21 +5101,22 @@ func buildStartUIRepoScoutWritePlans(repoSlug string, patch *startUIRepoScoutsPa
 }
 
 func ensureStartUIRepoSourceCheckout(repoSlug string) (string, error) {
-	repoPath := strings.TrimSpace(githubManagedPaths(repoSlug).SourcePath)
+	repoPath, ready, err := githubManagedSourceCheckoutState(repoSlug)
+	if err != nil {
+		return "", err
+	}
 	if repoPath == "" {
 		return "", fmt.Errorf("repo %s does not have a managed source checkout", repoSlug)
 	}
-	info, err := os.Stat(repoPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("repo %s does not have a managed source checkout", repoSlug)
-		}
-		return "", err
+	if ready {
+		return repoPath, nil
 	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("repo %s source checkout is not a directory", repoSlug)
-	}
-	return repoPath, nil
+	return ensureGithubManagedCheckout(repoSlug, repoAccessLockOwner{
+		Backend: "start-ui",
+		RunID:   sanitizePathToken(repoSlug),
+		Purpose: "scout-policy-source-setup",
+		Label:   "start-ui-scout-policy-source",
+	})
 }
 
 func buildStartUIRepoScoutWritePlan(repoPath string, role string, request *startUIRepoScoutConfig) (startUIRepoScoutWritePlan, error) {

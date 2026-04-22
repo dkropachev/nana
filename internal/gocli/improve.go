@@ -1186,34 +1186,12 @@ func normalizeImproveGithubRepo(target string) (string, bool) {
 }
 
 func ensureImproveGithubCheckout(repoSlug string) (string, error) {
-	apiBaseURL := strings.TrimSpace(os.Getenv("GITHUB_API_URL"))
-	if apiBaseURL == "" {
-		apiBaseURL = "https://api.github.com"
-	}
-	token, err := resolveGithubToken()
-	if err != nil {
-		return "", err
-	}
-	var repository githubRepositoryPayload
-	if err := githubAPIGetJSON(apiBaseURL, token, fmt.Sprintf("/repos/%s", repoSlug), &repository); err != nil {
-		return "", err
-	}
-	paths := githubManagedPaths(repoSlug)
-	meta, err := ensureGithubManagedRepoMetadata(paths, githubTargetContext{Repository: repository}, time.Now().UTC())
-	if err != nil {
-		return "", err
-	}
-	if err := withManagedSourceWriteLock(repoSlug, repoAccessLockOwner{
+	return ensureGithubManagedCheckout(repoSlug, repoAccessLockOwner{
 		Backend: "github-improve",
 		RunID:   fmt.Sprintf("improve-%d", time.Now().UTC().UnixNano()),
 		Purpose: "source-setup",
 		Label:   "github-improve-source",
-	}, func() error {
-		return ensureGithubSourceClone(paths, meta)
-	}); err != nil {
-		return "", err
-	}
-	return paths.SourcePath, nil
+	})
 }
 
 func defaultScoutPolicy() scoutPolicy {

@@ -2936,7 +2936,7 @@
     const repoCount = sortedRepos().length;
     const summaryCopy = repoCount
       ? "Add another GitHub repo to the workspace. Advanced routing and scout policies stay editable in the repo Config tab."
-      : "No repos are onboarded yet. Add an owner/repo slug to start managing it from this workspace.";
+      : "No repos are onboarded yet. Add an owner/repo slug or GitHub repo URL to start managing it from this workspace.";
     host.innerHTML = `
       <div class="surface-head">
         <div>
@@ -2950,7 +2950,7 @@
         <div class="config-grid">
           <label class="selector config-field-wide">
             <span>Repo Slug</span>
-            <input id="repo-onboard-slug" type="text" value="${escapeHTML(draft.repo_slug || "")}" placeholder="owner/repo" data-repo-onboard-field="repo_slug" />
+            <input id="repo-onboard-slug" type="text" value="${escapeHTML(draft.repo_slug || "")}" placeholder="owner/repo or https://github.com/owner/repo" data-repo-onboard-field="repo_slug" />
           </label>
           <label class="selector">
             <span>Repo Mode</span>
@@ -2981,9 +2981,9 @@
   function submitRepoOnboarding() {
     const payload = repoOnboardingPayload();
     if (!payload.repo_slug) {
-      state.repoOnboarding.error = "Enter a repo slug in owner/repo format.";
+      state.repoOnboarding.error = "Enter an owner/repo slug or GitHub repo URL.";
       renderRepoOnboardingPanel();
-      toast("warning", "Repo slug required", "Use owner/repo.");
+      toast("warning", "Repo slug required", "Use owner/repo or a GitHub repo URL.");
       return;
     }
     state.repoOnboarding.submitting = true;
@@ -4865,7 +4865,8 @@
       { label: "Issue Pick", value: defaultString(repo.issue_pick_mode, "unknown"), note: "Automation issue pick policy." },
       { label: "PR Forward", value: defaultString(repo.pr_forward_mode, "unknown"), note: "How review and publish are forwarded." },
       { label: "Updated", value: formatDateTime(repo.updated_at), note: "Latest repo state refresh." },
-      { label: "Source Path", value: defaultString(repo.source_path, "Unavailable"), note: "Mapped source checkout for this repo." },
+      { label: "Checkout", value: repo.source_checkout_ready ? "Ready" : "Missing", note: repo.source_checkout_ready ? "Managed source checkout is available." : "Managed source checkout has not been hydrated yet." },
+      { label: "Source Path", value: defaultString(repo.source_path, "Unavailable"), note: "Mapped path for the managed source checkout." },
       { label: "Last Run", value: repo.last_run ? defaultString(repo.last_run.run_id, "Unknown") : "No run recorded", note: repo.last_run ? formatDateTime(repo.last_run.updated_at || repo.last_run.started_at) : "No completed run metadata." },
     ]);
     if (repoDismissedScoutCount(repo) > 0) {
@@ -5514,6 +5515,15 @@
     return defaultString(config && config.policy_path, "");
   }
 
+  function repoNeedsScoutCheckoutBootstrap(repo, draft, server) {
+    if (!repo || repo.source_checkout_ready || !draft || !server) return false;
+    return repoScoutCatalog(repo).some((entry) => {
+      const key = entry.config_key;
+      return repoConfigSnapshotKey((draft.scouts_by_role && draft.scouts_by_role[key]) || {})
+        !== repoConfigSnapshotKey((server.scouts_by_role && server.scouts_by_role[key]) || {});
+    });
+  }
+
   function syncCompatibilityScouts(target) {
     if (!target) return;
     const byRole = target.scouts_by_role || {};
@@ -5653,8 +5663,10 @@
     const draft = editor.draft || repoConfigSnapshot(repo);
     const rawSettings = repo && repo.settings ? repo.settings : {};
     const rawScouts = repo && repo.scouts_by_role ? repo.scouts_by_role : {};
+    const needsScoutCheckoutBootstrap = repoNeedsScoutCheckoutBootstrap(repo, draft, editor.server);
     const inventory = [
       { label: "Settings Path", value: defaultString(repo && repo.settings_path, "Unavailable") },
+      { label: "Source Checkout", value: repo && repo.source_checkout_ready ? "Ready" : "Missing" },
       { label: "Source Path", value: defaultString(repo && repo.source_path, "Unavailable") },
       { label: "Start State Path", value: defaultString(repo && repo.state_path, "Unavailable") },
     ].concat(repoScoutCatalog(repo).map((entry) => ({
@@ -5664,7 +5676,9 @@
     const resetDisabled = !editor.dirty && !editor.remoteChanged && !editor.saving;
     const saveDisabled = !editor.dirty || editor.saving;
     const statusCopy = editor.saving
-      ? "Saving changes..."
+      ? needsScoutCheckoutBootstrap
+        ? "Preparing managed checkout and saving scout policies..."
+        : "Saving changes..."
       : editor.remoteChanged
         ? "Server config changed while you were editing. Reset to load the latest values."
         : editor.dirty
@@ -5689,6 +5703,7 @@
       </div>
       <div class="config-meta">
         <span><strong>Settings path:</strong> ${escapeHTML(defaultString(repo.settings_path, "Unavailable"))}</span>
+        <span><strong>Source checkout:</strong> ${escapeHTML(repo.source_checkout_ready ? "Ready" : "Missing")}</span>
         <span><strong>Updated:</strong> ${escapeHTML(formatDateTime(repo.settings && repo.settings.updated_at))}</span>
       </div>
       <form id="repo-config-form" class="config-form">
@@ -5710,7 +5725,7 @@
         </div>
         <div class="config-section">
           <h4>Scout Policies</h4>
-          <p class="queue-copy">Saving keeps one active policy file per scout under the selected storage location.</p>
+          <p class="queue-copy">Saving keeps one active policy file per scout under managed scout storage. If the managed source checkout is missing, Nana prepares it before writing scout policies.</p>
         </div>
         ${repoScoutCatalog(repo).map((entry) => renderScoutConfigSection(repo, entry.config_key, draft.scouts_by_role[entry.config_key])).join("")}
         <div class="config-footer">

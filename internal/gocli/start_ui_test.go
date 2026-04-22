@@ -219,6 +219,9 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 	if !overview.Repos[0].StartParticipation || overview.Repos[0].ForkIssuesMode != "auto" || overview.Repos[0].PublishTarget != "fork" {
 		t.Fatalf("unexpected repo config summary: %+v", overview.Repos[0])
 	}
+	if !overview.Repos[0].SourceCheckoutReady {
+		t.Fatalf("expected repo overview to report ready managed source checkout, got %+v", overview.Repos[0])
+	}
 	if !overview.Repos[0].Scouts.Improvement.Enabled || overview.Repos[0].Scouts.Improvement.Schedule != scoutScheduleWeekly {
 		t.Fatalf("unexpected improvement scout summary: %+v", overview.Repos[0].Scouts.Improvement)
 	}
@@ -257,6 +260,9 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 	}
 	if settingsPayload.Repo.RepoMode != "repo" || settingsPayload.Repo.IssuePickMode != "label" || settingsPayload.Repo.PRForwardMode != "auto" || settingsPayload.Repo.ForkIssuesMode != "labeled" || settingsPayload.Repo.ImplementMode != "auto" || settingsPayload.Repo.PublishTarget != "repo" || !settingsPayload.Repo.StartParticipation {
 		t.Fatalf("unexpected settings payload: %+v", settingsPayload.Repo)
+	}
+	if !settingsPayload.Repo.SourceCheckoutReady {
+		t.Fatalf("expected settings patch to keep managed source checkout ready, got %+v", settingsPayload.Repo)
 	}
 	if !settingsPayload.Repo.Scouts.Improvement.Enabled || settingsPayload.Repo.Scouts.Improvement.IssueDestination != "repo" || settingsPayload.Repo.Scouts.Improvement.Schedule != scoutScheduleDaily {
 		t.Fatalf("unexpected patched improvement scout: %+v", settingsPayload.Repo.Scouts.Improvement)
@@ -1857,9 +1863,10 @@ func TestStartUIAPIOnboardRepoCreatesSummary(t *testing.T) {
 	server := httptest.NewServer((&startUIAPI{cwd: cwd, allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
 	defer server.Close()
 
-	repoSlug := "acme/widget"
+	repoSlug := "teryxjs/xhtmlx"
+	repoURL := "https://github.com/teryxjs/xhtmlx"
 	body := strings.NewReader(`{
-		"repo_slug":"acme/widget",
+		"repo_slug":"https://github.com/teryxjs/xhtmlx",
 		"repo_mode":"fork",
 		"issue_pick_mode":"auto",
 		"pr_forward_mode":"approve",
@@ -1888,6 +1895,21 @@ func TestStartUIAPIOnboardRepoCreatesSummary(t *testing.T) {
 	if payload.Repo.RepoSlug != repoSlug || payload.Repo.RepoMode != "fork" || payload.Repo.IssuePickMode != "auto" || payload.Repo.PRForwardMode != "approve" {
 		t.Fatalf("unexpected repo summary: %+v", payload.Repo)
 	}
+	if payload.Repo.SourcePath != githubManagedPaths(repoSlug).SourcePath {
+		t.Fatalf("expected repo URL %q to normalize to %q, got %+v", repoURL, repoSlug, payload.Repo)
+	}
+	if payload.Repo.SourceCheckoutReady {
+		t.Fatalf("expected onboarding summary to report missing managed source checkout until hydration, got %+v", payload.Repo)
+	}
+	for _, role := range supportedScoutRoleOrder {
+		spec := scoutRoleSpecFor(role)
+		if payload.Repo.ScoutsByRole[spec.ConfigKey].Enabled {
+			t.Fatalf("expected %s scout to be disabled after onboarding without saved policy, got %+v", role, payload.Repo.ScoutsByRole[spec.ConfigKey])
+		}
+		if payload.Repo.ScoutsByRole[spec.ConfigKey].PolicyPath != "" {
+			t.Fatalf("expected %s scout policy path to stay empty until a policy file exists, got %+v", role, payload.Repo.ScoutsByRole[spec.ConfigKey])
+		}
+	}
 	if !payload.Repo.StartParticipation || payload.Repo.PublishTarget != "fork" || payload.Repo.ForkIssuesMode != "auto" || payload.Repo.ImplementMode != "auto" {
 		t.Fatalf("expected derived repo automation settings, got %+v", payload.Repo)
 	}
@@ -1911,6 +1933,9 @@ func TestStartUIAPIOnboardRepoCreatesSummary(t *testing.T) {
 	}
 	if overview.Totals.Repos != 1 || len(overview.Repos) != 1 || overview.Repos[0].RepoSlug != repoSlug {
 		t.Fatalf("expected onboarded repo in overview, got totals=%+v repos=%+v", overview.Totals, overview.Repos)
+	}
+	if overview.Repos[0].SourceCheckoutReady {
+		t.Fatalf("expected overview to keep checkout missing until hydration, got %+v", overview.Repos[0])
 	}
 }
 
@@ -1973,6 +1998,98 @@ func TestStartUIAPIOnboardRepoReturnsExistingSummary(t *testing.T) {
 	}
 	if settings.RepoMode != "local" || settings.IssuePickMode != "manual" || settings.PRForwardMode != "approve" || settings.PublishTarget != "local-branch" {
 		t.Fatalf("expected existing repo settings to remain unchanged, got %+v", settings)
+	}
+}
+
+func TestStartUIAPISettingsPatchHydratesMissingSourceCheckoutForScouts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GH_TOKEN", "test-token")
+
+	cwd := t.TempDir()
+	repoSlug := "acme/widget"
+	paths, repoMeta := createGithubManagedSourceFixture(t, home, repoSlug)
+	if _, err := os.Stat(paths.SourcePath); !os.IsNotExist(err) {
+		t.Fatalf("expected managed source checkout to start missing, stat err=%v", err)
+	}
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{
+		Version:        6,
+		RepoMode:       "repo",
+		IssuePickMode:  "label",
+		PRForwardMode:  "approve",
+		ForkIssuesMode: "labeled",
+		ImplementMode:  "labeled",
+		PublishTarget:  "repo",
+		UpdatedAt:      time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("write repo settings: %v", err)
+	}
+
+	githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/acme/widget" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(githubRepositoryPayload{
+			Name:          repoMeta.RepoName,
+			FullName:      repoMeta.RepoSlug,
+			CloneURL:      repoMeta.CloneURL,
+			DefaultBranch: repoMeta.DefaultBranch,
+			HTMLURL:       repoMeta.HTMLURL,
+		})
+	}))
+	defer githubServer.Close()
+	t.Setenv("GITHUB_API_URL", githubServer.URL)
+
+	oldPreflight := githubManagedOriginPreflight
+	githubManagedOriginPreflight = func(repoPath string, repoMeta *githubManagedRepoMetadata) error { return nil }
+	defer func() { githubManagedOriginPreflight = oldPreflight }()
+
+	server := httptest.NewServer((&startUIAPI{cwd: cwd, allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
+	defer server.Close()
+
+	settingsBody := strings.NewReader(`{"repo_mode":"repo","issue_pick_mode":"label","pr_forward_mode":"approve","fork_issues_mode":"labeled","implement_mode":"labeled","publish_target":"repo","scouts":{"improvement":{"enabled":true,"mode":"auto","schedule":"when_resolved","issue_destination":"local","fork_repo":"","labels":["ux"]}}}`)
+	settingsRequest, err := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/repos/"+repoSlug+"/settings", settingsBody)
+	if err != nil {
+		t.Fatalf("new settings request: %v", err)
+	}
+	settingsRequest.Header.Set("Content-Type", "application/json")
+	settingsResponse, err := http.DefaultClient.Do(settingsRequest)
+	if err != nil {
+		t.Fatalf("PATCH settings: %v", err)
+	}
+	defer settingsResponse.Body.Close()
+	if settingsResponse.StatusCode != http.StatusOK {
+		t.Fatalf("expected settings patch status 200, got %d", settingsResponse.StatusCode)
+	}
+	var payload struct {
+		Repo startUIRepoSummary `json:"repo"`
+	}
+	if err := json.NewDecoder(settingsResponse.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode settings payload: %v", err)
+	}
+	if !payload.Repo.SourceCheckoutReady {
+		t.Fatalf("expected scout settings save to hydrate managed source checkout, got %+v", payload.Repo)
+	}
+	if !payload.Repo.Scouts.Improvement.Enabled || payload.Repo.Scouts.Improvement.PolicyPath == "" {
+		t.Fatalf("expected hydrated scout config to include managed policy path, got %+v", payload.Repo.Scouts.Improvement)
+	}
+	if _, err := os.Stat(paths.SourcePath); err != nil {
+		t.Fatalf("expected hydrated source checkout: %v", err)
+	}
+	if _, err := os.Stat(paths.RepoMetaPath); err != nil {
+		t.Fatalf("expected managed repo metadata after hydration: %v", err)
+	}
+	var policy scoutPolicy
+	if err := readGithubJSON(repoScoutPolicyPath(paths.SourcePath, improvementScoutRole, false), &policy); err != nil {
+		t.Fatalf("read hydrated scout policy: %v", err)
+	}
+	if policy.Mode != "auto" || policy.Schedule != scoutScheduleWhenResolved || policy.IssueDestination != improvementDestinationLocal {
+		t.Fatalf("unexpected hydrated scout policy: %+v", policy)
+	}
+	gotOrigin := strings.TrimSpace(runLocalWorkTestGitOutput(t, paths.SourcePath, "config", "--get", "remote.origin.url"))
+	if gotOrigin != repoMeta.CanonicalOriginURL {
+		t.Fatalf("expected hydrated source checkout origin %q, got %q", repoMeta.CanonicalOriginURL, gotOrigin)
 	}
 }
 

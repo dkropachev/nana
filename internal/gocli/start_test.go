@@ -1,6 +1,7 @@
 package gocli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -889,6 +890,65 @@ func TestRepoConfigDisabledObservationMode(t *testing.T) {
 		if !strings.Contains(explain, needle) {
 			t.Fatalf("expected explain to contain %q, got %q", needle, explain)
 		}
+	}
+}
+
+func TestRepoExplainReportsSourceCheckoutStateAndScoutPolicies(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{
+		Version:        6,
+		RepoMode:       "repo",
+		IssuePickMode:  "label",
+		PRForwardMode:  "auto",
+		ForkIssuesMode: "labeled",
+		ImplementMode:  "labeled",
+		PublishTarget:  "repo",
+		UpdatedAt:      time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	explainMissing, err := captureStdout(t, func() error { return Repo(".", []string{"explain", repoSlug}) })
+	if err != nil {
+		t.Fatalf("Repo(explain missing checkout): %v", err)
+	}
+	if !strings.Contains(explainMissing, "Source checkout: missing") {
+		t.Fatalf("expected explain to report missing checkout, got %q", explainMissing)
+	}
+
+	sourcePath := createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+	if err := writeGithubJSON(repoScoutPolicyPath(sourcePath, improvementScoutRole, false), scoutPolicy{Version: 1}); err != nil {
+		t.Fatalf("write scout policy: %v", err)
+	}
+
+	explainReady, err := captureStdout(t, func() error { return Repo(".", []string{"explain", repoSlug}) })
+	if err != nil {
+		t.Fatalf("Repo(explain ready checkout): %v", err)
+	}
+	if !strings.Contains(explainReady, "Source checkout: ready") {
+		t.Fatalf("expected explain to report ready checkout, got %q", explainReady)
+	}
+	if !strings.Contains(explainReady, "improvement scout policy: "+repoScoutPolicyPath(sourcePath, improvementScoutRole, false)) {
+		t.Fatalf("expected explain to report actual managed scout policy path, got %q", explainReady)
+	}
+
+	jsonOutput, err := captureStdout(t, func() error { return Repo(".", []string{"explain", repoSlug, "--json"}) })
+	if err != nil {
+		t.Fatalf("Repo(explain --json): %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(jsonOutput), &payload); err != nil {
+		t.Fatalf("decode explain json: %v", err)
+	}
+	if ready, _ := payload["source_checkout_ready"].(bool); !ready {
+		t.Fatalf("expected explain json to report ready checkout, got %#v", payload["source_checkout_ready"])
+	}
+	scoutPolicies, _ := payload["scout_policy_paths"].(map[string]any)
+	if scoutPolicies["improvement"] != repoScoutPolicyPath(sourcePath, improvementScoutRole, false) {
+		t.Fatalf("expected explain json scout policy path, got %#v", scoutPolicies)
 	}
 }
 

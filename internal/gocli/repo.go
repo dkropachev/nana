@@ -607,6 +607,10 @@ func repoExplain(args []string) error {
 	if !validRepoSlug(repoSlug) {
 		return fmt.Errorf("Usage: nana repo explain <owner/repo> [--json]\n\n%s", RepoHelp)
 	}
+	sourcePath, sourceCheckoutReady, err := githubManagedSourceCheckoutState(repoSlug)
+	if err != nil {
+		return err
+	}
 	settings, _ := readGithubRepoSettings(githubRepoSettingsPath(repoSlug))
 	repoMode := resolvedGithubRepoMode(settings)
 	issuePickMode := resolvedGithubIssuePickMode(settings)
@@ -620,10 +624,20 @@ func repoExplain(args []string) error {
 		publishTarget = defaultString(normalizeGithubPublishTarget(settings.PublishTarget), publishTarget)
 	}
 	state, _ := readStartWorkState(repoSlug)
+	scoutPolicyPaths := map[string]string{}
+	for _, role := range supportedScoutRoleOrder {
+		spec := scoutRoleSpecFor(role)
+		configuredPath := repoScoutConfiguredPath(sourcePath, role)
+		if fileExists(configuredPath) {
+			scoutPolicyPaths[spec.ConfigKey] = configuredPath
+		}
+	}
 	payload := map[string]any{
 		"repo":                       repoSlug,
 		"settings_path":              githubRepoSettingsPath(repoSlug),
 		"state_path":                 startWorkStatePath(repoSlug),
+		"source_path":                sourcePath,
+		"source_checkout_ready":      sourceCheckoutReady,
 		"repo_mode":                  repoMode,
 		"issue_pick_mode":            issuePickMode,
 		"pr_forward_mode":            prForwardMode,
@@ -638,6 +652,9 @@ func repoExplain(args []string) error {
 		"parallel_limit":             startDefaultGlobalParallel,
 		"is_enabled_for_start":       githubRepoAutomationEnabled(settings),
 		"start_promotes_before_work": true,
+	}
+	if len(scoutPolicyPaths) > 0 {
+		payload["scout_policy_paths"] = scoutPolicyPaths
 	}
 	if state != nil {
 		promoted, reused, activeSkips := startWorkPromotionCounts(state)
@@ -660,6 +677,8 @@ func repoExplain(args []string) error {
 	fmt.Fprintf(currentAdminStdout(), "[repo] Repo: %s\n", repoSlug)
 	fmt.Fprintf(currentAdminStdout(), "[repo] Settings path: %s\n", githubRepoSettingsPath(repoSlug))
 	fmt.Fprintf(currentAdminStdout(), "[repo] Start state path: %s\n", startWorkStatePath(repoSlug))
+	fmt.Fprintf(currentAdminStdout(), "[repo] Source path: %s\n", defaultString(sourcePath, "(unmapped)"))
+	fmt.Fprintf(currentAdminStdout(), "[repo] Source checkout: %s\n", map[bool]string{true: "ready", false: "missing"}[sourceCheckoutReady])
 	fmt.Fprintf(currentAdminStdout(), "[repo] repo-mode: %s\n", repoMode)
 	fmt.Fprintf(currentAdminStdout(), "[repo] issue-pick: %s\n", issuePickMode)
 	fmt.Fprintf(currentAdminStdout(), "[repo] pr-forward: %s\n", prForwardMode)
@@ -667,6 +686,12 @@ func repoExplain(args []string) error {
 	fmt.Fprintf(currentAdminStdout(), "[repo] implement: %s\n", implementMode)
 	fmt.Fprintf(currentAdminStdout(), "[repo] publish: %s\n", defaultString(publishTarget, "(none)"))
 	fmt.Fprintf(currentAdminStdout(), "[repo] Start participation: %t\n", githubRepoAutomationEnabled(settings))
+	for _, role := range supportedScoutRoleOrder {
+		spec := scoutRoleSpecFor(role)
+		if path := strings.TrimSpace(scoutPolicyPaths[spec.ConfigKey]); path != "" {
+			fmt.Fprintf(currentAdminStdout(), "[repo] %s scout policy: %s\n", spec.ConfigKey, path)
+		}
+	}
 	if repoMode == "disabled" {
 		fmt.Fprintln(currentAdminStdout(), "[repo] disabled mode keeps the repo onboarded for observation only; Nana will not launch work until repo-mode changes.")
 	}

@@ -1,6 +1,12 @@
 package gocli
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+)
 
 // githubPreparedManagedSource carries the source-derived artifacts that
 // inspection-oriented GitHub flows need after the managed checkout has been
@@ -89,4 +95,56 @@ func cloneGithubManagedSourceForSandbox(paths githubManagedRepoPaths, repoMeta *
 			return cloneGithubSourceToSandbox(paths.SourcePath, repoPath)
 		},
 	)
+}
+
+func githubManagedSourceCheckoutState(repoSlug string) (string, bool, error) {
+	sourcePath := strings.TrimSpace(githubManagedPaths(repoSlug).SourcePath)
+	if sourcePath == "" {
+		return "", false, nil
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return sourcePath, false, nil
+		}
+		return sourcePath, false, err
+	}
+	if !info.IsDir() {
+		return sourcePath, false, fmt.Errorf("repo %s source checkout is not a directory", repoSlug)
+	}
+	return sourcePath, true, nil
+}
+
+func loadGithubRepository(repoSlug string) (githubRepositoryPayload, error) {
+	apiBaseURL := strings.TrimSpace(os.Getenv("GITHUB_API_URL"))
+	if apiBaseURL == "" {
+		apiBaseURL = "https://api.github.com"
+	}
+	token, err := resolveGithubToken()
+	if err != nil {
+		return githubRepositoryPayload{}, err
+	}
+	var repository githubRepositoryPayload
+	if err := githubAPIGetJSON(apiBaseURL, token, fmt.Sprintf("/repos/%s", repoSlug), &repository); err != nil {
+		return githubRepositoryPayload{}, err
+	}
+	return repository, nil
+}
+
+func ensureGithubManagedCheckout(repoSlug string, owner repoAccessLockOwner) (string, error) {
+	repository, err := loadGithubRepository(repoSlug)
+	if err != nil {
+		return "", fmt.Errorf("lookup GitHub repository %s: %w", repoSlug, err)
+	}
+	paths := githubManagedPaths(repoSlug)
+	meta, err := ensureGithubManagedRepoMetadata(paths, githubTargetContext{Repository: repository}, time.Now().UTC())
+	if err != nil {
+		return "", fmt.Errorf("persist managed repo metadata for %s: %w", repoSlug, err)
+	}
+	if err := withManagedSourceWriteLock(repoSlug, owner, func() error {
+		return ensureGithubSourceClone(paths, meta)
+	}); err != nil {
+		return "", fmt.Errorf("prepare managed source checkout for %s: %w", repoSlug, err)
+	}
+	return paths.SourcePath, nil
 }
