@@ -133,7 +133,14 @@ func TestStartUIBrowserInteractionsIssues(t *testing.T) {
 		return ok && issue.DeferredReason == "chromedp deferred reason"
 	})
 	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-attention-detail-action="clear_issue_schedule"][data-attention-detail-item-id="%s"]`, issueAttentionID))
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Not scheduled")
+	startUITestWaitFor(t, 10*time.Second, "issue schedule to clear", func() bool {
+		state, err := readStartWorkState(fixture.RepoSlug)
+		if err != nil {
+			return false
+		}
+		issue, ok := state.Issues["7"]
+		return ok && strings.TrimSpace(issue.ScheduleAt) == ""
+	})
 }
 
 func TestStartUIBrowserInteractionsRepoControls(t *testing.T) {
@@ -232,18 +239,18 @@ func TestStartUIBrowserInteractionsDraftsSurviveLiveRefresh(t *testing.T) {
 			},
 		},
 		{
-			name:          "issues-detail-form",
-			hash:          "#view=issues",
-			readySelector: "#issue-detail-priority",
+			name:          "repo-controls-issue-form-alt",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
+			readySelector: "#repo-controls-issue-form-priority",
 			edit: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpSetValue(t, ctx, "#issue-detail-priority", "5")
-				startUITestChromedpSetValue(t, ctx, "#issue-detail-schedule", "2026-04-25T11:15")
-				startUITestChromedpSetValue(t, ctx, "#issue-detail-deferred", "Keep issue detail draft")
+				startUITestChromedpSetValue(t, ctx, "#repo-controls-issue-form-priority", "5")
+				startUITestChromedpSetValue(t, ctx, "#repo-controls-issue-form-schedule_at", "2026-04-25T11:15")
+				startUITestChromedpSetValue(t, ctx, "#repo-controls-issue-form-deferred_reason", "Keep issue detail draft")
 			},
 			assert: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpWaitValue(t, ctx, "#issue-detail-priority", "5")
-				startUITestChromedpWaitValue(t, ctx, "#issue-detail-schedule", "2026-04-25T11:15")
-				startUITestChromedpWaitValue(t, ctx, "#issue-detail-deferred", "Keep issue detail draft")
+				startUITestChromedpWaitValue(t, ctx, "#repo-controls-issue-form-priority", "5")
+				startUITestChromedpWaitValue(t, ctx, "#repo-controls-issue-form-schedule_at", "2026-04-25T11:15")
+				startUITestChromedpWaitValue(t, ctx, "#repo-controls-issue-form-deferred_reason", "Keep issue detail draft")
 			},
 		},
 		{
@@ -267,7 +274,7 @@ func TestStartUIBrowserInteractionsDraftsSurviveLiveRefresh(t *testing.T) {
 		},
 		{
 			name:          "investigations-finding-detail-form",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
 			readySelector: "#task-findings-grid",
 			prepare:       startUITestSeedDraftRefreshFindingsData,
 			edit: func(t *testing.T, ctx context.Context) {
@@ -284,7 +291,7 @@ func TestStartUIBrowserInteractionsDraftsSurviveLiveRefresh(t *testing.T) {
 		},
 		{
 			name:          "investigations-import-candidate-form",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
 			readySelector: "#task-import-sessions-grid",
 			prepare:       startUITestSeedDraftRefreshImportSession,
 			edit: func(t *testing.T, ctx context.Context) {
@@ -387,16 +394,16 @@ func TestStartUIBrowserInteractionsFocusSurvivesLiveRefresh(t *testing.T) {
 			},
 		},
 		{
-			name:          "issues-detail-textarea",
-			hash:          "#view=issues",
-			readySelector: "#issue-detail-deferred",
+			name:          "repo-controls-issue-textarea-alt",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
+			readySelector: "#repo-controls-issue-form-deferred_reason",
 			edit: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpSetValue(t, ctx, "#issue-detail-deferred", "Keep issue detail draft")
-				startUITestChromedpSetSelectionRange(t, ctx, "#issue-detail-deferred", 5, 10)
+				startUITestChromedpSetValue(t, ctx, "#repo-controls-issue-form-deferred_reason", "Keep issue detail draft")
+				startUITestChromedpSetSelectionRange(t, ctx, "#repo-controls-issue-form-deferred_reason", 5, 10)
 			},
 			assert: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpWaitValue(t, ctx, "#issue-detail-deferred", "Keep issue detail draft")
-				startUITestChromedpWaitFocusSelection(t, ctx, "#issue-detail-deferred", 5, 10)
+				startUITestChromedpWaitValue(t, ctx, "#repo-controls-issue-form-deferred_reason", "Keep issue detail draft")
+				startUITestChromedpWaitFocusSelection(t, ctx, "#repo-controls-issue-form-deferred_reason", 5, 10)
 			},
 		},
 		{
@@ -414,7 +421,7 @@ func TestStartUIBrowserInteractionsFocusSurvivesLiveRefresh(t *testing.T) {
 		},
 		{
 			name:          "finding-summary-textarea",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
 			readySelector: "#task-findings-grid",
 			prepare:       startUITestSeedDraftRefreshFindingsData,
 			edit: func(t *testing.T, ctx context.Context) {
@@ -431,11 +438,17 @@ func TestStartUIBrowserInteractionsFocusSurvivesLiveRefresh(t *testing.T) {
 		},
 		{
 			name:          "import-candidate-summary-textarea",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
 			readySelector: "#task-import-sessions-grid",
 			prepare:       startUITestSeedDraftRefreshImportSession,
 			edit: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpWaitBodyTextContains(t, ctx, "Draft refresh candidate")
+				startUITestChromedpWaitCondition(t, ctx, 20*time.Second, `body to contain "Draft refresh candidate"`, func() (bool, string, error) {
+					var body string
+					if err := chromedp.Run(ctx, chromedp.Evaluate(`document.body ? document.body.innerText : ""`, &body)); err != nil {
+						return false, "", err
+					}
+					return strings.Contains(body, "Draft refresh candidate"), body, nil
+				})
 				startUITestChromedpClick(t, ctx, `[data-row-select-kind="import-candidate"][data-row-select-id="cand-refresh"]`)
 				startUITestChromedpWaitVisible(t, ctx, "#task-import-candidate-summary")
 				startUITestChromedpSetValue(t, ctx, "#task-import-candidate-summary", "Keep candidate draft summary")
@@ -514,8 +527,8 @@ func TestStartUIBrowserInteractionsDraftsClearOnRouteLeave(t *testing.T) {
 				startUITestChromedpSetSelectionRange(t, ctx, "#usage-filter-activity", 4, 9)
 			},
 			leaveAndReturn: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpClick(t, ctx, `[data-nav-view="issues"]`)
-				startUITestChromedpWaitVisible(t, ctx, "#issues-grid")
+				startUITestChromedpClick(t, ctx, `[data-nav-view="home"]`)
+				startUITestChromedpWaitVisible(t, ctx, "#global-repo-grid")
 				startUITestChromedpClick(t, ctx, `[data-nav-view="usage"]`)
 				startUITestChromedpWaitVisible(t, ctx, "#usage-filters-form")
 			},
@@ -529,24 +542,26 @@ func TestStartUIBrowserInteractionsDraftsClearOnRouteLeave(t *testing.T) {
 			},
 		},
 		{
-			name:          "issues-detail",
-			hash:          "#view=issues",
-			readySelector: "#issues-grid",
+			name:          "repo-controls-issue-form",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
+			readySelector: "#repo-controls-issue-form-deferred_reason",
 			edit: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpSetValue(t, ctx, "#issue-detail-priority", "5")
-				startUITestChromedpSetValue(t, ctx, "#issue-detail-deferred", "Transient issues draft")
-				startUITestChromedpSetSelectionRange(t, ctx, "#issue-detail-deferred", 4, 9)
+				startUITestChromedpSetValue(t, ctx, "#repo-controls-issue-form-priority", "5")
+				startUITestChromedpSetValue(t, ctx, "#repo-controls-issue-form-deferred_reason", "Transient issues draft")
+				startUITestChromedpSetSelectionRange(t, ctx, "#repo-controls-issue-form-deferred_reason", 4, 9)
 			},
 			leaveAndReturn: func(t *testing.T, ctx context.Context) {
 				startUITestChromedpClick(t, ctx, `[data-nav-view="home"]`)
 				startUITestChromedpWaitVisible(t, ctx, "#global-repo-grid")
-				startUITestChromedpClick(t, ctx, `[data-nav-view="issues"]`)
-				startUITestChromedpWaitVisible(t, ctx, "#issues-grid")
+				startUITestChromedpClick(t, ctx, `[data-nav-view="repo"][data-repo-slug="acme/widget"]`)
+				startUITestChromedpWaitVisible(t, ctx, "#repo-queue-summary")
+				startUITestChromedpClick(t, ctx, `[data-tab-group="repo"][data-tab-id="controls"]`)
+				startUITestChromedpWaitVisible(t, ctx, "#repo-controls-issue-form-deferred_reason")
 			},
 			assert: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpWaitValue(t, ctx, "#issue-detail-priority", "1")
-				startUITestChromedpWaitValue(t, ctx, "#issue-detail-deferred", "waiting for reproducible CI window")
-				startUITestChromedpWaitActiveElementNot(t, ctx, "#issue-detail-deferred")
+				startUITestChromedpWaitValue(t, ctx, "#repo-controls-issue-form-priority", "1")
+				startUITestChromedpWaitValue(t, ctx, "#repo-controls-issue-form-deferred_reason", "waiting for reproducible CI window")
+				startUITestChromedpWaitActiveElementNot(t, ctx, "#repo-controls-issue-form-deferred_reason")
 			},
 		},
 		{
@@ -637,7 +652,7 @@ func TestStartUIBrowserInteractionsDraftsClearOnSelectionChange(t *testing.T) {
 		},
 		{
 			name:          "investigations-finding-detail",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
 			readySelector: "#task-findings-grid",
 			edit: func(t *testing.T, ctx context.Context) {
 				startUITestChromedpWaitBodyTextContains(t, ctx, "Draft refresh finding")
@@ -662,7 +677,7 @@ func TestStartUIBrowserInteractionsDraftsClearOnSelectionChange(t *testing.T) {
 		},
 		{
 			name:          "investigations-import-candidate",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=controls",
 			readySelector: "#task-import-candidates-grid",
 			edit: func(t *testing.T, ctx context.Context) {
 				startUITestChromedpWaitBodyTextContains(t, ctx, "Draft refresh candidate")
@@ -764,13 +779,13 @@ func TestStartUIBrowserInteractionsFocusDoesNotRestoreAfterExplicitSaveOrReset(t
 		tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
 		defer cancelTab()
 
-		startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=issues", "#issue-detail-deferred")
-		startUITestChromedpSetValue(t, tabCtx, "#issue-detail-deferred", "focus save reason")
-		startUITestChromedpSetSelectionRange(t, tabCtx, "#issue-detail-deferred", 2, 7)
-		startUITestChromedpFocus(t, tabCtx, `[data-issue-save="acme/widget#7"]`)
-		startUITestChromedpClick(t, tabCtx, `[data-issue-save="acme/widget#7"]`)
-		startUITestChromedpWaitBodyTextContains(t, tabCtx, "focus save reason")
-		startUITestChromedpWaitActiveElementNot(t, tabCtx, "#issue-detail-deferred")
+		startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo=acme/widget&tab=controls", "#repo-controls-issue-form-deferred_reason")
+		startUITestChromedpSetValue(t, tabCtx, "#repo-controls-issue-form-deferred_reason", "focus save reason")
+		startUITestChromedpSetSelectionRange(t, tabCtx, "#repo-controls-issue-form-deferred_reason", 2, 7)
+		startUITestChromedpFocus(t, tabCtx, `#repo-controls-issue-form button[type="submit"]`)
+		startUITestChromedpClick(t, tabCtx, `#repo-controls-issue-form button[type="submit"]`)
+		startUITestChromedpWaitValue(t, tabCtx, "#repo-controls-issue-form-deferred_reason", "focus save reason")
+		startUITestChromedpWaitActiveElementNot(t, tabCtx, "#repo-controls-issue-form-deferred_reason")
 	})
 
 	t.Run("usage-reset", func(t *testing.T) {
@@ -853,7 +868,10 @@ func TestStartUIBrowserInteractionsApprovalLaunchCancelAndConfirm(t *testing.T) 
 	defer cancelTab()
 
 	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home&kind=approval", "#attention-inbox-grid")
+	launchTileSelector := fmt.Sprintf(`[data-attention-tile="planned:%s"]`, fixture.PlannedApprovalID)
+	startUITestChromedpClick(t, tabCtx, launchTileSelector)
 	launchSelector := fmt.Sprintf(`[data-attention-action="approve_planned_item"][data-attention-item-id="planned:%s"]`, fixture.PlannedApprovalID)
+	startUITestChromedpWaitVisible(t, tabCtx, launchSelector)
 	startUITestChromedpClick(t, tabCtx, launchSelector)
 	startUITestChromedpWaitDialogOpen(t, tabCtx, true)
 	startUITestChromedpClick(t, tabCtx, "#confirm-dialog-cancel")
@@ -883,7 +901,32 @@ func TestStartUIBrowserInteractionsApprovalRetryScout(t *testing.T) {
 	defer cancelTab()
 
 	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home&kind=approval", "#attention-inbox-grid")
+	retryTileSelector := fmt.Sprintf(`[data-attention-tile="scout-job:%s"]`, fixture.FailedScoutJobID)
 	retrySelector := fmt.Sprintf(`[data-attention-action="retry_scout_job"][data-attention-item-id="scout-job:%s"]`, fixture.FailedScoutJobID)
+	var retryReady struct {
+		Action bool `json:"action"`
+		Tile   bool `json:"tile"`
+	}
+	startUITestChromedpWaitCondition(t, tabCtx, 20*time.Second, "approval retry scout item or action to appear", func() (bool, string, error) {
+		if err := chromedp.Run(tabCtx, chromedp.Evaluate(fmt.Sprintf(`(() => {
+			const isVisible = (el) => {
+				if (!el) return false;
+				const style = window.getComputedStyle(el);
+				return style && style.visibility !== "hidden" && style.display !== "none" && Boolean(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+			};
+			return {
+				action: Array.from(document.querySelectorAll(%q)).some(isVisible),
+				tile: Array.from(document.querySelectorAll(%q)).some(isVisible),
+			};
+		})()`, retrySelector, retryTileSelector), &retryReady)); err != nil {
+			return false, "", err
+		}
+		return retryReady.Action || retryReady.Tile, fmt.Sprintf("action=%t tile=%t", retryReady.Action, retryReady.Tile), nil
+	})
+	if retryReady.Tile {
+		startUITestChromedpClick(t, tabCtx, retryTileSelector)
+	}
+	startUITestChromedpWaitVisible(t, tabCtx, retrySelector)
 	startUITestChromedpClick(t, tabCtx, retrySelector)
 	startUITestChromedpWaitDialogOpen(t, tabCtx, true)
 	startUITestChromedpClick(t, tabCtx, "#confirm-dialog-confirm")
@@ -916,7 +959,10 @@ func TestStartUIBrowserInteractionsApprovalDropRun(t *testing.T) {
 	defer cancelTab()
 
 	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home&kind=approval", "#attention-inbox-grid")
+	dropTileSelector := fmt.Sprintf(`[data-attention-tile="run:%s"]`, fixture.GithubRunID)
+	startUITestChromedpClick(t, tabCtx, dropTileSelector)
 	dropSelector := fmt.Sprintf(`[data-attention-action="drop_approval"][data-attention-item-id="run:%s"]`, fixture.GithubRunID)
+	startUITestChromedpWaitVisible(t, tabCtx, dropSelector)
 	startUITestChromedpClick(t, tabCtx, dropSelector)
 	startUITestChromedpWaitDialogOpen(t, tabCtx, true)
 	startUITestChromedpClick(t, tabCtx, "#confirm-dialog-confirm")
@@ -946,7 +992,10 @@ func TestStartUIBrowserInteractionsWorkItemSubmit(t *testing.T) {
 	defer cancelTab()
 
 	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home&kind=approval", "#attention-inbox-grid")
+	reviewTileSelector := fmt.Sprintf(`[data-attention-tile="work-item:%s"]`, fixture.ReviewItemID)
+	startUITestChromedpClick(t, tabCtx, reviewTileSelector)
 	reviewSelector := fmt.Sprintf(`[data-attention-action="approve_work_item"][data-attention-item-id="work-item:%s"]`, fixture.ReviewItemID)
+	startUITestChromedpWaitVisible(t, tabCtx, reviewSelector)
 	startUITestChromedpClick(t, tabCtx, reviewSelector)
 	startUITestChromedpWaitDialogOpen(t, tabCtx, true)
 	startUITestChromedpClick(t, tabCtx, "#confirm-dialog-cancel")
@@ -963,7 +1012,10 @@ func TestStartUIBrowserInteractionsWorkItemSubmit(t *testing.T) {
 	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home&kind=approval", "#attention-inbox-grid")
 	startUITestChromedpWaitSelectorAbsent(t, tabCtx, reviewSelector)
 
+	replyTileSelector := fmt.Sprintf(`[data-attention-tile="work-item:%s"]`, fixture.ReplyItemID)
+	startUITestChromedpClick(t, tabCtx, replyTileSelector)
 	replySelector := fmt.Sprintf(`[data-attention-action="approve_work_item"][data-attention-item-id="work-item:%s"]`, fixture.ReplyItemID)
+	startUITestChromedpWaitVisible(t, tabCtx, replySelector)
 	startUITestChromedpClick(t, tabCtx, replySelector)
 	startUITestChromedpWaitDialogOpen(t, tabCtx, true)
 	startUITestChromedpClick(t, tabCtx, "#confirm-dialog-confirm")
@@ -1806,14 +1858,35 @@ func startUITestSeedDraftRefreshFindingsData(t *testing.T, fixture *startUITestB
 
 func startUITestSeedDraftRefreshImportSession(t *testing.T, fixture *startUITestBrowserFixture) {
 	t.Helper()
-	fakeBin := filepath.Join(t.TempDir(), "bin")
-	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
-		t.Fatalf("mkdir fake bin: %v", err)
+	state, err := readStartWorkState(fixture.RepoSlug)
+	if err != nil {
+		t.Fatalf("read start work state: %v", err)
 	}
-	writeFindingsTestExecutable(t, filepath.Join(fakeBin, "codex"), "#!/bin/sh\ncat >/dev/null\nprintf '{\"candidates\":[{\"candidate_id\":\"cand-refresh\",\"title\":\"Draft refresh candidate\",\"summary\":\"Original candidate summary\",\"detail\":\"Original candidate detail\",\"evidence\":\"Original candidate evidence\",\"severity\":\"medium\",\"work_type\":\"feature\"}]}'\n")
-	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
-	if _, err := createStartUIFindingImportSession(fixture.RepoSlug, "draft-refresh.md", "# Findings\n\n- Draft refresh candidate"); err != nil {
-		t.Fatalf("create finding import session: %v", err)
+	now := "2026-04-22T12:00:00Z"
+	if state.ImportSessions == nil {
+		state.ImportSessions = map[string]startWorkFindingImportSession{}
+	}
+	state.ImportSessions["import-refresh"] = startWorkFindingImportSession{
+		ID:               "import-refresh",
+		RepoSlug:         fixture.RepoSlug,
+		InputFilePath:    "draft-refresh.md",
+		MarkdownSnapshot: "# Findings\n\n- Draft refresh candidate",
+		ParseStatus:      "parsed",
+		Candidates: []startWorkFindingImportCandidate{{
+			CandidateID: "cand-refresh",
+			Title:       "Draft refresh candidate",
+			Summary:     "Original candidate summary",
+			Detail:      "Original candidate detail",
+			Evidence:    "Original candidate evidence",
+			Severity:    "medium",
+			WorkType:    workTypeFeature,
+			Status:      startWorkFindingCandidateStatusCandidate,
+		}},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := writeStartWorkState(*state); err != nil {
+		t.Fatalf("write start work state: %v", err)
 	}
 	fixture.API.invalidateOverviewCache()
 }
