@@ -180,11 +180,15 @@ var startUIOverviewCacheAfterUncachedBuildHook func()
 var startUIPrewarmLogWriter io.Writer = os.Stderr
 var startUIPrewarmDelay = time.Second
 var startUISectionCacheProbeInterval = 5 * time.Second
-var startUIUsageIndexProbeInterval = 5 * time.Second
+// The Usage page auto-refreshes every 30 seconds in the client, so probing the
+// backing usage index more aggressively just drags refresh work back onto
+// foreground requests without improving visible freshness.
+var startUIUsageIndexProbeInterval = 30 * time.Second
 // Usage cache keys already include the indexed data version and active filters,
 // so a longer TTL avoids rebuilding identical reports on repeated page loads
 // while still rolling forward promptly when the usage index changes.
 var startUIUsageCacheTTL = time.Hour
+var startUIUsageBackgroundWarmInterval = 30 * time.Second
 var startUIUsageCacheNow = time.Now
 
 type startUITotals struct {
@@ -917,6 +921,21 @@ func (h *startUIAPI) prewarmStartUIDataAsync(ctx context.Context, done chan stru
 	if err := h.prewarmStartUIData(); err != nil && startUIPrewarmLogWriter != nil {
 		fmt.Fprintf(startUIPrewarmLogWriter, "[start-ui] prewarm failed: %v\n", err)
 	}
+	if startUIUsageBackgroundWarmInterval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(startUIUsageBackgroundWarmInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := h.prewarmDefaultUsageReport(); err != nil && startUIPrewarmLogWriter != nil {
+				fmt.Fprintf(startUIPrewarmLogWriter, "[start-ui] usage prewarm failed: %v\n", err)
+			}
+		}
+	}
 }
 
 func (h *startUIAPI) prewarmStartUIData() error {
@@ -924,10 +943,15 @@ func (h *startUIAPI) prewarmStartUIData() error {
 	if _, err := h.buildOverview(); err != nil {
 		errs = append(errs, fmt.Errorf("overview: %w", err))
 	}
-	if _, err := h.buildUsageReport(startUIDefaultUsageQuery()); err != nil {
+	if err := h.prewarmDefaultUsageReport(); err != nil {
 		errs = append(errs, fmt.Errorf("usage: %w", err))
 	}
 	return errors.Join(errs...)
+}
+
+func (h *startUIAPI) prewarmDefaultUsageReport() error {
+	_, err := h.buildUsageReport(startUIDefaultUsageQuery())
+	return err
 }
 
 func startUIDefaultUsageQuery() url.Values {
