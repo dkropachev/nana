@@ -5386,8 +5386,8 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `} else if (state.currentView === "usage") {`) || !strings.Contains(string(appBody), `loadUsage({ silent: true });`) {
 		t.Fatalf("expected repo scope changes to refresh usage in place in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `Default scope is All repos.`) {
-		t.Fatalf("expected all-repos default picker copy in app.js, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `repo-picker-dropdown`) || !strings.Contains(string(appBody), `Repo scope`) {
+		t.Fatalf("expected compact repo picker dropdown markup in app.js, got %s", string(appBody))
 	}
 	if strings.Contains(string(appBody), `data-open-onboard="true"`) {
 		t.Fatalf("expected onboarding to move into the picker drawer flow, got %s", string(appBody))
@@ -7116,7 +7116,6 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 		"home": {
 			hash: "view=home",
 			expect: []string{
-				"Repo Picker",
 				"All Repos",
 				"Pending Jobs Chart",
 				"Repo Overview",
@@ -7218,12 +7217,12 @@ func TestStartUIBrowserRepoTabs(t *testing.T) {
 		"repo-overview": {
 			hash: "view=repo&repo=acme/widget&tab=overview",
 			expect: []string{
-				"Repo Picker",
+				"acme/widget",
 				"Queue Snapshot",
 				"Pending Jobs",
 				"Work Items",
 				"Drop Repo",
-				"Dismissed Scout Actions",
+				"Dismissed Scouts",
 			},
 		},
 		"repo-scouts": {

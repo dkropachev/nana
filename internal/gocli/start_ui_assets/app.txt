@@ -2873,29 +2873,9 @@
     if (!host) return;
     const repos = sortedRepos();
     const selected = selectedRepoSummary();
-    const countLabel = !repos.length
-      ? "No repos"
-      : selected
-        ? `${outstandingRepoCount(selected)} queued`
-        : `${repos.length} onboarded`;
-    const copy = selected
-      ? `Showing repo-specific overview and filtered workspace queues for ${selected.repo_slug}. Choose All repos to return to the shared dashboard.`
-      : "Default scope is All repos. Use this picker to focus one repo or onboard a new GitHub repository.";
     host.innerHTML = `
-      <div class="repo-picker-card">
-        <div class="repo-picker-head">
-          <div>
-            <p class="eyebrow">Repo Picker</p>
-            <h3 class="repo-picker-title">${escapeHTML(selected ? selected.repo_slug : "All Repos")}</h3>
-            <p class="repo-picker-copy">${escapeHTML(copy)}</p>
-          </div>
-          <div class="repo-picker-meta">
-            <span class="status-pill">${escapeHTML(countLabel)}</span>
-            <span class="repo-picker-meta-copy">${escapeHTML(selected ? defaultString(selected.repo_mode, "repo") : "Workspace scope")}</span>
-          </div>
-        </div>
-        <label class="selector repo-picker-shell" for="repo-scope-select">
-          <span>Scope</span>
+      <div class="repo-picker-dropdown">
+        <label class="sr-only" for="repo-scope-select">Repo scope</label>
           <select id="repo-scope-select" data-repo-picker="true">
             <optgroup label="Scope">
               <option value="${WORKSPACE_SCOPE_ALL}" ${selected ? "" : "selected"}>All repos</option>
@@ -2905,7 +2885,6 @@
               <option value="${WORKSPACE_SCOPE_ONBOARD}">Onboard new repo...</option>
             </optgroup>
           </select>
-        </label>
       </div>
     `;
   }
