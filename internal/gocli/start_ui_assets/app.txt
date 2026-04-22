@@ -33,6 +33,7 @@
     workItemSelection: defaultWorkItemSelection(),
     issueQueue: defaultIssueQueueState(),
     repoScheduler: defaultRepoSchedulerState(),
+    repoOnboarding: defaultRepoOnboardingState(),
     investigations: defaultInvestigationsState(),
     feedback: defaultFeedbackState(),
     approvals: defaultApprovalsState(),
@@ -144,6 +145,19 @@
       effectiveQuery: "",
       results: [],
       selectedPlannedItemID: "",
+    };
+  }
+
+  function defaultRepoOnboardingState() {
+    return {
+      draft: {
+        repo_slug: "",
+        repo_mode: "local",
+        issue_pick_mode: "manual",
+        pr_forward_mode: "approve",
+      },
+      submitting: false,
+      error: "",
     };
   }
 
@@ -511,6 +525,20 @@
       default:
         return "local";
     }
+  }
+
+  function repoOnboardingPayload() {
+    const onboarding = state.repoOnboarding || defaultRepoOnboardingState();
+    const draft = onboarding.draft || defaultRepoOnboardingState().draft;
+    return {
+      repo_slug: String(draft.repo_slug || "").trim(),
+      repo_mode: defaultString(draft.repo_mode, "local"),
+      issue_pick_mode: defaultString(draft.issue_pick_mode, "manual"),
+      pr_forward_mode: defaultString(draft.pr_forward_mode, "approve"),
+      fork_issues_mode: issuePickModeToAutomationMode(draft.issue_pick_mode),
+      implement_mode: issuePickModeToAutomationMode(draft.issue_pick_mode),
+      publish_target: repoModeToPublishTarget(draft.repo_mode),
+    };
   }
 
   function sortedRepos() {
@@ -2021,6 +2049,10 @@
         <details class="nav-disclosure" ${state.currentView === "repo" || repoQuery ? "open" : ""}>
           <summary>Repos</summary>
           <div class="nav-disclosure-body">
+            <button class="nav-item" type="button" data-open-onboard="true">
+              <span class="nav-label">Onboard Repo</span>
+              <span class="nav-count">+</span>
+            </button>
             ${visibleRepos.length ? visibleRepos.map((repo) => {
               const active = state.currentView === "repo" && state.selectedRepo === repo.repo_slug;
               return `
@@ -2557,6 +2589,90 @@
     syncUsageFilterControl("usage-filter-model", filters.model || "");
   }
 
+  function renderRepoOnboardingPanel() {
+    const host = document.getElementById("global-repo-onboard");
+    if (!host) return;
+    const onboarding = state.repoOnboarding || defaultRepoOnboardingState();
+    const draft = onboarding.draft || defaultRepoOnboardingState().draft;
+    const repoCount = sortedRepos().length;
+    const summaryCopy = repoCount
+      ? "Add another GitHub repo to the workspace. Advanced routing and scout policies stay editable in the repo Config tab."
+      : "No repos are onboarded yet. Add an owner/repo slug to start managing it from this workspace.";
+    host.innerHTML = `
+      <div class="surface-head">
+        <div>
+          <h3>Onboard Repo</h3>
+          <p>${escapeHTML(summaryCopy)}</p>
+        </div>
+        <span class="status-pill">${escapeHTML(repoCount ? `${repoCount} live` : "No repos")}</span>
+      </div>
+      ${onboarding.error ? `<div id="repo-onboard-error" class="config-notice">${escapeHTML(onboarding.error)}</div>` : `<div id="repo-onboard-error"></div>`}
+      <form id="repo-onboard-form" class="config-form">
+        <div class="config-grid">
+          <label class="selector config-field-wide">
+            <span>Repo Slug</span>
+            <input id="repo-onboard-slug" type="text" value="${escapeHTML(draft.repo_slug || "")}" placeholder="owner/repo" data-repo-onboard-field="repo_slug" />
+          </label>
+          <label class="selector">
+            <span>Repo Mode</span>
+            <select data-repo-onboard-field="repo_mode">
+              ${["local", "fork", "repo", "disabled"].map((value) => `<option value="${value}" ${defaultString(draft.repo_mode, "local") === value ? "selected" : ""}>${escapeHTML(value)}</option>`).join("")}
+            </select>
+          </label>
+          <label class="selector">
+            <span>Issue Pick</span>
+            <select data-repo-onboard-field="issue_pick_mode">
+              ${["manual", "label", "auto"].map((value) => `<option value="${value}" ${defaultString(draft.issue_pick_mode, "manual") === value ? "selected" : ""}>${escapeHTML(value)}</option>`).join("")}
+            </select>
+          </label>
+          <label class="selector">
+            <span>PR Forward</span>
+            <select data-repo-onboard-field="pr_forward_mode">
+              ${["approve", "auto"].map((value) => `<option value="${value}" ${defaultString(draft.pr_forward_mode, "approve") === value ? "selected" : ""}>${escapeHTML(value)}</option>`).join("")}
+            </select>
+          </label>
+        </div>
+        <div class="config-actions">
+          <button class="tx-btn tx-btn-primary" type="submit" ${onboarding.submitting ? "disabled" : ""}>${escapeHTML(onboarding.submitting ? "Onboarding..." : "Onboard Repo")}</button>
+        </div>
+      </form>
+    `;
+  }
+
+  function submitRepoOnboarding() {
+    const payload = repoOnboardingPayload();
+    if (!payload.repo_slug) {
+      state.repoOnboarding.error = "Enter a repo slug in owner/repo format.";
+      renderRepoOnboardingPanel();
+      toast("warning", "Repo slug required", "Use owner/repo.");
+      return;
+    }
+    state.repoOnboarding.submitting = true;
+    state.repoOnboarding.error = "";
+    renderRepoOnboardingPanel();
+    api("/api/v1/repos", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }).then((response) => {
+      const repo = response.repo || null;
+      const created = Boolean(response.created);
+      state.repoOnboarding = defaultRepoOnboardingState();
+      if (repo && repo.repo_slug) {
+        applySelectedRepoPayload(repo);
+        openRepoView(repo.repo_slug, "config");
+      }
+      loadOverview({ silent: true });
+      toast(created ? "success" : "warning", created ? "Repo onboarded" : "Repo already onboarded", repo && repo.repo_slug ? repo.repo_slug : payload.repo_slug);
+    }).catch((error) => {
+      state.repoOnboarding.submitting = false;
+      state.repoOnboarding.error = error.message;
+      if (state.currentView === "home") {
+        renderRepoOnboardingPanel();
+      }
+      toast("danger", "Repo onboarding failed", error.message);
+    });
+  }
+
   function renderRepoCards(target, repos) {
     const host = document.getElementById(target);
     if (!host) return;
@@ -2612,6 +2728,9 @@
     const showWorkItems = workItems.length > 0;
     ensureBodyStructure("global", `
       <section id="global-metrics" class="metrics-grid"></section>
+      <section class="surface">
+        <div id="global-repo-onboard"></div>
+      </section>
       <section class="layout-two-col">
         <div class="surface">
           <div class="surface-head">
@@ -2691,6 +2810,7 @@
     const metricsHost = document.getElementById("global-metrics");
     metricsHost.className = showWorkItems ? "metrics-grid metrics-grid-wide" : "metrics-grid";
     metricsHost.innerHTML = buildMetricCards(metricCards);
+    renderRepoOnboardingPanel();
     renderPendingJobsChart("global-pending-chart", runs);
     renderRepoCards("global-repo-grid", sortedRepos());
     renderGrid("global-pending-grid", pendingRunColumns(true), runGridRows(runs, true), {
@@ -5537,6 +5657,16 @@
         event.stopPropagation();
         return;
       }
+      const onboardButton = event.target.closest("[data-open-onboard]");
+      if (onboardButton) {
+        state.currentView = "home";
+        renderApp();
+        window.setTimeout(() => {
+          const input = document.getElementById("repo-onboard-slug");
+          if (input) input.focus();
+        }, 0);
+        return;
+      }
       const button = event.target.closest("[data-nav-view]");
       if (!button) return;
       const nextView = button.getAttribute("data-nav-view");
@@ -6162,6 +6292,12 @@
         renderRepoScoutsPage(selectedRepoSummary());
         return;
       }
+      const repoOnboardField = event.target.getAttribute("data-repo-onboard-field");
+      if (repoOnboardField) {
+        state.repoOnboarding.draft[repoOnboardField] = String(event.target.value || "");
+        state.repoOnboarding.error = "";
+        return;
+      }
       if (event.target.id === "issue-select") {
         state.selectedIssue = String(event.target.value || "");
         renderIssueForm(selectedIssueRecord());
@@ -6203,6 +6339,11 @@
     });
 
     document.getElementById("page-body").addEventListener("submit", (event) => {
+      if (event.target.id === "repo-onboard-form") {
+        event.preventDefault();
+        submitRepoOnboarding();
+        return;
+      }
       if (event.target.id === "repo-config-form") {
         event.preventDefault();
         saveConfigDraft(selectedRepoSummary());
@@ -6238,6 +6379,12 @@
     });
 
     document.getElementById("page-body").addEventListener("input", (event) => {
+      const repoOnboardField = event.target.getAttribute("data-repo-onboard-field");
+      if (repoOnboardField) {
+        state.repoOnboarding.draft[repoOnboardField] = String(event.target.value || "");
+        state.repoOnboarding.error = "";
+        return;
+      }
       const filterView = event.target.getAttribute("data-view-filter");
       const filterName = event.target.getAttribute("data-view-filter-name");
       if (!filterView || !filterName || filterName !== "query") {

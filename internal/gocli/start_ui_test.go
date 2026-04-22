@@ -1848,6 +1848,133 @@ func TestStartUIAPIDropRepoRemovesRepoFromOverview(t *testing.T) {
 	}
 }
 
+func TestStartUIAPIOnboardRepoCreatesSummary(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	server := httptest.NewServer((&startUIAPI{cwd: cwd, allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
+	defer server.Close()
+
+	repoSlug := "acme/widget"
+	body := strings.NewReader(`{
+		"repo_slug":"acme/widget",
+		"repo_mode":"fork",
+		"issue_pick_mode":"auto",
+		"pr_forward_mode":"approve",
+		"fork_issues_mode":"auto",
+		"implement_mode":"auto",
+		"publish_target":"fork"
+	}`)
+	response, err := http.Post(server.URL+"/api/v1/repos", "application/json", body)
+	if err != nil {
+		t.Fatalf("POST repo onboard: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("expected repo onboard status 201, got %d", response.StatusCode)
+	}
+	var payload struct {
+		Created bool               `json:"created"`
+		Repo    startUIRepoSummary `json:"repo"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode repo onboard payload: %v", err)
+	}
+	if !payload.Created {
+		t.Fatalf("expected created repo payload, got %+v", payload)
+	}
+	if payload.Repo.RepoSlug != repoSlug || payload.Repo.RepoMode != "fork" || payload.Repo.IssuePickMode != "auto" || payload.Repo.PRForwardMode != "approve" {
+		t.Fatalf("unexpected repo summary: %+v", payload.Repo)
+	}
+	if !payload.Repo.StartParticipation || payload.Repo.PublishTarget != "fork" || payload.Repo.ForkIssuesMode != "auto" || payload.Repo.ImplementMode != "auto" {
+		t.Fatalf("expected derived repo automation settings, got %+v", payload.Repo)
+	}
+
+	settings, err := readGithubRepoSettings(githubRepoSettingsPath(repoSlug))
+	if err != nil {
+		t.Fatalf("read onboarded repo settings: %v", err)
+	}
+	if settings.RepoMode != "fork" || settings.IssuePickMode != "auto" || settings.PRForwardMode != "approve" || settings.PublishTarget != "fork" {
+		t.Fatalf("unexpected onboarded settings: %+v", settings)
+	}
+
+	overviewResponse, err := http.Get(server.URL + "/api/v1/overview")
+	if err != nil {
+		t.Fatalf("GET overview after onboard: %v", err)
+	}
+	defer overviewResponse.Body.Close()
+	var overview startUIOverview
+	if err := json.NewDecoder(overviewResponse.Body).Decode(&overview); err != nil {
+		t.Fatalf("decode overview after onboard: %v", err)
+	}
+	if overview.Totals.Repos != 1 || len(overview.Repos) != 1 || overview.Repos[0].RepoSlug != repoSlug {
+		t.Fatalf("expected onboarded repo in overview, got totals=%+v repos=%+v", overview.Totals, overview.Repos)
+	}
+}
+
+func TestStartUIAPIOnboardRepoReturnsExistingSummary(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	repoSlug := "acme/widget"
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{
+		Version:        6,
+		RepoMode:       "local",
+		IssuePickMode:  "manual",
+		PRForwardMode:  "approve",
+		ForkIssuesMode: "manual",
+		ImplementMode:  "manual",
+		PublishTarget:  "local-branch",
+		UpdatedAt:      time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("write repo settings: %v", err)
+	}
+
+	server := httptest.NewServer((&startUIAPI{cwd: cwd, allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
+	defer server.Close()
+
+	body := strings.NewReader(`{
+		"repo_slug":"acme/widget",
+		"repo_mode":"repo",
+		"issue_pick_mode":"auto",
+		"pr_forward_mode":"auto",
+		"fork_issues_mode":"auto",
+		"implement_mode":"auto",
+		"publish_target":"repo"
+	}`)
+	response, err := http.Post(server.URL+"/api/v1/repos", "application/json", body)
+	if err != nil {
+		t.Fatalf("POST repo onboard existing: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected existing repo onboard status 200, got %d", response.StatusCode)
+	}
+	var payload struct {
+		Created bool               `json:"created"`
+		Repo    startUIRepoSummary `json:"repo"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode existing repo onboard payload: %v", err)
+	}
+	if payload.Created {
+		t.Fatalf("expected existing repo to report created=false, got %+v", payload)
+	}
+	if payload.Repo.RepoSlug != repoSlug || payload.Repo.RepoMode != "local" || payload.Repo.IssuePickMode != "manual" || payload.Repo.PublishTarget != "local-branch" {
+		t.Fatalf("expected existing repo summary to stay unchanged, got %+v", payload.Repo)
+	}
+
+	settings, err := readGithubRepoSettings(githubRepoSettingsPath(repoSlug))
+	if err != nil {
+		t.Fatalf("read existing repo settings: %v", err)
+	}
+	if settings.RepoMode != "local" || settings.IssuePickMode != "manual" || settings.PRForwardMode != "approve" || settings.PublishTarget != "local-branch" {
+		t.Fatalf("expected existing repo settings to remain unchanged, got %+v", settings)
+	}
+}
+
 func TestStartUIAPITrackedIssueSchedulerSearchAndMutations(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -4810,8 +4937,14 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `function defaultRepoListState()`) {
 		t.Fatalf("expected repo list fallback helper in app.js, got %s", string(appBody))
 	}
+	if !strings.Contains(string(appBody), `function defaultRepoOnboardingState()`) {
+		t.Fatalf("expected repo onboarding state helper in app.js, got %s", string(appBody))
+	}
 	if !strings.Contains(string(appBody), `api("/api/v1/repos")`) {
 		t.Fatalf("expected repo summaries fetch in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `api("/api/v1/repos", {`) {
+		t.Fatalf("expected repo onboarding POST wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `state.repoList.items || []`) {
 		t.Fatalf("expected sorted repos fallback to repo list cache in app.js, got %s", string(appBody))
@@ -4851,6 +4984,12 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	}
 	if !strings.Contains(string(appBody), `data-open-repo-tab="scouts"`) {
 		t.Fatalf("expected direct scouts navigation wiring in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `data-open-onboard="true"`) {
+		t.Fatalf("expected repo onboarding navigation affordance in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `repo-onboard-form`) || !strings.Contains(string(appBody), `submitRepoOnboarding()`) {
+		t.Fatalf("expected repo onboarding form wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `function dropApprovalItem(`) {
 		t.Fatalf("expected approval drop helper in app.js, got %s", string(appBody))
@@ -6557,6 +6696,7 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 		"home": {
 			hash: "view=home",
 			expect: []string{
+				"Onboard Repo",
 				"Pending Jobs Chart",
 				"Repo Overview",
 				"Work Items",

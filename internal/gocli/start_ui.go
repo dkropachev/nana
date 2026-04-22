@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -527,6 +528,27 @@ type startUIRepoSettingsPatchRequest struct {
 	ImplementMode  string                         `json:"implement_mode"`
 	PublishTarget  string                         `json:"publish_target"`
 	Scouts         *startUIRepoScoutsPatchRequest `json:"scouts,omitempty"`
+}
+
+type startUIRepoCreateRequest struct {
+	RepoSlug       string `json:"repo_slug"`
+	RepoMode       string `json:"repo_mode"`
+	IssuePickMode  string `json:"issue_pick_mode"`
+	PRForwardMode  string `json:"pr_forward_mode"`
+	ForkIssuesMode string `json:"fork_issues_mode"`
+	ImplementMode  string `json:"implement_mode"`
+	PublishTarget  string `json:"publish_target"`
+}
+
+func (request startUIRepoCreateRequest) settingsPatch() startUIRepoSettingsPatchRequest {
+	return startUIRepoSettingsPatchRequest{
+		RepoMode:       request.RepoMode,
+		IssuePickMode:  request.IssuePickMode,
+		PRForwardMode:  request.PRForwardMode,
+		ForkIssuesMode: request.ForkIssuesMode,
+		ImplementMode:  request.ImplementMode,
+		PublishTarget:  request.PublishTarget,
+	}
 }
 
 type startUIScoutItem struct {
@@ -1159,16 +1181,37 @@ func (h *startUIAPI) handleApprovals(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *startUIAPI) handleRepos(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		repos, err := listStartUIRepoSummaries(true)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSONResponse(w, map[string]any{"repos": repos})
+	case http.MethodPost:
+		var payload startUIRepoCreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		summary, created, err := createStartUIRepo(payload)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		h.invalidateOverviewCache()
+		status := http.StatusOK
+		if created {
+			status = http.StatusCreated
+		}
+		writeJSONResponseWithStatus(w, status, map[string]any{
+			"created": created,
+			"repo":    summary,
+		})
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
-	repos, err := listStartUIRepoSummaries(true)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSONResponse(w, map[string]any{"repos": repos})
 }
 
 func (h *startUIAPI) handleRepoRoute(w http.ResponseWriter, r *http.Request) {
@@ -4787,6 +4830,29 @@ func patchStartUIRepoSettings(repoSlug string, payload startUIRepoSettingsPatchR
 		return startUIRepoSummary{}, err
 	}
 	return loadStartUIRepoSummary(repoSlug, true)
+}
+
+func createStartUIRepo(payload startUIRepoCreateRequest) (startUIRepoSummary, bool, error) {
+	repoSlug := strings.TrimSpace(payload.RepoSlug)
+	if !validRepoSlug(repoSlug) {
+		return startUIRepoSummary{}, false, fmt.Errorf("repo_slug must be owner/repo")
+	}
+	repoSlugs, err := listStartUIRepoSlugs()
+	if err != nil {
+		return startUIRepoSummary{}, false, err
+	}
+	if slices.Contains(repoSlugs, repoSlug) {
+		summary, err := loadStartUIRepoSummary(repoSlug, true)
+		if err != nil {
+			return startUIRepoSummary{}, false, err
+		}
+		return summary, false, nil
+	}
+	summary, err := patchStartUIRepoSettings(repoSlug, payload.settingsPatch())
+	if err != nil {
+		return startUIRepoSummary{}, false, err
+	}
+	return summary, true, nil
 }
 
 type startUIRepoScoutWritePlan struct {
