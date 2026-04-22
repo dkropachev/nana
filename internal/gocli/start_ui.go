@@ -180,10 +180,12 @@ var startUIOverviewCacheAfterUncachedBuildHook func()
 var startUIPrewarmLogWriter io.Writer = os.Stderr
 var startUIPrewarmDelay = time.Second
 var startUISectionCacheProbeInterval = 5 * time.Second
+
 // The Usage page auto-refreshes every 30 seconds in the client, so probing the
 // backing usage index more aggressively just drags refresh work back onto
 // foreground requests without improving visible freshness.
 var startUIUsageIndexProbeInterval = 30 * time.Second
+
 // Usage cache keys already include the indexed data version and active filters,
 // so a longer TTL avoids rebuilding identical reports on repeated page loads
 // while still rolling forward promptly when the usage index changes.
