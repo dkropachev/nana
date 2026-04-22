@@ -288,7 +288,7 @@ func TestStartUIAPIFindingImportSessionRoutesListDetailPatchPromoteDrop(t *testi
 	}
 }
 
-func TestStartUIAppTasksPageReferencesFindingsInboxAndMarkdownImport(t *testing.T) {
+func TestStartUIAppRepoControlsReferencesFindingsInboxAndMarkdownImport(t *testing.T) {
 	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
 	if err != nil {
 		t.Fatalf("read app asset: %v", err)
@@ -298,6 +298,7 @@ func TestStartUIAppTasksPageReferencesFindingsInboxAndMarkdownImport(t *testing.
 		"/api/v1/repos/${repoSlug}/findings",
 		"/api/v1/repos/${repoSlug}/finding-import-sessions",
 		"Import Findings from Markdown",
+		"Schedule Task",
 		"Findings Inbox",
 		"data-task-finding-save",
 		"data-task-import-candidate-save",

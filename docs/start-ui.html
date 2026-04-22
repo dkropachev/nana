@@ -41,20 +41,20 @@ nana start</code></pre>
         <h2 id="what-you-can-do">What you can do in the workspace</h2>
         <div class="card-grid">
           <article class="card">
-            <h3>Home and work queues</h3>
-            <p>See active runs, paused work, pending work items, approvals, queue pressure, and repo automation state in one surface.</p>
+            <h3>Attention</h3>
+            <p>Work one operator inbox for approvals, findings, blocked runs, draft work items, and tracked-issue decisions. Sync GitHub from this surface when you need fresh review and reply work items.</p>
           </article>
           <article class="card">
-            <h3>Issues and investigations</h3>
-            <p>Inspect tracked issues, review triage rationale, launch work for tracked issues, and start or inspect investigation runs with retry timing when work is paused. Tracked issues and planned work now surface a resolved work type before launch.</p>
+            <h3>Usage</h3>
+            <p>Inspect token spend across NANA-managed sessions, roots, phases, and models without leaving the assistant workspace.</p>
           </article>
           <article class="card">
-            <h3>Feedback and approvals</h3>
-            <p>Review drafted PR feedback and replies, submit ready drafts, and inspect the human-gate queue for publication or launch decisions while paused work stays visible in the run surfaces. Local scout jobs that auto-recover from a stale startup cleanup stay in Scouts with a cooldown instead of appearing in Approvals; only a repeated stale cleanup is surfaced as a failed approval item.</p>
+            <h3>Repo tabs</h3>
+            <p>Use repo-scoped <code>Overview</code>, <code>Scouts</code>, <code>Config</code>, and <code>Controls</code> tabs without splitting operational editing across multiple top-level pages.</p>
           </article>
           <article class="card">
-            <h3>Repo operations</h3>
-            <p>Keep the existing repo-scoped config, controls, scouts, planned work, and logs available without leaving the workspace. Manual planned work now requires an explicit work type, and tracked issues show the inferred type Nana will use.</p>
+            <h3>Controls</h3>
+            <p>Schedule repo-scoped tasks, manage scheduled launches, edit findings, review markdown imports, and keep tracked issue scheduling in one operational tab.</p>
           </article>
         </div>
       </section>
@@ -64,10 +64,12 @@ nana start</code></pre>
         <ol>
           <li>Onboard and configure each target repo with <code>nana repo onboard</code>, <code>nana repo config</code>, or <code>nana repo explain</code>.</li>
           <li>Run bare <code>nana start</code> for the normal long-running loop, or <code>nana start --cycles &lt;n&gt;</code> for a bounded run.</li>
-          <li>Open the printed Web URL and use Home, Issues, Work, Feedback, Investigations, and Approvals to find paused work, blocked human-gate work, and active queue pressure.</li>
+          <li>Open the printed Web URL and use <code>Attention</code> to triage blocked work, approvals, findings, draft work items, and tracked-issue decisions.</li>
+          <li>Use <code>Usage</code> when you need token-spend visibility without leaving the browser workspace.</li>
           <li>Use the repo-level Scouts tab to inspect auto-recovered scout proposals; stale startup cleanups are retried once there with explicit cooldown metadata before any failed approval is shown.</li>
-          <li>Open a repo page when you need repo-local Scouts, Config, Controls, or queue posture.</li>
-          <li>Use run detail, retry timing, and logs when verification, publication, or review feedback needs investigation.</li>
+          <li>Open a repo page when you need repo-local <code>Overview</code>, <code>Scouts</code>, <code>Config</code>, or <code>Controls</code>.</li>
+          <li>Use repo <code>Controls</code> for task scheduling, scheduled-task management, findings editing, and finding-import review.</li>
+          <li>Use run detail, retry timing, logs, and the <code>Sync GitHub</code> control in <code>Attention</code> when verification, publication, or review feedback needs fresh state.</li>
           <li>Stop the loop from the terminal with <kbd>Ctrl</kbd>+<kbd>C</kbd> when you are done operating automation.</li>
         </ol>
       </section>
@@ -84,13 +86,13 @@ nana start</code></pre>
             <tr><td><code>GET /api/v1/overview</code></td><td>Global totals, repo summaries, recent runs, work items, and HUD payload.</td></tr>
             <tr><td><code>GET /api/v1/usage</code></td><td>Usage breakdowns, top sessions, and a usage-data <code>version</code> for the current filter set. The Usage view refreshes on entry, on manual/filter actions, and periodically while that view stays visible. Live usage reads are backed by SQLite; older usage JSON files and <code>thread-usage*.json</code> artifacts are treated only as compatibility import inputs.</td></tr>
             <tr><td><code>GET /api/v1/attention</code></td><td>Ranked attention queue plus the single best next item and recommended command.</td></tr>
-            <tr><td><code>GET /api/v1/issues</code></td><td>Flattened tracked-issue queue with triage and publication state.</td></tr>
-            <tr><td><code>GET /api/v1/investigations</code></td><td>Investigation runs discovered across the workspace and managed repo checkouts, including paused retry timing.</td></tr>
+            <tr><td><code>GET /api/v1/issues</code></td><td>Compatibility-only legacy tracked-issue queue feed retained for one migration cycle. The current SPA redirects old queue hashes into <code>Attention</code> filters instead of rendering a dedicated issues page.</td></tr>
+            <tr><td><code>GET /api/v1/investigations</code></td><td>Compatibility-only legacy investigations feed retained for one migration cycle. Repo task scheduling now lives under repo <code>Controls</code>, while already-created investigation work is triaged through <code>Attention</code>.</td></tr>
             <tr><td><code>POST /api/v1/investigations</code></td><td>Start a new investigation for the current workspace or a managed repo checkout.</td></tr>
-            <tr><td><code>GET /api/v1/reviews</code></td><td>Review-request drafts and PR feedback queue.</td></tr>
-            <tr><td><code>GET /api/v1/replies</code></td><td>Reply drafts for GitHub review or issue threads.</td></tr>
-            <tr><td><code>POST /api/v1/feedback/sync</code></td><td>Refresh the feedback queue from GitHub notifications.</td></tr>
-            <tr><td><code>GET /api/v1/approvals</code></td><td>Human-gate queue for ready drafts, publication decisions, scout retries, and planned launches; paused runs stay in work/run views instead, and scout jobs in one-shot stale-startup recovery stay in Scouts until they either recover or fail again.</td></tr>
+            <tr><td><code>GET /api/v1/reviews</code></td><td>Compatibility-only legacy review-draft feed retained for one migration cycle. The current workspace surfaces these items as work-item attention tiles instead of a dedicated feedback page.</td></tr>
+            <tr><td><code>GET /api/v1/replies</code></td><td>Compatibility-only legacy reply-draft feed retained for one migration cycle. The current workspace surfaces these items as work-item attention tiles instead of a dedicated feedback page.</td></tr>
+            <tr><td><code>POST /api/v1/feedback/sync</code></td><td>Refresh GitHub notifications so new review/reply work items appear in <code>Attention</code>. The current SPA calls this from the <code>Sync GitHub</code> button in the <code>Attention</code> summary area.</td></tr>
+            <tr><td><code>GET /api/v1/approvals</code></td><td>Compatibility-only legacy approvals feed retained for one migration cycle. The current SPA redirects old approvals hashes into <code>Attention</code> approval filters instead of rendering a dedicated approvals page.</td></tr>
             <tr><td><code>GET /api/v1/repos</code></td><td>List start-aware repo summaries.</td></tr>
             <tr><td><code>GET /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/start-state</code></td><td>Inspect one repo's start state and automation settings.</td></tr>
             <tr><td><code>PATCH /api/v1/repos/&lt;owner&gt;/&lt;repo&gt;/settings</code></td><td>Update repo-mode, issue-pick, PR-forwarding, publish settings, scout policies, and scout schedules.</td></tr>

@@ -23,17 +23,38 @@ Behavior:
 `
 
 type attentionItem struct {
-	Kind               string `json:"kind"`
-	ID                 string `json:"id"`
-	RepoSlug           string `json:"repo_slug,omitempty"`
-	Summary            string `json:"summary"`
-	Reason             string `json:"reason,omitempty"`
-	AttentionState     string `json:"attention_state,omitempty"`
-	RecommendedCommand string `json:"recommended_command,omitempty"`
-	TargetURL          string `json:"target_url,omitempty"`
-	RunID              string `json:"run_id,omitempty"`
-	ItemID             string `json:"item_id,omitempty"`
-	UpdatedAt          string `json:"updated_at,omitempty"`
+	Kind                  string   `json:"kind"`
+	Subtype               string   `json:"subtype,omitempty"`
+	ID                    string   `json:"id"`
+	RepoSlug              string   `json:"repo_slug,omitempty"`
+	IssueNumber           int      `json:"issue_number,omitempty"`
+	Summary               string   `json:"summary"`
+	Reason                string   `json:"reason,omitempty"`
+	Detail                string   `json:"detail,omitempty"`
+	Status                string   `json:"status,omitempty"`
+	Severity              string   `json:"severity,omitempty"`
+	Path                  string   `json:"path,omitempty"`
+	Route                 string   `json:"route,omitempty"`
+	AttentionState        string   `json:"attention_state,omitempty"`
+	ActionKind            string   `json:"action_kind,omitempty"`
+	AvailableActions      []string `json:"available_actions,omitempty"`
+	RecommendedCommand    string   `json:"recommended_command,omitempty"`
+	TargetURL             string   `json:"target_url,omitempty"`
+	RunID                 string   `json:"run_id,omitempty"`
+	ItemID                string   `json:"item_id,omitempty"`
+	PlannedItemID         string   `json:"planned_item_id,omitempty"`
+	ScoutJobID            string   `json:"scout_job_id,omitempty"`
+	FindingID             string   `json:"finding_id,omitempty"`
+	ImportSessionID       string   `json:"import_session_id,omitempty"`
+	ImportCandidateID     string   `json:"import_candidate_id,omitempty"`
+	ImportCandidateStatus string   `json:"import_candidate_status,omitempty"`
+	UpdatedAt             string   `json:"updated_at,omitempty"`
+}
+
+type attentionCounts struct {
+	ByAttentionState map[string]int `json:"by_attention_state,omitempty"`
+	ByKind           map[string]int `json:"by_kind,omitempty"`
+	ByRepoSlug       map[string]int `json:"by_repo_slug,omitempty"`
 }
 
 type attentionReport struct {
@@ -41,6 +62,7 @@ type attentionReport struct {
 	ActiveModeID string          `json:"active_mode_id,omitempty"`
 	ActiveMode   string          `json:"active_mode,omitempty"`
 	ActivePhase  string          `json:"active_phase,omitempty"`
+	Counts       attentionCounts `json:"counts,omitempty"`
 	Items        []attentionItem `json:"items"`
 	Next         *attentionItem  `json:"next,omitempty"`
 }
@@ -91,6 +113,7 @@ func buildAttentionReport(cwd string) (attentionReport, error) {
 		ActiveModeID: modeID,
 		ActiveMode:   strings.TrimSpace(modeID),
 		ActivePhase:  modePhase,
+		Counts:       buildAttentionCounts(items),
 		Items:        items,
 	}
 	if len(items) > 0 {
@@ -98,6 +121,23 @@ func buildAttentionReport(cwd string) (attentionReport, error) {
 		report.Next = &next
 	}
 	return report, nil
+}
+
+func buildAttentionCounts(items []attentionItem) attentionCounts {
+	counts := attentionCounts{
+		ByAttentionState: map[string]int{},
+		ByKind:           map[string]int{},
+		ByRepoSlug:       map[string]int{},
+	}
+	for _, item := range items {
+		state := defaultString(strings.TrimSpace(item.AttentionState), "queued")
+		counts.ByAttentionState[state]++
+		if kind := strings.TrimSpace(item.Kind); kind != "" {
+			counts.ByKind[kind]++
+		}
+		counts.ByRepoSlug[strings.TrimSpace(item.RepoSlug)]++
+	}
+	return counts
 }
 
 func formatAttentionReport(report attentionReport) string {
@@ -216,6 +256,10 @@ func listAttentionItems(cwd string) ([]attentionItem, error) {
 	if err != nil {
 		return nil, err
 	}
+	repos, err := listStartUIRepoSummaries(true)
+	if err != nil {
+		return nil, err
+	}
 
 	items := []attentionItem{}
 	seenRunIDs := map[string]bool{}
@@ -230,26 +274,54 @@ func listAttentionItems(cwd string) ([]attentionItem, error) {
 			seenItemIDs[approval.ItemID] = true
 		}
 	}
+	for _, repo := range repos {
+		repoSlug := strings.TrimSpace(repo.RepoSlug)
+		if repoSlug == "" {
+			continue
+		}
+		findings, err := listStartUIFindings(repoSlug)
+		if err != nil {
+			return nil, err
+		}
+		for _, finding := range findings {
+			if !attentionFindingNeedsOperatorAction(finding) {
+				continue
+			}
+			items = append(items, attentionItemFromFinding(finding))
+		}
+		sessions, err := listStartUIFindingImportSessions(repoSlug)
+		if err != nil {
+			return nil, err
+		}
+		for _, session := range sessions {
+			for _, candidate := range session.Candidates {
+				if !attentionImportCandidateNeedsOperatorAction(candidate) {
+					continue
+				}
+				items = append(items, attentionItemFromImportCandidate(repoSlug, session, candidate))
+			}
+		}
+	}
 	for _, run := range workRuns {
-		if !run.Pending || seenRunIDs[run.RunID] {
+		if seenRunIDs[run.RunID] || !attentionWorkRunNeedsOperatorAction(run) {
 			continue
 		}
 		items = append(items, attentionItemFromWorkRun(run))
 	}
 	for _, item := range workItems {
-		if !item.Pending || seenItemIDs[item.ID] {
+		if seenItemIDs[item.ID] || !attentionWorkItemNeedsOperatorAction(item) {
 			continue
 		}
 		items = append(items, attentionItemFromWorkItem(item))
 	}
 	for _, investigation := range investigations {
-		if investigation.AttentionState == "completed" {
+		if !attentionInvestigationNeedsOperatorAction(investigation) {
 			continue
 		}
 		items = append(items, attentionItemFromInvestigation(investigation))
 	}
 	for _, issue := range issues {
-		if issue.AttentionState == "completed" {
+		if !attentionIssueNeedsOperatorAction(issue) {
 			continue
 		}
 		items = append(items, attentionItemFromIssue(issue))
@@ -281,16 +353,20 @@ func attentionKindRank(kind string) int {
 	switch strings.TrimSpace(kind) {
 	case "approval":
 		return 0
-	case "work_run":
+	case "finding":
 		return 1
-	case "work_item":
+	case "import_candidate":
 		return 2
-	case "investigation":
+	case "work_run":
 		return 3
-	case "issue":
+	case "work_item":
 		return 4
-	default:
+	case "investigation":
 		return 5
+	case "issue":
+		return 6
+	default:
+		return 7
 	}
 }
 
@@ -301,17 +377,50 @@ func attentionItemFromApproval(item startUIApprovalQueueItem) attentionItem {
 	}
 	return attentionItem{
 		Kind:               "approval",
+		Subtype:            strings.TrimSpace(item.Kind),
 		ID:                 item.ID,
 		RepoSlug:           item.RepoSlug,
 		Summary:            defaultString(summary, item.ID),
 		Reason:             defaultString(strings.TrimSpace(item.Reason), strings.TrimSpace(item.NextAction)),
+		Detail:             strings.TrimSpace(item.NextAction),
+		Status:             strings.TrimSpace(item.Status),
 		AttentionState:     defaultString(strings.TrimSpace(item.AttentionState), "queued"),
+		ActionKind:         strings.TrimSpace(item.ActionKind),
+		AvailableActions:   attentionApprovalAvailableActions(item),
 		RecommendedCommand: recommendedCommandForApproval(item),
 		TargetURL:          defaultString(strings.TrimSpace(item.ExternalURL), strings.TrimSpace(item.TargetURL)),
 		RunID:              strings.TrimSpace(item.RunID),
 		ItemID:             strings.TrimSpace(item.ItemID),
+		PlannedItemID:      strings.TrimSpace(item.PlannedItemID),
+		ScoutJobID:         strings.TrimSpace(item.ScoutJobID),
 		UpdatedAt:          strings.TrimSpace(item.UpdatedAt),
 	}
+}
+
+func attentionApprovalAvailableActions(item startUIApprovalQueueItem) []string {
+	actions := []string{}
+	if action := strings.TrimSpace(item.ActionKind); action != "" {
+		actions = append(actions, action)
+	}
+	switch strings.TrimSpace(item.Kind) {
+	case "work_run":
+		if strings.TrimSpace(item.RunID) != "" {
+			actions = append(actions, "open_run", "drop_approval")
+		}
+	case "work_item":
+		if strings.TrimSpace(item.ItemID) != "" {
+			actions = append(actions, "open_work_item", "drop_approval")
+		}
+	case "planned_item":
+		if strings.TrimSpace(item.PlannedItemID) != "" {
+			actions = append(actions, "drop_approval")
+		}
+	case "scout_job":
+		if strings.TrimSpace(item.ScoutJobID) != "" {
+			actions = append(actions, "drop_approval")
+		}
+	}
+	return uniqueStrings(actions)
 }
 
 func recommendedCommandForApproval(item startUIApprovalQueueItem) string {
@@ -340,13 +449,27 @@ func attentionItemFromWorkRun(run startUIWorkRun) attentionItem {
 	if reason == "" {
 		reason = strings.TrimSpace(run.Status)
 	}
+	actionKind := "open_run"
+	availableActions := []string{"open_run"}
+	if run.ResolveAllowed {
+		actionKind = "resolve_run"
+		availableActions = append([]string{"resolve_run"}, availableActions...)
+	} else if strings.TrimSpace(run.Backend) == "github" {
+		actionKind = "sync_run"
+		availableActions = append([]string{"sync_run"}, availableActions...)
+	}
 	return attentionItem{
 		Kind:               "work_run",
+		Subtype:            strings.TrimSpace(run.Backend),
 		ID:                 run.RunID,
 		RepoSlug:           run.RepoSlug,
 		Summary:            defaultString(summary, run.RunID),
 		Reason:             reason,
+		Detail:             defaultString(strings.TrimSpace(run.PublicationState), strings.TrimSpace(run.CurrentPhase)),
+		Status:             strings.TrimSpace(run.Status),
 		AttentionState:     defaultString(strings.TrimSpace(run.AttentionState), "active"),
+		ActionKind:         actionKind,
+		AvailableActions:   uniqueStrings(availableActions),
 		RecommendedCommand: recommendedCommandForWorkRun(run),
 		TargetURL:          strings.TrimSpace(run.TargetURL),
 		RunID:              run.RunID,
@@ -384,16 +507,36 @@ func attentionItemFromWorkItem(item startUIWorkItem) attentionItem {
 	}
 	return attentionItem{
 		Kind:               "work_item",
+		Subtype:            strings.TrimSpace(item.SourceKind),
 		ID:                 item.ID,
 		RepoSlug:           item.RepoSlug,
 		Summary:            defaultString(item.Subject, item.ID),
 		Reason:             reason,
+		Detail:             defaultString(strings.TrimSpace(item.DraftSummary), strings.TrimSpace(item.TargetURL)),
+		Status:             strings.TrimSpace(item.Status),
 		AttentionState:     defaultString(strings.TrimSpace(item.AttentionState), "queued"),
+		ActionKind:         attentionWorkItemPrimaryAction(item),
+		AvailableActions:   attentionWorkItemAvailableActions(item),
 		RecommendedCommand: recommendedCommandForWorkItem(item),
 		TargetURL:          strings.TrimSpace(item.TargetURL),
 		ItemID:             item.ID,
 		UpdatedAt:          strings.TrimSpace(item.UpdatedAt),
 	}
+}
+
+func attentionWorkItemPrimaryAction(item startUIWorkItem) string {
+	if strings.TrimSpace(item.Status) == workItemStatusPaused {
+		return "requeue_work_item"
+	}
+	return "open_work_item"
+}
+
+func attentionWorkItemAvailableActions(item startUIWorkItem) []string {
+	actions := []string{"open_work_item"}
+	if strings.TrimSpace(item.Status) == workItemStatusPaused {
+		actions = append([]string{"requeue_work_item"}, actions...)
+	}
+	return uniqueStrings(actions)
 }
 
 func recommendedCommandForWorkItem(item startUIWorkItem) string {
@@ -416,7 +559,11 @@ func attentionItemFromInvestigation(item startUIInvestigationSummary) attentionI
 		RepoSlug:           item.RepoSlug,
 		Summary:            defaultString(item.Query, item.RunID),
 		Reason:             reason,
+		Detail:             defaultString(strings.TrimSpace(item.OverallShortExplanation), strings.TrimSpace(item.PauseReason)),
+		Status:             strings.TrimSpace(item.Status),
 		AttentionState:     defaultString(strings.TrimSpace(item.AttentionState), "queued"),
+		ActionKind:         "open_investigation",
+		AvailableActions:   []string{"open_investigation"},
 		RecommendedCommand: "nana investigate " + strconv.Quote(item.Query),
 		RunID:              item.RunID,
 		UpdatedAt:          strings.TrimSpace(item.UpdatedAt),
@@ -433,12 +580,126 @@ func attentionItemFromIssue(item startUIIssueQueueItem) attentionItem {
 		Kind:               "issue",
 		ID:                 item.ID,
 		RepoSlug:           item.RepoSlug,
+		IssueNumber:        item.SourceNumber,
 		Summary:            summary,
 		Reason:             reason,
+		Detail:             defaultString(strings.TrimSpace(item.TriageRationale), strings.TrimSpace(item.DeferredReason)),
+		Status:             strings.TrimSpace(item.Status),
 		AttentionState:     defaultString(strings.TrimSpace(item.AttentionState), "queued"),
+		ActionKind:         "investigate_issue",
+		AvailableActions:   []string{"investigate_issue", "launch_issue_work", "open_issue"},
 		RecommendedCommand: recommendedCommandForIssue(item),
 		TargetURL:          strings.TrimSpace(item.SourceURL),
 		UpdatedAt:          strings.TrimSpace(item.UpdatedAt),
+	}
+}
+
+func attentionItemFromFinding(item startWorkFinding) attentionItem {
+	summary := strings.TrimSpace(item.Title)
+	if strings.TrimSpace(item.RepoSlug) != "" {
+		summary = item.RepoSlug + ": " + summary
+	}
+	reason := defaultString(strings.TrimSpace(item.Summary), "finding requires disposition")
+	detail := strings.TrimSpace(item.Detail)
+	if detail == "" {
+		detail = "Promote this finding into planned work or dismiss it."
+	}
+	return attentionItem{
+		Kind:               "finding",
+		Subtype:            strings.TrimSpace(item.SourceKind),
+		ID:                 item.ID,
+		RepoSlug:           item.RepoSlug,
+		Summary:            defaultString(summary, item.ID),
+		Reason:             reason,
+		Detail:             detail,
+		Status:             normalizeStartWorkFindingStatus(item.Status),
+		Severity:           normalizeGithubSeverity(item.Severity),
+		Path:               strings.TrimSpace(item.Path),
+		Route:              strings.TrimSpace(item.Route),
+		AttentionState:     "blocked",
+		ActionKind:         "promote_finding",
+		AvailableActions:   []string{"promote_finding", "dismiss_finding", "open_finding"},
+		RecommendedCommand: "nana findings promote --repo " + item.RepoSlug + " --finding " + item.ID,
+		FindingID:          item.ID,
+		UpdatedAt:          strings.TrimSpace(item.UpdatedAt),
+	}
+}
+
+func attentionItemFromImportCandidate(repoSlug string, session startWorkFindingImportSession, candidate startWorkFindingImportCandidate) attentionItem {
+	summary := strings.TrimSpace(candidate.Title)
+	if strings.TrimSpace(repoSlug) != "" {
+		summary = repoSlug + ": " + summary
+	}
+	reason := defaultString(strings.TrimSpace(candidate.Summary), "imported finding candidate awaiting review")
+	detail := strings.TrimSpace(candidate.Detail)
+	if detail == "" {
+		detail = "Promote this candidate into the findings inbox or drop it."
+	}
+	return attentionItem{
+		Kind:                  "import_candidate",
+		Subtype:               startWorkFindingSourceKindManualImport,
+		ID:                    session.ID + ":" + candidate.CandidateID,
+		RepoSlug:              repoSlug,
+		Summary:               defaultString(summary, candidate.CandidateID),
+		Reason:                reason,
+		Detail:                detail,
+		Status:                normalizeStartWorkFindingImportParseStatus(session.ParseStatus),
+		Severity:              normalizeGithubSeverity(candidate.Severity),
+		Path:                  strings.TrimSpace(candidate.Path),
+		Route:                 strings.TrimSpace(candidate.Route),
+		AttentionState:        "queued",
+		ActionKind:            "promote_import_candidate",
+		AvailableActions:      []string{"promote_import_candidate", "drop_import_candidate", "open_import_candidate"},
+		RecommendedCommand:    "nana findings import review --repo " + repoSlug + " --session " + session.ID + " --promote " + candidate.CandidateID,
+		ImportSessionID:       session.ID,
+		ImportCandidateID:     candidate.CandidateID,
+		ImportCandidateStatus: normalizeStartWorkFindingCandidateStatus(candidate.Status),
+		UpdatedAt:             strings.TrimSpace(session.UpdatedAt),
+	}
+}
+
+func attentionFindingNeedsOperatorAction(item startWorkFinding) bool {
+	return normalizeStartWorkFindingStatus(item.Status) == startWorkFindingStatusOpen
+}
+
+func attentionImportCandidateNeedsOperatorAction(candidate startWorkFindingImportCandidate) bool {
+	return normalizeStartWorkFindingCandidateStatus(candidate.Status) == startWorkFindingCandidateStatusCandidate
+}
+
+func attentionWorkRunNeedsOperatorAction(item startUIWorkRun) bool {
+	if !item.Pending {
+		return false
+	}
+	switch strings.TrimSpace(item.AttentionState) {
+	case "failed", "blocked":
+		return true
+	default:
+		return false
+	}
+}
+
+func attentionWorkItemNeedsOperatorAction(item startUIWorkItem) bool {
+	if !item.Pending {
+		return false
+	}
+	switch strings.TrimSpace(item.Status) {
+	case workItemStatusPaused, workItemStatusNeedsRouting, workItemStatusFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func attentionInvestigationNeedsOperatorAction(item startUIInvestigationSummary) bool {
+	return strings.TrimSpace(item.RunID) != ""
+}
+
+func attentionIssueNeedsOperatorAction(item startUIIssueQueueItem) bool {
+	switch strings.TrimSpace(item.AttentionState) {
+	case "failed", "blocked":
+		return true
+	default:
+		return false
 	}
 }
 

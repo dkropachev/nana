@@ -6955,78 +6955,52 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 		"home": {
 			hash: "view=home",
 			expect: []string{
+				"Attention Inbox",
+				"Sync GitHub",
+				"Next Recommended Action",
+				"Select Visible",
+				"Group",
+				"Detail",
 				"Onboard Repo",
 				"Pending Jobs Chart",
 				"Repo Overview",
 				"Work Items",
 				"Open Repo",
-				"Open Scouts",
+				"Review feature PR",
 				"Queued Issues",
 				"Dismissed Scouts",
 			},
 		},
-		"issues": {
+		"legacy-issues": {
 			hash: "view=issues",
 			expect: []string{
-				"Tracked Issues",
-				"Issue Detail",
-				"Triage Rationale",
-				"Priority Source",
-				"Published PR",
+				"Attention Inbox",
 				"Fix flaky test",
 				"priority still pending reviewer confirmation",
 			},
 		},
-		"investigations": {
+		"legacy-investigations": {
 			hash: "view=investigations",
 			expect: []string{
-				"Schedule Task",
-				"Scheduled Tasks",
-				"Findings Inbox",
-				"Import Sessions",
-				"Detailed Explanation",
-				"Proofs",
-				"Findings",
-				"Validator",
+				"Attention Inbox",
+				"Investigate flaky scheduler failure",
 				"Flake reproduced in scheduler path.",
-				"scheduler cleanup races the review path",
 			},
 		},
-		"work": {
-			hash: "view=work",
-			expect: []string{
-				"Work Runs",
-				"gh-ui-blocked",
-				"lw-browser-active",
-				"completion-harden",
-				"ci_waiting",
-			},
-		},
-		"feedback-reviews": {
-			hash: "view=feedback&tab=reviews",
-			expect: []string{
-				"Review Drafts",
-				"Review feature PR",
-				"REQUEST_CHANGES",
-				"Flaky assertion needs a guard.",
-			},
-		},
-		"feedback-replies": {
-			hash: "view=feedback&tab=replies",
-			expect: []string{
-				"Reply Drafts",
-				"Reply in thread",
-				"Reply with fix summary.",
-			},
-		},
-		"approvals": {
+		"legacy-approvals": {
 			hash: "view=approvals",
 			expect: []string{
-				"Approval Queue",
-				"Approval Detail",
+				"Attention Inbox",
 				"Reply in thread",
 				"Review feature PR",
-				"Action Kind",
+				"approval required",
+			},
+		},
+		"legacy-work": {
+			hash: "view=work",
+			expect: []string{
+				"Attention Inbox",
+				"No attention items match these filters.",
 			},
 		},
 		"usage": {
@@ -7041,6 +7015,47 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 			},
 		},
 	})
+}
+
+func TestStartUIBrowserNavigationOnlyShowsConsolidatedPrimaryViews(t *testing.T) {
+	chromePath := startUITestChromePath(t)
+	if chromePath == "" {
+		t.Skip("google-chrome is required for browser UI coverage")
+	}
+
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=home")
+	for _, needle := range []string{
+		`data-nav-view="home"`,
+		`data-nav-view="usage"`,
+		`data-nav-view="repo"`,
+		`value="Attention"`,
+		`value="Usage"`,
+		`value="Repo: acme/widget"`,
+		`value="Run: gh-ui-blocked"`,
+	} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("expected %q in consolidated navigation output, got:\n%s", needle, output)
+		}
+	}
+	for _, needle := range []string{
+		`data-nav-view="issues"`,
+		`data-nav-view="investigations"`,
+		`data-nav-view="work"`,
+		`data-nav-view="feedback"`,
+		`data-nav-view="approvals"`,
+		`value="Issues"`,
+		`value="Investigations"`,
+		`value="Work"`,
+		`value="Feedback"`,
+		`value="Approvals"`,
+	} {
+		if strings.Contains(output, needle) {
+			t.Fatalf("did not expect %q in consolidated navigation output, got:\n%s", needle, output)
+		}
+	}
 }
 
 func TestStartUIBrowserRepoTabs(t *testing.T) {
@@ -7092,6 +7107,11 @@ func TestStartUIBrowserRepoTabs(t *testing.T) {
 				"Selected Scheduled Issue",
 				"Manage Existing Tracked Issue",
 				"Create Planned Launch",
+				"Schedule Task",
+				"Scheduled Tasks",
+				"Findings Inbox",
+				"Import Sessions",
+				"Candidate Detail",
 				"Launch Existing",
 			},
 		},
@@ -7145,7 +7165,7 @@ func TestStartUIBrowserActions(t *testing.T) {
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("expected issue patch status 200, got %d", response.StatusCode)
 		}
-		output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=issues")
+		output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=home&kind=issue")
 		startUITestRequireText(t, output, updatedReason, "issue-save-result")
 	})
 
@@ -7182,7 +7202,7 @@ func TestStartUIBrowserActions(t *testing.T) {
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("expected run sync status 200, got %d", response.StatusCode)
 		}
-		output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=work")
+		output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=home&kind=approval")
 		startUITestRequireText(t, output, "publish", "run-sync-result")
 	})
 }
@@ -7292,8 +7312,8 @@ func startUITestSetupBrowserFixtureWithOptions(t *testing.T, options startUITest
 		Confidence:        "high",
 		Files:             []string{"internal/gocli/start_ui_assets/app.txt", "internal/gocli/start_ui_test.go"},
 		Labels:            []string{"ui", "qa"},
-		Page:              "Approvals",
-		Route:             "#view=approvals",
+		Page:              "Attention",
+		Route:             "#view=home&kind=approval",
 		Severity:          "high",
 		TargetKind:        "page",
 		Screenshots:       []string{"approvals-before.png", "approvals-after.png"},
@@ -7416,8 +7436,8 @@ func startUITestSetupBrowserFixtureWithOptions(t *testing.T, options startUITest
 				Confidence:         "high",
 				Files:              []string{"internal/gocli/start_ui_assets/app.txt", "internal/gocli/start_ui_test.go"},
 				Labels:             []string{"ui", "qa"},
-				Page:               "Approvals",
-				Route:              "#view=approvals",
+				Page:               "Attention",
+				Route:              "#view=home&kind=approval",
 				Severity:           "high",
 				TargetKind:         "page",
 				Screenshots:        []string{"approvals-before.png", "approvals-after.png"},

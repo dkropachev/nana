@@ -893,6 +893,220 @@ textarea {
   background: #eef5fd;
 }
 
+.attention-inbox-surface {
+  overflow: hidden;
+}
+
+.attention-summary-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(0, 1.6fr);
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.attention-summary-next {
+  min-width: 0;
+}
+
+.attention-command-copy {
+  color: #4e627a;
+  font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+.attention-bulk-shell,
+.attention-bulk-copy,
+.attention-bulk-controls,
+.attention-tile-head,
+.attention-tile-pills,
+.attention-tile-meta,
+.attention-tile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.attention-bulk-shell {
+  align-items: flex-end;
+  justify-content: space-between;
+  margin: 16px 0 18px;
+  padding: 12px 14px;
+  border: 1px solid #d6deea;
+  border-radius: 10px;
+  background: #f8fafd;
+}
+
+.attention-bulk-copy {
+  align-items: center;
+}
+
+.attention-bulk-controls {
+  align-items: flex-end;
+  justify-content: flex-end;
+}
+
+.attention-board-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2.2fr) minmax(320px, 0.95fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.attention-board-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.attention-lane {
+  display: grid;
+  gap: 14px;
+}
+
+.attention-lane-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.attention-tile {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #d6deea;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  box-shadow: 0 10px 24px rgba(20, 32, 51, 0.04);
+  cursor: pointer;
+}
+
+.attention-tile-selected {
+  border-color: #9bb7dd;
+  box-shadow: 0 0 0 2px rgba(137, 167, 210, 0.2), 0 10px 24px rgba(20, 32, 51, 0.06);
+}
+
+.attention-tile-open {
+  border-color: #6b88b0;
+  box-shadow: 0 0 0 2px rgba(107, 136, 176, 0.22), 0 12px 28px rgba(20, 32, 51, 0.08);
+}
+
+.attention-tile:focus-visible {
+  outline: 3px solid rgba(107, 136, 176, 0.28);
+  outline-offset: 2px;
+}
+
+.attention-state-failed {
+  border-color: #e6c0c0;
+  background: linear-gradient(180deg, #fff9f9 0%, #ffffff 100%);
+}
+
+.attention-state-blocked {
+  border-color: #e4d6b2;
+  background: linear-gradient(180deg, #fffaf1 0%, #ffffff 100%);
+}
+
+.attention-state-queued {
+  border-color: #c8d6ea;
+}
+
+.attention-tile-head {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.attention-tile-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #4f6787;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.attention-tile-check input {
+  margin: 0;
+}
+
+.attention-tile-pills {
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.attention-kind-pill {
+  background: #efe8d7;
+  color: #6d5320;
+}
+
+.attention-tile-copy {
+  display: grid;
+  gap: 8px;
+}
+
+.attention-tile-copy h3 {
+  margin: 0;
+  color: #16243b;
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.attention-tile-repo,
+.attention-tile-reason,
+.attention-tile-detail {
+  margin: 0;
+}
+
+.attention-tile-repo {
+  color: #4f6787;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.attention-tile-reason {
+  color: #21324a;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.attention-tile-detail {
+  color: #4e627a;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.attention-tile-meta {
+  align-items: center;
+}
+
+.attention-tile-meta span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #eef3f9;
+  color: #4e627a;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.attention-tile-actions {
+  align-items: center;
+}
+
+.attention-detail-surface {
+  position: sticky;
+  top: 16px;
+  max-height: calc(100vh - 120px);
+  overflow: auto;
+}
+
+.attention-btn-danger {
+  border-color: #e5c4c4;
+  background: #fff8f8;
+  color: #9d2f2f;
+}
+
 .chart-host {
   min-height: 300px;
 }
@@ -1137,6 +1351,7 @@ textarea {
   .quick-switch {
     min-width: 0;
     width: 100%;
+  }
 
   .scheduler-search-form {
     grid-template-columns: 1fr;
@@ -1157,5 +1372,20 @@ textarea {
   .data-cards {
     display: grid;
     gap: 12px;
+  }
+
+  .attention-bulk-shell,
+  .attention-bulk-copy,
+  .attention-bulk-controls,
+  .attention-tile-head,
+  .attention-tile-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .attention-summary-strip,
+  .attention-board-layout,
+  .attention-board-grid {
+    grid-template-columns: 1fr;
   }
 }

@@ -994,6 +994,9 @@ func (h *startUIAPI) routes() http.Handler {
 	mux.HandleFunc("/api/v1/overview", h.handleOverview)
 	mux.HandleFunc("/api/v1/usage", h.handleUsage)
 	mux.HandleFunc("/api/v1/attention", h.handleAttention)
+	mux.HandleFunc("/api/v1/attention/", h.handleAttentionRoute)
+	// Legacy queue feeds retained for one compatibility cycle. The SPA no longer
+	// depends on these routes, but older tooling and deep links may still call them.
 	mux.HandleFunc("/api/v1/issues", h.handleIssues)
 	mux.HandleFunc("/api/v1/investigations", h.handleInvestigations)
 	mux.HandleFunc("/api/v1/investigations/", h.handleInvestigation)
@@ -1070,6 +1073,148 @@ func (h *startUIAPI) handleAttention(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSONResponse(w, report)
+}
+
+func (h *startUIAPI) handleAttentionRoute(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.EscapedPath()
+	if strings.TrimSpace(path) == "" {
+		path = r.URL.Path
+	}
+	trimmed := strings.Trim(strings.TrimPrefix(path, "/api/v1/attention/"), "/")
+	switch {
+	case r.Method == http.MethodPost && trimmed == "batch":
+		var payload startUIAttentionBatchRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		action := strings.TrimSpace(payload.Action)
+		if !attentionBatchActionSupported(action) {
+			http.Error(w, fmt.Sprintf("unsupported attention batch action %q", action), http.StatusBadRequest)
+			return
+		}
+		seen := map[string]struct{}{}
+		itemIDs := make([]string, 0, len(payload.ItemIDs))
+		for _, itemID := range payload.ItemIDs {
+			trimmedID := strings.TrimSpace(itemID)
+			if trimmedID == "" {
+				continue
+			}
+			if _, ok := seen[trimmedID]; ok {
+				continue
+			}
+			seen[trimmedID] = struct{}{}
+			itemIDs = append(itemIDs, trimmedID)
+		}
+		if len(itemIDs) == 0 {
+			http.Error(w, "at least one attention item is required", http.StatusBadRequest)
+			return
+		}
+		index, err := loadAttentionItemIndex(h.cwd)
+		if err != nil {
+			writeStartUIError(w, err, http.StatusInternalServerError)
+			return
+		}
+		response := startUIAttentionBatchResponse{
+			Action:  action,
+			Results: make([]startUIAttentionBatchResult, 0, len(itemIDs)),
+		}
+		for _, itemID := range itemIDs {
+			item, ok := index[itemID]
+			if !ok {
+				response.Results = append(response.Results, startUIAttentionBatchResult{
+					ID:     itemID,
+					Status: "error",
+					Error:  fmt.Sprintf("attention item %s was not found", itemID),
+				})
+				response.FailureCount++
+				continue
+			}
+			if _, err := executeAttentionItemAction(h.cwd, item, action, nil); err != nil {
+				response.Results = append(response.Results, startUIAttentionBatchResult{
+					ID:     itemID,
+					Status: "error",
+					Error:  err.Error(),
+				})
+				response.FailureCount++
+				continue
+			}
+			response.Results = append(response.Results, startUIAttentionBatchResult{
+				ID:     itemID,
+				Status: "ok",
+			})
+			response.SuccessCount++
+		}
+		if response.SuccessCount > 0 {
+			h.invalidateOverviewCache()
+		}
+		writeJSONResponse(w, response)
+	case strings.HasPrefix(trimmed, "items/"):
+		rest := strings.Trim(strings.TrimPrefix(trimmed, "items/"), "/")
+		if rest == "" {
+			http.NotFound(w, r)
+			return
+		}
+		parts := strings.Split(rest, "/")
+		encodedID, err := url.PathUnescape(parts[0])
+		if err != nil {
+			http.Error(w, "invalid attention item id", http.StatusBadRequest)
+			return
+		}
+		item, err := resolveAttentionItemByID(h.cwd, encodedID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if len(parts) == 1 && r.Method == http.MethodGet {
+			response, err := loadAttentionDetailResponse(h.cwd, item)
+			if err != nil {
+				writeStartUIError(w, err, http.StatusBadRequest)
+				return
+			}
+			writeJSONResponse(w, response)
+			return
+		}
+		if len(parts) == 3 && parts[1] == "actions" && r.Method == http.MethodPost {
+			action, err := url.PathUnescape(parts[2])
+			if err != nil {
+				http.Error(w, "invalid attention action", http.StatusBadRequest)
+				return
+			}
+			action = strings.TrimSpace(action)
+			if !attentionActionSupported(action) {
+				http.Error(w, fmt.Sprintf("unsupported attention action %q", action), http.StatusBadRequest)
+				return
+			}
+			var body []byte
+			if r.Body != nil {
+				defer r.Body.Close()
+				body, err = io.ReadAll(r.Body)
+				if err != nil {
+					http.Error(w, "invalid json", http.StatusBadRequest)
+					return
+				}
+			}
+			result, err := executeAttentionItemAction(h.cwd, item, action, body)
+			if err != nil {
+				writeStartUIError(w, err, http.StatusBadRequest)
+				return
+			}
+			h.invalidateOverviewCache()
+			response := map[string]any{"result": result}
+			if updatedItem, resolveErr := resolveAttentionItemByID(h.cwd, item.ID); resolveErr == nil {
+				response["item"] = updatedItem
+				if detail, detailErr := loadAttentionItemDetail(h.cwd, updatedItem); detailErr == nil {
+					response["detail"] = detail
+				}
+			}
+			writeJSONResponse(w, response)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 func (h *startUIAPI) handleIssues(w http.ResponseWriter, r *http.Request) {
