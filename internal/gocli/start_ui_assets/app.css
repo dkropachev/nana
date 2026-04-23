@@ -1669,6 +1669,11 @@ textarea {
   resize: none;
 }
 
+.task-composer-description-field textarea[readonly] {
+  background: #f5f8fd;
+  color: #314762;
+}
+
 .task-run-at-hidden {
   display: none;
 }

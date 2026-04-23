@@ -1078,6 +1078,15 @@
     return templates.find((item) => item.id === state.taskComposer.templateID) || templates[0] || null;
   }
 
+  function taskTemplateScoutPromptPreview(template) {
+    if (!template || defaultString(template.launch_kind_hint, "") !== "manual_scout") return "";
+    return String(template.scout_prompt_preview || "").trim();
+  }
+
+  function taskComposerCanSavePreset(template) {
+    return !template || defaultString(template.id, "template:custom") === "template:custom";
+  }
+
   function selectedTaskScopeRepoSummary() {
     if (!state.selectedRepo) return null;
     return selectedRepoSummary();
@@ -5057,6 +5066,9 @@
     const composerRepo = selectedTaskComposerRepoSummary();
     const selectedTemplate = selectedTaskTemplate();
     const runMode = defaultString(state.taskComposer.runMode, state.taskComposer.scheduleAt ? "later" : "now");
+    const scoutPromptPreview = taskTemplateScoutPromptPreview(selectedTemplate);
+    const descriptionValue = scoutPromptPreview || state.taskComposer.description;
+    const canSavePreset = taskComposerCanSavePreset(selectedTemplate);
     host.innerHTML = `
       <div class="mission-schedule-modal">
         <div class="config-grid task-composer-controls">
@@ -5092,11 +5104,11 @@
         </div>
         <label class="config-field config-field-wide task-composer-description-field">
           <span class="config-label">Description</span>
-          <textarea id="task-composer-description" rows="6" placeholder="Investigate why the task repo filter sometimes appears empty, then patch the UI if needed.">${escapeHTML(state.taskComposer.description)}</textarea>
+          <textarea id="task-composer-description" rows="6" placeholder="Investigate why the task repo filter sometimes appears empty, then patch the UI if needed." ${scoutPromptPreview ? "readonly" : ""}>${escapeHTML(descriptionValue)}</textarea>
         </label>
         <div class="drawer-toolbar">
           <button class="tx-btn tx-btn-secondary" type="button" data-task-schedule-close="true">Cancel</button>
-          <button id="task-save-template-button" class="tx-btn tx-btn-secondary" type="button" ${state.taskComposer.savingTemplate || !composerRepo ? "disabled" : ""}>${state.taskComposer.savingTemplate ? "Saving..." : "Save As Preset"}</button>
+          <button id="task-save-template-button" class="tx-btn tx-btn-secondary" type="button" ${state.taskComposer.savingTemplate || !composerRepo || !canSavePreset ? "disabled" : ""}>${state.taskComposer.savingTemplate ? "Saving..." : "Save As Preset"}</button>
           <button id="task-schedule-button" class="tx-btn tx-btn-primary" type="button" ${state.taskComposer.creating || !composerRepo ? "disabled" : ""}>${state.taskComposer.creating ? "Scheduling..." : "Schedule Task"}</button>
         </div>
       </div>
@@ -5126,8 +5138,10 @@
       toast("warning", "No repo selected", "Pick a repo before scheduling a task.");
       return;
     }
-    const description = String(state.taskComposer.description || "").trim();
-    if (!description) {
+    const selectedTemplate = selectedTaskTemplate();
+    const scoutPromptPreview = taskTemplateScoutPromptPreview(selectedTemplate);
+    const description = scoutPromptPreview ? "" : String(state.taskComposer.description || "").trim();
+    if (!description && !scoutPromptPreview) {
       toast("warning", "Missing description", "Describe the task first.");
       return;
     }
@@ -5161,7 +5175,7 @@
       }
       loadApprovals({ silent: true });
       loadInvestigations({ silent: true });
-      toast("success", "Task scheduled", response.planned_item && response.planned_item.title || description);
+      toast("success", "Task scheduled", response.planned_item && response.planned_item.title || (scoutPromptPreview ? defaultString(selectedTemplate && selectedTemplate.name, "Scout") : description));
     }).catch((error) => {
       state.taskComposer.creating = false;
       renderTaskScheduleModal();
@@ -5173,6 +5187,11 @@
   function saveTaskTemplateFromComposer() {
     const repo = selectedTaskComposerRepoSummary();
     const description = String(state.taskComposer.description || "").trim();
+    const selectedTemplate = selectedTaskTemplate();
+    if (!taskComposerCanSavePreset(selectedTemplate)) {
+      toast("warning", "Preset selected", "Switch to Custom task before saving a new preset.");
+      return;
+    }
     if (!repo || !description) {
       toast("warning", "Missing preset description", "Write the preset description first.");
       return;
@@ -8152,7 +8171,7 @@
         const templateID = taskTemplateButton.getAttribute("data-task-template") || "template:custom";
         const template = (state.investigations.templates || []).find((item) => item.id === templateID);
         state.taskComposer.templateID = templateID;
-        if (template && !String(state.taskComposer.description || "").trim()) {
+        if (template && !taskTemplateScoutPromptPreview(template) && !String(state.taskComposer.description || "").trim()) {
           state.taskComposer.description = String(template.description || "");
         }
         renderInvestigationsPage();
@@ -8885,6 +8904,7 @@
     document.getElementById("page-body").addEventListener("input", (event) => {
       captureDraftField(event.target);
       if (event.target.id === "task-composer-description") {
+        if (taskTemplateScoutPromptPreview(selectedTaskTemplate())) return;
         state.taskComposer.description = String(event.target.value || "");
         return;
       }
@@ -8928,6 +8948,7 @@
     document.body.addEventListener("input", (event) => {
       if (event.target.closest("#page-body")) return;
       if (event.target.id === "task-composer-description") {
+        if (taskTemplateScoutPromptPreview(selectedTaskTemplate())) return;
         state.taskComposer.description = String(event.target.value || "");
         return;
       }

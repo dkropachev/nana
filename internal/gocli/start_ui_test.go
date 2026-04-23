@@ -3717,6 +3717,47 @@ func TestStartUIAPITaskCreateAndTemplateSave(t *testing.T) {
 	}) {
 		t.Fatalf("expected saved task template %s in %+v", templatePayload.Template.ID, templatesPayload.Items)
 	}
+	uiScoutTemplateIndex := slices.IndexFunc(templatesPayload.Items, func(item startUITaskTemplate) bool {
+		return item.ID == "template:scout:"+uiScoutRole
+	})
+	if uiScoutTemplateIndex < 0 {
+		t.Fatalf("expected builtin UI scout template in %+v", templatesPayload.Items)
+	}
+	uiScoutTemplate := templatesPayload.Items[uiScoutTemplateIndex]
+	if strings.TrimSpace(uiScoutTemplate.Description) != "" || !strings.Contains(uiScoutTemplate.ScoutPromptPreview, "UI") {
+		t.Fatalf("expected builtin scout template to expose only prompt preview, got %+v", uiScoutTemplate)
+	}
+
+	builtinScoutBody, err := json.Marshal(startUITaskCreateRequest{
+		RepoSlug:    fixture.RepoSlug,
+		Description: "this preview text must not be persisted",
+		TemplateID:  "template:scout:" + uiScoutRole,
+		Priority:    intPtr(2),
+	})
+	if err != nil {
+		t.Fatalf("marshal builtin scout task body: %v", err)
+	}
+	builtinScoutResponse, err := http.Post(fixture.Server.URL+"/api/v1/tasks", "application/json", strings.NewReader(string(builtinScoutBody)))
+	if err != nil {
+		t.Fatalf("POST builtin scout task: %v", err)
+	}
+	defer builtinScoutResponse.Body.Close()
+	var builtinScoutPayload struct {
+		PlannedItem startWorkPlannedItem       `json:"planned_item"`
+		Inference   startUITaskInferenceResult `json:"inference"`
+	}
+	if err := json.NewDecoder(builtinScoutResponse.Body).Decode(&builtinScoutPayload); err != nil {
+		t.Fatalf("decode builtin scout task payload: %v", err)
+	}
+	if builtinScoutPayload.PlannedItem.LaunchKind != "manual_scout" || builtinScoutPayload.PlannedItem.ScoutRole != uiScoutRole || builtinScoutPayload.PlannedItem.Priority != 2 {
+		t.Fatalf("unexpected builtin scout task payload: %+v", builtinScoutPayload.PlannedItem)
+	}
+	if strings.TrimSpace(builtinScoutPayload.PlannedItem.Description) != "" {
+		t.Fatalf("expected builtin scout task description to stay empty, got %q", builtinScoutPayload.PlannedItem.Description)
+	}
+	if builtinScoutPayload.Inference.Title != "Run UI Scout" {
+		t.Fatalf("expected fixed scout inference, got %+v", builtinScoutPayload.Inference)
+	}
 
 	taskBody, err := json.Marshal(startUITaskCreateRequest{
 		RepoSlug:    fixture.RepoSlug,
@@ -5542,6 +5583,12 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `task-composer-controls`) || !strings.Contains(string(appBody), `task-composer-description-field`) {
 		t.Fatalf("expected schedule task controls above expanding description layout, got %s", string(appBody))
 	}
+	if !strings.Contains(string(appBody), `taskTemplateScoutPromptPreview`) || !strings.Contains(string(appBody), `scout_prompt_preview`) || !strings.Contains(string(appBody), `scoutPromptPreview ? "" : String(state.taskComposer.description || "").trim()`) {
+		t.Fatalf("expected scout presets to render read-only prompt previews without submitting them as descriptions, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `!composerRepo || !canSavePreset`) {
+		t.Fatalf("expected Save As Preset to be disabled when a preset is selected, got %s", string(appBody))
+	}
 	if strings.Contains(string(appBody), `class="mission-task-action"`) || strings.Contains(string(appBody), `taskPrimaryActionLabel`) {
 		t.Fatalf("expected task feed rows to render only the state pill, got %s", string(appBody))
 	}
@@ -5588,7 +5635,7 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read app.css body: %v", err)
 	}
-	if !strings.Contains(string(cssBody), `.task-composer-description-field textarea`) || !strings.Contains(string(cssBody), `height: min(560px, calc(100vh - 220px));`) || !strings.Contains(string(cssBody), `resize: none;`) {
+	if !strings.Contains(string(cssBody), `.task-composer-description-field textarea`) || !strings.Contains(string(cssBody), `height: min(560px, calc(100vh - 220px));`) || !strings.Contains(string(cssBody), `resize: none;`) || !strings.Contains(string(cssBody), `.task-composer-description-field textarea[readonly]`) {
 		t.Fatalf("expected bounded task composer description layout in app.css, got %s", string(cssBody))
 	}
 }

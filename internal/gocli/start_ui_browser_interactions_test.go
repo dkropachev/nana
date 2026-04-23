@@ -228,6 +228,12 @@ func TestStartUIBrowserInteractionsMissionControlTasks(t *testing.T) {
 
 	startUITestChromedpClick(t, tabCtx, "#open-task-schedule-button")
 	startUITestChromedpWaitVisible(t, tabCtx, "#task-schedule-modal-content")
+	startUITestChromedpSetValue(t, tabCtx, "#task-composer-template", "template:scout:ui-scout")
+	startUITestChromedpWaitReadonly(t, tabCtx, "#task-composer-description", true)
+	startUITestChromedpWaitValueContains(t, tabCtx, "#task-composer-description", "UI")
+	startUITestChromedpWaitDisabled(t, tabCtx, "#task-save-template-button", true)
+	startUITestChromedpSetValue(t, tabCtx, "#task-composer-template", "template:implementation")
+	startUITestChromedpWaitReadonly(t, tabCtx, "#task-composer-description", false)
 	startUITestChromedpSetValue(t, tabCtx, "#task-composer-description", "Create a browser scheduled task from Mission Control")
 	startUITestChromedpSetValue(t, tabCtx, "#task-composer-template", "template:implementation")
 	startUITestChromedpSetValue(t, tabCtx, "#task-composer-priority", "1")
@@ -1892,6 +1898,20 @@ func startUITestChromedpWaitValue(t *testing.T, ctx context.Context, selector st
 	})
 }
 
+func startUITestChromedpWaitValueContains(t *testing.T, ctx context.Context, selector string, needle string) {
+	t.Helper()
+	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("value %s to contain %q", selector, needle), func() (bool, string, error) {
+		var value string
+		if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`(() => {
+			const el = document.querySelector(%q);
+			return el ? String(el.value ?? "") : "";
+		})()`, selector), &value)); err != nil {
+			return false, "", err
+		}
+		return strings.Contains(value, needle), value, nil
+	})
+}
+
 func startUITestChromedpWaitOpen(t *testing.T, ctx context.Context, selector string, expected bool) {
 	t.Helper()
 	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("open state for %s to become %t", selector, expected), func() (bool, string, error) {
@@ -1903,6 +1923,20 @@ func startUITestChromedpWaitOpen(t *testing.T, ctx context.Context, selector str
 			return false, "", err
 		}
 		return open == expected, strconv.FormatBool(open), nil
+	})
+}
+
+func startUITestChromedpWaitReadonly(t *testing.T, ctx context.Context, selector string, expected bool) {
+	t.Helper()
+	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("readonly state for %s to become %t", selector, expected), func() (bool, string, error) {
+		var readonly bool
+		if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`(() => {
+			const el = document.querySelector(%q);
+			return Boolean(el && el.readOnly);
+		})()`, selector), &readonly)); err != nil {
+			return false, "", err
+		}
+		return readonly == expected, strconv.FormatBool(readonly), nil
 	})
 }
 

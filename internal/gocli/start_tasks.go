@@ -57,15 +57,16 @@ type startUITaskDetail struct {
 }
 
 type startUITaskTemplate struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	Description     string `json:"description,omitempty"`
-	RepoSlug        string `json:"repo_slug,omitempty"`
-	BuiltIn         bool   `json:"built_in,omitempty"`
-	LaunchKindHint  string `json:"launch_kind_hint,omitempty"`
-	ScoutRoleHint   string `json:"scout_role_hint,omitempty"`
-	WorkTypeHint    string `json:"work_type_hint,omitempty"`
-	DefaultPriority int    `json:"default_priority,omitempty"`
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Description        string `json:"description,omitempty"`
+	ScoutPromptPreview string `json:"scout_prompt_preview,omitempty"`
+	RepoSlug           string `json:"repo_slug,omitempty"`
+	BuiltIn            bool   `json:"built_in,omitempty"`
+	LaunchKindHint     string `json:"launch_kind_hint,omitempty"`
+	ScoutRoleHint      string `json:"scout_role_hint,omitempty"`
+	WorkTypeHint       string `json:"work_type_hint,omitempty"`
+	DefaultPriority    int    `json:"default_priority,omitempty"`
 }
 
 type startUITaskCreateRequest struct {
@@ -466,17 +467,24 @@ func createStartUITaskTemplate(repoSlug string, payload startUITaskTemplateCreat
 }
 
 func createStartUITask(repoSlug string, payload startUITaskCreateRequest) (*startWorkState, startWorkPlannedItem, startUITaskInferenceResult, error) {
-	description := strings.TrimSpace(payload.Description)
-	if description == "" {
-		return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, fmt.Errorf("description is required")
-	}
 	template, err := resolveStartUITaskTemplate(repoSlug, strings.TrimSpace(payload.TemplateID))
 	if err != nil {
 		return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, err
 	}
-	inference, err := startUIInferTaskPlan(repoSlug, description, template)
-	if err != nil {
-		return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, err
+	description := strings.TrimSpace(payload.Description)
+	fixedScoutTemplate := startUITaskTemplateIsFixedScout(template)
+	if description == "" && !fixedScoutTemplate {
+		return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, fmt.Errorf("description is required")
+	}
+	var inference startUITaskInferenceResult
+	if fixedScoutTemplate {
+		inference = fixedScoutTemplateInference(template)
+		description = ""
+	} else {
+		inference, err = startUIInferTaskPlan(repoSlug, description, template)
+		if err != nil {
+			return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, err
+		}
 	}
 	scheduleAt := strings.TrimSpace(payload.ScheduleAt)
 	if scheduleAt == "" {
@@ -509,6 +517,24 @@ func createStartUITask(repoSlug string, payload startUITaskCreateRequest) (*star
 		return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, err
 	}
 	return state, item, inference, nil
+}
+
+func startUITaskTemplateIsFixedScout(template startUITaskTemplate) bool {
+	return template.BuiltIn &&
+		strings.HasPrefix(strings.TrimSpace(template.ID), "template:scout:") &&
+		strings.TrimSpace(template.LaunchKindHint) == "manual_scout" &&
+		scoutRoleListIncludes(supportedScoutRoleOrder, strings.TrimSpace(template.ScoutRoleHint))
+}
+
+func fixedScoutTemplateInference(template startUITaskTemplate) startUITaskInferenceResult {
+	role := strings.TrimSpace(template.ScoutRoleHint)
+	label := defaultString(strings.TrimSpace(template.Name), scoutDisplayLabel(role))
+	return startUITaskInferenceResult{
+		Title:            "Run " + label,
+		LaunchKind:       "manual_scout",
+		ScoutRole:        role,
+		FindingsHandling: startWorkFindingsHandlingManualReview,
+	}
 }
 
 func resolveStartUITaskTemplate(repoSlug string, templateID string) (startUITaskTemplate, error) {
@@ -581,17 +607,25 @@ func startUIBuiltinTaskTemplates(repoSlug string) []startUITaskTemplate {
 	}
 	for _, entry := range startUIScoutCatalog() {
 		templates = append(templates, startUITaskTemplate{
-			ID:              "template:scout:" + entry.Role,
-			Name:            entry.DisplayLabel,
-			Description:     fmt.Sprintf("Run %s from a short description.", strings.ToLower(entry.DisplayLabel)),
-			RepoSlug:        repoSlug,
-			BuiltIn:         true,
-			LaunchKindHint:  "manual_scout",
-			ScoutRoleHint:   entry.Role,
-			DefaultPriority: 3,
+			ID:                 "template:scout:" + entry.Role,
+			Name:               entry.DisplayLabel,
+			ScoutPromptPreview: startUITaskScoutPromptPreview(entry.Role),
+			RepoSlug:           repoSlug,
+			BuiltIn:            true,
+			LaunchKindHint:     "manual_scout",
+			ScoutRoleHint:      entry.Role,
+			DefaultPriority:    3,
 		})
 	}
 	return templates
+}
+
+func startUITaskScoutPromptPreview(role string) string {
+	content, err := readScoutPrompt(role)
+	if err == nil && strings.TrimSpace(content) != "" {
+		return strings.TrimSpace(content)
+	}
+	return fmt.Sprintf("Run %s for this repo.", scoutDisplayLabel(role))
 }
 
 func inferStartUITaskPlan(repoSlug string, description string, template startUITaskTemplate) (startUITaskInferenceResult, error) {
