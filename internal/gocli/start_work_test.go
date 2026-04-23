@@ -1069,7 +1069,7 @@ func TestStartRepoCoordinatorRefreshRepoStatePreservesPersistedScoutJobs(t *test
 	}
 }
 
-func TestPrepareStartRepoCycleCleansStaleLocalRuns(t *testing.T) {
+func TestPrepareStartRepoCycleResumesStaleLocalRuns(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -1078,18 +1078,20 @@ func TestPrepareStartRepoCycleCleansStaleLocalRuns(t *testing.T) {
 	createLocalWorkRepoAt(t, sourcePath)
 
 	manifest := localWorkManifest{
-		Version:      1,
-		RunID:        "lw-start-clean",
-		CreatedAt:    "2026-04-17T00:00:00Z",
-		UpdatedAt:    "2026-04-17T00:00:00Z",
-		Status:       "running",
-		CurrentPhase: "implement",
-		RepoRoot:     sourcePath,
-		RepoName:     filepath.Base(sourcePath),
-		RepoID:       localWorkRepoID(sourcePath),
-		SourceBranch: "main",
-		BaselineSHA:  strings.TrimSpace(runLocalWorkTestGitOutput(t, sourcePath, "rev-parse", "HEAD")),
-		SandboxPath:  filepath.Join(home, "sandboxes", "lw-start-clean"),
+		Version:         1,
+		RunID:           "lw-start-clean",
+		CreatedAt:       "2026-04-17T00:00:00Z",
+		UpdatedAt:       "2026-04-17T00:00:00Z",
+		Status:          "running",
+		CurrentPhase:    "implement",
+		RepoRoot:        sourcePath,
+		RepoName:        filepath.Base(sourcePath),
+		RepoID:          localWorkRepoID(sourcePath),
+		SourceBranch:    "main",
+		BaselineSHA:     strings.TrimSpace(runLocalWorkTestGitOutput(t, sourcePath, "rev-parse", "HEAD")),
+		SandboxPath:     filepath.Join(home, "sandboxes", "lw-start-clean"),
+		SandboxRepoPath: filepath.Join(home, "sandboxes", "lw-start-clean", "repo"),
+		MaxIterations:   8,
 	}
 	if err := writeLocalWorkManifest(manifest); err != nil {
 		t.Fatalf("writeLocalWorkManifest: %v", err)
@@ -1099,16 +1101,27 @@ func TestPrepareStartRepoCycleCleansStaleLocalRuns(t *testing.T) {
 	localWorkProcessSnapshot = func() (string, error) { return "", nil }
 	defer func() { localWorkProcessSnapshot = oldSnapshot }()
 
+	oldDetachedRunner := localWorkStartDetachedRunner
+	resumeCalls := []string{}
+	localWorkStartDetachedRunner = func(repoRoot string, runID string, codexArgs []string, logPath string) error {
+		resumeCalls = append(resumeCalls, repoRoot+"|"+runID+"|"+logPath)
+		return nil
+	}
+	defer func() { localWorkStartDetachedRunner = oldDetachedRunner }()
+
 	if _, err := prepareStartRepoCycle(repoSlug, startOptions{}); err != nil {
 		t.Fatalf("prepareStartRepoCycle: %v", err)
+	}
+	if len(resumeCalls) != 1 || !strings.Contains(resumeCalls[0], manifest.RunID) {
+		t.Fatalf("expected detached resume launch for stale local run, got %+v", resumeCalls)
 	}
 
 	updated, err := readLocalWorkManifestByRunID("lw-start-clean")
 	if err != nil {
 		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
 	}
-	if updated.Status != "failed" || !strings.Contains(updated.LastError, "stale running run cleaned up at start") {
-		t.Fatalf("expected stale run cleanup during start prep, got %+v", updated)
+	if updated.Status != "running" || updated.CompletedAt != "" || updated.LastError != "" {
+		t.Fatalf("expected stale run resume during start prep, got %+v", updated)
 	}
 }
 

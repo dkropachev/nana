@@ -14,6 +14,7 @@ import (
 
 const (
 	startUITaskStatusRunning   = "running"
+	startUITaskStatusFailed    = "failed"
 	startUITaskStatusQueued    = "queued"
 	startUITaskStatusPaused    = "paused"
 	startUITaskStatusInReview  = "in_review"
@@ -806,20 +807,22 @@ func startUITaskStatusRank(status string) int {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case startUITaskStatusRunning:
 		return 0
-	case startUITaskStatusQueued:
+	case startUITaskStatusFailed:
 		return 1
-	case startUITaskStatusPaused:
-		return 2
-	case startUITaskStatusInReview:
-		return 3
 	case startUITaskStatusBlocked:
+		return 2
+	case startUITaskStatusQueued:
+		return 3
+	case startUITaskStatusPaused:
 		return 4
-	case startUITaskStatusDismissed:
+	case startUITaskStatusInReview:
 		return 5
-	case startUITaskStatusCompleted:
+	case startUITaskStatusDismissed:
 		return 6
-	default:
+	case startUITaskStatusCompleted:
 		return 7
+	default:
+		return 8
 	}
 }
 
@@ -991,7 +994,13 @@ func startUITaskSummaryFromWorkRun(item startUIWorkRun) startUITaskSummary {
 		} else {
 			status = startUITaskStatusRunning
 		}
-	case "blocked", "failed":
+	case "failed":
+		if strings.TrimSpace(item.PauseUntil) != "" {
+			status = startUITaskStatusPaused
+		} else {
+			status = startUITaskStatusFailed
+		}
+	case "blocked":
 		if strings.TrimSpace(item.PauseUntil) != "" {
 			status = startUITaskStatusPaused
 		} else {
@@ -1170,6 +1179,8 @@ func startUITaskAttentionStateForStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case startUITaskStatusRunning:
 		return "active"
+	case startUITaskStatusFailed:
+		return "failed"
 	case startUITaskStatusPaused, startUITaskStatusInReview, startUITaskStatusBlocked:
 		return "blocked"
 	case startUITaskStatusDismissed, startUITaskStatusCompleted:

@@ -997,10 +997,14 @@ func cleanupStaleLocalWorkRunsForRepo(repoRoot string) (int, error) {
 	return cleaned, err
 }
 
-func cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot string) (int, []localWorkManifest, error) {
+func cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot string, codexArgs ...[]string) (int, []localWorkManifest, error) {
 	repoRoot = strings.TrimSpace(repoRoot)
 	if repoRoot == "" {
 		return 0, nil, nil
+	}
+	resumeCodexArgs := []string(nil)
+	if len(codexArgs) > 0 {
+		resumeCodexArgs = append([]string{}, codexArgs[0]...)
 	}
 	snapshot, err := localWorkProcessSnapshot()
 	if err != nil {
@@ -1042,12 +1046,22 @@ func cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot string) (int, []localWork
 		if localWorkManifestHasLiveProcess(manifest, snapshot) {
 			continue
 		}
+		if localWorkCanResumeAfterHardRestart(manifest) {
+			resumedManifest, err := resumeStaleLocalWorkRunDetached(manifest, resumeCodexArgs)
+			if err == nil {
+				cleaned++
+				cleanedManifests = append(cleanedManifests, resumedManifest)
+				continue
+			}
+			manifest.LastError = localWorkStaleCleanupError + ": resume failed: " + err.Error()
+		} else {
+			manifest.LastError = localWorkStaleCleanupError
+		}
 		manifest.Status = "failed"
 		manifest.UpdatedAt = now
 		if strings.TrimSpace(manifest.CompletedAt) == "" {
 			manifest.CompletedAt = now
 		}
-		manifest.LastError = localWorkStaleCleanupError
 		if err := writeLocalWorkManifest(manifest); err != nil {
 			return cleaned, cleanedManifests, err
 		}
@@ -1055,6 +1069,50 @@ func cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot string) (int, []localWork
 		cleanedManifests = append(cleanedManifests, manifest)
 	}
 	return cleaned, cleanedManifests, nil
+}
+
+func localWorkCanResumeAfterHardRestart(manifest localWorkManifest) bool {
+	if strings.TrimSpace(manifest.RunID) == "" {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(manifest.Status), "running") {
+		return false
+	}
+	if strings.TrimSpace(manifest.RepoRoot) == "" ||
+		strings.TrimSpace(manifest.SandboxPath) == "" ||
+		strings.TrimSpace(manifest.SandboxRepoPath) == "" {
+		return false
+	}
+	if strings.TrimSpace(manifest.CompletedAt) != "" {
+		return false
+	}
+	if manifest.MaxIterations > 0 && len(manifest.Iterations) >= manifest.MaxIterations {
+		return false
+	}
+	return true
+}
+
+func resumeStaleLocalWorkRunDetached(manifest localWorkManifest, codexArgs []string) (localWorkManifest, error) {
+	original := manifest
+	manifest.Status = "running"
+	manifest.CompletedAt = ""
+	manifest.LastError = ""
+	manifest.PauseReason = ""
+	manifest.PauseUntil = ""
+	manifest.PausedAt = ""
+	manifest.UpdatedAt = ISOTimeNow()
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		return original, err
+	}
+	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
+	logPath := filepath.Join(runDir, "runtime.log")
+	if err := localWorkStartDetachedRunner(manifest.RepoRoot, manifest.RunID, codexArgs, logPath); err != nil {
+		if restoreErr := writeLocalWorkManifest(original); restoreErr != nil {
+			return original, fmt.Errorf("%w (additionally failed to restore stale manifest: %v)", err, restoreErr)
+		}
+		return original, err
+	}
+	return manifest, nil
 }
 
 func localWorkRunIndexEntry(manifest localWorkManifest) workRunIndexEntry {

@@ -63,10 +63,11 @@
 
   const TASK_STATUS_GROUPS = [
     { id: "running", title: "Running", copy: "Active Nana work and execution jobs." },
-    { id: "queued", title: "Queued", copy: "Due or scheduled tasks waiting to run." },
-    { id: "paused", title: "Paused", copy: "Tasks waiting for retry windows or recovery." },
-    { id: "in_review", title: "In Review", copy: "Drafted work waiting for a human pass." },
+    { id: "failed", title: "Failed", copy: "Runs or jobs that ended with a hard failure." },
     { id: "blocked", title: "Blocked", copy: "Tasks that need attention before they can move." },
+    { id: "queued", title: "Queued", copy: "Due or scheduled tasks waiting to run." },
+    { id: "in_review", title: "In Review", copy: "Drafted work waiting for a human pass." },
+    { id: "paused", title: "Paused", copy: "Tasks waiting for retry windows or recovery." },
     { id: "dismissed", title: "Dismissed", copy: "Suppressed or intentionally dropped tasks." },
     { id: "completed", title: "Completed", copy: "Finished tasks and launched work." },
   ];
@@ -4629,6 +4630,8 @@
     switch (status) {
       case "running":
         return "active";
+      case "failed":
+        return "failed";
       case "paused":
       case "in_review":
       case "blocked":
@@ -4750,6 +4753,8 @@
     switch (defaultString(item && item.status, "")) {
       case "running":
         return "Logs";
+      case "failed":
+        return "Open Job";
       case "blocked":
         return "Resolve";
       case "queued":

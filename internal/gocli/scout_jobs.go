@@ -793,6 +793,18 @@ func recoverStartWorkScoutJobsFromStaleManifests(repoSlug string, state *startWo
 		if !ok {
 			continue
 		}
+		if strings.TrimSpace(manifest.Status) == "running" && strings.TrimSpace(manifest.LastError) == "" {
+			startWorkScoutJobRecordRecoveredRun(&job, localWorkManifest{
+				RunID:     manifest.RunID,
+				LastError: localWorkStaleCleanupError,
+			}, now)
+			state.ScoutJobs[jobID] = job
+			handled[manifest.RunID] = true
+			resumed++
+			updated = true
+			fmt.Fprintf(os.Stdout, "[start] %s: scout job %s resumed stale local work run %s.\n", repoSlug, job.ID, manifest.RunID)
+			continue
+		}
 		if startWorkScoutJobCanResumeAfterStaleCleanup(&job, manifest) {
 			if err := resumeStartWorkScoutJobDetached(manifest, codexArgs); err == nil {
 				startWorkScoutJobRecordRecoveredRun(&job, manifest, now)

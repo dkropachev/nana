@@ -383,7 +383,7 @@ func (c *startRepoCoordinator) refreshRepoState() error {
 }
 
 func (c *startRepoCoordinator) reconcileStaleLocalRuns() error {
-	cleaned, manifests, err := cleanupStaleLocalWorkRunsForRepoDetailed(githubManagedPaths(c.repoSlug).SourcePath)
+	cleaned, manifests, err := cleanupStaleLocalWorkRunsForRepoDetailed(githubManagedPaths(c.repoSlug).SourcePath, c.workOptions.CodexArgs)
 	if err != nil {
 		return err
 	}
@@ -412,6 +412,17 @@ func (c *startRepoCoordinator) reconcileStaleLocalRuns() error {
 	}
 	for _, manifest := range manifests {
 		if handled[strings.TrimSpace(manifest.RunID)] {
+			continue
+		}
+		if strings.TrimSpace(manifest.Status) == "running" && strings.TrimSpace(manifest.LastError) == "" {
+			fmt.Fprintf(
+				os.Stdout,
+				"[start] %s: stale local work run %s resumed after restart (phase=%s updated_at=%s).\n",
+				c.repoSlug,
+				manifest.RunID,
+				defaultString(strings.TrimSpace(manifest.CurrentPhase), "-"),
+				defaultString(strings.TrimSpace(manifest.UpdatedAt), "-"),
+			)
 			continue
 		}
 		fmt.Fprintf(

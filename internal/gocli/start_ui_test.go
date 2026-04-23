@@ -3592,6 +3592,22 @@ func TestStartUIAPITasksListAndDetail(t *testing.T) {
 	}
 }
 
+func TestStartUITaskSummaryFromFailedWorkRunKeepsFailedStatus(t *testing.T) {
+	summary := startUITaskSummaryFromWorkRun(startUIWorkRun{
+		RunID:          "lw-failed",
+		Backend:        "local",
+		RepoSlug:       "acme/widget",
+		RepoLabel:      "acme/widget",
+		Status:         "failed",
+		AttentionState: "failed",
+		CurrentPhase:   "review",
+		UpdatedAt:      "2026-04-23T00:00:00Z",
+	})
+	if summary.Status != startUITaskStatusFailed || summary.RawStatus != "failed" || summary.AttentionState != "failed" {
+		t.Fatalf("expected failed work run task to stay failed, got %+v", summary)
+	}
+}
+
 func TestStartUIAPITaskCreateAndTemplateSave(t *testing.T) {
 	fixture := startUITestSetupBrowserFixture(t)
 	defer fixture.Server.Close()

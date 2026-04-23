@@ -264,25 +264,87 @@ func TestReadWorkRunIndexRetriesWhenDatabaseIsLocked(t *testing.T) {
 	}
 }
 
-func TestCleanupStaleLocalWorkRunsForRepoMarksOrphanedRunsFailed(t *testing.T) {
+func TestCleanupStaleLocalWorkRunsForRepoResumesOrphanedRuns(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	repoRoot := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
 	oldUpdatedAt := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
 
 	manifest := localWorkManifest{
-		Version:      1,
-		RunID:        "lw-stale",
-		CreatedAt:    oldUpdatedAt,
-		UpdatedAt:    oldUpdatedAt,
-		Status:       "running",
-		CurrentPhase: "implement",
-		RepoRoot:     repoRoot,
-		RepoName:     filepath.Base(repoRoot),
-		RepoID:       localWorkRepoID(repoRoot),
-		SourceBranch: "main",
-		BaselineSHA:  strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
-		SandboxPath:  filepath.Join(home, "sandboxes", "lw-stale"),
+		Version:         1,
+		RunID:           "lw-stale",
+		CreatedAt:       oldUpdatedAt,
+		UpdatedAt:       oldUpdatedAt,
+		Status:          "running",
+		CurrentPhase:    "implement",
+		RepoRoot:        repoRoot,
+		RepoName:        filepath.Base(repoRoot),
+		RepoID:          localWorkRepoID(repoRoot),
+		SourceBranch:    "main",
+		BaselineSHA:     strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
+		SandboxPath:     filepath.Join(home, "sandboxes", "lw-stale"),
+		SandboxRepoPath: filepath.Join(home, "sandboxes", "lw-stale", "repo"),
+		MaxIterations:   8,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) { return "", nil }
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	oldDetachedRunner := localWorkStartDetachedRunner
+	resumeCalls := []string{}
+	localWorkStartDetachedRunner = func(repoRoot string, runID string, codexArgs []string, logPath string) error {
+		resumeCalls = append(resumeCalls, repoRoot+"|"+runID+"|"+logPath)
+		return nil
+	}
+	defer func() { localWorkStartDetachedRunner = oldDetachedRunner }()
+
+	cleaned, err := cleanupStaleLocalWorkRunsForRepo(repoRoot)
+	if err != nil {
+		t.Fatalf("cleanupStaleLocalWorkRunsForRepo: %v", err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("expected one resumed run, got %d", cleaned)
+	}
+	if len(resumeCalls) != 1 || !strings.Contains(resumeCalls[0], manifest.RunID) {
+		t.Fatalf("expected detached resume launch for stale run, got %+v", resumeCalls)
+	}
+
+	updated, err := readLocalWorkManifestByRunID("lw-stale")
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
+	}
+	if updated.Status != "running" {
+		t.Fatalf("expected running status after restart resume, got %+v", updated)
+	}
+	if updated.CompletedAt != "" || updated.LastError != "" {
+		t.Fatalf("expected stale cleanup to preserve resumable run, got %+v", updated)
+	}
+}
+
+func TestCleanupStaleLocalWorkRunsForRepoMarksUnresumableRunsFailed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoRoot := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	oldUpdatedAt := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+
+	manifest := localWorkManifest{
+		Version:       1,
+		RunID:         "lw-unresumable",
+		CreatedAt:     oldUpdatedAt,
+		UpdatedAt:     oldUpdatedAt,
+		Status:        "running",
+		CurrentPhase:  "implement",
+		RepoRoot:      repoRoot,
+		RepoName:      filepath.Base(repoRoot),
+		RepoID:        localWorkRepoID(repoRoot),
+		SourceBranch:  "main",
+		BaselineSHA:   strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
+		SandboxPath:   filepath.Join(home, "sandboxes", "lw-unresumable"),
+		MaxIterations: 8,
 	}
 	if err := writeLocalWorkManifest(manifest); err != nil {
 		t.Fatalf("writeLocalWorkManifest: %v", err)
@@ -299,16 +361,12 @@ func TestCleanupStaleLocalWorkRunsForRepoMarksOrphanedRunsFailed(t *testing.T) {
 	if cleaned != 1 {
 		t.Fatalf("expected one cleaned run, got %d", cleaned)
 	}
-
-	updated, err := readLocalWorkManifestByRunID("lw-stale")
+	updated, err := readLocalWorkManifestByRunID("lw-unresumable")
 	if err != nil {
 		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
 	}
-	if updated.Status != "failed" {
-		t.Fatalf("expected failed status, got %+v", updated)
-	}
-	if updated.CompletedAt == "" || !strings.Contains(updated.LastError, "stale running run cleaned up at start") {
-		t.Fatalf("expected stale cleanup markers, got %+v", updated)
+	if updated.Status != "failed" || updated.CompletedAt == "" || !strings.Contains(updated.LastError, "stale running run cleaned up at start") {
+		t.Fatalf("expected unresumable stale run to be failed, got %+v", updated)
 	}
 }
 
@@ -439,20 +497,31 @@ func TestCleanupStaleLocalWorkRunsIgnoresNonWorkerProcessMentions(t *testing.T) 
 	}
 	defer func() { localWorkProcessSnapshot = oldSnapshot }()
 
+	oldDetachedRunner := localWorkStartDetachedRunner
+	resumeCalls := []string{}
+	localWorkStartDetachedRunner = func(repoRoot string, runID string, codexArgs []string, logPath string) error {
+		resumeCalls = append(resumeCalls, repoRoot+"|"+runID+"|"+logPath)
+		return nil
+	}
+	defer func() { localWorkStartDetachedRunner = oldDetachedRunner }()
+
 	cleaned, err := cleanupStaleLocalWorkRunsForRepo(repoRoot)
 	if err != nil {
 		t.Fatalf("cleanupStaleLocalWorkRunsForRepo: %v", err)
 	}
 	if cleaned != 1 {
-		t.Fatalf("expected stale run to be cleaned despite shell mention, got %d", cleaned)
+		t.Fatalf("expected stale run to be handled despite shell mention, got %d", cleaned)
+	}
+	if len(resumeCalls) != 1 || !strings.Contains(resumeCalls[0], manifest.RunID) {
+		t.Fatalf("expected detached resume launch despite shell mention, got %+v", resumeCalls)
 	}
 
 	updated, err := readLocalWorkManifestByRunID("lw-shell-hit")
 	if err != nil {
 		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
 	}
-	if updated.Status != "failed" {
-		t.Fatalf("expected failed status, got %+v", updated)
+	if updated.Status != "running" || updated.LastError != "" || updated.CompletedAt != "" {
+		t.Fatalf("expected running status after shell mention was ignored, got %+v", updated)
 	}
 }
 
@@ -4132,6 +4201,97 @@ func TestLocalWorkResumeAfterFailedImplementUsesExecResume(t *testing.T) {
 	}
 	if !strings.Contains(string(commandLog), "exec resume session-local") {
 		t.Fatalf("expected resume command in log, got %q", string(commandLog))
+	}
+}
+
+func TestCleanupStaleLocalWorkRunsResumesWithExistingCodexSession(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	failOncePath := filepath.Join(home, "fail-once.marker")
+	commandLogPath := filepath.Join(home, "codex-commands.log")
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`printf '%s\n' "$*" >> "${FAKE_CODEX_LOG_PATH}"`,
+		`mkdir -p "$CODEX_HOME/sessions/2026/04/17"`,
+		`printf '{"type":"session_meta","payload":{"id":"session-hard-restart","timestamp":"2099-01-01T00:00:00Z","cwd":"%s"}}\n' "$PWD" > "$CODEX_HOME/sessions/2026/04/17/rollout-session-hard-restart.jsonl"`,
+		`PAYLOAD="$(cat)"`,
+		`case "$PAYLOAD" in`,
+		`  *"# NANA Work-local Finding Grouping"*)`,
+		`    printf '{"groups":[]}\n'`,
+		`    ;;`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    printf '{"findings":[]}\n'`,
+		`    ;;`,
+		`  *)`,
+		`    if printf '%s' "$*" | grep -q "exec resume session-hard-restart"; then`,
+		`      printf 'implemented after hard restart\n' >> README.md`,
+		`      printf 'fake-codex:%s\n' "$*"`,
+		`      exit 0`,
+		`    fi`,
+		`    if [ "${FAKE_CODEX_FAIL_ONCE_PATH:-}" != "" ] && [ ! -f "${FAKE_CODEX_FAIL_ONCE_PATH}" ]; then`,
+		`      : > "${FAKE_CODEX_FAIL_ONCE_PATH}"`,
+		`      printf 'interrupted before restart\n' >&2`,
+		`      exit 1`,
+		`    fi`,
+		`    printf 'implemented fresh\n' >> README.md`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_FAIL_ONCE_PATH", failOncePath)
+	t.Setenv("FAKE_CODEX_LOG_PATH", commandLogPath)
+
+	startErr := runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Resume after hard restart"})
+	if startErr == nil {
+		t.Fatal("expected initial start to fail and leave a resumable checkpoint")
+	}
+	manifest, _ := mustLatestLocalWorkRun(t, repo)
+	manifest.Status = "running"
+	manifest.LastError = ""
+	manifest.CompletedAt = ""
+	manifest.UpdatedAt = time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write running manifest: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) { return "", nil }
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	oldDetachedRunner := localWorkStartDetachedRunner
+	localWorkStartDetachedRunner = func(repoRoot string, runID string, codexArgs []string, logPath string) error {
+		return resumeLocalWork(repoRoot, localWorkResumeOptions{
+			RunSelection: localWorkRunSelection{RunID: runID},
+			CodexArgs:    codexArgs,
+		})
+	}
+	defer func() { localWorkStartDetachedRunner = oldDetachedRunner }()
+
+	cleaned, err := cleanupStaleLocalWorkRunsForRepo(repo)
+	if err != nil {
+		t.Fatalf("cleanupStaleLocalWorkRunsForRepo: %v", err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("expected one stale run to be resumed, got %d", cleaned)
+	}
+	commandLog, err := os.ReadFile(commandLogPath)
+	if err != nil {
+		t.Fatalf("read command log: %v", err)
+	}
+	if !strings.Contains(string(commandLog), "exec resume session-hard-restart") {
+		t.Fatalf("expected hard restart cleanup to resume existing Codex session, got %q", string(commandLog))
+	}
+	updated := mustLocalWorkManifestByRunID(t, manifest.RunID)
+	if updated.Status != "completed" {
+		t.Fatalf("expected hard-restarted run to complete through resume, got %#v", updated)
 	}
 }
 
