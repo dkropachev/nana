@@ -1640,14 +1640,14 @@ func (s *localWorkDBStore) upsertWorkItemWithLinks(item workItem, actor string, 
 			return workItem{}, false, err
 		}
 	}
-		if err := tx.Commit(); err != nil {
-			return workItem{}, false, err
-		}
-		if err := syncCanonicalWorkItemTask(item); err != nil {
-			return workItem{}, false, err
-		}
-		return item, created, nil
+	if err := tx.Commit(); err != nil {
+		return workItem{}, false, err
 	}
+	if err := syncCanonicalWorkItemTask(item); err != nil {
+		return workItem{}, false, err
+	}
+	return item, created, nil
+}
 
 func (s *localWorkDBStore) updateWorkItem(item workItem) error {
 	tx, err := s.db.Begin()

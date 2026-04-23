@@ -433,7 +433,8 @@ type localWorkValidationGroupProgress struct {
 }
 
 type localWorkDBStore struct {
-	db *sql.DB
+	db            *sql.DB
+	emptyReadOnly bool
 }
 
 type localWorkFindingHistoryEvent struct {

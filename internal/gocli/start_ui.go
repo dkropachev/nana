@@ -2774,11 +2774,11 @@ func (h *startUIAPI) expireOverviewSectionsForChangedDependencies(previousDeps [
 	}
 	currentLocalWorkSnapshot := h.persistentLocalWorkReadSnapshot()
 	h.localWorkReadMu.Lock()
-	resetLocalWorkRead := h.localWorkRead != nil && h.localWorkToken != currentLocalWorkSnapshot.token
-	h.localWorkReadMu.Unlock()
-	if resetLocalWorkRead {
-		h.resetPersistentLocalWorkReadStore()
+	if h.localWorkRead != nil && h.localWorkToken != currentLocalWorkSnapshot.token {
+		h.localWorkToken = currentLocalWorkSnapshot.token
+		h.workMetaCache = startUIWorkMetadataCache{}
 	}
+	h.localWorkReadMu.Unlock()
 	h.sectionCacheMu.Lock()
 	defer h.sectionCacheMu.Unlock()
 	if snapshotStartUIDependencies(listStartUIRepoSummaryDependencies(h.cwd)).token != h.sectionCaches.repos.token {
@@ -2830,32 +2830,35 @@ func (h *startUIAPI) persistentLocalWorkReadSnapshot() startUIDependencySnapshot
 
 func (h *startUIAPI) persistentLocalWorkReadStore(snapshot startUIDependencySnapshot) (*localWorkDBStore, error) {
 	for {
-		var staleStore *localWorkDBStore
-		var closeStore *localWorkDBStore
 		h.localWorkReadMu.Lock()
 		if h.localWorkRead != nil {
-			if h.localWorkToken != snapshot.token {
-				// The dependency snapshot changed, so swap in a fresh reader. Keep the
-				// previous handle alive until the next refresh/close so in-flight reads
-				// are less likely to trip over an immediate close.
-				staleStore = h.localWorkRead
-				closeStore = h.localWorkReadRetired
-				h.localWorkReadRetired = staleStore
-				h.localWorkRead = nil
-				h.localWorkToken = ""
-				h.workMetaCache = startUIWorkMetadataCache{}
-			} else {
-				store := h.localWorkRead
-				h.localWorkReadMu.Unlock()
-				return store, nil
+			if h.localWorkRead.emptyReadOnly {
+				if _, err := os.Stat(localWorkDBPath()); err == nil {
+					store := h.localWorkRead
+					retired := h.localWorkReadRetired
+					h.localWorkRead = nil
+					h.localWorkReadRetired = nil
+					h.localWorkToken = ""
+					h.workMetaCache = startUIWorkMetadataCache{}
+					h.localWorkReadMu.Unlock()
+					_ = store.Close()
+					if retired != nil {
+						_ = retired.Close()
+					}
+					continue
+				}
 			}
+			if h.localWorkToken != snapshot.token {
+				h.workMetaCache = startUIWorkMetadataCache{}
+				h.localWorkToken = snapshot.token
+			}
+			store := h.localWorkRead
+			h.localWorkReadMu.Unlock()
+			return store, nil
 		}
 		if h.localWorkReadBuildCh != nil {
 			waitCh := h.localWorkReadBuildCh
 			h.localWorkReadMu.Unlock()
-			if closeStore != nil {
-				_ = closeStore.Close()
-			}
 			<-waitCh
 			continue
 		}
@@ -2863,15 +2866,12 @@ func (h *startUIAPI) persistentLocalWorkReadStore(snapshot startUIDependencySnap
 		h.localWorkReadBuildCh = buildCh
 		h.localWorkReadMu.Unlock()
 
-		if closeStore != nil {
-			_ = closeStore.Close()
-		}
-
 		store, err := localWorkOpenReadStore()
+		openedSnapshot := h.persistentLocalWorkReadSnapshot()
 		h.localWorkReadMu.Lock()
 		if err == nil && h.localWorkRead == nil {
 			h.localWorkRead = store
-			h.localWorkToken = snapshot.token
+			h.localWorkToken = openedSnapshot.token
 		}
 		existing := h.localWorkRead
 		h.localWorkReadBuildCh = nil
@@ -4151,16 +4151,16 @@ func loadStartUIApprovals() ([]startUIApprovalQueueItem, error) {
 				AttentionState: "failed",
 			})
 		}
-			for _, item := range repo.State.PlannedItems {
-				if startWorkPlannedItemLooksScoutDerived(item) {
-					continue
-				}
-				if strings.TrimSpace(item.ScheduleAt) != "" {
-					continue
-				}
-				if item.State != startPlannedItemQueued && item.State != startPlannedItemFailed {
-					continue
-				}
+		for _, item := range repo.State.PlannedItems {
+			if startWorkPlannedItemLooksScoutDerived(item) {
+				continue
+			}
+			if strings.TrimSpace(item.ScheduleAt) != "" {
+				continue
+			}
+			if item.State != startPlannedItemQueued && item.State != startPlannedItemFailed {
+				continue
+			}
 			reason := "launch requested from approvals"
 			if item.State == startPlannedItemFailed && strings.TrimSpace(item.LastError) != "" {
 				reason = item.LastError
@@ -6617,21 +6617,21 @@ func ensureStartUIStateUnlocked(repoSlug string) (*startWorkState, error) {
 		return nil, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-		state = &startWorkState{
-			Version:        startWorkStateVersion,
-			SourceRepo:     repoSlug,
-			CreatedAt:      now,
-			UpdatedAt:      now,
-			Issues:         map[string]startWorkIssueState{},
-			ServiceTasks:   map[string]startWorkServiceTask{},
-			Promotions:     map[string]startWorkPromotion{},
-			PromotionSkips: map[string]startWorkPromotionSkip{},
-			PlannedItems:   map[string]startWorkPlannedItem{},
-			TaskTemplates:  map[string]startWorkTaskTemplate{},
-			ScoutJobs:      map[string]startWorkScoutJob{},
-			Findings:       map[string]startWorkFinding{},
-			ImportSessions: map[string]startWorkFindingImportSession{},
-		}
+	state = &startWorkState{
+		Version:        startWorkStateVersion,
+		SourceRepo:     repoSlug,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		Issues:         map[string]startWorkIssueState{},
+		ServiceTasks:   map[string]startWorkServiceTask{},
+		Promotions:     map[string]startWorkPromotion{},
+		PromotionSkips: map[string]startWorkPromotionSkip{},
+		PlannedItems:   map[string]startWorkPlannedItem{},
+		TaskTemplates:  map[string]startWorkTaskTemplate{},
+		ScoutJobs:      map[string]startWorkScoutJob{},
+		Findings:       map[string]startWorkFinding{},
+		ImportSessions: map[string]startWorkFindingImportSession{},
+	}
 	return state, nil
 }
 

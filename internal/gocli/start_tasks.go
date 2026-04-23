@@ -44,15 +44,15 @@ type startUITaskSummary struct {
 }
 
 type startUITaskDetail struct {
-	Summary       startUITaskSummary         `json:"summary"`
-	Issue         *startUIIssueQueueItem     `json:"issue,omitempty"`
-	PlannedItem   *startWorkPlannedItem      `json:"planned_item,omitempty"`
-	ScoutJob      *startWorkScoutJob         `json:"scout_job,omitempty"`
+	Summary       startUITaskSummary          `json:"summary"`
+	Issue         *startUIIssueQueueItem      `json:"issue,omitempty"`
+	PlannedItem   *startWorkPlannedItem       `json:"planned_item,omitempty"`
+	ScoutJob      *startWorkScoutJob          `json:"scout_job,omitempty"`
 	Investigation *startUIInvestigationDetail `json:"investigation,omitempty"`
-	WorkRun       *startUIWorkRunDetail      `json:"work_run,omitempty"`
-	WorkItem      *workItemDetail            `json:"work_item,omitempty"`
-	ServiceTask   *startWorkServiceTask      `json:"service_task,omitempty"`
-	RelatedRun    *startUIWorkRunDetail      `json:"related_run,omitempty"`
+	WorkRun       *startUIWorkRunDetail       `json:"work_run,omitempty"`
+	WorkItem      *workItemDetail             `json:"work_item,omitempty"`
+	ServiceTask   *startWorkServiceTask       `json:"service_task,omitempty"`
+	RelatedRun    *startUIWorkRunDetail       `json:"related_run,omitempty"`
 }
 
 type startUITaskTemplate struct {
@@ -121,9 +121,9 @@ func (h *startUIAPI) handleTasks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSONResponse(w, map[string]any{
-			"state":       state,
+			"state":        state,
 			"planned_item": item,
-			"inference":   inference,
+			"inference":    inference,
 		})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -906,11 +906,13 @@ func startUITaskSummaryFromScoutJob(repoSlug string, item startWorkScoutJob) sta
 	case startScoutJobCompleted:
 		status = startUITaskStatusCompleted
 	}
+	title := defaultString(strings.TrimSpace(item.Title), startUITaskTitleFromDescription(item.TaskBody))
+	title = defaultString(title, defaultString(strings.TrimSpace(item.Role), "Scout job"))
 	return startUITaskSummary{
 		ID:             "scout-job:" + repoSlug + ":" + item.ID,
 		Kind:           "scout_job",
 		RepoSlug:       repoSlug,
-		Title:          item.Title,
+		Title:          title,
 		Summary:        defaultString(strings.TrimSpace(item.Summary), strings.TrimSpace(item.LastError)),
 		Description:    item.TaskBody,
 		Status:         status,

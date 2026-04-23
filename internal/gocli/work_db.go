@@ -560,7 +560,7 @@ func createLocalWorkEmptyReadStore() (*localWorkDBStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	store := &localWorkDBStore{db: db}
+	store := &localWorkDBStore{db: db, emptyReadOnly: true}
 	tx, err := db.Begin()
 	if err != nil {
 		_ = db.Close()

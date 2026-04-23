@@ -5465,8 +5465,8 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `Schedule Task`) {
 		t.Fatalf("expected unified task scheduling copy in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `data-task-planned-launch="`) {
-		t.Fatalf("expected scheduled task launch control wiring in app.js, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `data-task-action="run-now"`) {
+		t.Fatalf("expected task run-now control wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `data-scout-action="promote"`) {
 		t.Fatalf("expected manual scout promote control wiring in app.js, got %s", string(appBody))

@@ -464,7 +464,7 @@ func executeInvestigationRun(manifestPath string, manifest *investigateManifest,
 			manifest.LastError = codexPauseInfoMessage(pauseErr.Info)
 			manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 			manifest.CompletedAt = ""
-				_ = persistInvestigateManifest(manifestPath, *manifest)
+			_ = persistInvestigateManifest(manifestPath, *manifest)
 			return runErr
 		}
 		manifest.Status = status
@@ -475,7 +475,7 @@ func executeInvestigationRun(manifestPath string, manifest *investigateManifest,
 		}
 		manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		manifest.CompletedAt = manifest.UpdatedAt
-			_ = persistInvestigateManifest(manifestPath, *manifest)
+		_ = persistInvestigateManifest(manifestPath, *manifest)
 		return runErr
 	}
 
@@ -552,9 +552,9 @@ func executeInvestigationRun(manifestPath string, manifest *investigateManifest,
 			}
 			manifest.Rounds[len(manifest.Rounds)-1].Status = "needs_revision"
 			manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-				if err := persistInvestigateManifest(manifestPath, *manifest); err != nil {
-					return writeFailure(investigateRunStatusFailedExecutor, err)
-				}
+			if err := persistInvestigateManifest(manifestPath, *manifest); err != nil {
+				return writeFailure(investigateRunStatusFailedExecutor, err)
+			}
 			continue
 		}
 		if err := writeJSONArtifact(roundState.ReportPath, report); err != nil {
@@ -613,18 +613,18 @@ func executeInvestigationRun(manifestPath string, manifest *investigateManifest,
 			if err := writeJSONArtifact(manifest.FinalReportPath, report); err != nil {
 				return writeFailure(investigateRunStatusFailedExecutor, err)
 			}
-				if err := persistInvestigateManifest(manifestPath, *manifest); err != nil {
-					return writeFailure(investigateRunStatusFailedExecutor, err)
-				}
+			if err := persistInvestigateManifest(manifestPath, *manifest); err != nil {
+				return writeFailure(investigateRunStatusFailedExecutor, err)
+			}
 			break
 		}
 
 		violations = validatorResult.Violations
 		manifest.Rounds[len(manifest.Rounds)-1].Status = "needs_revision"
 		manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-			if err := persistInvestigateManifest(manifestPath, *manifest); err != nil {
-				return writeFailure(investigateRunStatusFailedExecutor, err)
-			}
+		if err := persistInvestigateManifest(manifestPath, *manifest); err != nil {
+			return writeFailure(investigateRunStatusFailedExecutor, err)
+		}
 	}
 
 	if !accepted {
