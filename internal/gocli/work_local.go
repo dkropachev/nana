@@ -1134,6 +1134,9 @@ func localWorkCanRecoverAfterStaleCleanup(manifest localWorkManifest) bool {
 	if !localWorkFailedRunIsRecent(manifest, localWorkFailedStaleRecoveryWindow) {
 		return false
 	}
+	if !localWorkRunHasFailedCanonicalTask(manifest.RunID) {
+		return false
+	}
 	if strings.TrimSpace(manifest.RunID) == "" ||
 		strings.TrimSpace(manifest.RepoRoot) == "" ||
 		strings.TrimSpace(manifest.SandboxPath) == "" ||
@@ -1144,6 +1147,28 @@ func localWorkCanRecoverAfterStaleCleanup(manifest localWorkManifest) bool {
 		return false
 	}
 	return true
+}
+
+func localWorkRunHasFailedCanonicalTask(runID string) bool {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return false
+	}
+	status, err := withLocalWorkReadStore(func(store *localWorkDBStore) (string, error) {
+		row := store.db.QueryRow(`SELECT status FROM tasks WHERE id = ? OR run_id = ? ORDER BY updated_at DESC LIMIT 1`, "work-run:"+runID, runID)
+		var status string
+		if err := row.Scan(&status); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return "", nil
+			}
+			return "", err
+		}
+		return status, nil
+	})
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(status), "failed")
 }
 
 func localWorkFailedRunIsRecent(manifest localWorkManifest, window time.Duration) bool {

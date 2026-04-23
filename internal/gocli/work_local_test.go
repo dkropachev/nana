@@ -4866,6 +4866,61 @@ func TestCleanupStaleLocalWorkRunsDoesNotRecoverOldFailedStaleRows(t *testing.T)
 	}
 }
 
+func TestCleanupStaleLocalWorkRunsDoesNotRecoverFailedStaleRowsWithoutFailedTask(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	recentAt := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+	manifest := localWorkManifest{
+		Version:          5,
+		RunID:            "lw-no-failed-task",
+		CreatedAt:        recentAt,
+		UpdatedAt:        recentAt,
+		CompletedAt:      recentAt,
+		Status:           "failed",
+		CurrentPhase:     "implement",
+		CurrentIteration: 1,
+		RepoRoot:         repo,
+		RepoName:         filepath.Base(repo),
+		RepoID:           localWorkRepoID(repo),
+		SourceBranch:     "main",
+		BaselineSHA:      strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:      filepath.Join(home, "sandboxes", "lw-no-failed-task"),
+		SandboxRepoPath:  filepath.Join(home, "sandboxes", "lw-no-failed-task", "repo"),
+		MaxIterations:    8,
+		LastError:        localWorkStaleCleanupError,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+		_, err := store.db.Exec(`UPDATE tasks SET status = ?, raw_status = ? WHERE id = ?`, "dismissed", "dismissed", "work-run:"+manifest.RunID)
+		return err
+	}); err != nil {
+		t.Fatalf("mark task dismissed: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) { return "", nil }
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	oldDetachedRunner := localWorkStartDetachedRunner
+	resumeCalls := 0
+	localWorkStartDetachedRunner = func(repoRoot string, runID string, codexArgs []string, logPath string) error {
+		resumeCalls++
+		return nil
+	}
+	defer func() { localWorkStartDetachedRunner = oldDetachedRunner }()
+
+	cleaned, err := cleanupStaleLocalWorkRunsForRepo(repo)
+	if err != nil {
+		t.Fatalf("cleanupStaleLocalWorkRunsForRepo: %v", err)
+	}
+	if cleaned != 0 || resumeCalls != 0 {
+		t.Fatalf("expected stale row without failed task to remain untouched, cleaned=%d calls=%d", cleaned, resumeCalls)
+	}
+}
+
 func mustLatestLocalWorkRun(t *testing.T, repo string) (localWorkManifest, string) {
 	t.Helper()
 	manifest, runDir, err := resolveLocalWorkRun(repo, localWorkRunSelection{UseLast: true})
