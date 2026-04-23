@@ -2965,10 +2965,6 @@
             <span class="nav-label">Tasks</span>
             <span class="nav-count">${taskCount}</span>
           </button>
-          <button class="nav-item ${state.currentView === "work" ? "nav-item-active" : ""}" type="button" data-nav-view="work" aria-current="${state.currentView === "work" ? "page" : "false"}">
-            <span class="nav-label">Work</span>
-            <span class="nav-count">${pendingRuns().length}</span>
-          </button>
           <button class="nav-item ${state.currentView === "usage" ? "nav-item-active" : ""}" type="button" data-nav-view="usage" aria-current="${state.currentView === "usage" ? "page" : "false"}">
             <span class="nav-label">Usage</span>
             <span class="nav-count">${usageNavCount()}</span>

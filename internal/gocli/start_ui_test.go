@@ -7368,20 +7368,26 @@ func TestStartUIBrowserNavigationShowsTaskWorkspaceViews(t *testing.T) {
 		`data-nav-view="home"`,
 		`data-nav-view="issues"`,
 		`data-nav-view="investigations"`,
-		`data-nav-view="work"`,
 		`data-nav-view="usage"`,
 		`data-nav-view="feedback"`,
 		`data-nav-view="approvals"`,
 		`<span class="nav-label">All Repos</span>`,
 		`<span class="nav-label">Issues</span>`,
 		`<span class="nav-label">Tasks</span>`,
-		`<span class="nav-label">Work</span>`,
 		`<span class="nav-label">Usage</span>`,
 		`<span class="nav-label">Feedback</span>`,
 		`<span class="nav-label">Approvals</span>`,
 	} {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("expected %q in task workspace navigation output, got:\n%s", needle, output)
+		}
+	}
+	for _, needle := range []string{
+		`data-nav-view="work"`,
+		`<span class="nav-label">Work</span>`,
+	} {
+		if strings.Contains(output, needle) {
+			t.Fatalf("expected %q to be absent from task workspace navigation output, got:\n%s", needle, output)
 		}
 	}
 }
