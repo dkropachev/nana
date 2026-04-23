@@ -209,6 +209,12 @@ func TestStartUIBrowserInteractionsMissionControlTasks(t *testing.T) {
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "completion-harden")
 	startUITestChromedpWaitBodyTextAbsent(t, tabCtx, "Reply in thread")
 
+	startUITestChromedpClick(t, tabCtx, `[data-task-multi-filter-menu="priority"] summary`)
+	startUITestChromedpClick(t, tabCtx, `[data-task-multi-filter-field="priority"][data-task-multi-filter-value="P0"]`)
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Priority: P0")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "completion-harden")
+	startUITestChromedpWaitBodyTextAbsent(t, tabCtx, "Fix flaky test")
+
 	startUITestChromedpClick(t, tabCtx, `[data-task-multi-filter-menu="kind"] summary`)
 	startUITestChromedpClick(t, tabCtx, `[data-task-multi-filter-field="kind"][data-task-multi-filter-value="work_run"]`)
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Type: work run")

@@ -5554,6 +5554,9 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `data-task-multi-filter-menu="${escapeHTML(field)}"`) || !strings.Contains(string(appBody), `data-task-multi-filter-field="${escapeHTML(field)}"`) {
 		t.Fatalf("expected investigations toolbar multi-select filters, got %s", string(appBody))
 	}
+	if !strings.Contains(string(appBody), `renderTaskMultiFilter("priority", "Priority", "All priorities", priorityOptions)`) || !strings.Contains(string(appBody), `matchesTaskPriorityFilter(item, filter.priority)`) {
+		t.Fatalf("expected investigations priority multi-select filter wiring, got %s", string(appBody))
+	}
 	if !strings.Contains(string(appBody), `data-task-action="run-now"`) {
 		t.Fatalf("expected task run-now control wiring in app.js, got %s", string(appBody))
 	}
@@ -5574,6 +5577,19 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	}
 	if !strings.Contains(string(appBody), `const currentViewLoad = refreshCurrentView({ silent: true });`) {
 		t.Fatalf("expected load() to fetch the current view in parallel in app.js, got %s", string(appBody))
+	}
+
+	cssResponse, err := http.Get(server.URL + "/app.css")
+	if err != nil {
+		t.Fatalf("GET /app.css: %v", err)
+	}
+	defer cssResponse.Body.Close()
+	cssBody, err := io.ReadAll(cssResponse.Body)
+	if err != nil {
+		t.Fatalf("read app.css body: %v", err)
+	}
+	if !strings.Contains(string(cssBody), `.task-composer-description-field textarea`) || !strings.Contains(string(cssBody), `height: min(560px, calc(100vh - 220px));`) || !strings.Contains(string(cssBody), `resize: none;`) {
+		t.Fatalf("expected bounded task composer description layout in app.css, got %s", string(cssBody))
 	}
 }
 

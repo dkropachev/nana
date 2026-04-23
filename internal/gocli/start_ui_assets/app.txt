@@ -284,6 +284,7 @@
       attention: "all",
       status: "all",
       kind: "all",
+      priority: "all",
     };
   }
 
@@ -1262,6 +1263,18 @@
 
   function matchesKindFilter(item, value) {
     return matchesFilterSelection(defaultString(item && item.kind, defaultString(item && item.backend, "")), value, "all");
+  }
+
+  function taskPriorityValue(item) {
+    const label = defaultString(item && item.priority_label, "");
+    if (label) return label;
+    const priority = item && item.priority;
+    if (priority === undefined || priority === null || priority === "") return "P3";
+    return `P${priority}`;
+  }
+
+  function matchesTaskPriorityFilter(item, value) {
+    return matchesFilterSelection(taskPriorityValue(item), value, "all");
   }
 
   function filterSelectionValues(value, inactiveValue) {
@@ -4059,6 +4072,7 @@
     return (state.investigations.items || []).filter((item) => {
       return matchesRepoFilter(item, filter.repo) &&
         matchesTaskStatusFilter(item, filter.status) &&
+        matchesTaskPriorityFilter(item, filter.priority) &&
         matchesAttentionFilter(item, filter.attention) &&
         matchesKindFilter(item, filter.kind) &&
         matchesQuery(item, ["title", "summary", "description", "repo_slug", "kind", "status", "raw_status", "run_id", "external_url", "work_type"], filter.query);
@@ -4650,10 +4664,27 @@
     return Array.from(values).sort();
   }
 
+  function taskPriorityOptions(items) {
+    const values = new Set(["P0", "P1", "P2", "P3", "P4", "P5"]);
+    (items || []).forEach((item) => {
+      values.add(taskPriorityValue(item));
+    });
+    return Array.from(values).sort((left, right) => {
+      const leftNumber = Number.parseInt(left.replace(/^P/i, ""), 10);
+      const rightNumber = Number.parseInt(right.replace(/^P/i, ""), 10);
+      if (Number.isNaN(leftNumber) || Number.isNaN(rightNumber)) return left.localeCompare(right);
+      return leftNumber - rightNumber;
+    }).map((priority) => ({
+      value: priority,
+      label: priority,
+    }));
+  }
+
   function activeTaskFilterCount(filter) {
     if (!filter) return 0;
     return (String(filter.query || "").trim() ? 1 : 0) +
       filterSelectionValues(filter.status, "all").length +
+      filterSelectionValues(filter.priority, "all").length +
       filterSelectionValues(filter.kind, "all").length +
       filterSelectionValues(filter.repo, "").length;
   }
@@ -4750,10 +4781,12 @@
     const filter = filterState("investigations");
     const activeCount = activeTaskFilterCount(filter);
     const statusOptions = TASK_STATUS_GROUPS.map((option) => ({ value: option.id, label: option.title }));
+    const priorityOptions = taskPriorityOptions(items);
     const kindOptions = taskKindOptions(items);
     const repoOptions = taskRepoOptions(items).map((repo) => ({ value: repo, label: repo }));
     const chips = [
       taskFilterChip("Status", filter.status, "status", statusOptions),
+      taskFilterChip("Priority", filter.priority, "priority", priorityOptions),
       taskFilterChip("Type", filter.kind, "kind", kindOptions),
       taskFilterChip("Repo", filter.repo, "repo", repoOptions),
       taskFilterChip("", filter.query, "query"),
@@ -4766,6 +4799,7 @@
             <input type="search" value="${escapeHTML(filter.query)}" placeholder="Search tasks..." data-view-filter="investigations" data-view-filter-name="query" />
           </label>
           ${renderTaskMultiFilter("status", "Status", "All statuses", statusOptions)}
+          ${renderTaskMultiFilter("priority", "Priority", "All priorities", priorityOptions)}
           ${renderTaskMultiFilter("kind", "Type", "All types", kindOptions)}
           ${renderTaskMultiFilter("repo", "Repo", "All repos", repoOptions)}
           ${activeCount ? `<button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-task-filter-clear="all">Clear</button>` : ""}
@@ -8102,6 +8136,8 @@
           updateFilter("investigations", "query", "");
         } else if (field === "status") {
           updateFilter("investigations", "status", "all");
+        } else if (field === "priority") {
+          updateFilter("investigations", "priority", "all");
         } else if (field === "kind") {
           updateFilter("investigations", "kind", "all");
         } else if (field === "repo") {

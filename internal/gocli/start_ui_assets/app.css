@@ -1360,7 +1360,7 @@ textarea {
 
 .mission-toolbar-main {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(130px, max-content) minmax(130px, max-content) minmax(160px, max-content) max-content max-content;
+  grid-template-columns: minmax(220px, 1fr) minmax(130px, max-content) minmax(130px, max-content) minmax(130px, max-content) minmax(160px, max-content) max-content max-content;
   gap: 8px;
   align-items: center;
 }
@@ -1644,9 +1644,11 @@ textarea {
 
 .mission-schedule-modal {
   display: grid;
-  grid-template-rows: auto minmax(260px, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 16px;
-  min-height: min(680px, 70vh);
+  height: min(560px, calc(100vh - 220px));
+  min-height: min(360px, calc(100vh - 220px));
+  max-height: calc(100vh - 220px);
 }
 
 .task-composer-controls {
@@ -1663,8 +1665,8 @@ textarea {
 .task-composer-description-field textarea {
   width: 100%;
   height: 100%;
-  min-height: 260px;
-  resize: vertical;
+  min-height: 0;
+  resize: none;
 }
 
 .task-run-at-hidden {
