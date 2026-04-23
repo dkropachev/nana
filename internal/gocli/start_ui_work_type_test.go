@@ -2,6 +2,7 @@ package gocli
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -85,6 +86,27 @@ func TestQueueScoutItemAsPlannedWorkPersistsWorkType(t *testing.T) {
 	}
 	if job.WorkType != workTypeFeature {
 		t.Fatalf("expected synced scout job to persist work type, got %+v", job)
+	}
+}
+
+func TestBackendPerformanceScoutDefaultsToRefactorWorkType(t *testing.T) {
+	resolution := defaultScoutRoleWorkType(backendPerformanceScoutRole, "test")
+	if resolution.WorkType != workTypeRefactor {
+		t.Fatalf("expected backend performance scout to default to refactor, got %+v", resolution)
+	}
+}
+
+func TestStartUIBuiltinTaskTemplatesIncludeBackendPerformanceScout(t *testing.T) {
+	templates := startUIBuiltinTaskTemplates("acme/widget")
+	index := slices.IndexFunc(templates, func(item startUITaskTemplate) bool {
+		return item.ID == "template:scout:"+backendPerformanceScoutRole
+	})
+	if index < 0 {
+		t.Fatalf("expected backend performance scout template in %+v", templates)
+	}
+	item := templates[index]
+	if item.LaunchKindHint != "manual_scout" || item.ScoutRoleHint != backendPerformanceScoutRole || !strings.Contains(item.Name, "Backend Performance") {
+		t.Fatalf("unexpected backend performance scout template: %+v", item)
 	}
 }
 

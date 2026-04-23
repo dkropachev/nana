@@ -18,7 +18,7 @@ func TestPromptAssetsStayInSyncWithPromptFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prompts(): %v", err)
 	}
-	for _, name := range []string{"executor.md", "team-executor.md", "investigator.md", "investigation-validator.md", "improvement-scout.md", "enhancement-scout.md", "ui-scout.md", "product-analyst.md"} {
+	for _, name := range []string{"executor.md", "team-executor.md", "investigator.md", "investigation-validator.md", "improvement-scout.md", "enhancement-scout.md", "backend-performance-scout.md", "ui-scout.md", "product-analyst.md"} {
 		diskContent, err := os.ReadFile(filepath.Join(repoRoot, "prompts", name))
 		if err != nil {
 			t.Fatalf("read prompt %s: %v", name, err)

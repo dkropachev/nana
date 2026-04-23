@@ -90,8 +90,9 @@ Behavior:
   - detects scout support from repo policy files
   - runs improvement-scout when a managed improvement scout policy exists
   - runs enhancement-scout when a managed enhancement scout policy exists
+  - runs backend-performance-scout when a managed backend performance scout policy exists
   - runs ui-scout when a managed UI scout policy exists
-  - local repos keep findings under .nana/improvements/, .nana/enhancements/, or .nana/ui-findings/
+  - local repos keep findings under .nana/improvements/, .nana/enhancements/, .nana/backend-performance-findings/, or .nana/ui-findings/
   - GitHub targets follow their scout policy issue_destination
   - local repos with mode "auto" in every supported scout policy commit generated artifacts to the repo's default branch
   - auto mode requires a clean worktree and a resolvable local default branch
@@ -106,6 +107,7 @@ const (
 
 	improvementScoutRole     = "improvement-scout"
 	enhancementScoutRole     = "enhancement-scout"
+	backendPerformanceScoutRole = "backend-performance-scout"
 	uiScoutRole              = "ui-scout"
 	defaultScoutSessionLimit = 4
 	maxScoutSessionLimit     = 6
@@ -1606,6 +1608,8 @@ func scoutRunID(role string) string {
 	switch role {
 	case enhancementScoutRole:
 		prefix = "enhance"
+	case backendPerformanceScoutRole:
+		prefix = "backend-perf"
 	case uiScoutRole:
 		prefix = "ui-scout"
 	}

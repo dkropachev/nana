@@ -494,16 +494,18 @@ type startUIScoutCatalogEntry struct {
 }
 
 type startUIRepoScouts struct {
-	Improvement startUIRepoScoutConfig `json:"improvement"`
-	Enhancement startUIRepoScoutConfig `json:"enhancement"`
-	UI          startUIRepoScoutConfig `json:"ui"`
+	Improvement        startUIRepoScoutConfig `json:"improvement"`
+	Enhancement        startUIRepoScoutConfig `json:"enhancement"`
+	BackendPerformance startUIRepoScoutConfig `json:"backend-performance"`
+	UI                 startUIRepoScoutConfig `json:"ui"`
 }
 
 type startUIRepoScoutsPatchRequest struct {
-	Improvement  *startUIRepoScoutConfig            `json:"improvement,omitempty"`
-	Enhancement  *startUIRepoScoutConfig            `json:"enhancement,omitempty"`
-	UI           *startUIRepoScoutConfig            `json:"ui,omitempty"`
-	ScoutsByRole map[string]*startUIRepoScoutConfig `json:"scouts_by_role,omitempty"`
+	Improvement        *startUIRepoScoutConfig            `json:"improvement,omitempty"`
+	Enhancement        *startUIRepoScoutConfig            `json:"enhancement,omitempty"`
+	BackendPerformance *startUIRepoScoutConfig            `json:"backend-performance,omitempty"`
+	UI                 *startUIRepoScoutConfig            `json:"ui,omitempty"`
+	ScoutsByRole       map[string]*startUIRepoScoutConfig `json:"scouts_by_role,omitempty"`
 }
 
 func startUISetRepoScoutConfig(scouts *startUIRepoScouts, role string, config startUIRepoScoutConfig) {
@@ -515,6 +517,8 @@ func startUISetRepoScoutConfig(scouts *startUIRepoScouts, role string, config st
 		scouts.Improvement = config
 	case enhancementScoutRole:
 		scouts.Enhancement = config
+	case backendPerformanceScoutRole:
+		scouts.BackendPerformance = config
 	case uiScoutRole:
 		scouts.UI = config
 	}
@@ -581,6 +585,8 @@ func startUIGetRepoScoutPatch(patch *startUIRepoScoutsPatchRequest, role string)
 		return patch.Improvement
 	case enhancementScoutRole:
 		return patch.Enhancement
+	case backendPerformanceScoutRole:
+		return patch.BackendPerformance
 	case uiScoutRole:
 		return patch.UI
 	default:
@@ -821,6 +827,10 @@ type startUIWorkRunDetail struct {
 	LocalManifest   *localWorkManifest        `json:"local_manifest,omitempty"`
 	GithubManifest  *githubWorkManifest       `json:"github_manifest,omitempty"`
 	GithubStatus    *githubWorkStatusSnapshot `json:"github_status,omitempty"`
+	StartedAt       string                    `json:"started_at,omitempty"`
+	TotalTokens     int                       `json:"total_tokens,omitempty"`
+	SessionsAccounted int                     `json:"sessions_accounted,omitempty"`
+	HasTokenUsage   bool                      `json:"has_token_usage,omitempty"`
 	NextAction      string                    `json:"next_action,omitempty"`
 	HumanGateReason string                    `json:"human_gate_reason,omitempty"`
 	SyncAllowed     bool                      `json:"sync_allowed,omitempty"`
@@ -5061,13 +5071,33 @@ func loadStartUIWorkRunDetail(runID string) (startUIWorkRunDetail, error) {
 			manifest.SupersededReason = supersededReason
 		}
 		nextAction := defaultString(localWorkBlockedNextAction(manifest), defaultString(strings.TrimSpace(manifest.CurrentPhase), "inspect local work state"))
+		totalTokens := 0
+		sessionsAccounted := 0
+		hasTokenUsage := false
+		if manifest.TokenUsage != nil {
+			totalTokens = manifest.TokenUsage.TotalTokens
+			sessionsAccounted = manifest.TokenUsage.SessionsAccounted
+			hasTokenUsage = manifest.TokenUsage.SessionsAccounted > 0 || manifest.TokenUsage.TotalTokens > 0
+		}
+		if !hasTokenUsage {
+			runDir := localWorkRunDirByID(defaultString(strings.TrimSpace(manifest.RepoID), localWorkRepoID(manifest.RepoRoot)), manifest.RunID)
+			if artifact, artifactErr := readLocalWorkThreadUsageArtifact(filepath.Join(runDir, "thread-usage.json")); artifactErr == nil && artifact != nil {
+				totalTokens = artifact.Totals.TotalTokens
+				sessionsAccounted = artifact.Totals.SessionsAccounted
+				hasTokenUsage = artifact.Totals.SessionsAccounted > 0 || artifact.Totals.TotalTokens > 0
+			}
+		}
 		return startUIWorkRunDetail{
-			Summary:        summary,
-			Backend:        entry.Backend,
-			LocalManifest:  &manifest,
-			NextAction:     nextAction,
-			ResolveAllowed: localWorkResolveAllowed(manifest),
-			ExternalURL:    summary.TargetURL,
+			Summary:           summary,
+			Backend:           entry.Backend,
+			LocalManifest:     &manifest,
+			StartedAt:         defaultString(strings.TrimSpace(manifest.CreatedAt), strings.TrimSpace(summary.UpdatedAt)),
+			TotalTokens:       totalTokens,
+			SessionsAccounted: sessionsAccounted,
+			HasTokenUsage:     hasTokenUsage,
+			NextAction:        nextAction,
+			ResolveAllowed:    localWorkResolveAllowed(manifest),
+			ExternalURL:       summary.TargetURL,
 		}, nil
 	case "github":
 		manifest, err := readGithubWorkManifest(entry.ManifestPath)
@@ -5078,15 +5108,27 @@ func loadStartUIWorkRunDetail(runID string) (startUIWorkRunDetail, error) {
 		if err != nil {
 			return startUIWorkRunDetail{}, err
 		}
+		totalTokens := 0
+		sessionsAccounted := 0
+		hasTokenUsage := false
+		if artifact, artifactErr := readGithubThreadUsageArtifact(filepath.Join(filepath.Dir(entry.ManifestPath), "thread-usage.json")); artifactErr == nil && artifact != nil {
+			totalTokens = artifact.TotalTokens
+			sessionsAccounted = len(artifact.Rows)
+			hasTokenUsage = artifact.TotalTokens > 0 || len(artifact.Rows) > 0
+		}
 		return startUIWorkRunDetail{
-			Summary:         summary,
-			Backend:         entry.Backend,
-			GithubManifest:  &manifest,
-			GithubStatus:    &status,
-			NextAction:      defaultString(strings.TrimSpace(manifest.NextAction), "inspect GitHub feedback and publication state"),
-			HumanGateReason: defaultString(strings.TrimSpace(manifest.NeedsHumanReason), defaultString(strings.TrimSpace(manifest.PublicationError), strings.TrimSpace(manifest.PublicationDetail))),
-			SyncAllowed:     true,
-			ExternalURL:     githubWorkRunExternalURL(manifest),
+			Summary:           summary,
+			Backend:           entry.Backend,
+			GithubManifest:    &manifest,
+			GithubStatus:      &status,
+			StartedAt:         defaultString(strings.TrimSpace(manifest.CreatedAt), strings.TrimSpace(summary.UpdatedAt)),
+			TotalTokens:       totalTokens,
+			SessionsAccounted: sessionsAccounted,
+			HasTokenUsage:     hasTokenUsage,
+			NextAction:        defaultString(strings.TrimSpace(manifest.NextAction), "inspect GitHub feedback and publication state"),
+			HumanGateReason:   defaultString(strings.TrimSpace(manifest.NeedsHumanReason), defaultString(strings.TrimSpace(manifest.PublicationError), strings.TrimSpace(manifest.PublicationDetail))),
+			SyncAllowed:       true,
+			ExternalURL:       githubWorkRunExternalURL(manifest),
 		}, nil
 	default:
 		return startUIWorkRunDetail{}, fmt.Errorf("unsupported backend %q", entry.Backend)

@@ -179,6 +179,8 @@ func defaultScoutRoleWorkType(role string, source string) workTypeResolution {
 		return workTypeResolution{WorkType: workTypeFeature, Source: source}
 	case improvementScoutRole:
 		return workTypeResolution{WorkType: workTypeRefactor, Source: source}
+	case backendPerformanceScoutRole:
+		return workTypeResolution{WorkType: workTypeRefactor, Source: source}
 	case uiScoutRole:
 		return workTypeResolution{WorkType: workTypeBugFix, Source: source}
 	default:

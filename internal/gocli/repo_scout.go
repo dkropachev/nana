@@ -11,7 +11,7 @@ import (
 const RepoScoutHelp = `nana repo scout - Manage scout startup policies
 
 Usage:
-  nana repo scout enable [--repo <path>] [--role improvement|enhancement|ui|both|all] [--mode auto|manual] [--schedule always|daily|weekly|when-resolved] [--issue-destination local|repo|fork] [--fork-repo <owner/repo>] [--labels <a,b>] [--session-limit <1-6>]
+  nana repo scout enable [--repo <path>] [--role improvement|enhancement|backend-performance|ui|both|all] [--mode auto|manual] [--schedule always|daily|weekly|when-resolved] [--issue-destination local|repo|fork] [--fork-repo <owner/repo>] [--labels <a,b>] [--session-limit <1-6>]
 
 Behavior:
   - writes scout policy to Nana-managed runtime state outside the source checkout
@@ -19,7 +19,7 @@ Behavior:
   - default role is both (improvement + enhancement); use --role ui or --role all to manage ui-scout
   - default new-policy mode is auto; default schedule is when-resolved; default new-policy issue destination is local
   - schedule controls when startup reruns the scout: always, daily, weekly, or after all reported issues are fixed or dropped
-  - ui-scout accepts a session-limit that caps parallel page-audit sessions
+  - ui-scout and backend-performance-scout accept a session-limit that caps parallel scout fanout
 `
 
 type repoScoutEnableOptions struct {
@@ -355,7 +355,7 @@ func parseRepoScoutRoles(value string) ([]string, error) {
 				return []string{role}, nil
 			}
 		}
-		return nil, fmt.Errorf("Invalid --role value %q. Expected improvement, enhancement, ui, both, or all.", value)
+		return nil, fmt.Errorf("Invalid --role value %q. Expected improvement, enhancement, backend-performance, ui, both, or all.", value)
 	}
 }
 

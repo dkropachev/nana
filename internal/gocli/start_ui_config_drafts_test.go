@@ -85,6 +85,14 @@ function scoutCatalog(keys) {
       default_session_limit: 0,
       supports_session_limit: false,
     },
+    "backend-performance": {
+      role: "backend-performance-scout",
+      config_key: "backend-performance",
+      display_label: "Backend Performance Scout",
+      default_schedule: "when_resolved",
+      default_session_limit: 4,
+      supports_session_limit: true,
+    },
     ui: {
       role: "ui-scout",
       config_key: "ui",
@@ -97,7 +105,7 @@ function scoutCatalog(keys) {
   return keys.map((key) => ({ ...catalog[key] }));
 }
 
-function makeRepo(catalogKeys = ['improvement', 'enhancement', 'ui']) {
+function makeRepo(catalogKeys = ['improvement', 'enhancement', 'backend-performance', 'ui']) {
   const scoutsByRole = {
     improvement: {
       enabled: true,
@@ -116,6 +124,17 @@ function makeRepo(catalogKeys = ['improvement', 'enhancement', 'ui']) {
       labels: [],
     },
   };
+  if (catalogKeys.includes('backend-performance')) {
+    scoutsByRole['backend-performance'] = {
+      enabled: false,
+      mode: "manual",
+      schedule: "when_resolved",
+      issue_destination: "local",
+      fork_repo: "",
+      labels: ['perf'],
+      session_limit: 4,
+    };
+  }
   if (catalogKeys.includes('ui')) {
     scoutsByRole.ui = {
       enabled: true,

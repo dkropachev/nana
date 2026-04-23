@@ -3346,6 +3346,9 @@ func TestStartUIAPIAssistantWorkspaceRoutes(t *testing.T) {
 	if !runDetail.SyncAllowed || runDetail.GithubManifest == nil || runDetail.GithubStatus == nil || runDetail.HumanGateReason != "approval required" {
 		t.Fatalf("unexpected work run detail: %+v", runDetail)
 	}
+	if strings.TrimSpace(runDetail.StartedAt) == "" || runDetail.HasTokenUsage {
+		t.Fatalf("expected github work run detail to expose started_at and no token usage yet, got %+v", runDetail)
+	}
 	if runDetail.Summary.CurrentPhase != "completion-harden" || runDetail.Summary.CurrentRound != 2 {
 		t.Fatalf("expected GitHub run summary phase/round, got %+v", runDetail.Summary)
 	}
@@ -3597,6 +3600,22 @@ func TestStartUIAPITasksListAndDetail(t *testing.T) {
 	}
 	if detail.WorkItem == nil || detail.Summary.Kind != "work_item" {
 		t.Fatalf("unexpected work-item task detail: %+v", detail)
+	}
+
+	runTaskDetailResponse, err := http.Get(fixture.Server.URL + "/api/v1/tasks/" + url.PathEscape("work-run:lw-browser-active"))
+	if err != nil {
+		t.Fatalf("GET work-run task detail: %v", err)
+	}
+	defer runTaskDetailResponse.Body.Close()
+	var runTaskDetail startUITaskDetail
+	if err := json.NewDecoder(runTaskDetailResponse.Body).Decode(&runTaskDetail); err != nil {
+		t.Fatalf("decode work-run task detail: %v", err)
+	}
+	if runTaskDetail.WorkRun == nil || runTaskDetail.RelatedRun == nil {
+		t.Fatalf("expected work-run task detail to include run detail, got %+v", runTaskDetail)
+	}
+	if runTaskDetail.WorkRun.StartedAt != "2026-04-21T22:15:00Z" || !runTaskDetail.WorkRun.HasTokenUsage || runTaskDetail.WorkRun.TotalTokens != 220 || runTaskDetail.WorkRun.SessionsAccounted != 1 {
+		t.Fatalf("unexpected work-run task timing/usage detail: %+v", runTaskDetail.WorkRun)
 	}
 }
 

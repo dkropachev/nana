@@ -1378,10 +1378,11 @@
     `;
   }
 
-  const SCOUT_ROLE_ORDER = ["improvement", "enhancement", "ui"];
+  const SCOUT_ROLE_ORDER = ["improvement", "enhancement", "backend-performance", "ui"];
   const SCOUT_ROLE_META = {
     improvement: { label: "Improvement Scout", defaultSchedule: "when_resolved", defaultSessionLimit: 0 },
     enhancement: { label: "Enhancement Scout", defaultSchedule: "when_resolved", defaultSessionLimit: 0 },
+    "backend-performance": { label: "Backend Performance Scout", defaultSchedule: "when_resolved", defaultSessionLimit: 4 },
     ui: { label: "UI Scout", defaultSchedule: "when_resolved", defaultSessionLimit: 4 },
   };
 
@@ -4952,6 +4953,38 @@
     return '<div class="status-pill">No source detail is available for this task.</div>';
   }
 
+  function taskDetailStartedAt(detail) {
+    if (detail && detail.related_run && detail.related_run.started_at) {
+      return detail.related_run.started_at;
+    }
+    if (detail && detail.work_run && detail.work_run.started_at) {
+      return detail.work_run.started_at;
+    }
+    if (detail && detail.summary && detail.summary.created_at) {
+      return detail.summary.created_at;
+    }
+    if (detail && detail.investigation && detail.investigation.summary && detail.investigation.summary.created_at) {
+      return detail.investigation.summary.created_at;
+    }
+    return "";
+  }
+
+  function taskDetailTokens(detail) {
+    if (detail && detail.related_run && detail.related_run.has_token_usage) {
+      return {
+        total: Number(detail.related_run.total_tokens || 0),
+        sessions: Number(detail.related_run.sessions_accounted || 0),
+      };
+    }
+    if (detail && detail.work_run && detail.work_run.has_token_usage) {
+      return {
+        total: Number(detail.work_run.total_tokens || 0),
+        sessions: Number(detail.work_run.sessions_accounted || 0),
+      };
+    }
+    return null;
+  }
+
   function renderTaskDetailModal() {
     const host = document.getElementById("task-detail-modal-content");
     if (!host) return;
@@ -4973,6 +5006,11 @@
       return;
     }
     const summary = detail.summary;
+    const startedAt = taskDetailStartedAt(detail);
+    const tokenUsage = taskDetailTokens(detail);
+    const tokenValue = tokenUsage
+      ? `${formatTokenCompact(tokenUsage.total)}${tokenUsage.sessions > 0 ? ` · ${tokenUsage.sessions} session${tokenUsage.sessions === 1 ? "" : "s"}` : ""}`
+      : "Not available";
     const actionButtons = [];
     if (detail.related_run && detail.related_run.summary && detail.related_run.summary.run_id) {
       actionButtons.push(`<button class="tx-btn tx-btn-secondary" type="button" data-task-open-job="${escapeHTML(detail.related_run.summary.run_id)}">Open Job</button>`);
@@ -5013,8 +5051,16 @@
             <span class="drawer-value">${escapeHTML(formatDateTime(summary.updated_at))}</span>
           </div>
           <div class="drawer-summary-card">
+            <span class="drawer-label">Started</span>
+            <span class="drawer-value">${escapeHTML(defaultString(startedAt ? formatDateTime(startedAt) : "", "Not started"))}</span>
+          </div>
+          <div class="drawer-summary-card">
             <span class="drawer-label">Scheduled</span>
             <span class="drawer-value">${escapeHTML(defaultString(summary.schedule_at ? formatDateTime(summary.schedule_at) : "", "Now"))}</span>
+          </div>
+          <div class="drawer-summary-card">
+            <span class="drawer-label">Tokens</span>
+            <span class="drawer-value">${escapeHTML(tokenValue)}</span>
           </div>
         </div>
       </div>

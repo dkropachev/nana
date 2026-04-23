@@ -677,7 +677,7 @@ func buildStartUITaskInferencePrompt(repoSlug string, description string, templa
 	lines := []string{
 		"You are classifying a Nana task from a short operator description.",
 		"Return JSON only with this schema:",
-		`{"title":"...","launch_kind":"local_work|investigation|manual_scout","work_type":"bug_fix|refactor|feature|test_only","investigation_query":"...","scout_role":"improvement-scout|enhancement-scout|ui-scout","scout_focus":["..."],"findings_handling":"manual_review|auto_promote"}`,
+		`{"title":"...","launch_kind":"local_work|investigation|manual_scout","work_type":"bug_fix|refactor|feature|test_only","investigation_query":"...","scout_role":"improvement-scout|enhancement-scout|backend-performance-scout|ui-scout","scout_focus":["..."],"findings_handling":"manual_review|auto_promote"}`,
 		"Rules:",
 		"- Pick the single best launch_kind for the described work.",
 		"- Use `investigation` when the user wants diagnosis, explanation, or evidence gathering.",
@@ -1314,6 +1314,8 @@ func startUITaskScoutRoleFromDescription(lower string) string {
 	switch {
 	case strings.Contains(lower, "ui"), strings.Contains(lower, "ux"), strings.Contains(lower, "layout"), strings.Contains(lower, "css"), strings.Contains(lower, "screen"):
 		return uiScoutRole
+	case strings.Contains(lower, "backend"), strings.Contains(lower, "api "), strings.Contains(lower, "api-"), strings.Contains(lower, "hot path"), strings.Contains(lower, "hotpath"), strings.Contains(lower, "hotspot"), strings.Contains(lower, "cpu"), strings.Contains(lower, "throughput"), strings.Contains(lower, "latency"), strings.Contains(lower, "worker"), strings.Contains(lower, "queue"):
+		return backendPerformanceScoutRole
 	case strings.Contains(lower, "enhanc"):
 		return enhancementScoutRole
 	default:
