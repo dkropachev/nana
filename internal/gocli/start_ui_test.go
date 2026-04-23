@@ -7194,13 +7194,14 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 		"investigations": {
 			hash: "view=investigations",
 			expect: []string{
-				"Schedule Task",
-				"Presets",
-				"Task Center",
+				"Nana Mission Control",
+				"Search tasks...",
+				"+ Task",
 				"Running",
 				"In Review",
 				"Blocked",
-				"No tasks in this state.",
+				"Fix flaky test",
+				"work run",
 			},
 		},
 		"repo-findings": {

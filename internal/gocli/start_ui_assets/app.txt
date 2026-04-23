@@ -35,6 +35,7 @@
     taskFindings: defaultTaskFindingsState(),
     findingImports: defaultFindingImportsState(),
     taskDetailModal: null,
+    taskScheduleModal: null,
     workItemDrawer: null,
     workItemSelection: defaultWorkItemSelection(),
     issueQueue: defaultIssueQueueState(),
@@ -229,6 +230,7 @@
       repoSlug: "",
       description: "",
       scheduleAt: "",
+      runMode: "now",
       priority: "3",
       templateID: "template:custom",
       creating: false,
@@ -278,6 +280,7 @@
       query: "",
       repo: "",
       attention: "all",
+      status: "all",
       kind: "all",
     };
   }
@@ -1166,6 +1169,7 @@
     if (!filter) return 0;
     return (String(filter.query || "").trim() ? 1 : 0) +
       (filter.kind && filter.kind !== "all" ? 1 : 0) +
+      (filter.status && filter.status !== "all" ? 1 : 0) +
       (filter.attention && filter.attention !== "all" ? 1 : 0);
   }
 
@@ -1244,6 +1248,11 @@
   function matchesAttentionFilter(item, value) {
     if (!value || value === "all") return true;
     return defaultString(item && item.attention_state, "") === value;
+  }
+
+  function matchesTaskStatusFilter(item, value) {
+    if (!value || value === "all") return true;
+    return defaultString(item && item.status, "") === value;
   }
 
   function matchesRepoFilter(item, value) {
@@ -3023,8 +3032,8 @@
         subtitle.textContent = "Tracked issues, triage evidence, scheduling, and direct launch actions.";
         updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
       } else if (state.currentView === "investigations") {
-        title.textContent = "Tasks";
-        subtitle.textContent = "Universal task board for scheduled, running, paused, blocked, and in-review Nana work.";
+        title.textContent = "Nana Mission Control";
+        subtitle.textContent = "One task feed for scheduled, running, paused, blocked, and in-review Nana work.";
         updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
       } else if (state.currentView === "feedback") {
         title.textContent = "Feedback";
@@ -3059,10 +3068,10 @@
       return;
     }
     if (state.currentView === "investigations") {
-      title.textContent = "Tasks";
+      title.textContent = "Nana Mission Control";
       subtitle.textContent = state.selectedRepo
-        ? `Universal task scheduling and task state for ${state.selectedRepo}.`
-        : "Universal task scheduling and execution state across Nana work.";
+        ? `Task scheduling and execution state for ${state.selectedRepo}.`
+        : "Task scheduling and execution state across Nana work.";
       return;
     }
     if (state.currentView === "work") {
@@ -4072,7 +4081,9 @@
     const filter = filterState("investigations");
     return (state.investigations.items || []).filter((item) => {
       return matchesRepoFilter(item, filter.repo) &&
+        matchesTaskStatusFilter(item, filter.status) &&
         matchesAttentionFilter(item, filter.attention) &&
+        matchesKindFilter(item, filter.kind) &&
         matchesQuery(item, ["title", "summary", "description", "repo_slug", "kind", "status", "raw_status", "run_id", "external_url", "work_type"], filter.query);
     });
   }
@@ -4634,68 +4645,172 @@
     return (items || []).filter((item) => item.status === status);
   }
 
-  function taskSummaryCards(items) {
+  function taskTypeLabel(value) {
+    return defaultString(String(value || "").replace(/_/g, " "), "task");
+  }
+
+  function taskKindOptions(items) {
+    const values = new Set(["scout_job", "investigation", "work_run", "work_item", "planned_item", "issue", "service_task"]);
+    (items || []).forEach((item) => {
+      const kind = defaultString(item && item.kind, "");
+      if (kind) values.add(kind);
+    });
+    return Array.from(values).sort().map((kind) => ({
+      value: kind,
+      label: taskTypeLabel(kind),
+    }));
+  }
+
+  function taskRepoOptions(items) {
+    const values = new Set();
+    sortedRepos().forEach((repo) => values.add(repo.repo_slug));
+    (items || []).forEach((item) => {
+      const repo = defaultString(item && item.repo_slug, "");
+      if (repo) values.add(repo);
+    });
+    return Array.from(values).sort();
+  }
+
+  function activeTaskFilterCount(filter) {
+    if (!filter) return 0;
+    return (String(filter.query || "").trim() ? 1 : 0) +
+      (filter.status && filter.status !== "all" ? 1 : 0) +
+      (filter.kind && filter.kind !== "all" ? 1 : 0) +
+      (filter.repo ? 1 : 0);
+  }
+
+  function taskFilterChip(label, value, field) {
+    if (!value || value === "all") return "";
+    const text = field === "query" ? `"${value}"` : `${label}: ${value}`;
+    return `<button class="mission-filter-chip" type="button" data-task-filter-clear="${escapeHTML(field)}">${escapeHTML(text)} ×</button>`;
+  }
+
+  function renderTaskToolbar(items) {
+    const filter = filterState("investigations");
+    const activeCount = activeTaskFilterCount(filter);
+    const statusOptions = [{ id: "all", title: "All" }, ...TASK_STATUS_GROUPS].map((option) => {
+      const selected = filter.status === option.id ? "selected" : "";
+      return `<option value="${escapeHTML(option.id)}" ${selected}>${escapeHTML(option.title)}</option>`;
+    }).join("");
+    const kindOptions = [{ value: "all", label: "All" }, ...taskKindOptions(items)].map((option) => {
+      const selected = filter.kind === option.value ? "selected" : "";
+      return `<option value="${escapeHTML(option.value)}" ${selected}>${escapeHTML(option.label)}</option>`;
+    }).join("");
+    const repoOptions = [`<option value="" ${filter.repo ? "" : "selected"}>All repos</option>`]
+      .concat(taskRepoOptions(items).map((repo) => `<option value="${escapeHTML(repo)}" ${filter.repo === repo ? "selected" : ""}>${escapeHTML(repo)}</option>`))
+      .join("");
+    const chips = [
+      taskFilterChip("Status", TASK_STATUS_GROUPS.find((item) => item.id === filter.status)?.title || "", "status"),
+      taskFilterChip("Type", filter.kind !== "all" ? taskTypeLabel(filter.kind) : "", "kind"),
+      taskFilterChip("Repo", filter.repo, "repo"),
+      taskFilterChip("", String(filter.query || "").trim(), "query"),
+    ].filter(Boolean).join("");
+    return `
+      <section class="mission-toolbar surface">
+        <div class="mission-toolbar-main">
+          <label class="mission-search">
+            <span class="sr-only">Search tasks</span>
+            <input type="search" value="${escapeHTML(filter.query)}" placeholder="Search tasks..." data-view-filter="investigations" data-view-filter-name="query" />
+          </label>
+          <label class="mission-select">
+            <span>Status</span>
+            <select data-view-filter="investigations" data-view-filter-name="status">${statusOptions}</select>
+          </label>
+          <label class="mission-select">
+            <span>Type</span>
+            <select data-view-filter="investigations" data-view-filter-name="kind">${kindOptions}</select>
+          </label>
+          <label class="mission-select mission-select-repo">
+            <span>Repo</span>
+            <select data-view-filter="investigations" data-view-filter-name="repo">${repoOptions}</select>
+          </label>
+          <span class="mission-filter-count">${activeCount ? `${activeCount} active` : "No filters"}</span>
+          ${activeCount ? `<button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-task-filter-clear="all">Clear</button>` : ""}
+          <button id="open-task-schedule-button" class="tx-btn tx-btn-primary mission-add-button" type="button">+ Task</button>
+        </div>
+        ${chips ? `<div class="mission-filter-chips">${chips}</div>` : ""}
+      </section>
+    `;
+  }
+
+  function taskStatusStrip(items) {
     return TASK_STATUS_GROUPS.map((group) => {
       const count = taskItemsForStatus(items, group.id).length;
       return `
-        <article class="task-summary-card">
-          <span class="task-summary-value">${count}</span>
-          <span class="task-summary-label">${escapeHTML(group.title)}</span>
-          <p class="task-summary-copy">${escapeHTML(group.copy)}</p>
-        </article>
+        <button class="mission-status-chip ${filterState("investigations").status === group.id ? "mission-status-chip-active" : ""}" type="button" data-task-status-filter="${escapeHTML(group.id)}">
+          <span>${escapeHTML(group.title)}</span>
+          <strong>${count}</strong>
+        </button>
       `;
     }).join("");
   }
 
-  function renderTaskCard(item) {
+  function taskPrimaryActionLabel(item) {
+    if (item && item.can_open_job) return "Open Job";
+    switch (defaultString(item && item.status, "")) {
+      case "running":
+        return "Logs";
+      case "blocked":
+        return "Resolve";
+      case "queued":
+        return "Details";
+      case "in_review":
+        return "Review";
+      default:
+        return "Details";
+    }
+  }
+
+  function renderTaskFeedRow(item) {
     const selected = item.id === state.investigations.selectedRunID;
     const repo = defaultString(item.repo_slug, "Workspace");
-    const priority = item.priority_label ? `<span class="task-card-tag">${escapeHTML(item.priority_label)}</span>` : "";
-    const schedule = item.schedule_at ? `<span class="task-card-meta">Scheduled ${escapeHTML(formatDateTime(item.schedule_at))}</span>` : "";
-    const runMeta = item.can_open_job && item.run_id ? `<span class="task-card-meta">Job ${escapeHTML(item.run_id)}</span>` : "";
-    const kind = item.kind ? `<span class="task-card-tag">${escapeHTML(item.kind.replace(/_/g, " "))}</span>` : "";
+    const priority = defaultString(item.priority_label, "P3");
+    const kind = taskTypeLabel(item.kind);
+    const schedule = item.schedule_at ? `scheduled ${formatDateTime(item.schedule_at)}` : `updated ${formatDateTime(item.updated_at)}`;
+    const summary = defaultString(item.summary, item.description || "No summary recorded.");
     return `
-      <button class="task-card ${selected ? "task-card-selected" : ""}" type="button" data-task-open="${escapeHTML(item.id)}">
-        <div class="task-card-head">
-          <div>
-            <span class="task-card-repo">${escapeHTML(repo)}</span>
-            <h4>${escapeHTML(defaultString(item.title, item.id))}</h4>
-          </div>
+      <button class="mission-task-row ${selected ? "mission-task-row-selected" : ""}" type="button" data-task-open="${escapeHTML(item.id)}">
+        <span class="mission-task-priority">${escapeHTML(priority)}</span>
+        <span class="mission-task-type">${escapeHTML(kind)}</span>
+        <span class="mission-task-copy">
+          <strong>${escapeHTML(defaultString(item.title, item.id))}</strong>
+          <span>${escapeHTML(repo)} · ${escapeHTML(schedule)}</span>
+          <em>${escapeHTML(summary)}</em>
+        </span>
+        <span class="mission-task-action">
+          <span>${escapeHTML(taskPrimaryActionLabel(item))} ›</span>
           ${renderStatePill(taskStatusTone(item.status), taskStatusLabel(defaultString(item.status, "queued")))}
-        </div>
-        <p class="task-card-copy">${escapeHTML(defaultString(item.summary, item.description || "No summary recorded."))}</p>
-        <div class="task-card-tags">
-          ${kind}
-          ${priority}
-          ${item.work_type ? `<span class="task-card-tag">${escapeHTML(workTypeLabel(item.work_type))}</span>` : ""}
-        </div>
-        <div class="task-card-foot">
-          <span class="task-card-meta">Updated ${escapeHTML(formatDateTime(item.updated_at))}</span>
-          ${schedule}
-          ${runMeta}
-        </div>
+          ${item.run_id ? `<small>${escapeHTML(item.run_id)}</small>` : ""}
+        </span>
       </button>
     `;
   }
 
-  function renderTaskColumns(items) {
-    return TASK_STATUS_GROUPS.map((group) => {
-      const bucket = taskItemsForStatus(items, group.id);
+  function renderTaskFeed(items) {
+    const groups = TASK_STATUS_GROUPS.map((group) => ({
+      ...group,
+      items: taskItemsForStatus(items, group.id),
+    })).filter((group) => group.items.length);
+    if (!groups.length) {
       return `
-        <section class="task-column">
-          <div class="task-column-head">
-            <div>
-              <h3>${escapeHTML(group.title)}</h3>
-              <p>${escapeHTML(group.copy)}</p>
-            </div>
-            <span class="nav-count">${bucket.length}</span>
-          </div>
-          <div class="task-column-body">
-            ${bucket.length ? bucket.map(renderTaskCard).join("") : '<div class="task-empty">No tasks in this state.</div>'}
-          </div>
+        <section class="mission-empty-state">
+          <h3>No tasks match these filters.</h3>
+          <p>Clear filters or schedule a new task from the toolbar.</p>
         </section>
       `;
-    }).join("");
+    }
+    return groups.map((group) => `
+      <section class="mission-task-group">
+        <div class="mission-task-group-head">
+          <div>
+            <h3>${escapeHTML(group.title)}</h3>
+            <p>${escapeHTML(group.copy)}</p>
+          </div>
+          <span>${group.items.length}</span>
+        </div>
+        <div class="mission-task-rows">${group.items.map(renderTaskFeedRow).join("")}</div>
+      </section>
+    `).join("");
   }
 
   function taskDetailSourceMarkup(detail) {
@@ -4890,43 +5005,32 @@
     loadInvestigationDetail(taskID, { silent: true });
   }
 
-  function renderInvestigationsPage() {
-    const items = filteredInvestigations();
+  function renderTaskScheduleModal() {
+    const host = document.getElementById("task-schedule-modal-content");
+    if (!host) return;
+    const repos = sortedRepos();
     const composerRepo = selectedTaskComposerRepoSummary();
     const selectedTemplate = selectedTaskTemplate();
-    ensureBodyStructure(`investigations:${defaultString(state.selectedRepo, "all")}:${sortedRepos().length}`, `
-      <section class="layout-two-col task-shell">
-        <div id="task-schedule-surface" class="surface"></div>
-        <div id="task-presets-surface" class="surface"></div>
-      </section>
-      <section id="task-center-surface" class="surface"></section>
-    `);
-    const scheduleHost = document.getElementById("task-schedule-surface");
-    if (scheduleHost) {
-      scheduleHost.innerHTML = `
-        <div class="surface-head">
-          <div>
-            <h3>Schedule Task</h3>
-            <p>Create a task from one description. Nana infers the title and task kind for you.</p>
-          </div>
-        </div>
+    const runMode = defaultString(state.taskComposer.runMode, state.taskComposer.scheduleAt ? "later" : "now");
+    host.innerHTML = `
+      <div class="mission-schedule-modal">
+        <p class="drawer-copy">Describe the work. Nana infers the title and task type.</p>
+        <label class="config-field config-field-wide">
+          <span class="config-label">Description</span>
+          <textarea id="task-composer-description" rows="6" placeholder="Investigate why the task repo filter sometimes appears empty, then patch the UI if needed.">${escapeHTML(state.taskComposer.description)}</textarea>
+        </label>
         <div class="config-grid">
-          ${state.selectedRepo ? `
-            <div class="config-field">
-              <span class="config-label">Repo</span>
-              <div class="scope-chip">${escapeHTML(state.selectedRepo)}</div>
-            </div>
-          ` : `
-            <label class="config-field">
-              <span class="config-label">Repo</span>
-              <select id="task-composer-repo">
-                ${sortedRepos().map((entry) => `<option value="${escapeHTML(entry.repo_slug)}" ${state.taskComposer.repoSlug === entry.repo_slug ? "selected" : ""}>${escapeHTML(entry.repo_slug)}</option>`).join("")}
-              </select>
-            </label>
-          `}
           <label class="config-field">
-            <span class="config-label">Run At</span>
-            <input id="task-composer-schedule" type="datetime-local" value="${escapeHTML(state.taskComposer.scheduleAt)}" />
+            <span class="config-label">Repo</span>
+            <select id="task-composer-repo">
+              ${repos.map((entry) => `<option value="${escapeHTML(entry.repo_slug)}" ${composerRepo && composerRepo.repo_slug === entry.repo_slug ? "selected" : ""}>${escapeHTML(entry.repo_slug)}</option>`).join("")}
+            </select>
+          </label>
+          <label class="config-field">
+            <span class="config-label">Preset</span>
+            <select id="task-composer-template">
+              ${(state.investigations.templates || []).map((template) => `<option value="${escapeHTML(template.id)}" ${selectedTemplate && selectedTemplate.id === template.id ? "selected" : ""}>${escapeHTML(template.name)}</option>`).join("")}
+            </select>
           </label>
           <label class="config-field">
             <span class="config-label">Priority</span>
@@ -4934,53 +5038,140 @@
               ${[0, 1, 2, 3, 4, 5].map((priority) => `<option value="${priority}" ${String(state.taskComposer.priority) === String(priority) ? "selected" : ""}>${escapeHTML(`P${priority}`)}</option>`).join("")}
             </select>
           </label>
-          <label class="config-field config-field-wide">
-            <span class="config-label">Description</span>
-            <textarea id="task-composer-description" rows="5" placeholder="Describe the work Nana should do. Example: investigate why paused runs stay in the approvals queue and then patch the UI copy if needed.">${escapeHTML(state.taskComposer.description)}</textarea>
+          <label class="config-field">
+            <span class="config-label">Run</span>
+            <select id="task-composer-run-mode">
+              <option value="now" ${runMode === "now" ? "selected" : ""}>Now</option>
+              <option value="later" ${runMode === "later" ? "selected" : ""}>Later</option>
+            </select>
+          </label>
+          <label class="config-field ${runMode === "later" ? "" : "task-run-at-hidden"}">
+            <span class="config-label">Run At</span>
+            <input id="task-composer-schedule" type="datetime-local" value="${escapeHTML(state.taskComposer.scheduleAt)}" />
           </label>
         </div>
-        <div class="config-actions">
-          <button id="task-schedule-button" class="tx-btn tx-btn-primary" type="button" ${state.taskComposer.creating || !composerRepo ? "disabled" : ""}>${state.taskComposer.creating ? "Scheduling..." : "Schedule Task"}</button>
+        <div class="drawer-toolbar">
+          <button class="tx-btn tx-btn-secondary" type="button" data-task-schedule-close="true">Cancel</button>
           <button id="task-save-template-button" class="tx-btn tx-btn-secondary" type="button" ${state.taskComposer.savingTemplate || !composerRepo ? "disabled" : ""}>${state.taskComposer.savingTemplate ? "Saving..." : "Save As Preset"}</button>
+          <button id="task-schedule-button" class="tx-btn tx-btn-primary" type="button" ${state.taskComposer.creating || !composerRepo ? "disabled" : ""}>${state.taskComposer.creating ? "Scheduling..." : "Schedule Task"}</button>
         </div>
-      `;
+      </div>
+    `;
+  }
+
+  function initTaskScheduleModal() {
+    if (state.taskScheduleModal) return;
+    state.taskScheduleModal = Teryx.modal({
+      title: "Schedule Task",
+      size: "lg",
+      width: "min(760px, 92vw)",
+      content: '<div id="task-schedule-modal-content" class="drawer-shell"></div>',
+    });
+  }
+
+  function openTaskScheduleModal() {
+    initTaskScheduleModal();
+    selectedTaskComposerRepoSummary();
+    renderTaskScheduleModal();
+    state.taskScheduleModal.open();
+  }
+
+  function submitTaskSchedule() {
+    const repo = selectedTaskComposerRepoSummary();
+    if (!repo) {
+      toast("warning", "No repo selected", "Pick a repo before scheduling a task.");
+      return;
     }
-    const presetsHost = document.getElementById("task-presets-surface");
-    if (presetsHost) {
-      presetsHost.innerHTML = `
-        <div class="surface-head">
-          <div>
-            <h3>Presets</h3>
-            <p>Use a starter when you want to bias Nana toward a specific task family.</p>
-          </div>
-        </div>
-        <div class="task-template-list">
-          ${(state.investigations.templates || []).map((template) => `
-            <button class="task-template-card ${selectedTemplate && selectedTemplate.id === template.id ? "task-template-card-selected" : ""}" type="button" data-task-template="${escapeHTML(template.id)}">
-              <div class="task-template-head">
-                <strong>${escapeHTML(template.name)}</strong>
-                ${template.built_in ? '<span class="task-card-tag">built-in</span>' : '<span class="task-card-tag">saved</span>'}
-              </div>
-              <p>${escapeHTML(defaultString(template.description, "Use this preset as a starting point."))}</p>
-            </button>
-          `).join("") || '<div class="task-empty">No presets are available yet.</div>'}
-        </div>
-      `;
+    const description = String(state.taskComposer.description || "").trim();
+    if (!description) {
+      toast("warning", "Missing description", "Describe the task first.");
+      return;
     }
-    const taskCenterHost = document.getElementById("task-center-surface");
-    if (taskCenterHost) {
-      taskCenterHost.innerHTML = `
-        <div class="surface-head">
-          <div>
-            <h3>Task Center</h3>
-            <p>Everything Nana is tracking or actively executing, grouped by current state.</p>
-          </div>
-        </div>
-        <div class="task-summary-grid">${taskSummaryCards(items)}</div>
-        ${buildFilterToolbar("investigations", { placeholder: "Search task title, summary, repo, kind, URL, or run id" })}
-        <div class="task-board">${renderTaskColumns(items)}</div>
-      `;
+    const priority = Number.parseInt(String(state.taskComposer.priority || "3"), 10);
+    const scheduleAt = fromDateTimeLocal(state.taskComposer.scheduleAt);
+    state.taskComposer.creating = true;
+    renderTaskScheduleModal();
+    renderInvestigationsPage();
+    api("/api/v1/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        repo_slug: repo.repo_slug,
+        description,
+        schedule_at: scheduleAt,
+        priority,
+        template_id: defaultString(state.taskComposer.templateID, "template:custom"),
+      }),
+    }).then((response) => {
+      state.taskComposer.creating = false;
+      state.taskComposer.description = "";
+      state.taskComposer.scheduleAt = "";
+      state.taskComposer.runMode = "now";
+      state.taskComposer.priority = "3";
+      if (state.taskScheduleModal && state.taskScheduleModal.isOpen()) {
+        state.taskScheduleModal.close();
+      }
+      if (response.state) {
+        mergeRepoState(response.state);
+      } else {
+        load();
+      }
+      loadApprovals({ silent: true });
+      loadInvestigations({ silent: true });
+      toast("success", "Task scheduled", response.planned_item && response.planned_item.title || description);
+    }).catch((error) => {
+      state.taskComposer.creating = false;
+      renderTaskScheduleModal();
+      renderInvestigationsPage();
+      toast("danger", "Task scheduling failed", error.message);
+    });
+  }
+
+  function saveTaskTemplateFromComposer() {
+    const repo = selectedTaskComposerRepoSummary();
+    const description = String(state.taskComposer.description || "").trim();
+    if (!repo || !description) {
+      toast("warning", "Missing preset description", "Write the preset description first.");
+      return;
     }
+    state.taskComposer.savingTemplate = true;
+    renderTaskScheduleModal();
+    renderInvestigationsPage();
+    api("/api/v1/tasks/templates", {
+      method: "POST",
+      body: JSON.stringify({
+        repo_slug: repo.repo_slug,
+        description,
+        base_template_id: defaultString(state.taskComposer.templateID, "template:custom"),
+      }),
+    }).then((payload) => {
+      state.taskComposer.savingTemplate = false;
+      toast("success", "Preset saved", payload.template && payload.template.name || "Custom preset");
+      loadTaskTemplates({ silent: true });
+      renderTaskScheduleModal();
+    }).catch((error) => {
+      state.taskComposer.savingTemplate = false;
+      renderTaskScheduleModal();
+      renderInvestigationsPage();
+      toast("danger", "Preset save failed", error.message);
+    });
+  }
+
+  function renderInvestigationsPage() {
+    const items = filteredInvestigations();
+    ensureBodyStructure(`investigations:${defaultString(state.selectedRepo, "all")}:${sortedRepos().length}`, `
+      <section class="mission-control-shell">
+        <div id="mission-toolbar-host"></div>
+        <div id="mission-status-strip" class="mission-status-strip"></div>
+        <section id="mission-feed" class="mission-feed"></section>
+      </section>
+    `);
+    const toolbarHost = document.getElementById("mission-toolbar-host");
+    if (toolbarHost) toolbarHost.innerHTML = renderTaskToolbar(state.investigations.items || []);
+    const statusHost = document.getElementById("mission-status-strip");
+    if (statusHost) statusHost.innerHTML = taskStatusStrip(state.investigations.items || []);
+    const feedHost = document.getElementById("mission-feed");
+    if (feedHost) feedHost.innerHTML = renderTaskFeed(items);
+    renderTaskScheduleModal();
   }
 
   function renderWorkPage() {
@@ -7871,6 +8062,39 @@
         return;
       }
 
+      const openTaskScheduleButton = event.target.closest("#open-task-schedule-button");
+      if (openTaskScheduleButton) {
+        openTaskScheduleModal();
+        return;
+      }
+
+      const taskStatusFilterButton = event.target.closest("[data-task-status-filter]");
+      if (taskStatusFilterButton) {
+        const status = taskStatusFilterButton.getAttribute("data-task-status-filter") || "all";
+        const current = filterState("investigations").status;
+        updateFilter("investigations", "status", current === status ? "all" : status);
+        renderInvestigationsPage();
+        return;
+      }
+
+      const taskFilterClearButton = event.target.closest("[data-task-filter-clear]");
+      if (taskFilterClearButton) {
+        const field = taskFilterClearButton.getAttribute("data-task-filter-clear") || "";
+        if (field === "all") {
+          state.filters.investigations = defaultScopedViewFilter("");
+        } else if (field === "query") {
+          updateFilter("investigations", "query", "");
+        } else if (field === "status") {
+          updateFilter("investigations", "status", "all");
+        } else if (field === "kind") {
+          updateFilter("investigations", "kind", "all");
+        } else if (field === "repo") {
+          updateFilter("investigations", "repo", "");
+        }
+        renderInvestigationsPage();
+        return;
+      }
+
       const taskTemplateButton = event.target.closest("[data-task-template]");
       if (taskTemplateButton) {
         const templateID = taskTemplateButton.getAttribute("data-task-template") || "template:custom";
@@ -7923,75 +8147,12 @@
       }
 
       if (event.target.id === "task-schedule-button") {
-        const repo = selectedTaskComposerRepoSummary();
-        if (!repo) {
-          toast("warning", "No repo selected", "Pick a repo before scheduling a task.");
-          return;
-        }
-        const description = String(state.taskComposer.description || "").trim();
-        if (!description) {
-          toast("warning", "Missing description", "Describe the task first.");
-          return;
-        }
-        const priority = Number.parseInt(String(state.taskComposer.priority || "3"), 10);
-        const scheduleAt = fromDateTimeLocal(state.taskComposer.scheduleAt);
-        state.taskComposer.creating = true;
-        renderInvestigationsPage();
-        api("/api/v1/tasks", {
-          method: "POST",
-          body: JSON.stringify({
-            repo_slug: repo.repo_slug,
-            description,
-            schedule_at: scheduleAt,
-            priority,
-            template_id: defaultString(state.taskComposer.templateID, "template:custom"),
-          }),
-        }).then((response) => {
-          state.taskComposer.creating = false;
-          state.taskComposer.description = "";
-          state.taskComposer.scheduleAt = "";
-          state.taskComposer.priority = "3";
-          if (response.state) {
-            mergeRepoState(response.state);
-          } else {
-            load();
-          }
-          loadApprovals({ silent: true });
-          loadInvestigations({ silent: true });
-          toast("success", "Task scheduled", response.planned_item && response.planned_item.title || description);
-        }).catch((error) => {
-          state.taskComposer.creating = false;
-          renderInvestigationsPage();
-          toast("danger", "Task scheduling failed", error.message);
-        });
+        submitTaskSchedule();
         return;
       }
 
       if (event.target.id === "task-save-template-button") {
-        const repo = selectedTaskComposerRepoSummary();
-        const description = String(state.taskComposer.description || "").trim();
-        if (!repo || !description) {
-          toast("warning", "Missing preset description", "Write the preset description first.");
-          return;
-        }
-        state.taskComposer.savingTemplate = true;
-        renderInvestigationsPage();
-        api("/api/v1/tasks/templates", {
-          method: "POST",
-          body: JSON.stringify({
-            repo_slug: repo.repo_slug,
-            description,
-            base_template_id: defaultString(state.taskComposer.templateID, "template:custom"),
-          }),
-        }).then((payload) => {
-          state.taskComposer.savingTemplate = false;
-          toast("success", "Preset saved", payload.template && payload.template.name || "Custom preset");
-          loadTaskTemplates({ silent: true });
-        }).catch((error) => {
-          state.taskComposer.savingTemplate = false;
-          renderInvestigationsPage();
-          toast("danger", "Preset save failed", error.message);
-        });
+        saveTaskTemplateFromComposer();
         return;
       }
 
@@ -8462,6 +8623,51 @@
       }
     });
 
+    document.body.addEventListener("click", (event) => {
+      if (event.target.closest("#page-body")) return;
+      if (event.target.closest("[data-task-schedule-close]")) {
+        if (state.taskScheduleModal) {
+          state.taskScheduleModal.close();
+        }
+        return;
+      }
+      if (event.target.id === "task-schedule-button") {
+        submitTaskSchedule();
+        return;
+      }
+      if (event.target.id === "task-save-template-button") {
+        saveTaskTemplateFromComposer();
+        return;
+      }
+      const taskOpenJobButton = event.target.closest("[data-task-open-job]");
+      if (taskOpenJobButton) {
+        const runID = taskOpenJobButton.getAttribute("data-task-open-job") || "";
+        if (runID) {
+          openLogDrawer(runID);
+        }
+        return;
+      }
+      const taskActionButton = event.target.closest("[data-task-action]");
+      if (taskActionButton) {
+        const taskID = taskActionButton.getAttribute("data-task-id") || "";
+        const action = taskActionButton.getAttribute("data-task-action") || "";
+        if (!taskID || !action) return;
+        api(`/api/v1/tasks/${encodeURIComponent(taskID)}/${encodeURIComponent(action)}`, {
+          method: "POST",
+        }).then(() => {
+          load();
+          loadApprovals({ silent: true });
+          loadInvestigations({ silent: true });
+          if (state.taskDetailModal && state.taskDetailModal.isOpen()) {
+            state.taskDetailModal.close();
+          }
+          toast("success", "Task updated", taskID);
+        }).catch((error) => {
+          toast("danger", "Task action failed", error.message);
+        });
+      }
+    });
+
     document.getElementById("page-body").addEventListener("change", (event) => {
       captureDraftField(event.target);
       const scoutToggle = event.target.getAttribute("data-scout-toggle");
@@ -8487,6 +8693,20 @@
       }
       if (event.target.id === "task-composer-priority") {
         state.taskComposer.priority = String(event.target.value || "3");
+        return;
+      }
+      if (event.target.id === "task-composer-template") {
+        state.taskComposer.templateID = String(event.target.value || "template:custom");
+        renderTaskScheduleModal();
+        return;
+      }
+      if (event.target.id === "task-composer-run-mode") {
+        const runMode = String(event.target.value || "now");
+        state.taskComposer.runMode = runMode;
+        if (runMode === "now") {
+          state.taskComposer.scheduleAt = "";
+        }
+        renderTaskScheduleModal();
         return;
       }
       if (event.target.id === "issue-select") {
@@ -8522,6 +8742,36 @@
       const field = event.target.getAttribute("data-config-field");
       if (field) {
         updateConfigDraft(field, String(event.target.value || ""));
+      }
+    });
+
+    document.body.addEventListener("change", (event) => {
+      if (event.target.closest("#page-body")) return;
+      if (event.target.id === "task-composer-repo") {
+        state.taskComposer.repoSlug = String(event.target.value || "");
+        state.investigations.templatesLoaded = false;
+        state.investigations.templatesRepoSlug = "";
+        loadTaskTemplates({ silent: true });
+        renderTaskScheduleModal();
+        return;
+      }
+      if (event.target.id === "task-composer-priority") {
+        state.taskComposer.priority = String(event.target.value || "3");
+        renderTaskScheduleModal();
+        return;
+      }
+      if (event.target.id === "task-composer-template") {
+        state.taskComposer.templateID = String(event.target.value || "template:custom");
+        renderTaskScheduleModal();
+        return;
+      }
+      if (event.target.id === "task-composer-run-mode") {
+        const runMode = String(event.target.value || "now");
+        state.taskComposer.runMode = runMode;
+        if (runMode === "now") {
+          state.taskComposer.scheduleAt = "";
+        }
+        renderTaskScheduleModal();
       }
     });
 
@@ -8577,6 +8827,8 @@
       }
       if (event.target.id === "task-composer-schedule") {
         state.taskComposer.scheduleAt = String(event.target.value || "");
+        state.taskComposer.runMode = state.taskComposer.scheduleAt ? "later" : defaultString(state.taskComposer.runMode, "now");
+        renderTaskScheduleModal();
         return;
       }
       if (event.target.id === "task-investigation-query") {
@@ -8607,6 +8859,19 @@
         renderFeedbackPage();
       } else if (filterView === "approvals") {
         renderApprovalsPage();
+      }
+    });
+
+    document.body.addEventListener("input", (event) => {
+      if (event.target.closest("#page-body")) return;
+      if (event.target.id === "task-composer-description") {
+        state.taskComposer.description = String(event.target.value || "");
+        return;
+      }
+      if (event.target.id === "task-composer-schedule") {
+        state.taskComposer.scheduleAt = String(event.target.value || "");
+        state.taskComposer.runMode = state.taskComposer.scheduleAt ? "later" : defaultString(state.taskComposer.runMode, "now");
+        renderTaskScheduleModal();
       }
     });
 

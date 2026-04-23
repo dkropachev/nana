@@ -1371,6 +1371,302 @@ textarea {
   background: #ffffff;
 }
 
+.mission-control-shell {
+  display: grid;
+  gap: 14px;
+}
+
+.mission-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  padding: 10px;
+  border-color: #c9d5e5;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.96), rgba(245, 249, 253, 0.96)),
+    repeating-linear-gradient(90deg, rgba(20, 32, 51, 0.04) 0 1px, transparent 1px 22px);
+  box-shadow: 0 12px 30px rgba(25, 45, 73, 0.08);
+  backdrop-filter: blur(8px);
+}
+
+.mission-toolbar-main {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(130px, max-content) minmax(130px, max-content) minmax(160px, max-content) max-content max-content max-content;
+  gap: 8px;
+  align-items: center;
+}
+
+.mission-search input,
+.mission-select select {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid #c7d5e8;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #142033;
+}
+
+.mission-search input {
+  padding: 0 16px;
+}
+
+.mission-select {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding-left: 12px;
+  border: 1px solid #c7d5e8;
+  border-radius: 999px;
+  background: #ffffff;
+}
+
+.mission-select span {
+  color: #4f6787;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.mission-select select {
+  min-width: 92px;
+  border: 0;
+  background: transparent;
+}
+
+.mission-select-repo select {
+  min-width: 132px;
+}
+
+.mission-filter-count {
+  color: #4e627a;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.mission-add-button {
+  min-height: 40px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.mission-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.mission-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid #b8cbe4;
+  border-radius: 999px;
+  background: #edf5ff;
+  color: #223d5f;
+  cursor: pointer;
+}
+
+.mission-status-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.mission-status-chip {
+  display: inline-grid;
+  grid-auto-flow: column;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid #d6deea;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #35506f;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.mission-status-chip strong {
+  color: #142033;
+}
+
+.mission-status-chip-active {
+  border-color: #315f9a;
+  background: #17324f;
+  color: #ffffff;
+}
+
+.mission-status-chip-active strong {
+  color: #ffffff;
+}
+
+.mission-feed {
+  display: grid;
+  gap: 16px;
+}
+
+.mission-task-group {
+  padding: 14px;
+  border: 1px solid #d6deea;
+  border-radius: 16px;
+  background: #f8fbff;
+}
+
+.mission-task-group-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+
+.mission-task-group-head h3 {
+  margin: 0;
+  color: #142033;
+  font-size: 14px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mission-task-group-head p {
+  margin: 4px 0 0;
+  color: #5b718d;
+  font-size: 13px;
+}
+
+.mission-task-group-head > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 28px;
+  border-radius: 999px;
+  background: #e7eef8;
+  color: #223d5f;
+  font-weight: 800;
+}
+
+.mission-task-rows {
+  display: grid;
+  gap: 8px;
+}
+
+.mission-task-row {
+  display: grid;
+  grid-template-columns: 56px 140px minmax(0, 1fr) minmax(120px, max-content);
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #d5deeb;
+  border-radius: 14px;
+  background: #ffffff;
+  color: #142033;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+}
+
+.mission-task-row:hover {
+  border-color: #9ab7dc;
+  box-shadow: 0 10px 24px rgba(25, 45, 73, 0.08);
+  transform: translateY(-1px);
+}
+
+.mission-task-row-selected {
+  border-color: #315f9a;
+  box-shadow: 0 0 0 1px rgba(49, 95, 154, 0.18);
+}
+
+.mission-task-priority {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: #132338;
+  color: #ffffff;
+  font-weight: 900;
+}
+
+.mission-task-type {
+  color: #4f6787;
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.mission-task-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.mission-task-copy strong {
+  overflow: hidden;
+  color: #142033;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mission-task-copy span,
+.mission-task-copy em,
+.mission-task-action small {
+  overflow: hidden;
+  color: #5b718d;
+  font-size: 12px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mission-task-action {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+}
+
+.mission-task-action > span {
+  color: #315f9a;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.mission-empty-state {
+  padding: 36px 18px;
+  border: 1px dashed #b8cbe4;
+  border-radius: 16px;
+  background: #ffffff;
+  text-align: center;
+}
+
+.mission-empty-state h3 {
+  margin: 0;
+}
+
+.mission-empty-state p {
+  margin: 8px 0 0;
+  color: #5b718d;
+}
+
+.mission-schedule-modal {
+  display: grid;
+  gap: 16px;
+}
+
+.task-run-at-hidden {
+  display: none;
+}
+
 #repo-scheduler-board .tx-kanban-column-body {
   min-height: 260px;
 }
@@ -1387,6 +1683,15 @@ textarea {
   .repo-onboarding-shell .config-grid,
   .usage-filter-grid {
     grid-template-columns: 1fr;
+  }
+
+  .mission-toolbar-main,
+  .mission-task-row {
+    grid-template-columns: 1fr;
+  }
+
+  .mission-task-action {
+    justify-items: start;
   }
 
   .config-json-grid {
@@ -1439,6 +1744,16 @@ textarea {
 
   .task-board {
     grid-template-columns: 1fr;
+  }
+
+  .mission-toolbar {
+    position: static;
+  }
+
+  .mission-select {
+    grid-template-columns: 1fr;
+    padding: 8px 12px;
+    border-radius: 14px;
   }
 
   .scheduler-search-form {

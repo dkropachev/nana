@@ -169,6 +169,62 @@ func TestStartUIBrowserInteractionsRepoControls(t *testing.T) {
 	}
 }
 
+func TestStartUIBrowserInteractionsMissionControlTasks(t *testing.T) {
+	chromePath := startUITestChromePath(t)
+	if chromePath == "" {
+		t.Skip("google-chrome is required for chromedp browser interaction coverage")
+	}
+
+	oldInfer := startUIInferTaskPlan
+	startUIInferTaskPlan = func(repoSlug string, description string, template startUITaskTemplate) (startUITaskInferenceResult, error) {
+		return startUITaskInferenceResult{
+			Title:      "Mission control browser task",
+			LaunchKind: "local_work",
+			WorkType:   workTypeFeature,
+		}, nil
+	}
+	t.Cleanup(func() { startUIInferTaskPlan = oldInfer })
+
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
+	defer cancelBrowser()
+
+	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
+	defer cancelTab()
+
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=investigations", ".mission-toolbar")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Nana Mission Control")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Fix flaky test")
+
+	startUITestChromedpSetValue(t, tabCtx, `[data-view-filter="investigations"][data-view-filter-name="status"]`, "blocked")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Status: Blocked")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "gh-ui-blocked")
+	startUITestChromedpWaitBodyTextAbsent(t, tabCtx, "Reply in thread")
+
+	startUITestChromedpSetValue(t, tabCtx, `[data-view-filter="investigations"][data-view-filter-name="kind"]`, "work_run")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Type: work run")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "gh-ui-blocked")
+	startUITestChromedpWaitBodyTextAbsent(t, tabCtx, "Warm staging environment")
+
+	startUITestChromedpSetValue(t, tabCtx, `[data-view-filter="investigations"][data-view-filter-name="query"]`, "no-match-token")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "No tasks match these filters.")
+	startUITestChromedpClick(t, tabCtx, `[data-task-filter-clear="all"]`)
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Fix flaky test")
+
+	startUITestChromedpClick(t, tabCtx, "#open-task-schedule-button")
+	startUITestChromedpWaitVisible(t, tabCtx, "#task-schedule-modal-content")
+	startUITestChromedpSetValue(t, tabCtx, "#task-composer-description", "Create a browser scheduled task from Mission Control")
+	startUITestChromedpSetValue(t, tabCtx, "#task-composer-template", "template:implementation")
+	startUITestChromedpSetValue(t, tabCtx, "#task-composer-priority", "1")
+	startUITestChromedpSetValue(t, tabCtx, "#task-composer-run-mode", "later")
+	startUITestChromedpSetValue(t, tabCtx, "#task-composer-schedule", "2026-04-24T09:30")
+	startUITestChromedpClick(t, tabCtx, "#task-schedule-button")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Task scheduled")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Mission control browser task")
+}
+
 func TestStartUIBrowserInteractionsDraftsSurviveLiveRefresh(t *testing.T) {
 	chromePath := startUITestChromePath(t)
 	if chromePath == "" {
