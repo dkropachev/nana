@@ -3639,6 +3639,54 @@ func TestStartUIAppTaskDetailSupportsReferenceAndDeepLinks(t *testing.T) {
 	}
 }
 
+func TestStartUIAppMissionControlRepoCardsShowBottomRightRepoTimestamp(t *testing.T) {
+	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
+	if err != nil {
+		t.Fatalf("read app asset: %v", err)
+	}
+	appContent := string(appBody)
+	for _, needle := range []string{
+		`<div class="repo-card-footer">`,
+		`${escapeHTML(repo.repo_slug)} · ${escapeHTML(` + "`updated ${formatDateTime(repo.updated_at)}`" + `)}`,
+	} {
+		if !strings.Contains(appContent, needle) {
+			t.Fatalf("expected app asset to contain %q", needle)
+		}
+	}
+
+	cssBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.css")
+	if err != nil {
+		t.Fatalf("read app stylesheet: %v", err)
+	}
+	cssContent := string(cssBody)
+	for _, needle := range []string{
+		`.repo-card-footer {`,
+		`margin-top: auto;`,
+		`justify-content: flex-end;`,
+		`text-align: right;`,
+	} {
+		if !strings.Contains(cssContent, needle) {
+			t.Fatalf("expected app stylesheet to contain %q", needle)
+		}
+	}
+}
+
+func TestStartUIAppTaskFeedHeadlinePrefersTitleOrDescription(t *testing.T) {
+	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
+	if err != nil {
+		t.Fatalf("read app asset: %v", err)
+	}
+	content := string(appBody)
+	for _, needle := range []string{
+		`const headline = defaultString(item.title, defaultString(item.description, defaultString(item.summary, item.id)));`,
+		`<strong>${escapeHTML(headline)}</strong>`,
+	} {
+		if !strings.Contains(content, needle) {
+			t.Fatalf("expected app asset to contain %q", needle)
+		}
+	}
+}
+
 func TestStartUIBrowserTaskDetailDeepLinkOpensModal(t *testing.T) {
 	chromePath := startUITestChromePath(t)
 	if chromePath == "" {
