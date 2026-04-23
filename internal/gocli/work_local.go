@@ -65,6 +65,7 @@ const (
 	localWorkWriteRetryAttempts    = 4
 	localWorkStaleRunThreshold     = 5 * time.Minute
 	localWorkStaleCleanupError     = "stale running run cleaned up at start: no active process found"
+	localWorkDBSchemaMismatchError = "local work DB schema"
 )
 
 var localWorkReadRetryDelay = 200 * time.Millisecond
@@ -1011,7 +1012,7 @@ func cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot string, codexArgs ...[]st
 		return 0, nil, err
 	}
 	manifests, err := withLocalWorkReadStore(func(store *localWorkDBStore) ([]localWorkManifest, error) {
-		rows, err := store.db.Query(`SELECT manifest_json FROM runs WHERE repo_root = ? AND status = ?`, repoRoot, "running")
+		rows, err := store.db.Query(`SELECT manifest_json FROM runs WHERE repo_root = ? AND status IN (?, ?)`, repoRoot, "running", "failed")
 		if err != nil {
 			return nil, err
 		}
@@ -1039,6 +1040,25 @@ func cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot string, codexArgs ...[]st
 	cleaned := 0
 	cleanedManifests := []localWorkManifest{}
 	for _, manifest := range manifests {
+		if strings.EqualFold(strings.TrimSpace(manifest.Status), "failed") {
+			if !localWorkCanRestartAfterDBSchemaMismatch(manifest) {
+				continue
+			}
+			resumedManifest, err := resumeStaleLocalWorkRunDetached(manifest, resumeCodexArgs)
+			if err == nil {
+				cleaned++
+				cleanedManifests = append(cleanedManifests, resumedManifest)
+				continue
+			}
+			manifest.LastError = localWorkDBSchemaMismatchError + " recovery failed: " + err.Error()
+			manifest.UpdatedAt = now
+			if err := writeLocalWorkManifest(manifest); err != nil {
+				return cleaned, cleanedManifests, err
+			}
+			cleaned++
+			cleanedManifests = append(cleanedManifests, manifest)
+			continue
+		}
 		lastHeartbeat := localWorkManifestLastHeartbeat(manifest)
 		if !lastHeartbeat.IsZero() && nowTime.Sub(lastHeartbeat) < localWorkStaleRunThreshold {
 			continue
@@ -1090,6 +1110,41 @@ func localWorkCanResumeAfterHardRestart(manifest localWorkManifest) bool {
 		return false
 	}
 	return true
+}
+
+func localWorkCanRestartAfterDBSchemaMismatch(manifest localWorkManifest) bool {
+	if !strings.EqualFold(strings.TrimSpace(manifest.Status), "failed") {
+		return false
+	}
+	if strings.TrimSpace(manifest.RunID) == "" ||
+		strings.TrimSpace(manifest.RepoRoot) == "" ||
+		strings.TrimSpace(manifest.SandboxPath) == "" ||
+		strings.TrimSpace(manifest.SandboxRepoPath) == "" {
+		return false
+	}
+	if manifest.MaxIterations > 0 && len(manifest.Iterations) >= manifest.MaxIterations {
+		return false
+	}
+	return localWorkManifestHasDBSchemaMismatch(manifest)
+}
+
+func localWorkManifestHasDBSchemaMismatch(manifest localWorkManifest) bool {
+	if localWorkStringLooksDBSchemaMismatch(manifest.LastError) ||
+		localWorkStringLooksDBSchemaMismatch(manifest.FinalApplyError) {
+		return true
+	}
+	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
+	content, err := os.ReadFile(filepath.Join(runDir, "runtime.log"))
+	if err != nil {
+		return false
+	}
+	return localWorkStringLooksDBSchemaMismatch(string(content))
+}
+
+func localWorkStringLooksDBSchemaMismatch(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	return strings.Contains(normalized, strings.ToLower(localWorkDBSchemaMismatchError)) &&
+		strings.Contains(normalized, "newer than supported")
 }
 
 func resumeStaleLocalWorkRunDetached(manifest localWorkManifest, codexArgs []string) (localWorkManifest, error) {

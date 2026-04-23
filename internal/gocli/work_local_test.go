@@ -4374,6 +4374,164 @@ func TestCleanupStaleLocalWorkRunsResumesWithExistingCodexSession(t *testing.T) 
 	}
 }
 
+func TestCleanupStaleLocalWorkRunsRestartsFailedRunAfterDBSchemaMismatch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoRoot := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	updatedAt := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+
+	manifest := localWorkManifest{
+		Version:         1,
+		RunID:           "lw-schema-mismatch",
+		CreatedAt:       updatedAt,
+		UpdatedAt:       updatedAt,
+		CompletedAt:     updatedAt,
+		Status:          "failed",
+		CurrentPhase:    "final-review",
+		RepoRoot:        repoRoot,
+		RepoName:        filepath.Base(repoRoot),
+		RepoID:          localWorkRepoID(repoRoot),
+		SourceBranch:    "main",
+		BaselineSHA:     strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
+		SandboxPath:     filepath.Join(home, "sandboxes", "lw-schema-mismatch"),
+		SandboxRepoPath: filepath.Join(home, "sandboxes", "lw-schema-mismatch", "repo"),
+		MaxIterations:   8,
+		LastError:       localWorkStaleCleanupError,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "runtime.log"), []byte("nana: local work DB schema at /tmp/state.db is version 3, newer than supported version 2\n"), 0o644); err != nil {
+		t.Fatalf("write runtime log: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) { return "", nil }
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	oldDetachedRunner := localWorkStartDetachedRunner
+	resumeCalls := []string{}
+	localWorkStartDetachedRunner = func(repoRoot string, runID string, codexArgs []string, logPath string) error {
+		resumeCalls = append(resumeCalls, repoRoot+"|"+runID+"|"+logPath)
+		return nil
+	}
+	defer func() { localWorkStartDetachedRunner = oldDetachedRunner }()
+
+	cleaned, err := cleanupStaleLocalWorkRunsForRepo(repoRoot)
+	if err != nil {
+		t.Fatalf("cleanupStaleLocalWorkRunsForRepo: %v", err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("expected one schema-mismatch run to restart, got %d", cleaned)
+	}
+	if len(resumeCalls) != 1 || !strings.Contains(resumeCalls[0], manifest.RunID) {
+		t.Fatalf("expected detached resume launch for schema mismatch, got %+v", resumeCalls)
+	}
+	updated := mustLocalWorkManifestByRunID(t, manifest.RunID)
+	if updated.Status != "running" || updated.LastError != "" || updated.CompletedAt != "" {
+		t.Fatalf("expected schema-mismatch run to reset to running, got %#v", updated)
+	}
+}
+
+func TestCleanupStaleLocalWorkRunsRestartsSchemaMismatchWithExistingCodexSession(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	failOncePath := filepath.Join(home, "fail-once.marker")
+	commandLogPath := filepath.Join(home, "codex-commands.log")
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`printf '%s\n' "$*" >> "${FAKE_CODEX_LOG_PATH}"`,
+		`mkdir -p "$CODEX_HOME/sessions/2026/04/17"`,
+		`printf '{"type":"session_meta","payload":{"id":"session-schema-mismatch","timestamp":"2099-01-01T00:00:00Z","cwd":"%s"}}\n' "$PWD" > "$CODEX_HOME/sessions/2026/04/17/rollout-session-schema-mismatch.jsonl"`,
+		`PAYLOAD="$(cat)"`,
+		`case "$PAYLOAD" in`,
+		`  *"# NANA Work-local Finding Grouping"*)`,
+		`    printf '{"groups":[]}\n'`,
+		`    ;;`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    printf '{"findings":[]}\n'`,
+		`    ;;`,
+		`  *)`,
+		`    if printf '%s' "$*" | grep -q "exec resume session-schema-mismatch"; then`,
+		`      printf 'resumed after schema mismatch\n' >> README.md`,
+		`      printf 'fake-codex:%s\n' "$*"`,
+		`      exit 0`,
+		`    fi`,
+		`    if [ "${FAKE_CODEX_FAIL_ONCE_PATH:-}" != "" ] && [ ! -f "${FAKE_CODEX_FAIL_ONCE_PATH}" ]; then`,
+		`      : > "${FAKE_CODEX_FAIL_ONCE_PATH}"`,
+		`      printf 'schema mismatch interrupted worker\n' >&2`,
+		`      exit 1`,
+		`    fi`,
+		`    printf 'implemented fresh\n' >> README.md`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_FAIL_ONCE_PATH", failOncePath)
+	t.Setenv("FAKE_CODEX_LOG_PATH", commandLogPath)
+
+	startErr := runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Recover after schema mismatch"})
+	if startErr == nil {
+		t.Fatal("expected initial start to fail and leave a resumable checkpoint")
+	}
+	manifest, _ := mustLatestLocalWorkRun(t, repo)
+	manifest.Status = "failed"
+	manifest.LastError = localWorkStaleCleanupError
+	manifest.CompletedAt = time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+	manifest.UpdatedAt = manifest.CompletedAt
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write failed manifest: %v", err)
+	}
+	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
+	if err := os.WriteFile(filepath.Join(runDir, "runtime.log"), []byte("nana: local work DB schema at /tmp/state.db is version 3, newer than supported version 2\n"), 0o644); err != nil {
+		t.Fatalf("write runtime log: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) { return "", nil }
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	oldDetachedRunner := localWorkStartDetachedRunner
+	localWorkStartDetachedRunner = func(repoRoot string, runID string, codexArgs []string, logPath string) error {
+		return resumeLocalWork(repoRoot, localWorkResumeOptions{
+			RunSelection: localWorkRunSelection{RunID: runID},
+			CodexArgs:    codexArgs,
+		})
+	}
+	defer func() { localWorkStartDetachedRunner = oldDetachedRunner }()
+
+	cleaned, err := cleanupStaleLocalWorkRunsForRepo(repo)
+	if err != nil {
+		t.Fatalf("cleanupStaleLocalWorkRunsForRepo: %v", err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("expected one schema-mismatch run to restart, got %d", cleaned)
+	}
+	commandLog, err := os.ReadFile(commandLogPath)
+	if err != nil {
+		t.Fatalf("read command log: %v", err)
+	}
+	if !strings.Contains(string(commandLog), "exec resume session-schema-mismatch") {
+		t.Fatalf("expected schema mismatch cleanup to resume existing Codex session, got %q", string(commandLog))
+	}
+	updated := mustLocalWorkManifestByRunID(t, manifest.RunID)
+	if updated.Status != "completed" {
+		t.Fatalf("expected schema-mismatch run to complete through resume, got %#v", updated)
+	}
+}
+
 func mustLatestLocalWorkRun(t *testing.T, repo string) (localWorkManifest, string) {
 	t.Helper()
 	manifest, runDir, err := resolveLocalWorkRun(repo, localWorkRunSelection{UseLast: true})
