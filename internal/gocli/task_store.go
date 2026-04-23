@@ -548,9 +548,7 @@ func (s *localWorkDBStore) listCanonicalTasks() ([]startUITaskSummary, error) {
 		item.ExternalURL = strings.TrimSpace(externalURL.String)
 		item.WorkType = strings.TrimSpace(workType.String)
 		item.RunID = strings.TrimSpace(runID.String)
-		item.CanOpenJob = item.RunID != ""
-		item.PriorityLabel = startWorkPriorityLabel(item.Priority)
-		item.AttentionState = startUITaskAttentionStateForStatus(item.Status)
+		normalizeCanonicalTaskSummaryFromStore(&item)
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -614,13 +612,23 @@ func (s *localWorkDBStore) listCanonicalTasksForRepo(repoSlug string, statuses .
 		item.ExternalURL = strings.TrimSpace(externalURL.String)
 		item.WorkType = strings.TrimSpace(workType.String)
 		item.RunID = strings.TrimSpace(runID.String)
-		item.CanOpenJob = item.RunID != ""
-		item.PriorityLabel = startWorkPriorityLabel(item.Priority)
-		item.AttentionState = startUITaskAttentionStateForStatus(item.Status)
+		normalizeCanonicalTaskSummaryFromStore(&item)
 		items = append(items, item)
 	}
 	slices.SortFunc(items, compareStartUITaskSummary)
 	return items, rows.Err()
+}
+
+func normalizeCanonicalTaskSummaryFromStore(item *startUITaskSummary) {
+	if item == nil {
+		return
+	}
+	if strings.TrimSpace(item.Kind) == "work_run" && strings.TrimSpace(item.RawStatus) == "failed" {
+		item.Status = startUITaskStatusFailed
+	}
+	item.CanOpenJob = strings.TrimSpace(item.RunID) != ""
+	item.PriorityLabel = startWorkPriorityLabel(item.Priority)
+	item.AttentionState = startUITaskAttentionStateForStatus(item.Status)
 }
 
 func syncTaskTemplatesFromState(repoSlug string) error {

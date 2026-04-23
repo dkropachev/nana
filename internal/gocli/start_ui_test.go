@@ -3608,6 +3608,50 @@ func TestStartUITaskSummaryFromFailedWorkRunKeepsFailedStatus(t *testing.T) {
 	}
 }
 
+func TestListCanonicalTasksNormalizesPersistedFailedWorkRunStatus(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	err := withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+		_, err := store.db.Exec(`INSERT INTO tasks(
+			id, kind, executor_kind, queue_class, status, raw_status, priority,
+			title, run_id, source_kind, source_ref, payload_json, created_at, updated_at
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			"work-run:lw-persisted-failed",
+			"work_run",
+			"local",
+			"execution",
+			"blocked",
+			"failed",
+			0,
+			"Persisted failed run",
+			"lw-persisted-failed",
+			"work_run",
+			"lw-persisted-failed",
+			"{}",
+			"2026-04-23T00:00:00Z",
+			"2026-04-23T00:00:00Z",
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert stale canonical task: %v", err)
+	}
+	items, err := listCanonicalTasks(t.TempDir())
+	if err != nil {
+		t.Fatalf("listCanonicalTasks: %v", err)
+	}
+	match := slices.IndexFunc(items, func(item startUITaskSummary) bool {
+		return item.ID == "work-run:lw-persisted-failed"
+	})
+	if match < 0 {
+		t.Fatalf("expected persisted failed work-run task in %+v", items)
+	}
+	if items[match].Status != startUITaskStatusFailed || items[match].AttentionState != "failed" {
+		t.Fatalf("expected persisted failed work-run task to normalize to failed, got %+v", items[match])
+	}
+}
+
 func TestStartUIAPITaskCreateAndTemplateSave(t *testing.T) {
 	fixture := startUITestSetupBrowserFixture(t)
 	defer fixture.Server.Close()
