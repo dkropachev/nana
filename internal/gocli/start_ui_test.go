@@ -5536,6 +5536,12 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `Schedule Task`) {
 		t.Fatalf("expected unified task scheduling copy in app.js, got %s", string(appBody))
 	}
+	if strings.Contains(string(appBody), `Describe the work. Nana infers the title and task type.`) {
+		t.Fatalf("expected schedule task helper copy to be removed, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `task-composer-controls`) || !strings.Contains(string(appBody), `task-composer-description-field`) {
+		t.Fatalf("expected schedule task controls above expanding description layout, got %s", string(appBody))
+	}
 	if strings.Contains(string(appBody), `class="mission-task-action"`) || strings.Contains(string(appBody), `taskPrimaryActionLabel`) {
 		t.Fatalf("expected task feed rows to render only the state pill, got %s", string(appBody))
 	}

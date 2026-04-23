@@ -5029,12 +5029,7 @@
     const runMode = defaultString(state.taskComposer.runMode, state.taskComposer.scheduleAt ? "later" : "now");
     host.innerHTML = `
       <div class="mission-schedule-modal">
-        <p class="drawer-copy">Describe the work. Nana infers the title and task type.</p>
-        <label class="config-field config-field-wide">
-          <span class="config-label">Description</span>
-          <textarea id="task-composer-description" rows="6" placeholder="Investigate why the task repo filter sometimes appears empty, then patch the UI if needed.">${escapeHTML(state.taskComposer.description)}</textarea>
-        </label>
-        <div class="config-grid">
+        <div class="config-grid task-composer-controls">
           <label class="config-field">
             <span class="config-label">Repo</span>
             <select id="task-composer-repo">
@@ -5065,6 +5060,10 @@
             <input id="task-composer-schedule" type="datetime-local" value="${escapeHTML(state.taskComposer.scheduleAt)}" />
           </label>
         </div>
+        <label class="config-field config-field-wide task-composer-description-field">
+          <span class="config-label">Description</span>
+          <textarea id="task-composer-description" rows="6" placeholder="Investigate why the task repo filter sometimes appears empty, then patch the UI if needed.">${escapeHTML(state.taskComposer.description)}</textarea>
+        </label>
         <div class="drawer-toolbar">
           <button class="tx-btn tx-btn-secondary" type="button" data-task-schedule-close="true">Cancel</button>
           <button id="task-save-template-button" class="tx-btn tx-btn-secondary" type="button" ${state.taskComposer.savingTemplate || !composerRepo ? "disabled" : ""}>${state.taskComposer.savingTemplate ? "Saving..." : "Save As Preset"}</button>
