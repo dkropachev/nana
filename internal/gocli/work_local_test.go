@@ -4532,6 +4532,287 @@ func TestCleanupStaleLocalWorkRunsRestartsSchemaMismatchWithExistingCodexSession
 	}
 }
 
+func TestCleanupStaleLocalWorkRunsRecoversFailedStaleRunWithMissingCheckpoint(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	failOncePath := filepath.Join(home, "fail-once.marker")
+	commandLogPath := filepath.Join(home, "codex-commands.log")
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`printf '%s\n' "$*" >> "${FAKE_CODEX_LOG_PATH}"`,
+		`CODEX_CWD="$PWD"`,
+		`PREV=""`,
+		`for ARG in "$@"; do`,
+		`  if [ "$PREV" = "-C" ]; then CODEX_CWD="$ARG"; break; fi`,
+		`  PREV="$ARG"`,
+		`done`,
+		`mkdir -p "$CODEX_HOME/sessions/2026/04/17"`,
+		`printf '{"type":"session_meta","payload":{"id":"session-missing-checkpoint","timestamp":"2099-01-01T00:00:00Z","cwd":"%s"}}\n' "$CODEX_CWD" > "$CODEX_HOME/sessions/2026/04/17/rollout-session-missing-checkpoint.jsonl"`,
+		`PAYLOAD="$(cat)"`,
+		`case "$PAYLOAD" in`,
+		`  *"# NANA Work-local Finding Grouping"*)`,
+		`    printf '{"groups":[]}\n'`,
+		`    ;;`,
+		`  *"Review this local implementation and return JSON only."*)`,
+		`    printf '{"findings":[]}\n'`,
+		`    ;;`,
+		`  *)`,
+		`    if printf '%s' "$*" | grep -q "exec resume session-missing-checkpoint"; then`,
+		`      printf 'resumed from recovered checkpoint\n'`,
+		`      exit 0`,
+		`    fi`,
+		`    if [ "${FAKE_CODEX_FAIL_ONCE_PATH:-}" != "" ] && [ ! -f "${FAKE_CODEX_FAIL_ONCE_PATH}" ]; then`,
+		`      : > "${FAKE_CODEX_FAIL_ONCE_PATH}"`,
+		`      printf 'interrupted before checkpoint persisted\n' >&2`,
+		`      exit 1`,
+		`    fi`,
+		`    printf 'implemented fresh\n' >> README.md`,
+		`    printf 'fake-codex:%s\n' "$*"`,
+		`    ;;`,
+		"esac",
+		"",
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_FAIL_ONCE_PATH", failOncePath)
+	t.Setenv("FAKE_CODEX_LOG_PATH", commandLogPath)
+
+	startErr := runLocalWorkCommand(repo, []string{"start", "--work-type", workTypeFeature, "--task", "Recover missing checkpoint"})
+	if startErr == nil {
+		t.Fatal("expected initial start to fail")
+	}
+	manifest, runDir := mustLatestLocalWorkRun(t, repo)
+	checkpointPath := filepath.Join(runDir, "iterations", "iter-01", "implement-checkpoint.json")
+	if err := os.Remove(checkpointPath); err != nil {
+		t.Fatalf("remove checkpoint: %v", err)
+	}
+	manifest.Status = "failed"
+	manifest.LastError = localWorkStaleCleanupError
+	manifest.CompletedAt = time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+	manifest.UpdatedAt = manifest.CompletedAt
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write failed manifest: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) { return "", nil }
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	oldDetachedRunner := localWorkStartDetachedRunner
+	localWorkStartDetachedRunner = func(repoRoot string, runID string, codexArgs []string, logPath string) error {
+		return resumeLocalWork(repoRoot, localWorkResumeOptions{
+			RunSelection: localWorkRunSelection{RunID: runID},
+			CodexArgs:    codexArgs,
+		})
+	}
+	defer func() { localWorkStartDetachedRunner = oldDetachedRunner }()
+
+	cleaned, err := cleanupStaleLocalWorkRunsForRepo(repo)
+	if err != nil {
+		t.Fatalf("cleanupStaleLocalWorkRunsForRepo: %v", err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("expected failed stale run to restart, got %d", cleaned)
+	}
+	commandLog, err := os.ReadFile(commandLogPath)
+	if err != nil {
+		t.Fatalf("read command log: %v", err)
+	}
+	if !strings.Contains(string(commandLog), "exec resume session-missing-checkpoint") {
+		t.Fatalf("expected recovered checkpoint to resume existing Codex session, got %q", string(commandLog))
+	}
+	recoveredCheckpoint, err := readCodexStepCheckpoint(checkpointPath)
+	if err != nil {
+		t.Fatalf("read recovered checkpoint: %v", err)
+	}
+	if recoveredCheckpoint.SessionID != "session-missing-checkpoint" || recoveredCheckpoint.Status != "completed" || recoveredCheckpoint.LastLaunchMode != "resume" {
+		t.Fatalf("unexpected recovered checkpoint: %#v", recoveredCheckpoint)
+	}
+}
+
+func TestCleanupStaleLocalWorkRunsPreservesSandboxDiffWhenCheckpointAndSessionMissing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	sandboxPath := filepath.Join(home, "sandboxes", "lw-diff-no-checkpoint")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := cloneGithubSourceToSandbox(repo, sandboxRepoPath); err != nil {
+		t.Fatalf("clone sandbox: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxRepoPath, "README.md"), []byte("# local work\nrecovered diff\n"), 0o644); err != nil {
+		t.Fatalf("write sandbox diff: %v", err)
+	}
+	runDir := filepath.Join(localWorkRepoDirByID(localWorkRepoID(repo)), "runs", "lw-diff-no-checkpoint")
+	if err := os.MkdirAll(filepath.Join(runDir, "iterations", "iter-01"), 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	inputPath := filepath.Join(runDir, "input-plan.md")
+	if err := os.WriteFile(inputPath, []byte("Preserve sandbox diff\n"), 0o644); err != nil {
+		t.Fatalf("write input plan: %v", err)
+	}
+	oldAt := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+	manifest := localWorkManifest{
+		Version:               5,
+		RunID:                 "lw-diff-no-checkpoint",
+		CreatedAt:             oldAt,
+		UpdatedAt:             oldAt,
+		CompletedAt:           oldAt,
+		Status:                "failed",
+		CurrentPhase:          "implement",
+		CurrentSubphase:       "implement",
+		CurrentIteration:      1,
+		RepoRoot:              repo,
+		RepoName:              filepath.Base(repo),
+		RepoID:                localWorkRepoID(repo),
+		SourceBranch:          "main",
+		BaselineSHA:           strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:           sandboxPath,
+		SandboxRepoPath:       sandboxRepoPath,
+		InputPath:             inputPath,
+		WorkType:              workTypeFeature,
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+		LastError:             localWorkStaleCleanupError,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := writeLocalWorkRuntimeState(manifest.RunID, localWorkIterationRuntimeState{
+		Version:               1,
+		Iteration:             1,
+		CurrentPhase:          "implement",
+		CurrentSubphase:       "implement",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+	}); err != nil {
+		t.Fatalf("write runtime state: %v", err)
+	}
+
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	commandLogPath := filepath.Join(home, "codex-commands.log")
+	implementRerunPath := filepath.Join(home, "implement-rerun.marker")
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`printf '%s\n' "$*" >> "${FAKE_CODEX_LOG_PATH}"`,
+		`PAYLOAD="$(cat)"`,
+		`case "$PAYLOAD" in`,
+		`  *"# NANA Work-local Finding Grouping"*) printf '{"groups":[]}\n' ;;`,
+		`  *'"decision":"no_followups|followups"'*) printf '{"decision":"no_followups","items":[]}\n' ;;`,
+		`  *'"decision":"no_followups|approved_followups"'*) printf '{"decision":"no_followups","approved_items":[],"rejected_items":[],"summary":"none"}\n' ;;`,
+		`  *"Review this local implementation and return JSON only."*) printf '{"findings":[]}\n' ;;`,
+		`  *"# NANA Work-local Iteration"*) : > "${FAKE_CODEX_IMPLEMENT_RERUN_PATH}"; printf 'implementation should not rerun when sandbox diff exists\n' >&2; exit 7 ;;`,
+		`  *) printf '{"findings":[]}\n' ;;`,
+		`esac`,
+		"",
+	}, "\n"))
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_LOG_PATH", commandLogPath)
+	t.Setenv("FAKE_CODEX_IMPLEMENT_RERUN_PATH", implementRerunPath)
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) { return "", nil }
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	oldDetachedRunner := localWorkStartDetachedRunner
+	localWorkStartDetachedRunner = func(repoRoot string, runID string, codexArgs []string, logPath string) error {
+		return resumeLocalWork(repoRoot, localWorkResumeOptions{
+			RunSelection: localWorkRunSelection{RunID: runID},
+			CodexArgs:    codexArgs,
+		})
+	}
+	defer func() { localWorkStartDetachedRunner = oldDetachedRunner }()
+
+	cleaned, err := cleanupStaleLocalWorkRunsForRepo(repo)
+	if err != nil {
+		t.Fatalf("cleanupStaleLocalWorkRunsForRepo: %v", err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("expected failed stale run to restart, got %d", cleaned)
+	}
+	updated := mustLocalWorkManifestByRunID(t, manifest.RunID)
+	if updated.Status != "completed" {
+		t.Fatalf("expected stale run with sandbox diff to complete, got %#v", updated)
+	}
+	sourceContent, err := os.ReadFile(filepath.Join(repo, "README.md"))
+	if err != nil {
+		t.Fatalf("read source README: %v", err)
+	}
+	if !strings.Contains(string(sourceContent), "recovered diff") {
+		t.Fatalf("expected sandbox diff to be applied to source, got %q", string(sourceContent))
+	}
+	if _, err := os.Stat(implementRerunPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no fresh implementation rerun, marker err=%v", err)
+	}
+}
+
+func TestCleanupStaleLocalWorkRunsRecreatesMissingSandboxCheckout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	oldAt := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+	manifest := localWorkManifest{
+		Version:          5,
+		RunID:            "lw-missing-checkout",
+		CreatedAt:        oldAt,
+		UpdatedAt:        oldAt,
+		CompletedAt:      oldAt,
+		Status:           "failed",
+		CurrentPhase:     "implement",
+		CurrentIteration: 1,
+		RepoRoot:         repo,
+		RepoName:         filepath.Base(repo),
+		RepoID:           localWorkRepoID(repo),
+		SourceBranch:     "main",
+		BaselineSHA:      strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:      filepath.Join(home, "sandboxes", "lw-missing-checkout"),
+		SandboxRepoPath:  filepath.Join(home, "sandboxes", "lw-missing-checkout", "repo"),
+		InputPath:        filepath.Join(home, "input-plan.md"),
+		WorkType:         workTypeFeature,
+		MaxIterations:    8,
+		LastError:        localWorkStaleCleanupError,
+	}
+	if err := os.WriteFile(manifest.InputPath, []byte("Recover missing checkout\n"), 0o644); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) { return "", nil }
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	oldDetachedRunner := localWorkStartDetachedRunner
+	resumeCalls := 0
+	localWorkStartDetachedRunner = func(repoRoot string, runID string, codexArgs []string, logPath string) error {
+		resumeCalls++
+		if !localWorkPathIsGitWorkTree(manifest.SandboxRepoPath) {
+			t.Fatalf("expected sandbox checkout to be recreated before detached resume")
+		}
+		return nil
+	}
+	defer func() { localWorkStartDetachedRunner = oldDetachedRunner }()
+
+	cleaned, err := cleanupStaleLocalWorkRunsForRepo(repo)
+	if err != nil {
+		t.Fatalf("cleanupStaleLocalWorkRunsForRepo: %v", err)
+	}
+	if cleaned != 1 || resumeCalls != 1 {
+		t.Fatalf("expected missing checkout run to restart once, cleaned=%d calls=%d", cleaned, resumeCalls)
+	}
+}
+
 func mustLatestLocalWorkRun(t *testing.T, repo string) (localWorkManifest, string) {
 	t.Helper()
 	manifest, runDir, err := resolveLocalWorkRun(repo, localWorkRunSelection{UseLast: true})

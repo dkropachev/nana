@@ -409,6 +409,14 @@ func discoverCodexSessionID(codexHome string, notBefore time.Time) string {
 }
 
 func discoverCodexSession(codexHome string, notBefore time.Time) (string, string) {
+	return discoverCodexSessionMatching(codexHome, notBefore.Add(-codexSessionCaptureGracePeriod), "")
+}
+
+func discoverLatestCodexSession(codexHome string, cwd string) (string, string) {
+	return discoverCodexSessionMatching(codexHome, time.Time{}, cwd)
+}
+
+func discoverCodexSessionMatching(codexHome string, cutoff time.Time, cwd string) (string, string) {
 	sessionsRoot := filepath.Join(strings.TrimSpace(codexHome), "sessions")
 	if strings.TrimSpace(codexHome) == "" {
 		return "", ""
@@ -419,7 +427,7 @@ func discoverCodexSession(codexHome string, notBefore time.Time) (string, string
 		When      time.Time
 	}
 	best := candidate{}
-	cutoff := notBefore.Add(-codexSessionCaptureGracePeriod)
+	wantCWD := strings.TrimSpace(cwd)
 	_ = filepath.Walk(sessionsRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info == nil || info.IsDir() || !strings.HasSuffix(path, ".jsonl") {
 			return nil
@@ -428,11 +436,14 @@ func discoverCodexSession(codexHome string, notBefore time.Time) (string, string
 		if !ok || strings.TrimSpace(meta.SessionID) == "" {
 			return nil
 		}
+		if wantCWD != "" && strings.TrimSpace(meta.CWD) != wantCWD {
+			return nil
+		}
 		when := info.ModTime()
 		if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(meta.Timestamp)); err == nil && parsed.After(when) {
 			when = parsed
 		}
-		if when.Before(cutoff) {
+		if !cutoff.IsZero() && when.Before(cutoff) {
 			return nil
 		}
 		if strings.TrimSpace(best.SessionID) == "" || when.After(best.When) {

@@ -1041,7 +1041,8 @@ func cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot string, codexArgs ...[]st
 	cleanedManifests := []localWorkManifest{}
 	for _, manifest := range manifests {
 		if strings.EqualFold(strings.TrimSpace(manifest.Status), "failed") {
-			if !localWorkCanRestartAfterDBSchemaMismatch(manifest) {
+			recoveryReason, canRecover := localWorkFailedRunRecoveryReason(manifest)
+			if !canRecover {
 				continue
 			}
 			resumedManifest, err := resumeStaleLocalWorkRunDetached(manifest, resumeCodexArgs)
@@ -1050,7 +1051,7 @@ func cleanupStaleLocalWorkRunsForRepoDetailed(repoRoot string, codexArgs ...[]st
 				cleanedManifests = append(cleanedManifests, resumedManifest)
 				continue
 			}
-			manifest.LastError = localWorkDBSchemaMismatchError + " recovery failed: " + err.Error()
+			manifest.LastError = recoveryReason + " recovery failed: " + err.Error()
 			manifest.UpdatedAt = now
 			if err := writeLocalWorkManifest(manifest); err != nil {
 				return cleaned, cleanedManifests, err
@@ -1112,6 +1113,35 @@ func localWorkCanResumeAfterHardRestart(manifest localWorkManifest) bool {
 	return true
 }
 
+func localWorkFailedRunRecoveryReason(manifest localWorkManifest) (string, bool) {
+	if localWorkCanRestartAfterDBSchemaMismatch(manifest) {
+		return localWorkDBSchemaMismatchError, true
+	}
+	if localWorkCanRecoverAfterStaleCleanup(manifest) {
+		return localWorkStaleCleanupError, true
+	}
+	return "", false
+}
+
+func localWorkCanRecoverAfterStaleCleanup(manifest localWorkManifest) bool {
+	if !strings.EqualFold(strings.TrimSpace(manifest.Status), "failed") {
+		return false
+	}
+	if !localWorkIsStaleCleanupError(manifest.LastError) {
+		return false
+	}
+	if strings.TrimSpace(manifest.RunID) == "" ||
+		strings.TrimSpace(manifest.RepoRoot) == "" ||
+		strings.TrimSpace(manifest.SandboxPath) == "" ||
+		strings.TrimSpace(manifest.SandboxRepoPath) == "" {
+		return false
+	}
+	if manifest.MaxIterations > 0 && len(manifest.Iterations) >= manifest.MaxIterations {
+		return false
+	}
+	return true
+}
+
 func localWorkCanRestartAfterDBSchemaMismatch(manifest localWorkManifest) bool {
 	if !strings.EqualFold(strings.TrimSpace(manifest.Status), "failed") {
 		return false
@@ -1149,6 +1179,9 @@ func localWorkStringLooksDBSchemaMismatch(value string) bool {
 
 func resumeStaleLocalWorkRunDetached(manifest localWorkManifest, codexArgs []string) (localWorkManifest, error) {
 	original := manifest
+	if err := prepareLocalWorkRunForRecovery(&manifest); err != nil {
+		return original, err
+	}
 	manifest.Status = "running"
 	manifest.CompletedAt = ""
 	manifest.LastError = ""
@@ -1168,6 +1201,211 @@ func resumeStaleLocalWorkRunDetached(manifest localWorkManifest, codexArgs []str
 		return original, err
 	}
 	return manifest, nil
+}
+
+func prepareLocalWorkRunForRecovery(manifest *localWorkManifest) error {
+	if manifest == nil {
+		return nil
+	}
+	if err := ensureLocalWorkSandboxCheckout(*manifest); err != nil {
+		return err
+	}
+	if err := recoverLocalWorkMissingCurrentCheckpoint(*manifest); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureLocalWorkSandboxCheckout(manifest localWorkManifest) error {
+	repoPath := strings.TrimSpace(manifest.SandboxRepoPath)
+	if repoPath == "" {
+		return nil
+	}
+	if localWorkPathIsGitWorkTree(repoPath) {
+		return nil
+	}
+	if strings.TrimSpace(manifest.RepoRoot) == "" {
+		return fmt.Errorf("run %s is missing repo root required to recreate sandbox checkout", manifest.RunID)
+	}
+	if err := os.MkdirAll(filepath.Dir(repoPath), 0o755); err != nil {
+		return err
+	}
+	if _, err := os.Stat(repoPath); err == nil {
+		backupPath := repoPath + ".recovered-" + sanitizePathToken(ISOTimeNow())
+		if renameErr := os.Rename(repoPath, backupPath); renameErr != nil {
+			return fmt.Errorf("sandbox checkout %s is not a git worktree and could not be preserved before reclone: %w", repoPath, renameErr)
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := cloneGithubSourceToSandbox(manifest.RepoRoot, repoPath); err != nil {
+		return fmt.Errorf("recreate missing sandbox checkout for run %s: %w", manifest.RunID, err)
+	}
+	return nil
+}
+
+func localWorkPathIsGitWorkTree(repoPath string) bool {
+	if strings.TrimSpace(repoPath) == "" {
+		return false
+	}
+	output, err := githubGitOutput(repoPath, "rev-parse", "--is-inside-work-tree")
+	return err == nil && strings.TrimSpace(output) == "true"
+}
+
+type localWorkRecoveryCheckpointTarget struct {
+	Alias          string
+	StepKey        string
+	CheckpointPath string
+	Prompt         string
+}
+
+func recoverLocalWorkMissingCurrentCheckpoint(manifest localWorkManifest) error {
+	iteration := manifest.CurrentIteration
+	if iteration <= 0 {
+		iteration = localWorkNextIteration(manifest)
+	}
+	if iteration <= 0 {
+		iteration = 1
+	}
+	state, err := readLocalWorkRuntimeState(manifest.RunID, iteration)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		state = localWorkIterationRuntimeState{
+			Version:               1,
+			Iteration:             iteration,
+			CurrentPhase:          manifest.CurrentPhase,
+			CurrentSubphase:       manifest.CurrentSubphase,
+			CurrentRound:          manifest.CurrentRound,
+			GroupingPolicy:        manifest.GroupingPolicy,
+			ValidationParallelism: manifest.ValidationParallelism,
+		}
+	}
+	if state.Iteration == 0 {
+		state.Iteration = iteration
+	}
+	runDir := localWorkRunDirByID(manifest.RepoID, manifest.RunID)
+	iterationDir := localWorkIterationDir(runDir, iteration)
+	target, hasTarget, err := localWorkCurrentRecoveryCheckpointTarget(manifest, state, iteration, iterationDir)
+	if err != nil {
+		return err
+	}
+	if !hasTarget {
+		if !state.ImplementCompleted {
+			return recoverLocalWorkImplementationDiffWithoutSession(manifest, state)
+		}
+		return nil
+	}
+	if checkpoint, err := readCodexStepCheckpoint(target.CheckpointPath); err == nil && strings.TrimSpace(checkpoint.SessionID) != "" {
+		return nil
+	}
+	codexHome := filepath.Join(manifest.SandboxPath, ".nana", localWorkRuntimeName, "codex-home", sanitizePathToken(target.Alias))
+	sessionID, _ := discoverLatestCodexSession(codexHome, manifest.SandboxRepoPath)
+	if strings.TrimSpace(sessionID) != "" {
+		now := ISOTimeNow()
+		return writeCodexStepCheckpoint(target.CheckpointPath, codexStepCheckpoint{
+			Version:           1,
+			StepKey:           target.StepKey,
+			Status:            "failed",
+			SessionID:         strings.TrimSpace(sessionID),
+			PromptFingerprint: sha256Hex(strings.TrimSpace(target.Prompt)),
+			ResumeStrategy:    string(codexResumeSamePrompt),
+			ResumeEligible:    true,
+			LastLaunchMode:    "fresh",
+			StartedAt:         now,
+			UpdatedAt:         now,
+			LastError:         "recovered checkpoint from sandbox Codex session",
+		})
+	}
+	if !state.ImplementCompleted {
+		return recoverLocalWorkImplementationDiffWithoutSession(manifest, state)
+	}
+	return nil
+}
+
+func recoverLocalWorkImplementationDiffWithoutSession(manifest localWorkManifest, state localWorkIterationRuntimeState) error {
+	hasDiff, diffErr := localWorkSandboxHasDiff(manifest)
+	if diffErr != nil {
+		return diffErr
+	}
+	if !hasDiff {
+		return nil
+	}
+	state.ImplementCompleted = true
+	state.CurrentPhase = "verify-refresh"
+	state.CurrentSubphase = "verify-refresh"
+	state.CurrentRound = 0
+	return writeLocalWorkRuntimeState(manifest.RunID, state)
+}
+
+func localWorkCurrentRecoveryCheckpointTarget(manifest localWorkManifest, state localWorkIterationRuntimeState, iteration int, iterationDir string) (localWorkRecoveryCheckpointTarget, bool, error) {
+	if !state.ImplementCompleted {
+		prompt, err := buildLocalWorkImplementPrompt(manifest, iteration)
+		if err != nil {
+			if strings.TrimSpace(manifest.InputPath) == "" || os.IsNotExist(err) {
+				return localWorkRecoveryCheckpointTarget{}, false, nil
+			}
+			return localWorkRecoveryCheckpointTarget{}, false, err
+		}
+		return localWorkRecoveryCheckpointTarget{
+			Alias:          "leader",
+			StepKey:        "leader",
+			CheckpointPath: filepath.Join(iterationDir, "implement-checkpoint.json"),
+			Prompt:         prompt,
+		}, true, nil
+	}
+	if state.VerificationCompleted && !state.ReviewCompleted {
+		prompt, err := buildLocalWorkReviewPrompt(manifest)
+		if err != nil {
+			return localWorkRecoveryCheckpointTarget{}, false, err
+		}
+		return localWorkRecoveryCheckpointTarget{
+			Alias:          "reviewer",
+			StepKey:        "reviewer",
+			CheckpointPath: filepath.Join(iterationDir, "review-checkpoint.json"),
+			Prompt:         prompt,
+		}, true, nil
+	}
+	round := state.CurrentRound
+	if round <= 0 {
+		round = manifest.CurrentRound
+	}
+	if round <= 0 {
+		return localWorkRecoveryCheckpointTarget{}, false, nil
+	}
+	phase := strings.TrimSpace(defaultString(state.CurrentPhase, manifest.CurrentPhase))
+	switch phase {
+	case "harden", "hardening":
+		promptPath := filepath.Join(iterationDir, fmt.Sprintf("hardening-round-%d-prompt.md", round))
+		prompt, err := os.ReadFile(promptPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return localWorkRecoveryCheckpointTarget{}, false, nil
+			}
+			return localWorkRecoveryCheckpointTarget{}, false, err
+		}
+		alias := fmt.Sprintf("hardener-round-%d", round)
+		return localWorkRecoveryCheckpointTarget{
+			Alias:          alias,
+			StepKey:        alias,
+			CheckpointPath: filepath.Join(iterationDir, fmt.Sprintf("hardening-round-%d-checkpoint.json", round)),
+			Prompt:         string(prompt),
+		}, true, nil
+	case "review-post-hardening":
+		prompt, err := buildLocalWorkReviewPrompt(manifest)
+		if err != nil {
+			return localWorkRecoveryCheckpointTarget{}, false, err
+		}
+		return localWorkRecoveryCheckpointTarget{
+			Alias:          "reviewer",
+			StepKey:        "reviewer",
+			CheckpointPath: filepath.Join(iterationDir, fmt.Sprintf("review-round-%d-checkpoint.json", round)),
+			Prompt:         prompt,
+		}, true, nil
+	default:
+		return localWorkRecoveryCheckpointTarget{}, false, nil
+	}
 }
 
 func localWorkRunIndexEntry(manifest localWorkManifest) workRunIndexEntry {
