@@ -7172,13 +7172,7 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 		"home": {
 			hash: "view=home",
 			expect: []string{
-				"Attention Inbox",
-				"Sync GitHub",
-				"Next Recommended Action",
-				"Select Visible",
-				"Group",
-				"Detail",
-				"Onboard Repo",
+				"All Repos",
 				"Pending Jobs Chart",
 				"Repo Overview",
 				"Work Items",
@@ -7188,10 +7182,11 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 				"Dismissed Scouts",
 			},
 		},
-		"legacy-issues": {
+		"issues": {
 			hash: "view=issues",
 			expect: []string{
-				"Attention Inbox",
+				"Tracked Issues",
+				"Issue Detail",
 				"Fix flaky test",
 				"priority still pending reviewer confirmation",
 			},
@@ -7247,10 +7242,11 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 		"approvals": {
 			hash: "view=approvals",
 			expect: []string{
-				"Attention Inbox",
+				"Approval Queue",
+				"Approval Detail",
 				"Reply in thread",
 				"Review feature PR",
-				"approval required",
+				"Action Kind",
 			},
 		},
 		"usage": {
@@ -7267,7 +7263,7 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 	})
 }
 
-func TestStartUIBrowserNavigationOnlyShowsConsolidatedPrimaryViews(t *testing.T) {
+func TestStartUIBrowserNavigationShowsTaskWorkspaceViews(t *testing.T) {
 	chromePath := startUITestChromePath(t)
 	if chromePath == "" {
 		t.Skip("google-chrome is required for browser UI coverage")
@@ -7279,31 +7275,22 @@ func TestStartUIBrowserNavigationOnlyShowsConsolidatedPrimaryViews(t *testing.T)
 	output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=home")
 	for _, needle := range []string{
 		`data-nav-view="home"`,
-		`data-nav-view="usage"`,
-		`data-nav-view="repo"`,
-		`value="Attention"`,
-		`value="Usage"`,
-		`value="Repo: acme/widget"`,
-		`value="Run: gh-ui-blocked"`,
-	} {
-		if !strings.Contains(output, needle) {
-			t.Fatalf("expected %q in consolidated navigation output, got:\n%s", needle, output)
-		}
-	}
-	for _, needle := range []string{
 		`data-nav-view="issues"`,
 		`data-nav-view="investigations"`,
 		`data-nav-view="work"`,
+		`data-nav-view="usage"`,
 		`data-nav-view="feedback"`,
 		`data-nav-view="approvals"`,
-		`value="Issues"`,
-		`value="Investigations"`,
-		`value="Work"`,
-		`value="Feedback"`,
-		`value="Approvals"`,
+		`<span class="nav-label">All Repos</span>`,
+		`<span class="nav-label">Issues</span>`,
+		`<span class="nav-label">Tasks</span>`,
+		`<span class="nav-label">Work</span>`,
+		`<span class="nav-label">Usage</span>`,
+		`<span class="nav-label">Feedback</span>`,
+		`<span class="nav-label">Approvals</span>`,
 	} {
-		if strings.Contains(output, needle) {
-			t.Fatalf("did not expect %q in consolidated navigation output, got:\n%s", needle, output)
+		if !strings.Contains(output, needle) {
+			t.Fatalf("expected %q in task workspace navigation output, got:\n%s", needle, output)
 		}
 	}
 }
