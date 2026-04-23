@@ -3619,6 +3619,48 @@ func TestStartUIAPITasksListAndDetail(t *testing.T) {
 	}
 }
 
+func TestStartUIAppTaskDetailSupportsReferenceAndDeepLinks(t *testing.T) {
+	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
+	if err != nil {
+		t.Fatalf("read app asset: %v", err)
+	}
+	content := string(appBody)
+	for _, needle := range []string{
+		`params.set("task", state.investigations.selectedRunID);`,
+		`const hasTaskSelection = params.has("task") || params.has("investigation");`,
+		`function syncTaskDetailModalState() {`,
+		`<span class="drawer-label">Task Start</span>`,
+		`<span class="drawer-label">Token Spend</span>`,
+		`<span class="drawer-label">Reference</span>`,
+	} {
+		if !strings.Contains(content, needle) {
+			t.Fatalf("expected app asset to contain %q", needle)
+		}
+	}
+}
+
+func TestStartUIBrowserTaskDetailDeepLinkOpensModal(t *testing.T) {
+	chromePath := startUITestChromePath(t)
+	if chromePath == "" {
+		t.Skip("google-chrome is required for browser UI coverage")
+	}
+
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	taskID := "work-run:lw-browser-active"
+	output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=investigations&task="+url.QueryEscape(taskID))
+	for _, needle := range []string{
+		"Task Detail",
+		"Task Start",
+		"Token Spend",
+		"Reference",
+		taskID,
+	} {
+		startUITestRequireText(t, output, needle, "task-detail-deeplink")
+	}
+}
+
 func TestStartUITaskSummaryFromFailedWorkRunKeepsFailedStatus(t *testing.T) {
 	summary := startUITaskSummaryFromWorkRun(startUIWorkRun{
 		RunID:          "lw-failed",

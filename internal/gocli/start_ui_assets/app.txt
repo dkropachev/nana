@@ -1204,7 +1204,7 @@
       params.set("issue", state.issueQueue.selectedID);
     }
     if (state.currentView === "investigations" && state.investigations.selectedRunID) {
-      params.set("investigation", state.investigations.selectedRunID);
+      params.set("task", state.investigations.selectedRunID);
     }
     if (state.currentView === "approvals" && state.approvals.selectedID) {
       params.set("approval", state.approvals.selectedID);
@@ -1226,6 +1226,8 @@
     const nextView = defaultString(params.get("view"), state.currentView);
     const nextRepo = params.has("repo") ? defaultString(params.get("repo"), "") : "";
     const nextRepoTab = defaultString(params.get("tab"), nextView === "repo" ? state.repoTab : "overview");
+    const hasTaskSelection = params.has("task") || params.has("investigation");
+    const taskSelection = defaultString(params.get("task"), defaultString(params.get("investigation"), ""));
     clearDraftsForRouteTransition({
       view: nextView,
       repoSlug: nextRepo,
@@ -1242,7 +1244,7 @@
       state.feedbackTab = defaultString(params.get("tab"), state.feedbackTab);
     }
     state.issueQueue.selectedID = defaultString(params.get("issue"), state.issueQueue.selectedID);
-    state.investigations.selectedRunID = defaultString(params.get("investigation"), state.investigations.selectedRunID);
+    state.investigations.selectedRunID = hasTaskSelection ? taskSelection : "";
     state.approvals.selectedID = defaultString(params.get("approval"), state.approvals.selectedID);
   }
 
@@ -2166,6 +2168,7 @@
       return Promise.resolve();
     }
     state.investigations.selectedRunID = taskID;
+    syncHashState();
     state.investigations.detailLoading = true;
     if (!options.silent) {
       state.investigations.error = "";
@@ -4985,6 +4988,29 @@
     return null;
   }
 
+  function syncTaskDetailModalState() {
+    const taskID = defaultString(state.investigations.selectedRunID, "");
+    if (state.currentView !== "investigations" || !taskID) {
+      if (state.taskDetailModal && state.taskDetailModal.isOpen()) {
+        state.taskDetailModal.close();
+      }
+      return;
+    }
+    initTaskDetailModal();
+    renderTaskDetailModal();
+    if (!state.taskDetailModal.isOpen()) {
+      state.taskDetailModal.open();
+    }
+    const currentDetailID = defaultString(state.investigations.detail && state.investigations.detail.summary && state.investigations.detail.summary.id, "");
+    if (currentDetailID === taskID || state.investigations.detailLoading) {
+      return;
+    }
+    state.investigations.detail = null;
+    state.investigations.detailLoading = true;
+    renderTaskDetailModal();
+    loadInvestigationDetail(taskID, { silent: true });
+  }
+
   function renderTaskDetailModal() {
     const host = document.getElementById("task-detail-modal-content");
     if (!host) return;
@@ -5008,6 +5034,7 @@
     const summary = detail.summary;
     const startedAt = taskDetailStartedAt(detail);
     const tokenUsage = taskDetailTokens(detail);
+    const taskReference = defaultString(summary.id, "Not available");
     const tokenValue = tokenUsage
       ? `${formatTokenCompact(tokenUsage.total)}${tokenUsage.sessions > 0 ? ` · ${tokenUsage.sessions} session${tokenUsage.sessions === 1 ? "" : "s"}` : ""}`
       : "Not available";
@@ -5051,7 +5078,7 @@
             <span class="drawer-value">${escapeHTML(formatDateTime(summary.updated_at))}</span>
           </div>
           <div class="drawer-summary-card">
-            <span class="drawer-label">Started</span>
+            <span class="drawer-label">Task Start</span>
             <span class="drawer-value">${escapeHTML(defaultString(startedAt ? formatDateTime(startedAt) : "", "Not started"))}</span>
           </div>
           <div class="drawer-summary-card">
@@ -5059,8 +5086,12 @@
             <span class="drawer-value">${escapeHTML(defaultString(summary.schedule_at ? formatDateTime(summary.schedule_at) : "", "Now"))}</span>
           </div>
           <div class="drawer-summary-card">
-            <span class="drawer-label">Tokens</span>
+            <span class="drawer-label">Token Spend</span>
             <span class="drawer-value">${escapeHTML(tokenValue)}</span>
+          </div>
+          <div class="drawer-summary-card">
+            <span class="drawer-label">Reference</span>
+            <span class="drawer-value">${escapeHTML(taskReference)}</span>
           </div>
         </div>
       </div>
@@ -5088,21 +5119,25 @@
       onClose() {
         state.investigations.selectedRunID = "";
         state.investigations.detail = null;
-        renderInvestigationsPage();
+        state.investigations.detailLoading = false;
+        syncHashState();
+        if (state.currentView === "investigations") {
+          renderInvestigationsPage();
+        } else {
+          renderAppPreservingDraftFocus();
+        }
         renderTaskDetailModal();
       },
     });
   }
 
   function openTaskDetailModal(taskID) {
-    initTaskDetailModal();
     state.investigations.selectedRunID = taskID;
-    state.investigations.detail = null;
-    state.investigations.detailLoading = true;
-    renderInvestigationsPage();
-    renderTaskDetailModal();
-    state.taskDetailModal.open();
-    loadInvestigationDetail(taskID, { silent: true });
+    syncHashState();
+    if (state.currentView === "investigations") {
+      renderInvestigationsPage();
+    }
+    syncTaskDetailModalState();
   }
 
   function renderTaskScheduleModal() {
@@ -7691,6 +7726,7 @@
     syncUsageAutoRefresh();
     refreshOpenLogDrawerIfNeeded();
     refreshOpenWorkItemDrawerIfNeeded();
+    syncTaskDetailModalState();
   }
 
   function attachHandlers() {
