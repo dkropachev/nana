@@ -3679,10 +3679,27 @@ func TestStartUIAppTaskFeedHeadlinePrefersTitleOrDescription(t *testing.T) {
 	content := string(appBody)
 	for _, needle := range []string{
 		`const headline = defaultString(item.title, defaultString(item.description, defaultString(item.summary, item.id)));`,
+		`const reference = defaultString(item.id, "unknown");`,
 		`<strong>${escapeHTML(headline)}</strong>`,
+		`<span class="mission-task-reference">${escapeHTML(reference)}</span>`,
 	} {
 		if !strings.Contains(content, needle) {
 			t.Fatalf("expected app asset to contain %q", needle)
+		}
+	}
+
+	cssBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.css")
+	if err != nil {
+		t.Fatalf("read app stylesheet: %v", err)
+	}
+	cssContent := string(cssBody)
+	for _, needle := range []string{
+		`.mission-task-reference {`,
+		`font-family: ui-monospace`,
+		`font-size: 11px;`,
+	} {
+		if !strings.Contains(cssContent, needle) {
+			t.Fatalf("expected app stylesheet to contain %q", needle)
 		}
 	}
 }

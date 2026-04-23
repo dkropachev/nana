@@ -1634,6 +1634,13 @@ textarea {
   white-space: nowrap;
 }
 
+.mission-task-reference {
+  color: #35506f;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .mission-task-row > .run-state-pill {
   justify-self: end;
 }

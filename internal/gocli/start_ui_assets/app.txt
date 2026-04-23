@@ -4833,6 +4833,7 @@
     const kind = taskTypeLabel(item.kind);
     const schedule = item.schedule_at ? `scheduled ${formatDateTime(item.schedule_at)}` : `updated ${formatDateTime(item.updated_at)}`;
     const headline = defaultString(item.title, defaultString(item.description, defaultString(item.summary, item.id)));
+    const reference = defaultString(item.id, "unknown");
     const summary = defaultString(item.summary, item.description || "No summary recorded.");
     return `
       <button class="mission-task-row ${selected ? "mission-task-row-selected" : ""}" type="button" data-task-open="${escapeHTML(item.id)}">
@@ -4840,6 +4841,7 @@
         <span class="mission-task-type">${escapeHTML(kind)}</span>
         <span class="mission-task-copy">
           <strong>${escapeHTML(headline)}</strong>
+          <span class="mission-task-reference">${escapeHTML(reference)}</span>
           <span>${escapeHTML(repo)} · ${escapeHTML(schedule)}</span>
           <em>${escapeHTML(summary)}</em>
         </span>
