@@ -7827,8 +7827,11 @@ func startUITestSetupBrowserFixtureWithOptions(t *testing.T, options startUITest
 	}); err != nil {
 		t.Fatalf("write lane runtime: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(githubRunDir, "lane-runtime", "executor-stdout.log"), []byte("executor output\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(githubRunDir, "lane-runtime", "executor-stdout.log"), []byte(startUITestBuildLogContent("executor scroll", 320)), 0o644); err != nil {
 		t.Fatalf("write github stdout log: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(githubRunDir, "lane-runtime", "reviewer-stdout.log"), []byte(startUITestBuildLogContent("reviewer scroll", 320)), 0o644); err != nil {
+		t.Fatalf("write github reviewer log: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(githubRunDir, "feedback-instructions.md"), []byte("feedback ready\n"), 0o644); err != nil {
 		t.Fatalf("write feedback instructions: %v", err)
@@ -7903,4 +7906,15 @@ func startUITestWriteScoutArtifact(t *testing.T, repoPath string, role string, r
 		t.Fatalf("write scout raw output: %v", err)
 	}
 	return localScoutProposalID(role, proposal)
+}
+
+func startUITestBuildLogContent(prefix string, lines int) string {
+	if lines <= 0 {
+		return ""
+	}
+	parts := make([]string, 0, lines)
+	for i := 1; i <= lines; i++ {
+		parts = append(parts, fmt.Sprintf("%s line %03d", prefix, i))
+	}
+	return strings.Join(parts, "\n") + "\n"
 }

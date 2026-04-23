@@ -326,16 +326,45 @@ func TestStartUIAppPreservesDraftsForRefreshableForms(t *testing.T) {
 		"function issuesDetailDraftScope(issue)",
 		"function repoControlsIssueDraftScope()",
 		"function repoControlsPlannedDraftScope()",
+		"function repoConfigDraftScope(repo)",
+		"function repoConfigEditableFields(repo)",
+		"function pruneRepoConfigTransientDraftFields(repo)",
+		"function syncConfigEditorTransientDrafts(repo)",
+		"function repoConfigCompatibilityScouts(config)",
+		"function repoOnboardingDraftScope()",
 		"function repoSchedulerSearchDraftScope(repo)",
 		"function repoSchedulerDetailDraftScope(repo, item)",
 		"function taskFindingDraftScope(repo, finding)",
 		"function findingImportCandidateDraftScope(repo, session, candidate)",
+		"function replaceHostContentPreservingState(host, html, options = {})",
+		"function captureElementFocusSnapshot(root = document)",
+		"function restoreElementFocusSnapshot(snapshot, root = document)",
 		`<form id="usage-filters-form" class="usage-filter-form" data-draft-scope="${escapeHTML(draftScope)}">`,
+		`<form id="repo-onboard-form" class="config-form" data-draft-scope="${escapeHTML(draftScope)}">`,
+		`<form id="repo-config-form" class="config-form" data-draft-scope="${escapeHTML(draftScope)}">`,
 		`state.issueForm.el.setAttribute("data-draft-scope", draftScope);`,
 		`state.plannedForm.el.setAttribute("data-draft-scope", draftScope);`,
 		"captureDraftField(event.target);",
 		"clearDraftScope(usageFiltersDraftScope());",
 		"clearDraftScope(repoSchedulerSearchDraftScope(repo));",
+		"ensureConfigEditor(state.overview.repos[index]);",
+	} {
+		if !strings.Contains(content, needle) {
+			t.Fatalf("expected app asset to contain %q", needle)
+		}
+	}
+}
+
+func TestStartUIAppIgnoresReadOnlyRepoConfigFieldsDuringDraftComparison(t *testing.T) {
+	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
+	if err != nil {
+		t.Fatalf("read app asset: %v", err)
+	}
+	content := string(appBody)
+	for _, needle := range []string{
+		"function repoConfigComparableValue(value)",
+		`if (key === "policy_path" || key === "scout_catalog" || key === "scouts") return;`,
+		"return JSON.stringify(repoConfigComparableValue(config || {}));",
 	} {
 		if !strings.Contains(content, needle) {
 			t.Fatalf("expected app asset to contain %q", needle)

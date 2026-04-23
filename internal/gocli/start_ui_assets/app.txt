@@ -65,6 +65,7 @@
       detail: null,
       detailLoading: false,
       filePath: "",
+      scrollIdentity: "",
       meta: null,
       content: "",
       loading: false,
@@ -470,6 +471,14 @@
     if (!field) return "";
     if (field.name) return `name:${field.name}`;
     if (field.id) return `id:${field.id}`;
+    const configField = typeof field.getAttribute === "function"
+      ? defaultString(field.getAttribute("data-config-field"), "")
+      : "";
+    if (configField) return `config:${configField}`;
+    const onboardingField = typeof field.getAttribute === "function"
+      ? defaultString(field.getAttribute("data-repo-onboard-field"), "")
+      : "";
+    if (onboardingField) return `repo-onboard:${onboardingField}`;
     return "";
   }
 
@@ -499,6 +508,14 @@
   function clearDraftScope(scope) {
     if (!scope) return;
     delete state.formDrafts[scope];
+  }
+
+  function clearDraftField(scope, key) {
+    if (!scope || !key || !state.formDrafts[scope]) return;
+    delete state.formDrafts[scope][key];
+    if (!Object.keys(state.formDrafts[scope]).length) {
+      delete state.formDrafts[scope];
+    }
   }
 
   function clearDraftScopesByPrefix(prefix) {
@@ -534,6 +551,14 @@
 
   function repoSchedulerDetailDraftScope(repo, item) {
     return repo && item ? `repo:${repo.repo_slug}:planned-detail:${item.id}` : "";
+  }
+
+  function repoConfigDraftScope(repo) {
+    return repo ? `repo:${repo.repo_slug}:config` : "";
+  }
+
+  function repoOnboardingDraftScope() {
+    return "repo:onboarding";
   }
 
   function taskFindingDraftScope(repo, finding) {
@@ -688,6 +713,111 @@
       }
     }
     return document.activeElement === field;
+  }
+
+  function focusSnapshotKey(field) {
+    const key = draftFieldKey(field);
+    if (key) return key;
+    if (!field || typeof field.getAttribute !== "function") return "";
+    const configField = defaultString(field.getAttribute("data-config-field"), "");
+    if (configField) return `config:${configField}`;
+    const onboardingField = defaultString(field.getAttribute("data-repo-onboard-field"), "");
+    if (onboardingField) return `onboard:${onboardingField}`;
+    return "";
+  }
+
+  function captureElementFocusSnapshot(root = document) {
+    if (!root) return null;
+    const field = document.activeElement;
+    if (!isDraftFocusableField(field)) return null;
+    if (root !== document && typeof root.contains === "function" && !root.contains(field)) return null;
+    const key = focusSnapshotKey(field);
+    if (!key) return null;
+    return {
+      key,
+      selection: readDraftFieldSelection(field),
+      scrollTop: typeof field.scrollTop === "number" ? field.scrollTop : 0,
+      scrollLeft: typeof field.scrollLeft === "number" ? field.scrollLeft : 0,
+    };
+  }
+
+  function findElementByFocusSnapshotKey(key, root = document) {
+    if (!key || !root) return null;
+    const fields = root.querySelectorAll("input, textarea, select");
+    for (const field of fields) {
+      if (!isDraftFocusableField(field)) continue;
+      if (focusSnapshotKey(field) !== key) continue;
+      return field;
+    }
+    return null;
+  }
+
+  function restoreElementFocusSnapshot(snapshot, root = document) {
+    if (!snapshot || !root) return false;
+    const field = findElementByFocusSnapshotKey(snapshot.key, root);
+    if (!field || field.disabled) return false;
+    focusDraftField(field);
+    if (snapshot.selection && draftFieldSupportsSelection(field) && typeof field.setSelectionRange === "function") {
+      try {
+        field.setSelectionRange(snapshot.selection.start, snapshot.selection.end, snapshot.selection.direction || "none");
+      } catch (_error) {
+        // Ignore unsupported selection restoration for non-text controls.
+      }
+    }
+    if (typeof field.scrollTop === "number") {
+      field.scrollTop = snapshot.scrollTop || 0;
+    }
+    if (typeof field.scrollLeft === "number") {
+      field.scrollLeft = snapshot.scrollLeft || 0;
+    }
+    return document.activeElement === field;
+  }
+
+  function captureHostRenderState(host, options = {}) {
+    if (!host) return null;
+    const scrollSelectors = Array.isArray(options.scrollSelectors) ? options.scrollSelectors : [];
+    return {
+      focus: captureElementFocusSnapshot(host),
+      hostScrollTop: typeof host.scrollTop === "number" ? host.scrollTop : 0,
+      hostScrollLeft: typeof host.scrollLeft === "number" ? host.scrollLeft : 0,
+      scrolls: scrollSelectors.map((selector) => {
+        const element = host.querySelector(selector);
+        if (!element) return null;
+        return {
+          selector,
+          top: typeof element.scrollTop === "number" ? element.scrollTop : 0,
+          left: typeof element.scrollLeft === "number" ? element.scrollLeft : 0,
+        };
+      }).filter(Boolean),
+    };
+  }
+
+  function restoreHostRenderState(host, snapshot) {
+    if (!host || !snapshot) return;
+    if (typeof host.scrollTop === "number") {
+      host.scrollTop = snapshot.hostScrollTop || 0;
+    }
+    if (typeof host.scrollLeft === "number") {
+      host.scrollLeft = snapshot.hostScrollLeft || 0;
+    }
+    (snapshot.scrolls || []).forEach((entry) => {
+      const element = host.querySelector(entry.selector);
+      if (!element) return;
+      if (typeof element.scrollTop === "number") {
+        element.scrollTop = entry.top || 0;
+      }
+      if (typeof element.scrollLeft === "number") {
+        element.scrollLeft = entry.left || 0;
+      }
+    });
+    restoreElementFocusSnapshot(snapshot.focus, host);
+  }
+
+  function replaceHostContentPreservingState(host, html, options = {}) {
+    if (!host) return;
+    const snapshot = captureHostRenderState(host, options);
+    host.innerHTML = html;
+    restoreHostRenderState(host, snapshot);
   }
 
   function renderAppPreservingDraftFocus() {
@@ -1260,19 +1390,42 @@
     };
   }
 
+  function repoConfigActiveScoutKeys(config) {
+    const catalog = config && Array.isArray(config.scout_catalog) ? config.scout_catalog : [];
+    if (catalog.length) {
+      const seen = new Set();
+      const keys = [];
+      catalog.forEach((entry) => {
+        const key = normalizeScoutRoleKey(entry && (entry.config_key || entry.role));
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        keys.push(key);
+      });
+      return keys;
+    }
+    return Object.keys((config && config.scouts_by_role) || {})
+      .map((key) => normalizeScoutRoleKey(key))
+      .filter(Boolean);
+  }
+
+  function repoConfigCompatibilityScouts(config) {
+    const byRole = (config && config.scouts_by_role) || {};
+    const scouts = {};
+    repoConfigActiveScoutKeys(config).forEach((roleKey) => {
+      scouts[roleKey] = byRole[roleKey] || repoScoutSnapshot(roleKey, {});
+    });
+    return scouts;
+  }
+
   function repoConfigSnapshot(repo) {
     if (!repo) return null;
     const issuePickMode = defaultString(repo.issue_pick_mode, "manual");
     const repoMode = defaultString(repo.repo_mode, "local");
+    const scoutCatalog = repoScoutCatalog(repo);
     const scouts = {};
-    repoScoutCatalog(repo).forEach((entry) => {
+    scoutCatalog.forEach((entry) => {
       scouts[entry.config_key] = repoScoutSnapshot(entry.config_key, repoScoutConfigsByRole(repo)[entry.config_key]);
     });
-    const fixedScouts = {
-      improvement: scouts.improvement || repoScoutSnapshot("improvement", {}),
-      enhancement: scouts.enhancement || repoScoutSnapshot("enhancement", {}),
-      ui: scouts.ui || repoScoutSnapshot("ui", {}),
-    };
     return {
       repo_mode: repoMode,
       issue_pick_mode: issuePickMode,
@@ -1282,14 +1435,29 @@
       publish_target: repoMode === "disabled"
         ? ""
         : defaultString(repo.publish_target, repoModeToPublishTarget(repoMode)),
-      scout_catalog: repoScoutCatalog(repo),
+      scout_catalog: scoutCatalog,
       scouts_by_role: scouts,
-      scouts: fixedScouts,
+      scouts: repoConfigCompatibilityScouts({ scout_catalog: scoutCatalog, scouts_by_role: scouts }),
     };
   }
 
+  function repoConfigComparableValue(value) {
+    if (Array.isArray(value)) {
+      return value.map((entry) => repoConfigComparableValue(entry));
+    }
+    if (value && typeof value === "object") {
+      const normalized = {};
+      Object.keys(value).sort().forEach((key) => {
+        if (key === "policy_path" || key === "scout_catalog" || key === "scouts") return;
+        normalized[key] = repoConfigComparableValue(value[key]);
+      });
+      return normalized;
+    }
+    return value;
+  }
+
   function repoConfigSnapshotKey(config) {
-    return JSON.stringify(config || {});
+    return JSON.stringify(repoConfigComparableValue(config || {}));
   }
 
   function cloneConfigSnapshot(config) {
@@ -1323,14 +1491,111 @@
       return;
     }
     state.configEditor.server = snapshot;
-    if (!state.configEditor.dirty) {
+    const draftMatchesServer = Boolean(state.configEditor.draft) && configDraftEquals(state.configEditor.draft, snapshot);
+    if (!state.configEditor.dirty || draftMatchesServer) {
       state.configEditor.serverKey = serverKey;
       state.configEditor.draft = cloneConfigSnapshot(snapshot);
+      state.configEditor.dirty = false;
       state.configEditor.remoteChanged = false;
+      state.configEditor.overridePublish = false;
+      state.configEditor.overrideForkIssues = false;
+      state.configEditor.overrideImplement = false;
       return;
     }
     if (serverKey !== state.configEditor.serverKey) {
       state.configEditor.remoteChanged = true;
+    }
+  }
+
+  function configDraftFieldRawValue(draft) {
+    if (!draft) return null;
+    if (draft.kind === "value") {
+      return String(draft.value ?? "");
+    }
+    if (draft.kind === "checkbox" || draft.kind === "radio") {
+      return draft.checked ? "true" : "false";
+    }
+    return null;
+  }
+
+  function repoConfigEditableFields(repo) {
+    const fields = new Set([
+      "repo_mode",
+      "issue_pick_mode",
+      "pr_forward_mode",
+      "fork_issues_mode",
+      "implement_mode",
+      "publish_target",
+    ]);
+    repoScoutCatalog(repo).forEach((entry) => {
+      const roleKey = entry.config_key;
+      ["enabled", "mode", "schedule", "issue_destination", "fork_repo", "labels"].forEach((name) => {
+        fields.add(`scouts_by_role.${roleKey}.${name}`);
+      });
+      if (repoScoutMeta(roleKey, repo).defaultSessionLimit > 0) {
+        fields.add(`scouts_by_role.${roleKey}.session_limit`);
+      }
+    });
+    return fields;
+  }
+
+  function pruneRepoConfigTransientDraftFields(repo) {
+    const draftScope = repoConfigDraftScope(repo);
+    const activeFields = repoConfigEditableFields(repo);
+    const draftFields = state.formDrafts[draftScope];
+    if (!draftFields) {
+      return { draftFields: null, activeFields, removedAny: false };
+    }
+    let removedAny = false;
+    Object.keys(draftFields).forEach((key) => {
+      if (!key.startsWith("config:")) return;
+      const field = key.slice("config:".length);
+      if (activeFields.has(field)) return;
+      clearDraftField(draftScope, key);
+      removedAny = true;
+    });
+    return {
+      draftFields: state.formDrafts[draftScope] || null,
+      activeFields,
+      removedAny,
+    };
+  }
+
+  function syncConfigEditorTransientDrafts(repo) {
+    if (!repo || state.configEditor.repoSlug !== repo.repo_slug || !state.configEditor.draft) {
+      return;
+    }
+    const { draftFields, activeFields, removedAny } = pruneRepoConfigTransientDraftFields(repo);
+    if (!draftFields && !removedAny) {
+      return;
+    }
+    const base = cloneConfigSnapshot(state.configEditor.server || repoConfigSnapshot(repo));
+    let next = null;
+    if (draftFields) {
+      Object.entries(draftFields).forEach(([key, draft]) => {
+        if (!key.startsWith("config:")) return;
+        const field = key.slice("config:".length);
+        if (!activeFields.has(field)) return;
+        const rawValue = configDraftFieldRawValue(draft);
+        if (rawValue === null) return;
+        if (!next) {
+          next = cloneConfigSnapshot(base);
+        }
+        applyConfigDraftValue(next, repo, field, parseConfigFieldValue(field, rawValue), { clearTransient: false });
+      });
+    }
+    next = next || base;
+    syncCompatibilityScouts(next);
+    if (!removedAny && configDraftEquals(next, state.configEditor.draft)) {
+      return;
+    }
+    state.configEditor.draft = next;
+    state.configEditor.dirty = !configDraftEquals(next, state.configEditor.server);
+    if (!state.configEditor.dirty) {
+      state.configEditor.remoteChanged = false;
+      state.configEditor.overridePublish = false;
+      state.configEditor.overrideForkIssues = false;
+      state.configEditor.overrideImplement = false;
     }
   }
 
@@ -2015,7 +2280,7 @@
     state.repoList.loaded = true;
     state.repoList.error = "";
     if (state.overview) {
-      renderApp();
+      renderAppPreservingDraftFocus();
     }
   }
 
@@ -2023,7 +2288,7 @@
     state.repoList.loading = false;
     state.repoList.error = error.message;
     if (state.overview) {
-      renderApp();
+      renderAppPreservingDraftFocus();
     }
     if (!options.silent) {
       toast("danger", "Repos failed", error.message);
@@ -2071,7 +2336,7 @@
         };
       }
     }
-    renderApp();
+    renderAppPreservingDraftFocus();
   }
 
   function loadSelectedRepoSummary(options = {}) {
@@ -3021,11 +3286,12 @@
     const host = document.getElementById(target);
     if (!host) return;
     const nextRenderKey = defaultString(options.renderKey, "");
+    const preserveScroll = options.preserveScroll !== false;
     if (nextRenderKey && host.getAttribute("data-grid-render-key") === nextRenderKey) {
       return;
     }
-    const currentTableWrap = options.preserveScroll ? host.querySelector(".data-table-wrap") : null;
-    const currentCards = options.preserveScroll ? host.querySelector(".data-cards") : null;
+    const currentTableWrap = preserveScroll ? host.querySelector(".data-table-wrap") : null;
+    const currentCards = preserveScroll ? host.querySelector(".data-cards") : null;
     const tableScrollTop = currentTableWrap ? currentTableWrap.scrollTop : 0;
     const tableScrollLeft = currentTableWrap ? currentTableWrap.scrollLeft : 0;
     const cardsScrollTop = currentCards ? currentCards.scrollTop : 0;
@@ -3086,7 +3352,7 @@
     } else {
       host.removeAttribute("data-grid-render-key");
     }
-    if (options.preserveScroll) {
+    if (preserveScroll) {
       const nextTableWrap = host.querySelector(".data-table-wrap");
       const nextCards = host.querySelector(".data-cards");
       if (nextTableWrap) {
@@ -3248,11 +3514,12 @@
     if (!host) return;
     const onboarding = state.repoOnboarding || defaultRepoOnboardingState();
     const draft = onboarding.draft || defaultRepoOnboardingState().draft;
+    const draftScope = repoOnboardingDraftScope();
     const repoCount = sortedRepos().length;
     const summaryCopy = repoCount
       ? "Add another GitHub repo to the workspace. Advanced routing and scout policies stay editable in the repo Config tab."
       : "No repos are onboarded yet. Add an owner/repo slug or GitHub repo URL to start managing it from this workspace.";
-    host.innerHTML = `
+    replaceHostContentPreservingState(host, `
       <div class="drawer-summary">
         <div>
           <span class="drawer-label">Workspace</span>
@@ -3271,7 +3538,7 @@
         </div>
       </div>
       ${onboarding.error ? `<div id="repo-onboard-error" class="config-notice">${escapeHTML(onboarding.error)}</div>` : `<div id="repo-onboard-error"></div>`}
-      <form id="repo-onboard-form" class="config-form">
+      <form id="repo-onboard-form" class="config-form" data-draft-scope="${escapeHTML(draftScope)}">
         <div class="config-grid">
           <label class="selector config-field-wide">
             <span>Repo Slug</span>
@@ -3300,7 +3567,7 @@
           <button class="tx-btn tx-btn-primary" type="submit" ${onboarding.submitting ? "disabled" : ""}>${escapeHTML(onboarding.submitting ? "Onboarding..." : "Onboard Repo")}</button>
         </div>
       </form>
-    `;
+    `);
   }
 
   function submitRepoOnboarding() {
@@ -3320,6 +3587,7 @@
     }).then((response) => {
       const repo = response.repo || null;
       const created = Boolean(response.created);
+      clearDraftScope(repoOnboardingDraftScope());
       state.repoOnboarding = defaultRepoOnboardingState();
       renderRepoOnboardingDrawer();
       if (state.repoOnboardingDrawer) {
@@ -5895,12 +6163,7 @@
 
   function syncCompatibilityScouts(target) {
     if (!target) return;
-    const byRole = target.scouts_by_role || {};
-    target.scouts = {
-      improvement: byRole.improvement || repoScoutSnapshot("improvement", {}),
-      enhancement: byRole.enhancement || repoScoutSnapshot("enhancement", {}),
-      ui: byRole.ui || repoScoutSnapshot("ui", {}),
-    };
+    target.scouts = repoConfigCompatibilityScouts(target);
   }
 
   function setNestedConfigValue(target, field, value) {
@@ -5914,12 +6177,69 @@
     cursor[parts[parts.length - 1]] = value;
   }
 
-  function renderScoutConfigSection(repo, roleKey, scout) {
+  function applyConfigDraftValue(target, repo, field, value, options = {}) {
+    if (!target) return;
+    const draftScope = options.draftScope || repoConfigDraftScope(repo);
+    const clearTransient = options.clearTransient !== false;
+    setNestedConfigValue(target, field, value);
+    switch (field) {
+      case "repo_mode":
+        if (clearTransient) clearDraftField(draftScope, "config:publish_target");
+        state.configEditor.overridePublish = false;
+        if (value === "disabled") {
+          target.publish_target = "";
+        } else {
+          target.publish_target = repoModeToPublishTarget(value);
+        }
+        break;
+      case "publish_target":
+        if (clearTransient) clearDraftField(draftScope, "config:repo_mode");
+        state.configEditor.overridePublish = true;
+        target.repo_mode = publishTargetToRepoMode(value);
+        break;
+      case "issue_pick_mode": {
+        const automationMode = issuePickModeToAutomationMode(value);
+        if (clearTransient) clearDraftField(draftScope, "config:fork_issues_mode");
+        if (clearTransient) clearDraftField(draftScope, "config:implement_mode");
+        state.configEditor.overrideForkIssues = false;
+        state.configEditor.overrideImplement = false;
+        target.fork_issues_mode = automationMode;
+        target.implement_mode = automationMode;
+        break;
+      }
+      case "fork_issues_mode":
+        if (clearTransient) clearDraftField(draftScope, "config:issue_pick_mode");
+        state.configEditor.overrideForkIssues = true;
+        target.issue_pick_mode = effectiveIssuePickFromAdvanced(target);
+        break;
+      case "implement_mode":
+        if (clearTransient) clearDraftField(draftScope, "config:issue_pick_mode");
+        state.configEditor.overrideImplement = true;
+        target.issue_pick_mode = effectiveIssuePickFromAdvanced(target);
+        break;
+      default:
+        if (field.startsWith("scouts_by_role.")) {
+          const parts = field.split(".");
+          const roleKey = parts[1];
+          const scout = (target.scouts_by_role && target.scouts_by_role[roleKey]) || null;
+          if (scout) {
+            scout.policy_path = configScoutPolicyPath(repo, roleKey);
+            if (parts[2] === "issue_destination" && value !== "fork") {
+              if (clearTransient) clearDraftField(draftScope, `config:scouts_by_role.${roleKey}.fork_repo`);
+              scout.fork_repo = "";
+            }
+          }
+        }
+        break;
+    }
+  }
+
+  function renderScoutConfigSection(repo, roleKey, scout, fieldsDisabled = false) {
     const roleLabel = scoutRoleLabel(roleKey);
     const policyPath = scout.policy_path || configScoutPolicyPath(repo, roleKey);
-    const forkDisabled = !scout.enabled || scout.issue_destination !== "fork";
+    const forkDisabled = fieldsDisabled || !scout.enabled || scout.issue_destination !== "fork";
     const sessionLimitField = repoScoutMeta(roleKey, repo).defaultSessionLimit > 0
-      ? renderConfigInput(`scouts_by_role.${roleKey}.session_limit`, "Session Limit", String(scout.session_limit || repoScoutMeta(roleKey, repo).defaultSessionLimit), { type: "number", min: 1, max: 6 })
+      ? renderConfigInput(`scouts_by_role.${roleKey}.session_limit`, "Session Limit", String(scout.session_limit || repoScoutMeta(roleKey, repo).defaultSessionLimit), { type: "number", min: 1, max: 6, disabled: fieldsDisabled })
       : "";
     return `
       <div class="config-section">
@@ -5929,66 +6249,25 @@
           <span><strong>Policy Path:</strong> ${escapeHTML(defaultString(policyPath, "Unavailable"))}</span>
         </div>
         <div class="config-grid">
-          ${renderConfigSelect(`scouts_by_role.${roleKey}.enabled`, "Enabled", String(Boolean(scout.enabled)), configFieldOptions("enabled"))}
-          ${renderConfigSelect(`scouts_by_role.${roleKey}.mode`, "Mode", scout.mode, configFieldOptions("mode"))}
-          ${renderConfigSelect(`scouts_by_role.${roleKey}.schedule`, "Schedule", scout.schedule || defaultString(repoScoutMeta(roleKey, repo).defaultSchedule, "when_resolved"), configFieldOptions("schedule"))}
-          ${renderConfigSelect(`scouts_by_role.${roleKey}.issue_destination`, "Destination", scout.issue_destination, configFieldOptions("issue_destination"))}
+          ${renderConfigSelect(`scouts_by_role.${roleKey}.enabled`, "Enabled", String(Boolean(scout.enabled)), configFieldOptions("enabled"), fieldsDisabled)}
+          ${renderConfigSelect(`scouts_by_role.${roleKey}.mode`, "Mode", scout.mode, configFieldOptions("mode"), fieldsDisabled)}
+          ${renderConfigSelect(`scouts_by_role.${roleKey}.schedule`, "Schedule", scout.schedule || defaultString(repoScoutMeta(roleKey, repo).defaultSchedule, "when_resolved"), configFieldOptions("schedule"), fieldsDisabled)}
+          ${renderConfigSelect(`scouts_by_role.${roleKey}.issue_destination`, "Destination", scout.issue_destination, configFieldOptions("issue_destination"), fieldsDisabled)}
           ${renderConfigInput(`scouts_by_role.${roleKey}.fork_repo`, "Fork Repo", scout.fork_repo || "", { placeholder: "owner/repo", disabled: forkDisabled })}
           ${sessionLimitField}
-          ${renderConfigInput(`scouts_by_role.${roleKey}.labels`, "Labels", (scout.labels || []).join(", "), { placeholder: "comma,separated,labels" })}
+          ${renderConfigInput(`scouts_by_role.${roleKey}.labels`, "Labels", (scout.labels || []).join(", "), { placeholder: "comma,separated,labels", disabled: fieldsDisabled })}
         </div>
       </div>
     `;
   }
 
-  function updateConfigDraft(field, rawValue) {
+  function updateConfigDraft(field, rawValue, options = {}) {
     if (!state.configEditor.draft) return;
+    const repo = selectedRepoSummary();
     const value = parseConfigFieldValue(field, rawValue);
     const next = cloneConfigSnapshot(state.configEditor.draft);
-    setNestedConfigValue(next, field, value);
-    switch (field) {
-      case "repo_mode":
-        state.configEditor.overridePublish = false;
-        if (value === "disabled") {
-          next.publish_target = "";
-        } else {
-          next.publish_target = repoModeToPublishTarget(value);
-        }
-        break;
-      case "publish_target":
-        state.configEditor.overridePublish = true;
-        next.repo_mode = publishTargetToRepoMode(value);
-        break;
-      case "issue_pick_mode": {
-        const automationMode = issuePickModeToAutomationMode(value);
-        state.configEditor.overrideForkIssues = false;
-        state.configEditor.overrideImplement = false;
-        next.fork_issues_mode = automationMode;
-        next.implement_mode = automationMode;
-        break;
-      }
-      case "fork_issues_mode":
-        state.configEditor.overrideForkIssues = true;
-        next.issue_pick_mode = effectiveIssuePickFromAdvanced(next);
-        break;
-      case "implement_mode":
-        state.configEditor.overrideImplement = true;
-        next.issue_pick_mode = effectiveIssuePickFromAdvanced(next);
-        break;
-      default:
-        if (field.startsWith("scouts_by_role.")) {
-          const parts = field.split(".");
-          const roleKey = parts[1];
-          const scout = (next.scouts_by_role && next.scouts_by_role[roleKey]) || null;
-          if (scout) {
-            scout.policy_path = configScoutPolicyPath(selectedRepoSummary(), roleKey);
-            if (parts[2] === "issue_destination" && value !== "fork") {
-              scout.fork_repo = "";
-            }
-          }
-        }
-        break;
-    }
+    const draftScope = repoConfigDraftScope(repo);
+    applyConfigDraftValue(next, repo, field, value, { draftScope });
     syncCompatibilityScouts(next);
     state.configEditor.draft = next;
     state.configEditor.dirty = !configDraftEquals(next, state.configEditor.server);
@@ -5998,10 +6277,13 @@
       state.configEditor.overrideForkIssues = false;
       state.configEditor.overrideImplement = false;
     }
-    renderRepoConfigPage(selectedRepoSummary());
+    if (options.rerender !== false) {
+      renderRepoConfigPage(repo);
+    }
   }
 
   function resetConfigDraft(repo) {
+    clearDraftScope(repoConfigDraftScope(repo));
     resetConfigEditorForRepo(repo);
     renderRepoConfigPage(repo);
   }
@@ -6017,7 +6299,8 @@
       body: JSON.stringify(state.configEditor.draft),
     }).then((payload) => {
       state.configEditor.saving = false;
-      mergeRepoSummary(payload.repo);
+      clearDraftScope(repoConfigDraftScope(repo));
+      mergeRepoSummary(payload.repo, { resetConfigEditor: true });
       toast("success", "Repo config updated", repo.repo_slug);
     }).catch((error) => {
       state.configEditor.saving = false;
@@ -6028,8 +6311,11 @@
 
   function renderRepoConfigPage(repo) {
     ensureConfigEditor(repo);
+    syncConfigEditorTransientDrafts(repo);
     const editor = state.configEditor;
     const draft = editor.draft || repoConfigSnapshot(repo);
+    const draftScope = repoConfigDraftScope(repo);
+    const fieldsDisabled = Boolean(editor.saving);
     const rawSettings = repo && repo.settings ? repo.settings : {};
     const rawScouts = repo && repo.scouts_by_role ? repo.scouts_by_role : {};
     const needsScoutCheckoutBootstrap = repoNeedsScoutCheckoutBootstrap(repo, draft, editor.server);
@@ -6062,7 +6348,7 @@
     if (!host) {
       return;
     }
-    host.innerHTML = `
+    replaceHostContentPreservingState(host, `
       <div class="surface-head">
         <div>
           <h3>Repo Configuration</h3>
@@ -6075,28 +6361,28 @@
         <span><strong>Source checkout:</strong> ${escapeHTML(repo.source_checkout_ready ? "Ready" : "Missing")}</span>
         <span><strong>Updated:</strong> ${escapeHTML(formatDateTime(repo.settings && repo.settings.updated_at))}</span>
       </div>
-      <form id="repo-config-form" class="config-form">
+      <form id="repo-config-form" class="config-form" data-draft-scope="${escapeHTML(draftScope)}">
         <div class="config-section">
           <h4>Basic Routing</h4>
           <div class="config-grid">
-            ${renderConfigSelect("repo_mode", "Repo Mode", draft.repo_mode, configFieldOptions("repo_mode"))}
-            ${renderConfigSelect("issue_pick_mode", "Issue Pick", draft.issue_pick_mode, configFieldOptions("issue_pick_mode"))}
-            ${renderConfigSelect("pr_forward_mode", "PR Forward", draft.pr_forward_mode, configFieldOptions("pr_forward_mode"))}
+            ${renderConfigSelect("repo_mode", "Repo Mode", draft.repo_mode, configFieldOptions("repo_mode"), fieldsDisabled)}
+            ${renderConfigSelect("issue_pick_mode", "Issue Pick", draft.issue_pick_mode, configFieldOptions("issue_pick_mode"), fieldsDisabled)}
+            ${renderConfigSelect("pr_forward_mode", "PR Forward", draft.pr_forward_mode, configFieldOptions("pr_forward_mode"), fieldsDisabled)}
           </div>
         </div>
         <div class="config-section">
           <h4>Automation Overrides</h4>
           <div class="config-grid">
-            ${renderConfigSelect("fork_issues_mode", "Fork Issues", draft.fork_issues_mode, configFieldOptions("fork_issues_mode"))}
-            ${renderConfigSelect("implement_mode", "Implement", draft.implement_mode, configFieldOptions("implement_mode"))}
-            ${renderConfigSelect("publish_target", "Publish Target", draft.publish_target || "local-branch", configFieldOptions("publish_target"), draft.repo_mode === "disabled")}
+            ${renderConfigSelect("fork_issues_mode", "Fork Issues", draft.fork_issues_mode, configFieldOptions("fork_issues_mode"), fieldsDisabled)}
+            ${renderConfigSelect("implement_mode", "Implement", draft.implement_mode, configFieldOptions("implement_mode"), fieldsDisabled)}
+            ${renderConfigSelect("publish_target", "Publish Target", draft.publish_target || "local-branch", configFieldOptions("publish_target"), fieldsDisabled || draft.repo_mode === "disabled")}
           </div>
         </div>
         <div class="config-section">
           <h4>Scout Policies</h4>
           <p class="queue-copy">Saving keeps one active policy file per scout under managed scout storage. If the managed source checkout is missing, Nana prepares it before writing scout policies.</p>
         </div>
-        ${repoScoutCatalog(repo).map((entry) => renderScoutConfigSection(repo, entry.config_key, draft.scouts_by_role[entry.config_key])).join("")}
+        ${repoScoutCatalog(repo).map((entry) => renderScoutConfigSection(repo, entry.config_key, draft.scouts_by_role[entry.config_key], fieldsDisabled)).join("")}
         <div class="config-footer">
           <p class="config-status-copy">${escapeHTML(statusCopy)}</p>
           <div class="config-actions">
@@ -6136,7 +6422,7 @@
           </div>
         </div>
       </div>
-    `;
+    `);
   }
 
   function renderRepoControlsPage(repo) {
@@ -6310,7 +6596,11 @@
       state: updatedRepo.state || existing.state || null,
     };
     if (state.configEditor.repoSlug === updatedRepo.repo_slug) {
-      resetConfigEditorForRepo(state.overview.repos[index]);
+      if (options.resetConfigEditor) {
+        resetConfigEditorForRepo(state.overview.repos[index]);
+      } else {
+        ensureConfigEditor(state.overview.repos[index]);
+      }
     }
     if (options.resetScouts && state.scoutItems.repoSlug === updatedRepo.repo_slug) {
       resetScoutItemsState(state.overview.repos[index]);
@@ -6348,26 +6638,34 @@
   function renderLogDrawer() {
     const host = document.getElementById("log-drawer-content");
     if (!host) return;
+    const scrollIdentity = state.logSelection.runID && state.logSelection.filePath
+      ? `${state.logSelection.runID}:${state.logSelection.filePath}`
+      : "";
+    const preserveLogScroll = scrollIdentity && scrollIdentity === state.logSelection.scrollIdentity;
+    const updateHost = (html) => {
+      replaceHostContentPreservingState(host, html, preserveLogScroll ? { scrollSelectors: [".log-content"] } : {});
+      state.logSelection.scrollIdentity = scrollIdentity;
+    };
 
     if (!state.logSelection.runID) {
-      host.innerHTML = '<div class="log-empty">Choose a run to inspect it.</div>';
+      updateHost('<div class="log-empty">Choose a run to inspect it.</div>');
       return;
     }
 
     if ((state.logSelection.loading || state.logSelection.detailLoading) && !state.logSelection.meta && !state.logSelection.detail) {
-      host.innerHTML = '<div class="log-empty">Loading run detail...</div>';
+      updateHost('<div class="log-empty">Loading run detail...</div>');
       return;
     }
 
     if (state.logSelection.error) {
-      host.innerHTML = `<div class="log-empty">${escapeHTML(state.logSelection.error)}</div>`;
+      updateHost(`<div class="log-empty">${escapeHTML(state.logSelection.error)}</div>`);
       return;
     }
 
     const meta = state.logSelection.meta;
     const detail = state.logSelection.detail;
     if (!meta && !detail) {
-      host.innerHTML = '<div class="log-empty">Run detail is unavailable.</div>';
+      updateHost('<div class="log-empty">Run detail is unavailable.</div>');
       return;
     }
 
@@ -6423,7 +6721,7 @@
         </div>
       `;
 
-    host.innerHTML = `
+    updateHost(`
       <div class="drawer-summary">
         <div>
           <span class="drawer-label">Run</span>
@@ -6480,7 +6778,7 @@
       </div>
       ${state.logSelection.loadingContent ? '<div class="status-pill">Loading log content...</div>' : ""}
       <pre class="log-content">${escapeHTML(state.logSelection.content || "No log content available.")}</pre>
-    `;
+    `);
   }
 
   function openLogDrawer(runID) {
@@ -6656,25 +6954,26 @@
   function renderWorkItemDrawer() {
     const host = document.getElementById("work-item-drawer-content");
     if (!host) return;
+    const updateHost = (html) => replaceHostContentPreservingState(host, html);
 
     if (!state.workItemSelection.itemID) {
-      host.innerHTML = '<div class="log-empty">Choose a work item to inspect it.</div>';
+      updateHost('<div class="log-empty">Choose a work item to inspect it.</div>');
       return;
     }
 
     if (state.workItemSelection.loading && !state.workItemSelection.detail) {
-      host.innerHTML = '<div class="log-empty">Loading work item...</div>';
+      updateHost('<div class="log-empty">Loading work item...</div>');
       return;
     }
 
     if (state.workItemSelection.error) {
-      host.innerHTML = `<div class="log-empty">${escapeHTML(state.workItemSelection.error)}</div>`;
+      updateHost(`<div class="log-empty">${escapeHTML(state.workItemSelection.error)}</div>`);
       return;
     }
 
     const detail = state.workItemSelection.detail;
     if (!detail || !detail.item) {
-      host.innerHTML = '<div class="log-empty">Work item details are unavailable.</div>';
+      updateHost('<div class="log-empty">Work item details are unavailable.</div>');
       return;
     }
 
@@ -6692,7 +6991,7 @@
       `;
     }).join("");
 
-    host.innerHTML = `
+    updateHost(`
       <div class="drawer-summary">
         <div>
           <span class="drawer-label">Item</span>
@@ -6777,7 +7076,7 @@
         </div>
         ${events ? `<ul class="status-list">${events}</ul>` : '<div class="status-pill">No events are recorded yet.</div>'}
       </div>
-    `;
+    `);
   }
 
   function openWorkItemDrawer(itemID) {
@@ -6799,7 +7098,6 @@
       if (state.workItemSelection.itemID !== itemID) return;
       state.workItemSelection.loading = false;
       state.workItemSelection.detail = payload;
-      state.workItemSelection.fixInstruction = "";
       renderWorkItemDrawer();
     }).catch((error) => {
       if (state.workItemSelection.itemID !== itemID) return;
@@ -6872,6 +7170,7 @@
     document.body.addEventListener("change", (event) => {
       const repoOnboardField = event.target.getAttribute("data-repo-onboard-field");
       if (!repoOnboardField) return;
+      captureDraftField(event.target);
       state.repoOnboarding.draft[repoOnboardField] = String(event.target.value || "");
       state.repoOnboarding.error = "";
       renderRepoOnboardingDrawer();
@@ -6880,8 +7179,14 @@
     document.body.addEventListener("input", (event) => {
       const repoOnboardField = event.target.getAttribute("data-repo-onboard-field");
       if (!repoOnboardField) return;
+      captureDraftField(event.target);
       state.repoOnboarding.draft[repoOnboardField] = String(event.target.value || "");
       state.repoOnboarding.error = "";
+    });
+
+    document.body.addEventListener("input", (event) => {
+      if (event.target.id !== "work-item-fix-instruction") return;
+      state.workItemSelection.fixInstruction = String(event.target.value || "");
     });
 
     document.body.addEventListener("submit", (event) => {
@@ -7953,6 +8258,10 @@
         state.taskComposer.scoutFocus = String(event.target.value || "");
         return;
       }
+      const configField = event.target.getAttribute("data-config-field");
+      if (configField && !(event.target instanceof HTMLSelectElement)) {
+        updateConfigDraft(configField, String(event.target.value || ""), { rerender: false });
+      }
       const filterView = event.target.getAttribute("data-view-filter");
       const filterName = event.target.getAttribute("data-view-filter-name");
       if (!filterView || !filterName || filterName !== "query") {
@@ -8172,6 +8481,7 @@
           method: "POST",
           body: JSON.stringify({ instruction }),
         }).then(() => {
+          state.workItemSelection.fixInstruction = "";
           toast("success", "Work item draft updated", itemID);
           load();
           loadWorkItemDetail(itemID);
