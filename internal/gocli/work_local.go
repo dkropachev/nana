@@ -1792,11 +1792,14 @@ func resumeLocalWork(cwd string, options localWorkResumeOptions) error {
 	if supersededBy, supersededReason, err := localWorkEffectiveSupersededInfo(manifest); err != nil {
 		return err
 	} else if supersededBy != "" {
-		manifest.SupersededByRunID = supersededBy
-		manifest.SupersededReason = supersededReason
+		completeSupersededLocalWorkRun(&manifest, supersededBy, supersededReason, ISOTimeNow())
+		if writeErr := writeLocalWorkManifest(manifest); writeErr != nil {
+			return writeErr
+		}
 	}
-	if manifest.Status == "blocked" && localWorkIsSuperseded(manifest) {
-		return fmt.Errorf("work run %s is blocked: %s", manifest.RunID, defaultString(localWorkBlockedNextAction(manifest), defaultString(manifest.LastError, manifest.FinalApplyError)))
+	if manifest.Status == "completed" && localWorkIsSuperseded(manifest) {
+		fmt.Fprintf(currentWorkStdout(), "[local] Completed run %s; superseded by %s.\n", manifest.RunID, manifest.SupersededByRunID)
+		return nil
 	}
 	if manifest.Status == "blocked" && manifest.FinalApplyStatus == "blocked-before-apply" {
 		return retryBlockedLocalWorkFinalApply(manifest)
@@ -1826,8 +1829,12 @@ func resolveLocalWorkManifest(manifest localWorkManifest) error {
 	if supersededBy, supersededReason, err := localWorkEffectiveSupersededInfo(manifest); err != nil {
 		return err
 	} else if supersededBy != "" {
-		manifest.SupersededByRunID = supersededBy
-		manifest.SupersededReason = supersededReason
+		completeSupersededLocalWorkRun(&manifest, supersededBy, supersededReason, ISOTimeNow())
+		if writeErr := writeLocalWorkManifest(manifest); writeErr != nil {
+			return writeErr
+		}
+		fmt.Fprintf(currentWorkStdout(), "[local] Completed run %s; superseded by %s.\n", manifest.RunID, manifest.SupersededByRunID)
+		return nil
 	}
 	if !localWorkResolveAllowed(manifest) {
 		if manifest.Status == "blocked" {
@@ -3453,6 +3460,26 @@ func localWorkSupersededReason(manifest localWorkManifest) string {
 	return ""
 }
 
+func completeSupersededLocalWorkRun(manifest *localWorkManifest, supersededBy string, reason string, supersededAt string) {
+	if manifest == nil {
+		return
+	}
+	now := defaultString(strings.TrimSpace(supersededAt), ISOTimeNow())
+	manifest.SupersededByRunID = strings.TrimSpace(supersededBy)
+	manifest.SupersededAt = now
+	manifest.SupersededReason = strings.TrimSpace(reason)
+	manifest.Status = "completed"
+	manifest.CompletedAt = defaultString(strings.TrimSpace(manifest.CompletedAt), now)
+	manifest.UpdatedAt = now
+	manifest.LastError = ""
+	manifest.FinalApplyStatus = "superseded"
+	manifest.FinalApplyError = ""
+	setLocalWorkProgress(manifest, nil, "completed", "superseded", 0)
+	if len(manifest.Iterations) > 0 {
+		manifest.Iterations[len(manifest.Iterations)-1].Status = "completed"
+	}
+}
+
 func localWorkEffectiveSupersededInfo(manifest localWorkManifest) (string, string, error) {
 	if localWorkIsSuperseded(manifest) {
 		return strings.TrimSpace(manifest.SupersededByRunID), localWorkSupersededReason(manifest), nil
@@ -3540,12 +3567,11 @@ func markSupersededLocalWorkRuns(completed localWorkManifest) error {
 				continue
 			}
 			if strings.TrimSpace(candidate.SupersededByRunID) == strings.TrimSpace(completed.RunID) &&
-				strings.TrimSpace(candidate.SupersededReason) == reason {
+				strings.TrimSpace(candidate.SupersededReason) == reason &&
+				strings.TrimSpace(candidate.Status) == "completed" {
 				continue
 			}
-			candidate.SupersededByRunID = completed.RunID
-			candidate.SupersededAt = defaultString(strings.TrimSpace(completed.CompletedAt), completed.UpdatedAt)
-			candidate.SupersededReason = reason
+			completeSupersededLocalWorkRun(&candidate, completed.RunID, reason, defaultString(strings.TrimSpace(completed.CompletedAt), completed.UpdatedAt))
 			updates = append(updates, candidate)
 		}
 		return updates, rows.Err()

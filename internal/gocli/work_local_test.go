@@ -2582,7 +2582,7 @@ func TestWorkResolveCompletesBlockedAfterApplyRun(t *testing.T) {
 	}
 }
 
-func TestWorkResolveRejectsSupersededBlockedRun(t *testing.T) {
+func TestWorkResolveCompletesSupersededBlockedRun(t *testing.T) {
 	repo := createLocalWorkRepo(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -2615,9 +2615,88 @@ func TestWorkResolveRejectsSupersededBlockedRun(t *testing.T) {
 		t.Fatalf("writeLocalWorkManifest: %v", err)
 	}
 
-	err := Work(repo, []string{"resolve", "--run-id", runID})
-	if err == nil || !strings.Contains(err.Error(), "lw-newer-completed") {
-		t.Fatalf("expected resolve to reject superseded run, got %v", err)
+	output, err := captureStdout(t, func() error {
+		return Work(repo, []string{"resolve", "--run-id", runID})
+	})
+	if err != nil {
+		t.Fatalf("expected resolve to complete superseded run, got %v output=%s", err, output)
+	}
+	updated := mustLocalWorkManifestByRunID(t, runID)
+	if updated.Status != "completed" || updated.FinalApplyStatus != "superseded" || updated.LastError != "" {
+		t.Fatalf("expected superseded blocked run to complete, got %#v", updated)
+	}
+}
+
+func TestMarkSupersededLocalWorkRunsCompletesOlderApplyBlockedRuns(t *testing.T) {
+	repo := createLocalWorkRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	oldRunID := "lw-old-apply-blocked"
+	newRunID := "lw-newer-completed"
+	oldTime := "2026-04-22T10:00:00Z"
+	newTime := "2026-04-22T11:00:00Z"
+	oldManifest := localWorkManifest{
+		Version:               5,
+		RunID:                 oldRunID,
+		CreatedAt:             oldTime,
+		UpdatedAt:             oldTime,
+		Status:                "blocked",
+		CurrentPhase:          "apply-blocked",
+		RepoRoot:              repo,
+		RepoName:              filepath.Base(repo),
+		RepoID:                localWorkRepoID(repo),
+		SourceBranch:          "main",
+		BaselineSHA:           strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:           filepath.Join(home, "old-sandbox"),
+		SandboxRepoPath:       filepath.Join(home, "old-sandbox", "repo"),
+		FinalApplyStatus:      "blocked-before-apply",
+		FinalApplyError:       "source checkout has local changes",
+		LastError:             "source checkout has local changes",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+		Iterations:            []localWorkIterationSummary{{Iteration: 1, Status: "blocked"}},
+	}
+	newManifest := localWorkManifest{
+		Version:               5,
+		RunID:                 newRunID,
+		CreatedAt:             newTime,
+		UpdatedAt:             newTime,
+		CompletedAt:           newTime,
+		Status:                "completed",
+		CurrentPhase:          "completed",
+		RepoRoot:              repo,
+		RepoName:              filepath.Base(repo),
+		RepoID:                localWorkRepoID(repo),
+		SourceBranch:          "main",
+		BaselineSHA:           oldManifest.BaselineSHA,
+		SandboxPath:           filepath.Join(home, "new-sandbox"),
+		SandboxRepoPath:       filepath.Join(home, "new-sandbox", "repo"),
+		FinalApplyStatus:      "committed",
+		FinalApplyCommitSHA:   oldManifest.BaselineSHA,
+		FinalAppliedAt:        newTime,
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+	}
+	if err := writeLocalWorkManifest(oldManifest); err != nil {
+		t.Fatalf("write old manifest: %v", err)
+	}
+	if err := writeLocalWorkManifest(newManifest); err != nil {
+		t.Fatalf("write new manifest: %v", err)
+	}
+	if err := markSupersededLocalWorkRuns(newManifest); err != nil {
+		t.Fatalf("markSupersededLocalWorkRuns: %v", err)
+	}
+	updated := mustLocalWorkManifestByRunID(t, oldRunID)
+	if updated.Status != "completed" || updated.FinalApplyStatus != "superseded" || updated.SupersededByRunID != newRunID {
+		t.Fatalf("expected older apply-blocked run to complete as superseded, got %#v", updated)
+	}
+	if updated.LastError != "" || updated.FinalApplyError != "" {
+		t.Fatalf("expected superseded completion to clear blockers, got %#v", updated)
+	}
+	if len(updated.Iterations) != 1 || updated.Iterations[0].Status != "completed" {
+		t.Fatalf("expected latest iteration to be completed, got %#v", updated.Iterations)
 	}
 }
 

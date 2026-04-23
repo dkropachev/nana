@@ -2573,7 +2573,7 @@ func TestLoadStartUIApprovalsIncludesRepoAutomationPreflightFailures(t *testing.
 	}
 }
 
-func TestLoadStartUIWorkRunsSkipsSupersededBlockedLocalRuns(t *testing.T) {
+func TestLoadStartUIWorkRunsCompletesSupersededBlockedLocalRuns(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -2637,18 +2637,26 @@ func TestLoadStartUIWorkRunsSkipsSupersededBlockedLocalRuns(t *testing.T) {
 		t.Fatalf("markSupersededLocalWorkRuns: %v", err)
 	}
 	updatedBlocked := mustLocalWorkManifestByRunID(t, blocked.RunID)
-	if updatedBlocked.SupersededByRunID != completed.RunID || strings.TrimSpace(updatedBlocked.SupersededReason) == "" {
-		t.Fatalf("expected persisted superseded blocked run, got %+v", updatedBlocked)
+	if updatedBlocked.SupersededByRunID != completed.RunID || strings.TrimSpace(updatedBlocked.SupersededReason) == "" ||
+		updatedBlocked.Status != "completed" || updatedBlocked.FinalApplyStatus != "superseded" || updatedBlocked.LastError != "" {
+		t.Fatalf("expected persisted superseded blocked run to be completed, got %+v", updatedBlocked)
 	}
 
 	runs, err := loadStartUIWorkRuns(10)
 	if err != nil {
 		t.Fatalf("loadStartUIWorkRuns: %v", err)
 	}
+	foundCompleted := false
 	for _, run := range runs {
 		if run.RunID == blocked.RunID {
-			t.Fatalf("expected superseded blocked run to be hidden, got %+v", run)
+			foundCompleted = true
+			if run.Status != "completed" || run.Pending {
+				t.Fatalf("expected superseded blocked run to appear completed, got %+v", run)
+			}
 		}
+	}
+	if !foundCompleted {
+		t.Fatalf("expected completed superseded run to remain visible in history, got %+v", runs)
 	}
 
 	approvals, err := loadStartUIApprovals()
