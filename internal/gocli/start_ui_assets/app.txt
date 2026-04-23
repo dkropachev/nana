@@ -4748,24 +4748,6 @@
     }).join("");
   }
 
-  function taskPrimaryActionLabel(item) {
-    if (item && item.can_open_job) return "Open Job";
-    switch (defaultString(item && item.status, "")) {
-      case "running":
-        return "Logs";
-      case "failed":
-        return "Open Job";
-      case "blocked":
-        return "Resolve";
-      case "queued":
-        return "Details";
-      case "in_review":
-        return "Review";
-      default:
-        return "Details";
-    }
-  }
-
   function renderTaskFeedRow(item) {
     const selected = item.id === state.investigations.selectedRunID;
     const repo = defaultString(item.repo_slug, "Workspace");
@@ -4782,11 +4764,7 @@
           <span>${escapeHTML(repo)} · ${escapeHTML(schedule)}</span>
           <em>${escapeHTML(summary)}</em>
         </span>
-        <span class="mission-task-action">
-          <span>${escapeHTML(taskPrimaryActionLabel(item))} ›</span>
-          ${renderStatePill(taskStatusTone(item.status), taskStatusLabel(defaultString(item.status, "queued")))}
-          ${item.run_id ? `<small>${escapeHTML(item.run_id)}</small>` : ""}
-        </span>
+        ${renderStatePill(taskStatusTone(item.status), taskStatusLabel(defaultString(item.status, "queued")))}
       </button>
     `;
   }

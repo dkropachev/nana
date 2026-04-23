@@ -5533,6 +5533,12 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `Schedule Task`) {
 		t.Fatalf("expected unified task scheduling copy in app.js, got %s", string(appBody))
 	}
+	if strings.Contains(string(appBody), `class="mission-task-action"`) || strings.Contains(string(appBody), `taskPrimaryActionLabel`) {
+		t.Fatalf("expected task feed rows to render only the state pill, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `renderStatePill(taskStatusTone(item.status), taskStatusLabel(defaultString(item.status, "queued")))`) {
+		t.Fatalf("expected task feed rows to keep state pill rendering, got %s", string(appBody))
+	}
 	if !strings.Contains(string(appBody), `data-task-action="run-now"`) {
 		t.Fatalf("expected task run-now control wiring in app.js, got %s", string(appBody))
 	}

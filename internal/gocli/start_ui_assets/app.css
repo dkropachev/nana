@@ -1619,8 +1619,7 @@ textarea {
 }
 
 .mission-task-copy span,
-.mission-task-copy em,
-.mission-task-action small {
+.mission-task-copy em {
   overflow: hidden;
   color: #5b718d;
   font-size: 12px;
@@ -1629,16 +1628,8 @@ textarea {
   white-space: nowrap;
 }
 
-.mission-task-action {
-  display: grid;
-  justify-items: end;
-  gap: 4px;
-}
-
-.mission-task-action > span {
-  color: #315f9a;
-  font-size: 13px;
-  font-weight: 900;
+.mission-task-row > .run-state-pill {
+  justify-self: end;
 }
 
 .mission-empty-state {
@@ -1690,8 +1681,8 @@ textarea {
     grid-template-columns: 1fr;
   }
 
-  .mission-task-action {
-    justify-items: start;
+  .mission-task-row > .run-state-pill {
+    justify-self: start;
   }
 
   .config-json-grid {
