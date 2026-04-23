@@ -248,6 +248,9 @@ func TestTemplateAssetsStayInSyncWithTemplateFiles(t *testing.T) {
 		{name: "templates/AGENTS.md", content: string(diskContent)},
 		{name: "root AGENTS.md", content: string(rootAgents)},
 	} {
+		if !strings.Contains(source.content, "`nana telemetry summary --run-id <id>` audits 3/5/8 budgets") {
+			t.Fatalf("%s missing skill context budget telemetry guidance", source.name)
+		}
 		if !strings.Contains(source.content, "`nana route --explain \"<prompt>\"` when keyword activation is unclear") {
 			t.Fatalf("%s missing route preview CLI guidance", source.name)
 		}
