@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -15,21 +16,24 @@ import (
 const TelemetryHelp = `nana telemetry - Summarize privacy-preserving context telemetry
 
 Usage:
-  nana telemetry [summary] [--json] [--all] [--run-id <id>] [--log <path>]
+  nana telemetry [summary] [--json] [--all] [--run-id <id>] [--turn-id <id>] [--log <path>]
   nana telemetry help
 
 Options:
   --json          Emit structured JSON.
   --all           Summarize all run_id values in the log.
   --run-id <id>   Summarize one run/session id.
+  --turn-id <id>  Within one run, summarize one turn_id.
   --log <path>    Read an explicit telemetry log path.
 
 By default, nana uses .nana/logs/context-telemetry.ndjson and filters to the
 current run id when NANA_CONTEXT_TELEMETRY_RUN_ID, NANA_WORK_RUN_ID,
-NANA_RUN_ID, or NANA_SESSION_ID is set. The summary reports event counts,
-safe skill/reference identifiers, and shell compaction frequency without
-emitting raw command arguments or shell output. For single-run scopes it also
-warns when skill/runtime context loads exceed the default budget.
+NANA_RUN_ID, or NANA_SESSION_ID is set. Use --turn-id (or
+NANA_CONTEXT_TELEMETRY_TURN_ID/NANA_TURN_ID/CODEX_TURN_ID) to inspect one
+turn within that run. The summary reports event counts, safe skill/reference
+identifiers, and shell compaction frequency without emitting raw command
+arguments or shell output. For single-run scopes it also warns when
+skill/runtime context loads exceed the default budget.
 `
 
 var telemetrySummaryEvents = map[string]bool{
@@ -43,25 +47,31 @@ const (
 	telemetrySkillDocFileBudget       = 3
 	telemetrySkillReferenceFileBudget = 5
 	telemetrySkillTotalFileBudget     = 8
+	telemetrySkillBudgetResumeWindow  = 4 * 1024
 )
 
 type telemetryOptions struct {
-	View  string
-	JSON  bool
-	All   bool
-	RunID string
-	Log   string
-	CWD   string
+	View   string
+	JSON   bool
+	All    bool
+	RunID  string
+	TurnID string
+	Log    string
+	CWD    string
 }
 
 type telemetryScope struct {
 	RunID          string `json:"run_id,omitempty"`
+	TurnID         string `json:"turn_id,omitempty"`
 	AllRuns        bool   `json:"all_runs"`
 	FromEnv        bool   `json:"from_env"`
 	NoRunIDInEnv   bool   `json:"no_run_id_in_env,omitempty"`
 	ExplicitRunID  bool   `json:"explicit_run_id,omitempty"`
+	ExplicitTurnID bool   `json:"explicit_turn_id,omitempty"`
 	ExplicitAll    bool   `json:"explicit_all,omitempty"`
 	FilteredByRun  bool   `json:"filtered_by_run"`
+	FilteredByTurn bool   `json:"filtered_by_turn,omitempty"`
+	TurnFromEnv    bool   `json:"turn_from_env,omitempty"`
 	CurrentRunHint string `json:"current_run_hint,omitempty"`
 }
 
@@ -134,6 +144,22 @@ type telemetrySummaryReport struct {
 	Privacy       string                  `json:"privacy"`
 }
 
+type telemetrySkillBudgetCache struct {
+	LogPath           string                                        `json:"log_path"`
+	Offset            int64                                         `json:"offset"`
+	ModTime           string                                        `json:"mod_time,omitempty"`
+	ResumeWindowBytes int                                           `json:"resume_window_bytes,omitempty"`
+	ResumeWindowHash  string                                        `json:"resume_window_hash,omitempty"`
+	Runs              map[string][]telemetrySkillSummary            `json:"runs,omitempty"`
+	Turns             map[string]map[string][]telemetrySkillSummary `json:"turns,omitempty"`
+}
+
+type telemetryBudgetLogReadSeeker interface {
+	io.Reader
+	io.Seeker
+	io.Closer
+}
+
 type telemetryAccumulator struct {
 	logPath       string
 	scope         telemetryScope
@@ -147,6 +173,10 @@ type telemetryAccumulator struct {
 	shell         telemetryShellSummary
 	firstTime     time.Time
 	lastTime      time.Time
+}
+
+var openTelemetrySkillBudgetLog = func(path string) (telemetryBudgetLogReadSeeker, error) {
+	return os.Open(path)
 }
 
 func Telemetry(cwd string, args []string) error {
@@ -206,7 +236,7 @@ func parseTelemetryArgs(args []string) (telemetryOptions, error) {
 			options.JSON = true
 		case "--all":
 			options.All = true
-		case "--run-id", "--log":
+		case "--run-id", "--turn-id", "--log":
 			if index+1 >= len(args) || strings.HasPrefix(args[index+1], "-") {
 				return telemetryOptions{}, fmt.Errorf("missing value after %s\n%s", token, TelemetryHelp)
 			}
@@ -214,6 +244,8 @@ func parseTelemetryArgs(args []string) (telemetryOptions, error) {
 			switch token {
 			case "--run-id":
 				options.RunID = value
+			case "--turn-id":
+				options.TurnID = value
 			case "--log":
 				options.Log = value
 			}
@@ -222,6 +254,8 @@ func parseTelemetryArgs(args []string) (telemetryOptions, error) {
 			switch {
 			case strings.HasPrefix(token, "--run-id="):
 				options.RunID = strings.TrimSpace(strings.TrimPrefix(token, "--run-id="))
+			case strings.HasPrefix(token, "--turn-id="):
+				options.TurnID = strings.TrimSpace(strings.TrimPrefix(token, "--turn-id="))
 			case strings.HasPrefix(token, "--log="):
 				options.Log = strings.TrimSpace(strings.TrimPrefix(token, "--log="))
 			default:
@@ -232,25 +266,16 @@ func parseTelemetryArgs(args []string) (telemetryOptions, error) {
 	if options.All && strings.TrimSpace(options.RunID) != "" {
 		return telemetryOptions{}, fmt.Errorf("--all and --run-id cannot be combined\n%s", TelemetryHelp)
 	}
+	if options.All && strings.TrimSpace(options.TurnID) != "" {
+		return telemetryOptions{}, fmt.Errorf("--all and --turn-id cannot be combined\n%s", TelemetryHelp)
+	}
 	return options, nil
 }
 
 func buildTelemetrySummary(options telemetryOptions) (telemetrySummaryReport, error) {
-	scope := telemetryScope{AllRuns: options.All, ExplicitAll: options.All}
-	if strings.TrimSpace(options.RunID) != "" {
-		scope.RunID = strings.TrimSpace(options.RunID)
-		scope.ExplicitRunID = true
-		scope.FilteredByRun = true
-	} else if !options.All {
-		if runID := currentContextTelemetryRunID(); runID != "" {
-			scope.RunID = runID
-			scope.FromEnv = true
-			scope.FilteredByRun = true
-			scope.CurrentRunHint = "from NANA_CONTEXT_TELEMETRY_RUN_ID/NANA_WORK_RUN_ID/NANA_RUN_ID/NANA_SESSION_ID"
-		} else {
-			scope.AllRuns = true
-			scope.NoRunIDInEnv = true
-		}
+	scope, err := resolveTelemetrySummaryScope(options)
+	if err != nil {
+		return telemetrySummaryReport{}, err
 	}
 
 	acc := telemetryAccumulator{
@@ -291,6 +316,41 @@ func buildTelemetrySummary(options telemetryOptions) (telemetrySummaryReport, er
 	return acc.report(), nil
 }
 
+func resolveTelemetrySummaryScope(options telemetryOptions) (telemetryScope, error) {
+	scope := telemetryScope{AllRuns: options.All, ExplicitAll: options.All}
+	if strings.TrimSpace(options.RunID) != "" {
+		scope.RunID = strings.TrimSpace(options.RunID)
+		scope.ExplicitRunID = true
+		scope.FilteredByRun = true
+	} else if !options.All {
+		if runID := currentContextTelemetryRunID(); runID != "" {
+			scope.RunID = runID
+			scope.FromEnv = true
+			scope.FilteredByRun = true
+			scope.CurrentRunHint = "from NANA_CONTEXT_TELEMETRY_RUN_ID/NANA_WORK_RUN_ID/NANA_RUN_ID/NANA_SESSION_ID"
+		} else {
+			scope.AllRuns = true
+			scope.NoRunIDInEnv = true
+		}
+	}
+	switch turnID := strings.TrimSpace(options.TurnID); {
+	case turnID != "":
+		if scope.AllRuns {
+			return telemetryScope{}, fmt.Errorf("--turn-id requires --run-id or a current run id in the environment\n%s", TelemetryHelp)
+		}
+		scope.TurnID = turnID
+		scope.ExplicitTurnID = true
+		scope.FilteredByTurn = true
+	case !scope.AllRuns && !scope.ExplicitRunID:
+		if turnID := currentContextTelemetryTurnID(); turnID != "" {
+			scope.TurnID = turnID
+			scope.FilteredByTurn = true
+			scope.TurnFromEnv = true
+		}
+	}
+	return scope, nil
+}
+
 func (acc *telemetryAccumulator) recordEvent(event map[string]any) {
 	eventName := telemetryString(event, "event")
 	if !telemetrySummaryEvents[eventName] {
@@ -298,6 +358,10 @@ func (acc *telemetryAccumulator) recordEvent(event map[string]any) {
 		return
 	}
 	if acc.scope.FilteredByRun && telemetryString(event, "run_id") != acc.scope.RunID {
+		acc.eventsIgnored++
+		return
+	}
+	if acc.scope.FilteredByTurn && telemetryString(event, "turn_id") != acc.scope.TurnID {
 		acc.eventsIgnored++
 		return
 	}
@@ -473,6 +537,486 @@ func buildTelemetrySkillBudget(skillLoads []telemetrySkillSummary, scope telemet
 	return budget
 }
 
+func sessionSkillContextBudgetAdvisoryBlock(cwd string, scope contextTelemetryScope, activatedDocs []loadedSkillRuntimeDoc) string {
+	skillLoads := telemetrySkillLoadsFromLoadedDocs(activatedDocs)
+	advisoryScope := skillContextBudgetScopeForLoadedDocs(scope)
+	if skillContextBudgetScopeMayHavePriorTelemetry(scope) {
+		if report, ok := currentSkillContextBudgetReportWithScope(cwd, scope); ok {
+			skillLoads = append(skillLoads, report.SkillLoads...)
+			advisoryScope = report.Scope
+		}
+	}
+	if len(skillLoads) == 0 {
+		return ""
+	}
+	return formatSkillContextBudgetAdvisory(advisoryScope, buildTelemetrySkillBudget(skillLoads, advisoryScope))
+}
+
+func skillContextBudgetScopeMayHavePriorTelemetry(scope contextTelemetryScope) bool {
+	if scope.GeneratedRunID || scope.GeneratedTurnID {
+		return false
+	}
+	if strings.TrimSpace(scope.RunID) != "" {
+		return true
+	}
+	return currentContextTelemetryRunID() != ""
+}
+
+func telemetrySkillLoadsFromLoadedDocs(activatedDocs []loadedSkillRuntimeDoc) []telemetrySkillSummary {
+	if len(activatedDocs) == 0 {
+		return nil
+	}
+	skillLoads := make([]telemetrySkillSummary, 0, len(activatedDocs))
+	for _, doc := range activatedDocs {
+		row := telemetrySkillSummary{
+			Skill:    safeTelemetryLabel(strings.TrimSpace(doc.Skill)),
+			Path:     safeTelemetryPath(firstNonEmptyString(strings.TrimSpace(doc.ActualPath), strings.TrimSpace(doc.DisplayPath))),
+			Count:    1,
+			DocLoads: 1,
+		}
+		if row.Skill == "" {
+			row.Skill = "(unknown)"
+		}
+		skillLoads = append(skillLoads, row)
+	}
+	return skillLoads
+}
+
+func skillContextBudgetScopeForSession(scope contextTelemetryScope) telemetryScope {
+	resolved := telemetryScope{}
+	if runID := strings.TrimSpace(scope.RunID); runID != "" {
+		resolved.RunID = runID
+		resolved.FilteredByRun = true
+	}
+	if turnID := strings.TrimSpace(scope.TurnID); turnID != "" {
+		resolved.TurnID = turnID
+		resolved.FilteredByTurn = true
+	}
+	return resolved
+}
+
+func skillContextBudgetScopeForLoadedDocs(scope contextTelemetryScope) telemetryScope {
+	explicitRunID := strings.TrimSpace(scope.RunID)
+	resolved := skillContextBudgetScopeForSession(scope)
+	if !resolved.FilteredByRun {
+		if runID := currentContextTelemetryRunID(); runID != "" {
+			resolved.RunID = runID
+			resolved.FilteredByRun = true
+		}
+	}
+	if !resolved.FilteredByTurn && explicitRunID == "" && resolved.FilteredByRun {
+		if turnID := currentContextTelemetryTurnID(); turnID != "" {
+			resolved.TurnID = turnID
+			resolved.FilteredByTurn = true
+		}
+	}
+	if !resolved.FilteredByRun {
+		resolved.FilteredByRun = true
+	}
+	return resolved
+}
+
+func currentSkillContextBudgetAdvisoryBlock(cwd string) string {
+	return currentSkillContextBudgetAdvisoryBlockWithScope(cwd, contextTelemetryScope{})
+}
+
+func telemetrySkillBudgetCachePath(cwd string, logPath string) string {
+	token := sha256BytesHex([]byte(filepath.Clean(logPath)))
+	return filepath.Join(BaseStateDir(cwd), "context-telemetry-skill-budget-"+token+".json")
+}
+
+func telemetrySkillBudgetCachePathForScope(cwd string, logPath string, scope telemetryScope) string {
+	baseToken := sha256BytesHex([]byte(filepath.Clean(logPath)))
+	scopeKey := "run\x00" + strings.TrimSpace(scope.RunID)
+	if scope.FilteredByTurn && strings.TrimSpace(scope.TurnID) != "" {
+		scopeKey = "turn\x00" + strings.TrimSpace(scope.RunID) + "\x00" + strings.TrimSpace(scope.TurnID)
+	}
+	scopeToken := sha256BytesHex([]byte(scopeKey))
+	return filepath.Join(BaseStateDir(cwd), "context-telemetry-skill-budget-"+baseToken+"-"+scopeToken+".json")
+}
+
+func currentSkillContextBudgetReportWithScope(cwd string, scope contextTelemetryScope) (telemetrySummaryReport, bool) {
+	logPath := resolveContextTelemetryLogPath(cwd)
+	if strings.TrimSpace(logPath) == "" {
+		return telemetrySummaryReport{}, false
+	}
+	resolvedScope, err := resolveTelemetrySummaryScope(telemetryOptions{
+		View:   "summary",
+		RunID:  strings.TrimSpace(scope.RunID),
+		TurnID: strings.TrimSpace(scope.TurnID),
+		Log:    logPath,
+		CWD:    cwd,
+	})
+	if err != nil || !resolvedScope.FilteredByRun {
+		return telemetrySummaryReport{}, false
+	}
+	skillLoads, err := currentSkillContextBudgetSkillLoads(cwd, logPath, resolvedScope)
+	if err != nil {
+		return telemetrySummaryReport{}, false
+	}
+	report := telemetrySummaryReport{
+		LogPath:     filepath.Clean(logPath),
+		Scope:       resolvedScope,
+		SkillLoads:  skillLoads,
+		SkillBudget: buildTelemetrySkillBudget(skillLoads, resolvedScope),
+		Privacy:     "Reports metadata only; raw command arguments and shell output are not emitted.",
+	}
+	return report, true
+}
+
+func currentSkillContextBudgetSkillLoads(cwd string, logPath string, scope telemetryScope) ([]telemetrySkillSummary, error) {
+	cleanLogPath := filepath.Clean(logPath)
+	cachePath := telemetrySkillBudgetCachePathForScope(cwd, cleanLogPath, scope)
+	if legacyCachePath := telemetrySkillBudgetCachePath(cwd, cleanLogPath); legacyCachePath != cachePath {
+		_ = os.Remove(legacyCachePath)
+	}
+	cache := readTelemetrySkillBudgetCache(cachePath)
+
+	info, err := os.Stat(cleanLogPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	fromOffset, shouldScan, reset := telemetrySkillBudgetCacheScanPlan(cache, cleanLogPath, info)
+	if reset {
+		cache = telemetrySkillBudgetCache{}
+	}
+	cache.LogPath = cleanLogPath
+	if shouldScan {
+		if err := updateTelemetrySkillBudgetCache(cleanLogPath, fromOffset, scope, &cache); err != nil {
+			cache = telemetrySkillBudgetCache{LogPath: cleanLogPath}
+			if err := updateTelemetrySkillBudgetCache(cleanLogPath, 0, scope, &cache); err != nil {
+				return nil, err
+			}
+		}
+		_ = writeTelemetrySkillBudgetCache(cachePath, cache)
+	}
+	return telemetrySkillBudgetCacheSkillLoads(cache, scope), nil
+}
+
+func telemetrySkillBudgetCacheScanPlan(cache telemetrySkillBudgetCache, cleanLogPath string, info os.FileInfo) (int64, bool, bool) {
+	currentModTime := info.ModTime().UTC().Format(time.RFC3339Nano)
+	hasCache := filepath.Clean(strings.TrimSpace(cache.LogPath)) == cleanLogPath &&
+		(cache.Offset > 0 || cache.ModTime != "" || len(cache.Runs) > 0 || len(cache.Turns) > 0)
+	if !hasCache {
+		return 0, true, false
+	}
+	switch {
+	case cache.Offset == info.Size() && cache.ModTime == currentModTime:
+		return 0, false, false
+	case cache.Offset >= 0 && cache.Offset < info.Size():
+		if telemetrySkillBudgetCacheCanResume(cache, cleanLogPath) {
+			return cache.Offset, true, false
+		}
+		return 0, true, true
+	default:
+		return 0, true, true
+	}
+}
+
+func telemetrySkillBudgetCacheCanResume(cache telemetrySkillBudgetCache, cleanLogPath string) bool {
+	if cache.Offset <= 0 {
+		return true
+	}
+	if cache.ResumeWindowBytes <= 0 || strings.TrimSpace(cache.ResumeWindowHash) == "" {
+		return false
+	}
+	resumeWindowBytes, resumeWindowHash := telemetrySkillBudgetResumeAnchor(cleanLogPath, cache.Offset)
+	return resumeWindowBytes == cache.ResumeWindowBytes && resumeWindowHash == cache.ResumeWindowHash
+}
+
+func telemetrySkillBudgetResumeAnchor(path string, offset int64) (int, string) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, ""
+	}
+	defer file.Close()
+	resumeWindowBytes, resumeWindowHash, err := telemetrySkillBudgetResumeAnchorForReader(file, offset)
+	if err != nil {
+		return 0, ""
+	}
+	return resumeWindowBytes, resumeWindowHash
+}
+
+func telemetrySkillBudgetResumeAnchorForReader(reader io.ReadSeeker, offset int64) (int, string, error) {
+	if reader == nil || offset <= 0 {
+		return 0, "", nil
+	}
+	resumeWindowBytes := int(offset)
+	if resumeWindowBytes > telemetrySkillBudgetResumeWindow {
+		resumeWindowBytes = telemetrySkillBudgetResumeWindow
+	}
+	start := offset - int64(resumeWindowBytes)
+	if _, err := reader.Seek(start, io.SeekStart); err != nil {
+		return 0, "", err
+	}
+	buffer := make([]byte, resumeWindowBytes)
+	if _, err := io.ReadFull(reader, buffer); err != nil {
+		return 0, "", err
+	}
+	return resumeWindowBytes, sha256BytesHex(buffer), nil
+}
+
+func readTelemetrySkillBudgetCache(path string) telemetrySkillBudgetCache {
+	raw, err := os.ReadFile(path)
+	if err != nil || len(raw) == 0 {
+		return telemetrySkillBudgetCache{}
+	}
+	var cache telemetrySkillBudgetCache
+	if err := json.Unmarshal(raw, &cache); err != nil {
+		return telemetrySkillBudgetCache{}
+	}
+	return cache
+}
+
+func writeTelemetrySkillBudgetCache(path string, cache telemetrySkillBudgetCache) error {
+	payload, err := json.Marshal(cache)
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	return writeRuntimeBytesIfChanged(path, payload)
+}
+
+func updateTelemetrySkillBudgetCache(logPath string, fromOffset int64, scope telemetryScope, cache *telemetrySkillBudgetCache) error {
+	if cache == nil {
+		return nil
+	}
+	file, err := openTelemetrySkillBudgetLog(logPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	if fromOffset > 0 {
+		if _, err := file.Seek(fromOffset, io.SeekStart); err != nil {
+			return err
+		}
+	}
+
+	bucket := telemetrySkillBudgetCacheScopedBucket(cache, scope)
+
+	reader := bufio.NewReaderSize(file, 64*1024)
+	committedOffset := fromOffset
+	for {
+		lineBytes, readErr := reader.ReadBytes('\n')
+		if readErr != nil && readErr != io.EOF {
+			return readErr
+		}
+		if len(lineBytes) == 0 {
+			break
+		}
+		if lineBytes[len(lineBytes)-1] != '\n' {
+			break
+		}
+		committedOffset += int64(len(lineBytes))
+		line := strings.TrimSpace(string(lineBytes))
+		if line == "" {
+			if readErr == io.EOF {
+				break
+			}
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+		recordTelemetrySkillBudgetCacheEventForScope(bucket, scope, event)
+		if readErr == io.EOF {
+			break
+		}
+	}
+
+	cache.LogPath = filepath.Clean(logPath)
+	cache.Offset = committedOffset
+	if info, err := os.Stat(logPath); err == nil {
+		if info.Size() < cache.Offset {
+			cache.Offset = info.Size()
+		}
+		cache.ModTime = info.ModTime().UTC().Format(time.RFC3339Nano)
+	}
+	cache.ResumeWindowBytes = 0
+	cache.ResumeWindowHash = ""
+	if resumeWindowBytes, resumeWindowHash := telemetrySkillBudgetResumeAnchor(logPath, cache.Offset); resumeWindowBytes > 0 && resumeWindowHash != "" {
+		cache.ResumeWindowBytes = resumeWindowBytes
+		cache.ResumeWindowHash = resumeWindowHash
+	}
+	telemetrySkillBudgetCacheStoreScopedBucket(cache, scope, bucket)
+	return nil
+}
+
+func telemetrySkillBudgetCacheScopedBucket(cache *telemetrySkillBudgetCache, scope telemetryScope) map[string]*telemetrySkillSummary {
+	if cache == nil {
+		return map[string]*telemetrySkillSummary{}
+	}
+	switch {
+	case scope.FilteredByTurn && scope.RunID != "" && scope.TurnID != "":
+		if turns := cache.Turns[scope.RunID]; len(turns) > 0 {
+			return telemetrySkillBudgetBucketToMap(turns[scope.TurnID])
+		}
+	case scope.FilteredByRun && scope.RunID != "":
+		return telemetrySkillBudgetBucketToMap(cache.Runs[scope.RunID])
+	}
+	return map[string]*telemetrySkillSummary{}
+}
+
+func telemetrySkillBudgetCacheStoreScopedBucket(cache *telemetrySkillBudgetCache, scope telemetryScope, bucket map[string]*telemetrySkillSummary) {
+	if cache == nil {
+		return
+	}
+	cache.Runs = nil
+	cache.Turns = nil
+	rows := telemetrySkillBudgetBucketFromMap(bucket)
+	switch {
+	case scope.FilteredByTurn && scope.RunID != "" && scope.TurnID != "":
+		cache.Turns = map[string]map[string][]telemetrySkillSummary{
+			scope.RunID: {
+				scope.TurnID: rows,
+			},
+		}
+	case scope.FilteredByRun && scope.RunID != "":
+		cache.Runs = map[string][]telemetrySkillSummary{
+			scope.RunID: rows,
+		}
+	}
+}
+
+func telemetrySkillBudgetBucketToMap(rows []telemetrySkillSummary) map[string]*telemetrySkillSummary {
+	out := make(map[string]*telemetrySkillSummary, len(rows))
+	for _, row := range rows {
+		rowCopy := row
+		out[telemetrySkillBudgetKey(rowCopy)] = &rowCopy
+	}
+	return out
+}
+
+func telemetrySkillBudgetBucketFromMap(bucket map[string]*telemetrySkillSummary) []telemetrySkillSummary {
+	if len(bucket) == 0 {
+		return nil
+	}
+	rows := make([]telemetrySkillSummary, 0, len(bucket))
+	for _, row := range bucket {
+		rows = append(rows, *row)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Count == rows[j].Count {
+			if rows[i].Skill == rows[j].Skill {
+				return rows[i].Path < rows[j].Path
+			}
+			return rows[i].Skill < rows[j].Skill
+		}
+		return rows[i].Count > rows[j].Count
+	})
+	return rows
+}
+
+func recordTelemetrySkillBudgetCacheEventForScope(bucket map[string]*telemetrySkillSummary, scope telemetryScope, event map[string]any) {
+	if bucket == nil {
+		return
+	}
+	eventName := telemetryString(event, "event")
+	if eventName != "skill_doc_load" && eventName != "skill_reference_load" {
+		return
+	}
+	if !scope.FilteredByRun || scope.RunID == "" || telemetryString(event, "run_id") != scope.RunID {
+		return
+	}
+	if scope.FilteredByTurn && (scope.TurnID == "" || telemetryString(event, "turn_id") != scope.TurnID) {
+		return
+	}
+	recordTelemetrySkillBudgetBucketEvent(bucket, eventName, event)
+}
+
+func recordTelemetrySkillBudgetBucketEvent(bucket map[string]*telemetrySkillSummary, eventName string, event map[string]any) {
+	skill := safeTelemetryLabel(firstTelemetryString(event, "skill", "skill_name", "skill_id", "skill_slug", "name"))
+	if skill == "" {
+		skill = "(unknown)"
+	}
+	path := safeTelemetryPath(firstTelemetryString(event, "skill_path", "reference_path", "doc_path", "path", "file", "reference"))
+	key := telemetrySkillBudgetKey(telemetrySkillSummary{Skill: skill, Path: path})
+	row := bucket[key]
+	if row == nil {
+		row = &telemetrySkillSummary{Skill: skill, Path: path}
+		bucket[key] = row
+	}
+	row.Count++
+	if eventName == "skill_doc_load" {
+		row.DocLoads++
+		switch strings.ToLower(safeTelemetryLabel(firstTelemetryString(event, "cache", "cache_status"))) {
+		case "hit":
+			row.CacheHits++
+		case "miss":
+			row.CacheMisses++
+		}
+		return
+	}
+	row.ReferenceLoads++
+}
+
+func telemetrySkillBudgetCacheSkillLoads(cache telemetrySkillBudgetCache, scope telemetryScope) []telemetrySkillSummary {
+	var rows []telemetrySkillSummary
+	switch {
+	case scope.FilteredByTurn && scope.RunID != "" && scope.TurnID != "":
+		if turns := cache.Turns[scope.RunID]; len(turns) > 0 {
+			rows = turns[scope.TurnID]
+		}
+	case scope.FilteredByRun && scope.RunID != "":
+		rows = cache.Runs[scope.RunID]
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]telemetrySkillSummary, len(rows))
+	copy(out, rows)
+	return out
+}
+
+func currentSkillContextBudgetAdvisoryBlockWithScope(cwd string, scope contextTelemetryScope) string {
+	report, ok := currentSkillContextBudgetReportWithScope(cwd, scope)
+	if !ok {
+		return ""
+	}
+	return formatSkillContextBudgetAdvisory(report.Scope, report.SkillBudget)
+}
+
+func formatSkillContextBudgetAdvisory(scope telemetryScope, budget telemetrySkillBudget) string {
+	if len(budget.Warnings) == 0 {
+		return ""
+	}
+	parts := []string{
+		"<!-- NANA:SKILL_CONTEXT_BUDGET:START -->",
+		fmt.Sprintf(
+			"<skill_context_budget source=%q scope=%q docs=%q references=%q total=%q>",
+			"telemetry",
+			skillContextBudgetScopeLabel(scope),
+			fmt.Sprintf("%d/%d", budget.DocFiles, budget.DocFileBudget),
+			fmt.Sprintf("%d/%d", budget.ReferenceFiles, budget.ReferenceFileBudget),
+			fmt.Sprintf("%d/%d", budget.TotalFiles, budget.TotalFileBudget),
+		),
+	}
+	for _, warning := range budget.Warnings {
+		parts = append(parts, "warning: "+warning.Message)
+	}
+	parts = append(parts, "</skill_context_budget>", "<!-- NANA:SKILL_CONTEXT_BUDGET:END -->")
+	return strings.Join(parts, "\n")
+}
+
+func skillContextBudgetScopeLabel(scope telemetryScope) string {
+	if scope.FilteredByTurn && scope.TurnID != "" {
+		if scope.RunID != "" {
+			return fmt.Sprintf("current turn_id=%s within run_id=%s", scope.TurnID, scope.RunID)
+		}
+		return "current turn_id=" + scope.TurnID
+	}
+	if scope.FilteredByRun && scope.RunID != "" {
+		return "current run_id=" + scope.RunID
+	}
+	return "current session"
+}
+
 func telemetrySkillBudgetKey(row telemetrySkillSummary) string {
 	if row.Path != "" {
 		return "path\x00" + row.Path
@@ -591,6 +1135,12 @@ func formatTelemetrySummaryReport(report telemetrySummaryReport) string {
 }
 
 func formatTelemetryScope(scope telemetryScope) string {
+	if scope.FilteredByTurn {
+		if scope.TurnFromEnv {
+			return "current turn_id=" + scope.TurnID + " within run_id=" + scope.RunID
+		}
+		return "turn_id=" + scope.TurnID + " within run_id=" + scope.RunID
+	}
 	if scope.FilteredByRun {
 		if scope.FromEnv {
 			return "current run_id=" + scope.RunID

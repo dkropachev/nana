@@ -275,6 +275,9 @@ func TestSummaryModeWritesCompactionTelemetry(t *testing.T) {
 		"NANA_CONTEXT_TELEMETRY=1",
 		"NANA_CONTEXT_TELEMETRY_LOG="+logPath,
 		"NANA_CONTEXT_TELEMETRY_RUN_ID=run-123",
+		"NANA_CONTEXT_TELEMETRY_TURN_ID=turn-telemetry",
+		"NANA_TURN_ID=turn-fallback",
+		"CODEX_TURN_ID=turn-codex",
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -308,7 +311,7 @@ func TestSummaryModeWritesCompactionTelemetry(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &event); err != nil {
 		t.Fatalf("unmarshal telemetry event: %v\n%s", err, lines[0])
 	}
-	if event["event"] != "shell_output_compaction" || event["tool"] != "nana-sparkshell" || event["run_id"] != "run-123" {
+	if event["event"] != "shell_output_compaction" || event["tool"] != "nana-sparkshell" || event["run_id"] != "run-123" || event["turn_id"] != "turn-telemetry" {
 		t.Fatalf("unexpected telemetry identity fields: %#v", event)
 	}
 	expectedSummary := "- summary: command produced long output\n"

@@ -39,6 +39,8 @@ type codexStepCheckpoint struct {
 	PromptFingerprint string `json:"prompt_fingerprint,omitempty"`
 	ResumeStrategy    string `json:"resume_strategy,omitempty"`
 	ResumeEligible    bool   `json:"resume_eligible,omitempty"`
+	TelemetryRunID    string `json:"telemetry_run_id,omitempty"`
+	TelemetryTurnID   string `json:"telemetry_turn_id,omitempty"`
 	LastLaunchMode    string `json:"last_launch_mode,omitempty"`
 	StartedAt         string `json:"started_at,omitempty"`
 	UpdatedAt         string `json:"updated_at,omitempty"`
@@ -62,6 +64,7 @@ type codexManagedPromptOptions struct {
 	UsageRepoSlug      string
 	UsageBackend       string
 	UsageSandboxPath   string
+	TelemetryScope     contextTelemetryScope
 	Env                []string
 	RateLimitPolicy    codexRateLimitPolicy
 	OnPause            func(codexRateLimitPauseInfo)
@@ -92,8 +95,15 @@ func runManagedCodexPrompt(options codexManagedPromptOptions) (codexManagedPromp
 		options.ContinuationPrompt = buildCodexContinuationPrompt(options.StepKey)
 	}
 	options.RateLimitPolicy = codexRateLimitPolicyDefault(options.RateLimitPolicy)
-
 	promptFingerprint := sha256Hex(strings.TrimSpace(options.Prompt))
+	ephemeral := hasCodexEphemeralArg(options.CommonArgs)
+	checkpoint, _ := readCodexStepCheckpoint(options.CheckpointPath)
+	options.TelemetryScope = resolveManagedPromptTelemetryScope(
+		options.TelemetryScope,
+		checkpoint,
+		options.StepKey,
+		managedPromptShouldReuseCheckpointTelemetryScope(ephemeral, checkpoint, options.StepKey, promptFingerprint, options.ResumeStrategy),
+	)
 	authManager, err := prepareManagedAuthManager(options.CommandDir, options.CodexHome)
 	if err != nil {
 		return codexManagedPromptResult{}, err
@@ -101,9 +111,8 @@ func runManagedCodexPrompt(options codexManagedPromptOptions) (codexManagedPromp
 	authSwitched := false
 
 	for {
-		ephemeral := hasCodexEphemeralArg(options.CommonArgs)
 		checkpoint, _ := readCodexStepCheckpoint(options.CheckpointPath)
-		shouldResume := !ephemeral && checkpoint.ResumeEligible && strings.TrimSpace(checkpoint.SessionID) != "" && codexCheckpointMatchesPrompt(checkpoint, promptFingerprint, options.ResumeStrategy)
+		shouldResume := managedPromptShouldResume(ephemeral, checkpoint, promptFingerprint, options.ResumeStrategy)
 
 		result := codexManagedPromptResult{}
 		runErr := error(nil)
@@ -157,6 +166,49 @@ func runManagedCodexPrompt(options codexManagedPromptOptions) (codexManagedPromp
 	}
 }
 
+func resolveManagedPromptTelemetryScope(scope contextTelemetryScope, checkpoint codexStepCheckpoint, stepKey string, inheritCheckpoint bool) contextTelemetryScope {
+	resolved := scope
+	if inheritCheckpoint {
+		if strings.TrimSpace(resolved.RunID) == "" {
+			resolved.RunID = strings.TrimSpace(checkpoint.TelemetryRunID)
+		}
+		if strings.TrimSpace(resolved.TurnID) == "" {
+			resolved.TurnID = strings.TrimSpace(checkpoint.TelemetryTurnID)
+		}
+	}
+	defaultRunID := fmt.Sprintf("%s-%d", sanitizePathToken(stepKey), time.Now().UnixNano())
+	return resolveContextTelemetryScope(resolved, defaultRunID)
+}
+
+func managedPromptShouldReuseCheckpointTelemetryScope(ephemeral bool, checkpoint codexStepCheckpoint, stepKey string, promptFingerprint string, strategy codexResumeStrategy) bool {
+	if ephemeral {
+		return false
+	}
+	if strings.TrimSpace(checkpoint.TelemetryRunID) == "" && strings.TrimSpace(checkpoint.TelemetryTurnID) == "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(checkpoint.Status), "completed") {
+		return false
+	}
+	checkpointStepKey := strings.TrimSpace(checkpoint.StepKey)
+	if checkpointStepKey != "" && strings.TrimSpace(stepKey) != "" && checkpointStepKey != strings.TrimSpace(stepKey) {
+		return false
+	}
+	switch strategy {
+	case codexResumeConversation:
+		return true
+	default:
+		return strings.TrimSpace(checkpoint.PromptFingerprint) != "" && strings.TrimSpace(checkpoint.PromptFingerprint) == strings.TrimSpace(promptFingerprint)
+	}
+}
+
+func managedPromptShouldResume(ephemeral bool, checkpoint codexStepCheckpoint, promptFingerprint string, strategy codexResumeStrategy) bool {
+	return !ephemeral &&
+		checkpoint.ResumeEligible &&
+		strings.TrimSpace(checkpoint.SessionID) != "" &&
+		codexCheckpointMatchesPrompt(checkpoint, promptFingerprint, strategy)
+}
+
 func executeManagedCodexPrompt(options codexManagedPromptOptions, sessionID string, prompt string, resumed bool) (codexManagedPromptResult, error) {
 	startedAt := time.Now().UTC()
 	args := []string{}
@@ -168,6 +220,7 @@ func executeManagedCodexPrompt(options codexManagedPromptOptions, sessionID stri
 	args = append(args, options.CommonArgs...)
 
 	nanaSessionID := fmt.Sprintf("%s-%d", sanitizePathToken(options.StepKey), time.Now().UnixNano())
+	telemetryScope := resolveContextTelemetryScope(options.TelemetryScope, nanaSessionID)
 	if strings.TrimSpace(options.CodexHome) != "" {
 		instructionsRoot := options.InstructionsRoot
 		if strings.TrimSpace(instructionsRoot) == "" {
@@ -176,12 +229,12 @@ func executeManagedCodexPrompt(options codexManagedPromptOptions, sessionID stri
 		activatedDocs := []loadedSkillRuntimeDoc(nil)
 		if !resumed {
 			var loadErr error
-			activatedDocs, loadErr = loadActivatedSkillRuntimeDocs(defaultString(strings.TrimSpace(options.CommandDir), instructionsRoot), prompt, options.CodexHome)
+			activatedDocs, loadErr = loadActivatedSkillRuntimeDocsWithTelemetryScope(defaultString(strings.TrimSpace(options.CommandDir), instructionsRoot), prompt, telemetryScope, options.CodexHome)
 			if loadErr != nil {
 				return codexManagedPromptResult{}, loadErr
 			}
 		}
-		sessionInstructionsPath, err := writeSessionModelInstructions(instructionsRoot, nanaSessionID, options.CodexHome, activatedDocs...)
+		sessionInstructionsPath, err := writeSessionModelInstructionsWithTelemetryScope(instructionsRoot, nanaSessionID, options.CodexHome, telemetryScope, activatedDocs...)
 		if err != nil {
 			return codexManagedPromptResult{}, err
 		}
@@ -194,7 +247,7 @@ func executeManagedCodexPrompt(options codexManagedPromptOptions, sessionID stri
 
 	cmd := exec.Command("codex", args...)
 	cmd.Dir = options.CommandDir
-	cmd.Env = append([]string{}, options.Env...)
+	cmd.Env = withContextTelemetryScopeEnv(options.Env, telemetryScope)
 	if stdinReader != nil {
 		cmd.Stdin = stdinReader
 	}
@@ -235,6 +288,8 @@ func finalizeManagedCodexPrompt(options codexManagedPromptOptions, promptFingerp
 		PromptFingerprint: promptFingerprint,
 		ResumeStrategy:    string(options.ResumeStrategy),
 		ResumeEligible:    result.ResumeEligible,
+		TelemetryRunID:    strings.TrimSpace(options.TelemetryScope.RunID),
+		TelemetryTurnID:   strings.TrimSpace(options.TelemetryScope.TurnID),
 		LastLaunchMode:    "fresh",
 		StartedAt:         ISOTimeNow(),
 		UpdatedAt:         ISOTimeNow(),
@@ -273,6 +328,8 @@ func writePausedCodexCheckpoint(options codexManagedPromptOptions, promptFingerp
 		PromptFingerprint: promptFingerprint,
 		ResumeStrategy:    string(options.ResumeStrategy),
 		ResumeEligible:    result.ResumeEligible,
+		TelemetryRunID:    strings.TrimSpace(options.TelemetryScope.RunID),
+		TelemetryTurnID:   strings.TrimSpace(options.TelemetryScope.TurnID),
 		LastLaunchMode:    "fresh",
 		StartedAt:         now,
 		UpdatedAt:         now,

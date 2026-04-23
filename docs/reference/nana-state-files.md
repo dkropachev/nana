@@ -65,8 +65,11 @@ Structured memory can add known arrays while remaining extension-friendly:
 Telemetry events intentionally store `command_name` and counts instead of full
 commands, arguments, stdout, stderr, or raw output. `tool` is optional for
 skill/reference events so existing local logs remain valid.
-Use `nana telemetry summary --run-id <id>` to inspect privacy-preserving
-skill/reference counts and single-run context-budget warnings.
+Use `nana telemetry summary --run-id <id> [--turn-id <id>]` to inspect
+privacy-preserving skill/reference counts and single-run or single-turn
+context-budget warnings. When the current turn or run exceeds the same
+thresholds, session instructions include an advisory skill-context budget block
+sourced from this telemetry.
 
 ### `.nana/notepad.md`
 

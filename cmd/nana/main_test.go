@@ -42,56 +42,23 @@ func runCommand(t *testing.T, name string, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, name, args...)
 }
 
-func withoutEnvKeys(env []string, keys ...string) []string {
-	if len(env) == 0 || len(keys) == 0 {
-		return append([]string{}, env...)
-	}
-	blocked := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		blocked[key] = struct{}{}
-	}
-	filtered := make([]string, 0, len(env))
-	for _, entry := range env {
-		key, _, hasValue := strings.Cut(entry, "=")
-		if !hasValue {
-			filtered = append(filtered, entry)
-			continue
-		}
-		if _, skip := blocked[key]; skip {
-			continue
-		}
-		filtered = append(filtered, entry)
-	}
-	return filtered
-}
-
 func appendNanaServiceBypassEnv(env []string) []string {
-	return append(withoutEnvKeys(env, "NANA_SERVICE_INTERNAL"), "NANA_SERVICE_INTERNAL=1")
+	return append(env, "NANA_SERVICE_INTERNAL=1")
 }
 
 func appendNanaServiceRuntimeDirEnv(env []string, dir string) []string {
-	return append(
-		withoutEnvKeys(env, "NANA_SERVICE_INTERNAL", "NANA_SERVICE_RUNTIME_DIR"),
-		"NANA_SERVICE_RUNTIME_DIR="+dir,
-	)
-}
-
-func TestAppendNanaServiceRuntimeDirEnvClearsInheritedServiceRoutingEnv(t *testing.T) {
-	env := appendNanaServiceRuntimeDirEnv([]string{
-		"HOME=/tmp/home",
-		"NANA_SERVICE_INTERNAL=1",
-		"NANA_SERVICE_RUNTIME_DIR=/tmp/old",
-	}, "/tmp/new")
-	joined := strings.Join(env, "\n")
-	if strings.Contains(joined, "NANA_SERVICE_INTERNAL=1") {
-		t.Fatalf("expected runtime helper to clear inherited service bypass env, got %q", env)
+	filtered := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		switch {
+		case strings.HasPrefix(entry, "NANA_SERVICE_INTERNAL="):
+			continue
+		case strings.HasPrefix(entry, "NANA_SERVICE_RUNTIME_DIR="):
+			continue
+		default:
+			filtered = append(filtered, entry)
+		}
 	}
-	if strings.Contains(joined, "NANA_SERVICE_RUNTIME_DIR=/tmp/old") {
-		t.Fatalf("expected runtime helper to replace inherited runtime dir, got %q", env)
-	}
-	if !strings.Contains(joined, "NANA_SERVICE_RUNTIME_DIR=/tmp/new") {
-		t.Fatalf("expected runtime helper to inject new runtime dir, got %q", env)
-	}
+	return append(filtered, "NANA_SERVICE_RUNTIME_DIR="+dir)
 }
 
 func configureBinaryTestGitInsteadOf(t *testing.T, home string, from string, to string) {

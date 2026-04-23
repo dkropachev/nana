@@ -3,6 +3,8 @@ package gocli
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -98,6 +100,73 @@ func TestBuildInvestigatePromptCapsServerAndViolationLists(t *testing.T) {
 	}
 	if len(prompt) > investigatePromptCharLimit {
 		t.Fatalf("expected investigate prompt <= %d bytes, got %d", investigatePromptCharLimit, len(prompt))
+	}
+}
+
+func TestRunInvestigateSimplePromptInjectsGeneratedTelemetryScopeIntoCodexEnv(t *testing.T) {
+	cwd := t.TempDir()
+	home := filepath.Join(t.TempDir(), "home")
+	codexHome := filepath.Join(t.TempDir(), ".codex")
+	fakeBin := filepath.Join(t.TempDir(), "bin")
+
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatalf("mkdir codex home: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "AGENTS.md"), []byte("# Codex Home\n"), 0o644); err != nil {
+		t.Fatalf("write codex AGENTS: %v", err)
+	}
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		"printf 'session-env:%s\\n' \"$NANA_SESSION_ID\"",
+		"printf 'turn-env:%s\\n' \"$NANA_TURN_ID\"",
+		"cat >/dev/null",
+		"printf 'ok\\n'",
+	}, "\n"))
+
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "")
+	t.Setenv("NANA_WORK_RUN_ID", "")
+	t.Setenv("NANA_RUN_ID", "")
+	t.Setenv("NANA_SESSION_ID", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_TURN_ID", "")
+	t.Setenv("NANA_TURN_ID", "")
+	t.Setenv("CODEX_TURN_ID", "")
+
+	result, err := runInvestigateSimplePrompt(cwd, codexHome, "Inspect this prompt.\n", "mcp-health")
+	if err != nil {
+		t.Fatalf("runInvestigateSimplePrompt: %v\nstdout=%s\nstderr=%s", err, result.Stdout, result.Stderr)
+	}
+	if !strings.Contains(result.Stdout, "ok") {
+		t.Fatalf("expected fake codex output, got %q", result.Stdout)
+	}
+
+	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
+	sessionLine := ""
+	turnLine := ""
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "session-env:"):
+			sessionLine = line
+		case strings.HasPrefix(line, "turn-env:"):
+			turnLine = line
+		}
+	}
+	if sessionLine == "" || sessionLine == "session-env:" {
+		t.Fatalf("expected investigate codex env to include generated run id, got %q", result.Stdout)
+	}
+	if turnLine == "" || turnLine == "turn-env:" {
+		t.Fatalf("expected investigate codex env to include generated turn id, got %q", result.Stdout)
+	}
+	if !strings.HasPrefix(strings.TrimPrefix(sessionLine, "session-env:"), "investigate-simple-") {
+		t.Fatalf("expected generated investigate session prefix, got %q", sessionLine)
+	}
+	if !strings.HasPrefix(strings.TrimPrefix(turnLine, "turn-env:"), "turn-") {
+		t.Fatalf("expected generated investigate turn prefix, got %q", turnLine)
 	}
 }
 

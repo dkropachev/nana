@@ -2,6 +2,7 @@ package gocli
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -266,6 +267,580 @@ func TestTelemetrySummarySkillBudgetDedupesSharedPathsAcrossLoadTypes(t *testing
 	}
 }
 
+func TestBuildTelemetrySummaryFiltersSkillBudgetByTurn(t *testing.T) {
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T13:00:00Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:01Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"tdd","path":"skills/tdd/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:02Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"build-fix","path":"skills/build-fix/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:03Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"code-review","path":"skills/code-review/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:05:00Z","run_id":"run-turn","turn_id":"turn-b","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+	})
+
+	reportA, err := buildTelemetrySummary(telemetryOptions{
+		View:   "summary",
+		RunID:  "run-turn",
+		TurnID: "turn-a",
+		Log:    logPath,
+		CWD:    cwd,
+	})
+	if err != nil {
+		t.Fatalf("buildTelemetrySummary(turn-a): %v", err)
+	}
+	if !reportA.Scope.FilteredByTurn || reportA.Scope.TurnID != "turn-a" {
+		t.Fatalf("expected turn-a scope, got %+v", reportA.Scope)
+	}
+	if reportA.SkillBudget.DocFiles != 4 || reportA.SkillBudget.TotalFiles != 4 {
+		t.Fatalf("unexpected turn-a skill budget counts: %+v", reportA.SkillBudget)
+	}
+	if len(reportA.SkillBudget.Warnings) != 1 || reportA.SkillBudget.Warnings[0].Budget != "skill_doc_files" {
+		t.Fatalf("expected one doc-file warning for turn-a, got %+v", reportA.SkillBudget.Warnings)
+	}
+
+	reportB, err := buildTelemetrySummary(telemetryOptions{
+		View:   "summary",
+		RunID:  "run-turn",
+		TurnID: "turn-b",
+		Log:    logPath,
+		CWD:    cwd,
+	})
+	if err != nil {
+		t.Fatalf("buildTelemetrySummary(turn-b): %v", err)
+	}
+	if reportB.SkillBudget.DocFiles != 1 || reportB.SkillBudget.TotalFiles != 1 {
+		t.Fatalf("unexpected turn-b skill budget counts: %+v", reportB.SkillBudget)
+	}
+	if len(reportB.SkillBudget.Warnings) != 0 {
+		t.Fatalf("expected no turn-b warnings, got %+v", reportB.SkillBudget.Warnings)
+	}
+}
+
+func TestTelemetrySummaryExposesTurnScopedFilteringViaCLIFlag(t *testing.T) {
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T13:00:00Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:01Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"tdd","path":"skills/tdd/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:02Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"build-fix","path":"skills/build-fix/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:03Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"code-review","path":"skills/code-review/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:05:00Z","run_id":"run-turn","turn_id":"turn-b","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+	})
+
+	t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "")
+	t.Setenv("NANA_WORK_RUN_ID", "")
+	t.Setenv("NANA_RUN_ID", "")
+	t.Setenv("NANA_SESSION_ID", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_TURN_ID", "")
+	t.Setenv("NANA_TURN_ID", "")
+	t.Setenv("CODEX_TURN_ID", "")
+
+	output, err := captureTelemetryStdout(t, func() error {
+		return Telemetry(cwd, []string{"summary", "--run-id", "run-turn", "--turn-id", "turn-b"})
+	})
+	if err != nil {
+		t.Fatalf("Telemetry(summary --run-id --turn-id): %v", err)
+	}
+	for _, want := range []string{
+		"Scope: turn_id=turn-b within run_id=run-turn",
+		"docs: 1/3 unique files",
+		"references: 0/5 unique files",
+		"total: 1/8 unique files",
+		"warnings: (none)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected %q in telemetry output:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "warning: skill runtime docs loaded 4 unique files (budget 3)") {
+		t.Fatalf("turn-scoped CLI summary should not include sibling-turn warning:\n%s", output)
+	}
+}
+
+func TestTelemetrySummaryJSONFiltersShellCompactionEventsByTurn(t *testing.T) {
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T14:00:00Z","run_id":"run-turn","turn_id":"turn-a","event":"shell_output_compaction","command_name":"go","argument_count":2,"captured_bytes":1200,"stdout_bytes":1000,"stderr_bytes":200,"stdout_lines":40,"stderr_lines":5,"summary_bytes":120,"summary_lines":4,"summarized":true}`,
+		`{"timestamp":"2026-04-20T14:01:00Z","run_id":"run-turn","turn_id":"turn-a","event":"shell_output_compaction_failed","command_name":"pytest","argument_count":1,"captured_bytes":300,"stdout_bytes":200,"stderr_bytes":100,"stdout_lines":8,"stderr_lines":2,"error":"codex_timeout","summarized":false}`,
+		`{"timestamp":"2026-04-20T14:02:00Z","run_id":"run-turn","turn_id":"turn-b","event":"shell_output_compaction","command_name":"bash","argument_count":1,"captured_bytes":900,"stdout_bytes":900,"stderr_bytes":0,"stdout_lines":18,"stderr_lines":0,"summary_bytes":90,"summary_lines":3,"summarized":true}`,
+		`{"timestamp":"2026-04-20T14:03:00Z","run_id":"other-run","turn_id":"turn-a","event":"shell_output_compaction","command_name":"node","argument_count":1,"captured_bytes":700,"stdout_bytes":500,"stderr_bytes":200,"stdout_lines":10,"stderr_lines":4,"summary_bytes":70,"summary_lines":2,"summarized":true}`,
+	})
+
+	t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "")
+	t.Setenv("NANA_WORK_RUN_ID", "")
+	t.Setenv("NANA_RUN_ID", "")
+	t.Setenv("NANA_SESSION_ID", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_TURN_ID", "")
+	t.Setenv("NANA_TURN_ID", "")
+	t.Setenv("CODEX_TURN_ID", "")
+
+	output, err := captureTelemetryStdout(t, func() error {
+		return Telemetry(cwd, []string{"summary", "--run-id", "run-turn", "--turn-id", "turn-a", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("Telemetry(summary --run-id --turn-id --json): %v", err)
+	}
+
+	var report telemetrySummaryReport
+	if err := json.Unmarshal([]byte(output), &report); err != nil {
+		t.Fatalf("unmarshal telemetry JSON: %v\n%s", err, output)
+	}
+	if !report.Scope.FilteredByRun || report.Scope.RunID != "run-turn" || !report.Scope.FilteredByTurn || report.Scope.TurnID != "turn-a" {
+		t.Fatalf("unexpected scope: %+v", report.Scope)
+	}
+	if report.EventsScanned != 4 || report.EventsMatched != 2 || report.EventsIgnored != 2 || report.InvalidLines != 0 {
+		t.Fatalf("unexpected event counts: %+v", report)
+	}
+	if report.Shell.Compactions != 2 || report.Shell.Failed != 1 {
+		t.Fatalf("unexpected shell compaction totals: %+v", report.Shell)
+	}
+	if report.Shell.CapturedBytes != 1500 || report.Shell.StdoutBytes != 1200 || report.Shell.StderrBytes != 300 {
+		t.Fatalf("unexpected shell byte totals: %+v", report.Shell)
+	}
+	if report.Shell.StdoutLines != 48 || report.Shell.StderrLines != 7 || report.Shell.SummaryBytes != 120 || report.Shell.SummaryLines != 4 {
+		t.Fatalf("unexpected shell line/summary totals: %+v", report.Shell)
+	}
+	if len(report.Shell.Commands) != 2 {
+		t.Fatalf("expected two turn-scoped shell commands, got %+v", report.Shell.Commands)
+	}
+	if report.Shell.Commands[0].Command != "go" || report.Shell.Commands[0].Count != 1 || report.Shell.Commands[0].Failed != 0 {
+		t.Fatalf("unexpected first command summary: %+v", report.Shell.Commands[0])
+	}
+	if report.Shell.Commands[1].Command != "pytest" || report.Shell.Commands[1].Count != 1 || report.Shell.Commands[1].Failed != 1 {
+		t.Fatalf("unexpected second command summary: %+v", report.Shell.Commands[1])
+	}
+}
+
+func TestTelemetrySummaryDoesNotLabelExplicitTurnAsCurrentWhenRunComesFromEnvironment(t *testing.T) {
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T13:00:00Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:05:00Z","run_id":"run-turn","turn_id":"turn-b","event":"skill_doc_load","skill":"tdd","path":"skills/tdd/RUNTIME.md"}`,
+	})
+
+	t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-turn")
+	t.Setenv("NANA_WORK_RUN_ID", "")
+	t.Setenv("NANA_RUN_ID", "")
+	t.Setenv("NANA_SESSION_ID", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_TURN_ID", "turn-a")
+	t.Setenv("NANA_TURN_ID", "")
+	t.Setenv("CODEX_TURN_ID", "")
+
+	output, err := captureTelemetryStdout(t, func() error {
+		return Telemetry(cwd, []string{"summary", "--turn-id", "turn-b"})
+	})
+	if err != nil {
+		t.Fatalf("Telemetry(summary --turn-id): %v", err)
+	}
+	if !strings.Contains(output, "Scope: turn_id=turn-b within run_id=run-turn") {
+		t.Fatalf("expected explicit turn label in telemetry output:\n%s", output)
+	}
+	if strings.Contains(output, "Scope: current turn_id=turn-b within run_id=run-turn") {
+		t.Fatalf("explicit turn should not be labeled current:\n%s", output)
+	}
+}
+
+func TestTelemetrySummaryDoesNotInheritEnvironmentTurnForExplicitRunID(t *testing.T) {
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T13:00:00Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:01Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"tdd","path":"skills/tdd/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:02Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"build-fix","path":"skills/build-fix/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:03Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"code-review","path":"skills/code-review/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:05:00Z","run_id":"run-turn","turn_id":"turn-b","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+	})
+
+	t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "")
+	t.Setenv("NANA_WORK_RUN_ID", "")
+	t.Setenv("NANA_RUN_ID", "")
+	t.Setenv("NANA_SESSION_ID", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_TURN_ID", "turn-b")
+	t.Setenv("NANA_TURN_ID", "")
+	t.Setenv("CODEX_TURN_ID", "")
+
+	output, err := captureTelemetryStdout(t, func() error {
+		return Telemetry(cwd, []string{"summary", "--run-id", "run-turn"})
+	})
+	if err != nil {
+		t.Fatalf("Telemetry(summary --run-id): %v", err)
+	}
+	for _, want := range []string{
+		"Scope: run_id=run-turn",
+		"Events: scanned=5 matched=5 ignored=0 invalid=0",
+		"docs: 4/3 unique files",
+		"references: 0/5 unique files",
+		"total: 4/8 unique files",
+		"warning: skill runtime docs loaded 4 unique files (budget 3)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected %q in telemetry output:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "Scope: turn_id=turn-b within run_id=run-turn") {
+		t.Fatalf("explicit run summary should not inherit the environment turn:\n%s", output)
+	}
+}
+
+func TestTelemetrySummaryUsesCurrentTurnIDFromEnvironment(t *testing.T) {
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T13:00:00Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:01Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"tdd","path":"skills/tdd/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:02Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"build-fix","path":"skills/build-fix/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:03Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"code-review","path":"skills/code-review/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:05:00Z","run_id":"run-turn","turn_id":"turn-b","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+	})
+
+	t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-turn")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_TURN_ID", "turn-b")
+	t.Setenv("NANA_WORK_RUN_ID", "")
+	t.Setenv("NANA_RUN_ID", "")
+	t.Setenv("NANA_SESSION_ID", "")
+	t.Setenv("NANA_TURN_ID", "")
+	t.Setenv("CODEX_TURN_ID", "")
+
+	output, err := captureTelemetryStdout(t, func() error {
+		return Telemetry(cwd, []string{"summary"})
+	})
+	if err != nil {
+		t.Fatalf("Telemetry(summary): %v", err)
+	}
+	for _, want := range []string{
+		"Scope: current turn_id=turn-b within run_id=run-turn",
+		"docs: 1/3 unique files",
+		"references: 0/5 unique files",
+		"total: 1/8 unique files",
+		"warnings: (none)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected %q in telemetry output:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "warning: skill runtime docs loaded 4 unique files (budget 3)") {
+		t.Fatalf("turn-scoped env summary should not include sibling-turn warning:\n%s", output)
+	}
+}
+
+func TestTelemetrySummaryRejectsTurnScopedFilteringWithoutRunScope(t *testing.T) {
+	cwd := t.TempDir()
+
+	t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "")
+	t.Setenv("NANA_WORK_RUN_ID", "")
+	t.Setenv("NANA_RUN_ID", "")
+	t.Setenv("NANA_SESSION_ID", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_TURN_ID", "")
+	t.Setenv("NANA_TURN_ID", "")
+	t.Setenv("CODEX_TURN_ID", "")
+
+	err := Telemetry(cwd, []string{"summary", "--turn-id", "turn-b"})
+	if err == nil {
+		t.Fatal("expected telemetry summary to reject --turn-id without a run scope")
+	}
+	if !strings.Contains(err.Error(), "--turn-id requires --run-id or a current run id in the environment") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCurrentSkillContextBudgetReportWithScopeUsesCachedOffsetForAppends(t *testing.T) {
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T13:00:00Z","run_id":"run-budget","turn_id":"turn-a","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:01Z","run_id":"run-budget","turn_id":"turn-a","event":"skill_doc_load","skill":"tdd","path":"skills/tdd/RUNTIME.md"}`,
+	})
+
+	reportA, ok := currentSkillContextBudgetReportWithScope(cwd, contextTelemetryScope{RunID: "run-budget", TurnID: "turn-a"})
+	if !ok {
+		t.Fatal("expected turn-a skill context budget report")
+	}
+	if reportA.SkillBudget.DocFiles != 2 || reportA.SkillBudget.TotalFiles != 2 {
+		t.Fatalf("unexpected turn-a skill budget counts: %+v", reportA.SkillBudget)
+	}
+
+	infoBeforeAppend, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat telemetry log before append: %v", err)
+	}
+	appendTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T13:05:00Z","run_id":"run-budget","turn_id":"turn-a","event":"skill_doc_load","skill":"build-fix","path":"skills/build-fix/RUNTIME.md"}`,
+	})
+
+	originalOpen := openTelemetrySkillBudgetLog
+	defer func() {
+		openTelemetrySkillBudgetLog = originalOpen
+	}()
+
+	tracked := &trackedTelemetryBudgetLogOpen{}
+	openTelemetrySkillBudgetLog = func(path string) (telemetryBudgetLogReadSeeker, error) {
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		return &trackedTelemetryBudgetLogFile{
+			File:    file,
+			tracker: tracked,
+		}, nil
+	}
+
+	reportB, ok := currentSkillContextBudgetReportWithScope(cwd, contextTelemetryScope{RunID: "run-budget", TurnID: "turn-a"})
+	if !ok {
+		t.Fatal("expected turn-a skill context budget report after append")
+	}
+	if reportB.SkillBudget.DocFiles != 3 || reportB.SkillBudget.TotalFiles != 3 {
+		t.Fatalf("unexpected turn-a skill budget counts after append: %+v", reportB.SkillBudget)
+	}
+	if tracked.seekCalls == 0 {
+		t.Fatal("expected cached telemetry reader to seek to the append offset")
+	}
+	if tracked.firstSeekWhence != io.SeekStart || tracked.firstSeekOffset != infoBeforeAppend.Size() {
+		t.Fatalf("expected first cache seek to start at offset %d, got whence=%d offset=%d", infoBeforeAppend.Size(), tracked.firstSeekWhence, tracked.firstSeekOffset)
+	}
+
+	infoAfterAppend, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat telemetry log after append: %v", err)
+	}
+	scope := telemetryScope{RunID: "run-budget", TurnID: "turn-a", FilteredByRun: true, FilteredByTurn: true}
+	cache := readTelemetrySkillBudgetCache(telemetrySkillBudgetCachePathForScope(cwd, logPath, scope))
+	if cache.Offset != infoAfterAppend.Size() {
+		t.Fatalf("expected cache offset %d after append, got %+v", infoAfterAppend.Size(), cache)
+	}
+}
+
+func TestCurrentSkillContextBudgetReportWithScopeCachesOnlyRequestedTurn(t *testing.T) {
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	lines := []string{}
+	for index := 0; index < 25; index++ {
+		lines = append(lines, fmt.Sprintf(
+			`{"timestamp":"2026-04-20T12:00:%02dZ","run_id":"run-history-%d","turn_id":"turn-history-%d","event":"skill_doc_load","skill":"history-%d","path":"skills/history-%d/RUNTIME.md"}`,
+			index, index, index, index, index,
+		))
+	}
+	lines = append(lines,
+		`{"timestamp":"2026-04-20T12:05:00Z","run_id":"run-current","turn_id":"turn-current","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+	)
+	writeTelemetryLog(t, logPath, lines)
+
+	legacyCachePath := telemetrySkillBudgetCachePath(cwd, logPath)
+	if err := writeTelemetrySkillBudgetCache(legacyCachePath, telemetrySkillBudgetCache{
+		LogPath: filepath.Clean(logPath),
+		Runs: map[string][]telemetrySkillSummary{
+			"run-history-legacy": {{Skill: "legacy", Path: "skills/legacy/RUNTIME.md", Count: 1, DocLoads: 1}},
+		},
+	}); err != nil {
+		t.Fatalf("write legacy telemetry skill budget cache: %v", err)
+	}
+
+	report, ok := currentSkillContextBudgetReportWithScope(cwd, contextTelemetryScope{RunID: "run-current", TurnID: "turn-current"})
+	if !ok {
+		t.Fatal("expected current turn skill context budget report")
+	}
+	if report.SkillBudget.DocFiles != 1 || report.SkillBudget.TotalFiles != 1 {
+		t.Fatalf("unexpected current turn skill budget counts: %+v", report.SkillBudget)
+	}
+	if _, err := os.Stat(legacyCachePath); !os.IsNotExist(err) {
+		t.Fatalf("expected legacy all-scope cache to be removed, stat err=%v", err)
+	}
+
+	scope := telemetryScope{RunID: "run-current", TurnID: "turn-current", FilteredByRun: true, FilteredByTurn: true}
+	cachePath := telemetrySkillBudgetCachePathForScope(cwd, logPath, scope)
+	cache := readTelemetrySkillBudgetCache(cachePath)
+	if len(cache.Runs) != 0 {
+		t.Fatalf("turn-scoped launch cache should not retain run buckets, got %+v", cache.Runs)
+	}
+	if len(cache.Turns) != 1 || len(cache.Turns["run-current"]) != 1 || len(cache.Turns["run-current"]["turn-current"]) != 1 {
+		t.Fatalf("turn-scoped launch cache should retain only the requested turn, got %+v", cache.Turns)
+	}
+	raw, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("read scoped telemetry skill budget cache: %v", err)
+	}
+	if strings.Contains(string(raw), "run-history-") || strings.Contains(string(raw), "turn-history-") {
+		t.Fatalf("scoped launch cache retained historical buckets: %s", raw)
+	}
+}
+
+func TestCurrentSkillContextBudgetReportWithScopeResetsCacheAfterLogRewrite(t *testing.T) {
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T13:00:00Z","run_id":"run-budget","turn_id":"turn-old","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:01Z","run_id":"run-budget","turn_id":"turn-old","event":"skill_doc_load","skill":"tdd","path":"skills/tdd/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:02Z","run_id":"run-budget","turn_id":"turn-old","event":"skill_doc_load","skill":"build-fix","path":"skills/build-fix/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:03Z","run_id":"run-budget","turn_id":"turn-old","event":"skill_doc_load","skill":"code-review","path":"skills/code-review/RUNTIME.md"}`,
+	})
+
+	reportOld, ok := currentSkillContextBudgetReportWithScope(cwd, contextTelemetryScope{RunID: "run-budget", TurnID: "turn-old"})
+	if !ok {
+		t.Fatal("expected turn-old skill context budget report")
+	}
+	if reportOld.SkillBudget.DocFiles != 4 {
+		t.Fatalf("unexpected turn-old skill budget counts: %+v", reportOld.SkillBudget)
+	}
+
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T13:10:00Z","run_id":"run-budget","turn_id":"turn-new","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+	})
+
+	reportNew, ok := currentSkillContextBudgetReportWithScope(cwd, contextTelemetryScope{RunID: "run-budget", TurnID: "turn-new"})
+	if !ok {
+		t.Fatal("expected turn-new skill context budget report")
+	}
+	if reportNew.SkillBudget.DocFiles != 1 || reportNew.SkillBudget.TotalFiles != 1 {
+		t.Fatalf("unexpected turn-new skill budget counts after rewrite: %+v", reportNew.SkillBudget)
+	}
+	if len(reportNew.SkillBudget.Warnings) != 0 {
+		t.Fatalf("expected no warnings after rewrite reset, got %+v", reportNew.SkillBudget.Warnings)
+	}
+
+	newScope := telemetryScope{RunID: "run-budget", TurnID: "turn-new", FilteredByRun: true, FilteredByTurn: true}
+	cache := readTelemetrySkillBudgetCache(telemetrySkillBudgetCachePathForScope(cwd, logPath, newScope))
+	oldRows := telemetrySkillBudgetCacheSkillLoads(cache, telemetryScope{
+		RunID:          "run-budget",
+		TurnID:         "turn-old",
+		FilteredByRun:  true,
+		FilteredByTurn: true,
+	})
+	if len(oldRows) != 0 {
+		t.Fatalf("expected rewritten log cache to discard stale turn-old rows, got %+v", oldRows)
+	}
+}
+
+func TestCurrentSkillContextBudgetReportWithScopeResetsCacheAfterLargerLogRewrite(t *testing.T) {
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T13:00:00Z","run_id":"run-budget","turn_id":"turn-old","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+	})
+
+	reportOld, ok := currentSkillContextBudgetReportWithScope(cwd, contextTelemetryScope{RunID: "run-budget", TurnID: "turn-old"})
+	if !ok {
+		t.Fatal("expected turn-old skill context budget report")
+	}
+	if reportOld.SkillBudget.DocFiles != 1 || reportOld.SkillBudget.TotalFiles != 1 {
+		t.Fatalf("unexpected turn-old skill budget counts: %+v", reportOld.SkillBudget)
+	}
+
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T13:10:00Z","run_id":"run-budget","turn_id":"turn-new","event":"skill_doc_load","skill":"tdd","path":"skills/tdd/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:10:01Z","run_id":"run-budget","turn_id":"turn-new","event":"skill_doc_load","skill":"build-fix","path":"skills/build-fix/RUNTIME.md"}`,
+	})
+
+	reportNew, ok := currentSkillContextBudgetReportWithScope(cwd, contextTelemetryScope{RunID: "run-budget", TurnID: "turn-new"})
+	if !ok {
+		t.Fatal("expected turn-new skill context budget report")
+	}
+	if reportNew.SkillBudget.DocFiles != 2 || reportNew.SkillBudget.TotalFiles != 2 {
+		t.Fatalf("unexpected turn-new skill budget counts after larger rewrite: %+v", reportNew.SkillBudget)
+	}
+	if len(reportNew.SkillBudget.Warnings) != 0 {
+		t.Fatalf("expected no warnings after larger rewrite reset, got %+v", reportNew.SkillBudget.Warnings)
+	}
+
+	newScope := telemetryScope{RunID: "run-budget", TurnID: "turn-new", FilteredByRun: true, FilteredByTurn: true}
+	cache := readTelemetrySkillBudgetCache(telemetrySkillBudgetCachePathForScope(cwd, logPath, newScope))
+	oldRows := telemetrySkillBudgetCacheSkillLoads(cache, telemetryScope{
+		RunID:          "run-budget",
+		TurnID:         "turn-old",
+		FilteredByRun:  true,
+		FilteredByTurn: true,
+	})
+	if len(oldRows) != 0 {
+		t.Fatalf("expected larger rewritten log cache to discard stale turn-old rows, got %+v", oldRows)
+	}
+}
+
+func TestCurrentSkillContextBudgetReportWithScopeReplaysLineAfterPartialWriteCompletes(t *testing.T) {
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T13:00:00Z","run_id":"run-budget","turn_id":"turn-a","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+	})
+
+	reportA, ok := currentSkillContextBudgetReportWithScope(cwd, contextTelemetryScope{RunID: "run-budget", TurnID: "turn-a"})
+	if !ok {
+		t.Fatal("expected turn-a skill context budget report")
+	}
+	if reportA.SkillBudget.DocFiles != 1 || reportA.SkillBudget.TotalFiles != 1 {
+		t.Fatalf("unexpected turn-a skill budget counts: %+v", reportA.SkillBudget)
+	}
+
+	infoBeforePartial, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat telemetry log before partial append: %v", err)
+	}
+	appendTelemetryRaw(t, logPath, `{"timestamp":"2026-04-20T13:05:00Z","run_id":"run-budget","turn_id":"turn-b","event":"skill_doc_load","skill":"tdd",`)
+
+	reportPartial, ok := currentSkillContextBudgetReportWithScope(cwd, contextTelemetryScope{RunID: "run-budget", TurnID: "turn-b"})
+	if !ok {
+		t.Fatal("expected turn-b skill context budget report after partial append")
+	}
+	if reportPartial.SkillBudget.DocFiles != 0 || reportPartial.SkillBudget.TotalFiles != 0 {
+		t.Fatalf("partial telemetry line should not be counted yet: %+v", reportPartial.SkillBudget)
+	}
+
+	turnBScope := telemetryScope{RunID: "run-budget", TurnID: "turn-b", FilteredByRun: true, FilteredByTurn: true}
+	cacheAfterPartial := readTelemetrySkillBudgetCache(telemetrySkillBudgetCachePathForScope(cwd, logPath, turnBScope))
+	if cacheAfterPartial.Offset != infoBeforePartial.Size() {
+		t.Fatalf("expected cache offset to stay at %d while last line is partial, got %+v", infoBeforePartial.Size(), cacheAfterPartial)
+	}
+
+	appendTelemetryRaw(t, logPath, `"path":"skills/tdd/RUNTIME.md"}`+"\n")
+
+	reportComplete, ok := currentSkillContextBudgetReportWithScope(cwd, contextTelemetryScope{RunID: "run-budget", TurnID: "turn-b"})
+	if !ok {
+		t.Fatal("expected turn-b skill context budget report after partial line completion")
+	}
+	if reportComplete.SkillBudget.DocFiles != 1 || reportComplete.SkillBudget.TotalFiles != 1 {
+		t.Fatalf("completed telemetry line should be replayed and counted: %+v", reportComplete.SkillBudget)
+	}
+
+	infoAfterCompletion, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat telemetry log after line completion: %v", err)
+	}
+	cacheAfterCompletion := readTelemetrySkillBudgetCache(telemetrySkillBudgetCachePathForScope(cwd, logPath, turnBScope))
+	if cacheAfterCompletion.Offset != infoAfterCompletion.Size() {
+		t.Fatalf("expected cache offset %d after line completion, got %+v", infoAfterCompletion.Size(), cacheAfterCompletion)
+	}
+}
+
+func TestCurrentSkillContextBudgetAdvisoryBlockDoesNotFallBackToRunWarningsWhenTurnIsClean(t *testing.T) {
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T13:00:00Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:01Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"tdd","path":"skills/tdd/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:02Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"build-fix","path":"skills/build-fix/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:00:03Z","run_id":"run-turn","turn_id":"turn-a","event":"skill_doc_load","skill":"code-review","path":"skills/code-review/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T13:05:00Z","run_id":"run-turn","turn_id":"turn-b","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+	})
+
+	t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-turn")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_TURN_ID", "turn-b")
+	t.Setenv("NANA_WORK_RUN_ID", "")
+	t.Setenv("NANA_RUN_ID", "")
+	t.Setenv("NANA_SESSION_ID", "")
+	t.Setenv("NANA_TURN_ID", "")
+	t.Setenv("CODEX_TURN_ID", "")
+
+	if got := currentSkillContextBudgetAdvisoryBlock(cwd); got != "" {
+		t.Fatalf("expected no advisory for clean current turn, got %q", got)
+	}
+}
+
 func TestSafeTelemetryPathOmitsUnsafeAbsolutePaths(t *testing.T) {
 	if got := safeTelemetryPath("/tmp/private/reference.md"); got != "" {
 		t.Fatalf("expected unsafe absolute path to be omitted, got %q", got)
@@ -306,4 +881,50 @@ func writeTelemetryLog(t *testing.T, path string, lines []string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write telemetry log: %v", err)
 	}
+}
+
+func appendTelemetryLog(t *testing.T, path string, lines []string) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open telemetry log for append: %v", err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString(strings.Join(lines, "\n") + "\n"); err != nil {
+		t.Fatalf("append telemetry log: %v", err)
+	}
+}
+
+func appendTelemetryRaw(t *testing.T, path string, content string) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open telemetry log for raw append: %v", err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString(content); err != nil {
+		t.Fatalf("append raw telemetry log content: %v", err)
+	}
+}
+
+type trackedTelemetryBudgetLogOpen struct {
+	firstSeekOffset int64
+	firstSeekWhence int
+	seekCalls       int
+}
+
+type trackedTelemetryBudgetLogFile struct {
+	*os.File
+	tracker *trackedTelemetryBudgetLogOpen
+}
+
+func (file *trackedTelemetryBudgetLogFile) Seek(offset int64, whence int) (int64, error) {
+	if file.tracker != nil {
+		if file.tracker.seekCalls == 0 {
+			file.tracker.firstSeekOffset = offset
+			file.tracker.firstSeekWhence = whence
+		}
+		file.tracker.seekCalls++
+	}
+	return file.File.Seek(offset, whence)
 }

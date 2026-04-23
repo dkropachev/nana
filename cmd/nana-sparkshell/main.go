@@ -362,6 +362,7 @@ func plural(count int, singular string, pluralForm string) string {
 type shellTelemetryEvent struct {
 	Timestamp     string `json:"timestamp"`
 	RunID         string `json:"run_id,omitempty"`
+	TurnID        string `json:"turn_id,omitempty"`
 	Tool          string `json:"tool"`
 	Event         string `json:"event"`
 	CommandName   string `json:"command_name,omitempty"`
@@ -382,6 +383,7 @@ func shellTelemetryEventFor(event string, command []string, output commandOutput
 	telemetry := shellTelemetryEvent{
 		Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
 		RunID:         telemetryRunID(),
+		TurnID:        telemetryTurnID(),
 		Tool:          "nana-sparkshell",
 		Event:         event,
 		CommandName:   telemetryCommandName(command),
@@ -463,6 +465,15 @@ func telemetryDisabled() bool {
 
 func telemetryRunID() string {
 	for _, key := range []string{"NANA_CONTEXT_TELEMETRY_RUN_ID", "NANA_WORK_RUN_ID", "NANA_RUN_ID", "NANA_SESSION_ID"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func telemetryTurnID() string {
+	for _, key := range []string{"NANA_CONTEXT_TELEMETRY_TURN_ID", "NANA_TURN_ID", "CODEX_TURN_ID"} {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			return value
 		}

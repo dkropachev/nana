@@ -19,7 +19,7 @@ Use this checklist when adding or changing a nana skill. Skills are a high-lever
 - **Runtime size:** keep the initially loaded `SKILL.md` concise. Move long workflows, tables, examples, or role prompts into `RUNTIME.md` or targeted reference files.
 - **Reference loading:** if a skill has `references/`, instruct agents to open only the specific file needed for the current variant. Do not require bulk-loading a whole folder.
 - **Telemetry:** preserve the existing expectation that skill and reference loads are recorded as `skill_doc_load` and `skill_reference_load` events in `.nana/logs/context-telemetry.ndjson`. Do not log raw user arguments, tool output, secrets, or large prompt bodies.
-- **Context budget:** `nana telemetry summary --run-id <id>` warns when one run loads more than 3 skill doc files, 5 reference files, or 8 combined skill/reference files. Treat warnings as a sign to narrow activation, split the workflow, or summarize before opening more context.
+- **Context budget:** `nana telemetry summary --run-id <id>` warns when one run loads more than 3 skill doc files, 5 reference files, or 8 combined skill/reference files. Active session instructions also surface the same warning for the current turn when `turn_id` telemetry is available, otherwise for the current run/session. Treat warnings as a sign to narrow activation, split the workflow, or summarize before opening more context.
 - **Fallback behavior:** say what the agent should do when the skill file, runtime document, script, or external CLI is missing. Prefer a safe degraded workflow over failing silently.
 - **Verification:** include a minimal local check that proves the skill can be discovered and that repo diagnostics still pass.
 
@@ -92,6 +92,7 @@ For large workflows, keep the template as the short entry point and put detailed
 
 - Keep `SKILL.md` short enough to scan quickly; use links to specific runtime/reference files for variant detail.
 - Keep a single run/turn within the telemetry budget where practical: at most 3 skill docs, 5 reference files, and 8 combined skill/reference files.
+- When session instructions show a skill-context budget advisory, treat it as a prompt-size warning and trim activation/reference loading before adding more context.
 - Prefer reusable scripts or templates over pasting long generated examples into the skill body.
 - Make optional network calls, external CLIs, and expensive checks explicit in the workflow, with a documented fallback when unavailable.
 - Do not add broad implicit triggers just to improve discoverability; document explicit `$skill-name` usage instead.

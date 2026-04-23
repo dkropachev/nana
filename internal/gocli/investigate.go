@@ -860,7 +860,8 @@ func runInvestigateSimplePrompt(cwd string, codexHome string, prompt string, ali
 		return investigateExecutionResult{}, err
 	}
 	sessionID := fmt.Sprintf("investigate-simple-%d", time.Now().UnixNano())
-	sessionInstructionsPath, err := writeSessionModelInstructions(cwd, sessionID, scopedCodexHome)
+	telemetryScope := launchSessionTelemetryScope(sessionID)
+	sessionInstructionsPath, err := writeSessionModelInstructionsWithTelemetryScope(cwd, sessionID, scopedCodexHome, telemetryScope)
 	if err != nil {
 		return investigateExecutionResult{}, err
 	}
@@ -874,7 +875,10 @@ func runInvestigateSimplePrompt(cwd string, codexHome string, prompt string, ali
 	cmd := exec.Command("codex", args...)
 	cmd.Dir = cwd
 	cmd.Stdin = strings.NewReader(prompt)
-	cmd.Env = append(buildCodexEnv(NotifyTempContract{}, scopedCodexHome), "NANA_PROJECT_AGENTS_ROOT="+cwd)
+	cmd.Env = withContextTelemetryScopeEnv(
+		append(buildCodexEnv(NotifyTempContract{}, scopedCodexHome), "NANA_PROJECT_AGENTS_ROOT="+cwd),
+		telemetryScope,
+	)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout

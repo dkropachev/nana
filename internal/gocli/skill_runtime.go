@@ -56,6 +56,13 @@ type skillRuntimeDocTelemetry struct {
 	ModTime              time.Time
 }
 
+type contextTelemetryScope struct {
+	RunID           string
+	TurnID          string
+	GeneratedRunID  bool
+	GeneratedTurnID bool
+}
+
 type skillRuntimeActivationDecision struct {
 	ActivationSource     string
 	ActivationMode       string
@@ -75,10 +82,18 @@ func newSkillRuntimeDocCache() *skillRuntimeDocCache {
 }
 
 func loadActivatedSkillRuntimeDocs(cwd string, prompt string, codexHome ...string) ([]loadedSkillRuntimeDoc, error) {
-	return loadActivatedSkillRuntimeDocsWithCache(cwd, prompt, defaultSkillRuntimeDocCache, codexHome...)
+	return loadActivatedSkillRuntimeDocsWithTelemetryScope(cwd, prompt, contextTelemetryScope{}, codexHome...)
+}
+
+func loadActivatedSkillRuntimeDocsWithTelemetryScope(cwd string, prompt string, scope contextTelemetryScope, codexHome ...string) ([]loadedSkillRuntimeDoc, error) {
+	return loadActivatedSkillRuntimeDocsWithCacheAndTelemetryScope(cwd, prompt, defaultSkillRuntimeDocCache, scope, codexHome...)
 }
 
 func loadActivatedSkillRuntimeDocsWithCache(cwd string, prompt string, cache *skillRuntimeDocCache, codexHome ...string) ([]loadedSkillRuntimeDoc, error) {
+	return loadActivatedSkillRuntimeDocsWithCacheAndTelemetryScope(cwd, prompt, cache, contextTelemetryScope{}, codexHome...)
+}
+
+func loadActivatedSkillRuntimeDocsWithCacheAndTelemetryScope(cwd string, prompt string, cache *skillRuntimeDocCache, scope contextTelemetryScope, codexHome ...string) ([]loadedSkillRuntimeDoc, error) {
 	if strings.TrimSpace(prompt) == "" {
 		return nil, nil
 	}
@@ -100,7 +115,7 @@ func loadActivatedSkillRuntimeDocsWithCache(cwd string, prompt string, cache *sk
 			continue
 		}
 		decision := skillRuntimeActivationDecisionForRoute(activation, preview.ImplicitSuppressedBy)
-		doc, ok, err := cache.load(cwd, activation.Skill, activation.DocLabel, activation.RuntimePath, actualPath, decision)
+		doc, ok, err := cache.load(cwd, activation.Skill, activation.DocLabel, activation.RuntimePath, actualPath, decision, scope)
 		if err != nil {
 			return nil, err
 		}
@@ -119,7 +134,7 @@ func firstString(values ...string) string {
 	return values[0]
 }
 
-func (cache *skillRuntimeDocCache) load(cwd string, skill string, label string, displayPath string, actualPath string, decision skillRuntimeActivationDecision) (loadedSkillRuntimeDoc, bool, error) {
+func (cache *skillRuntimeDocCache) load(cwd string, skill string, label string, displayPath string, actualPath string, decision skillRuntimeActivationDecision, scope contextTelemetryScope) (loadedSkillRuntimeDoc, bool, error) {
 	if cache == nil {
 		cache = defaultSkillRuntimeDocCache
 	}
@@ -162,7 +177,7 @@ func (cache *skillRuntimeDocCache) load(cwd string, skill string, label string, 
 			ImplicitSuppressed:   decision.ImplicitSuppressedBy != "",
 			Size:                 entry.Size,
 			ModTime:              entry.ModTime,
-		})
+		}, scope)
 		return doc, true, nil
 	}
 	cache.mu.Unlock()
@@ -213,7 +228,7 @@ func (cache *skillRuntimeDocCache) load(cwd string, skill string, label string, 
 		ImplicitSuppressed:   decision.ImplicitSuppressedBy != "",
 		Size:                 entry.Size,
 		ModTime:              entry.ModTime,
-	})
+	}, scope)
 	return doc, true, nil
 }
 
@@ -248,16 +263,20 @@ func skillRuntimeCacheKey(path string, info os.FileInfo) string {
 	return path + "\x00" + info.ModTime().UTC().Format(time.RFC3339Nano) + fmt.Sprintf("\x00%d", info.Size())
 }
 
-func (cache *skillRuntimeDocCache) emitTelemetry(cwd string, event skillRuntimeDocTelemetry) {
+func (cache *skillRuntimeDocCache) emitTelemetry(cwd string, event skillRuntimeDocTelemetry, scope contextTelemetryScope) {
 	if cache != nil && cache.appendTelemetry != nil {
 		cache.appendTelemetry(event)
 		return
 	}
-	appendSkillRuntimeDocTelemetry(cwd, event)
+	appendSkillRuntimeDocTelemetryWithScope(cwd, event, scope)
 }
 
 func appendSkillRuntimeDocTelemetry(cwd string, event skillRuntimeDocTelemetry) {
-	appendContextTelemetry(cwd, map[string]any{
+	appendSkillRuntimeDocTelemetryWithScope(cwd, event, contextTelemetryScope{})
+}
+
+func appendSkillRuntimeDocTelemetryWithScope(cwd string, event skillRuntimeDocTelemetry, scope contextTelemetryScope) {
+	appendContextTelemetryWithScope(cwd, map[string]any{
 		"event":                  "skill_doc_load",
 		"skill":                  event.Skill,
 		"path":                   event.Path,
@@ -273,10 +292,14 @@ func appendSkillRuntimeDocTelemetry(cwd string, event skillRuntimeDocTelemetry) 
 		"mtime":                  event.ModTime.UTC().Format(time.RFC3339Nano),
 		"loader":                 "nana_skill_runtime_cache",
 		"schema":                 "skill_doc_load.v1",
-	})
+	}, scope)
 }
 
 func appendContextTelemetry(cwd string, event map[string]any) {
+	appendContextTelemetryWithScope(cwd, event, contextTelemetryScope{})
+}
+
+func appendContextTelemetryWithScope(cwd string, event map[string]any, scope contextTelemetryScope) {
 	if contextTelemetryDisabled() {
 		return
 	}
@@ -292,12 +315,12 @@ func appendContextTelemetry(cwd string, event map[string]any) {
 		payload["timestamp"] = ISOTimeNow()
 	}
 	if _, ok := payload["run_id"]; !ok {
-		if runID := currentContextTelemetryRunID(); runID != "" {
+		if runID := firstNonEmptyString(strings.TrimSpace(scope.RunID), currentContextTelemetryRunID()); runID != "" {
 			payload["run_id"] = runID
 		}
 	}
 	if _, ok := payload["turn_id"]; !ok {
-		if turnID := currentContextTelemetryTurnID(); turnID != "" {
+		if turnID := firstNonEmptyString(strings.TrimSpace(scope.TurnID), currentContextTelemetryTurnID()); turnID != "" {
 			payload["turn_id"] = turnID
 		}
 	}
@@ -321,6 +344,15 @@ func currentContextTelemetryTurnID() string {
 	for _, key := range []string{"NANA_CONTEXT_TELEMETRY_TURN_ID", "NANA_TURN_ID", "CODEX_TURN_ID"} {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			return value
+		}
+	}
+	return ""
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
 		}
 	}
 	return ""

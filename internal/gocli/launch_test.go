@@ -1,6 +1,7 @@
 package gocli
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -368,6 +369,142 @@ func TestWriteSessionModelInstructionsDedupesRepeatedBlocks(t *testing.T) {
 	}
 }
 
+func TestWriteSessionModelInstructionsIncludesSkillContextBudgetAdvisory(t *testing.T) {
+	cwd := t.TempDir()
+	codexHome := filepath.Join(t.TempDir(), ".codex-home")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatalf("mkdir codex home: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "AGENTS.md"), []byte("# User Only\n"), 0o644); err != nil {
+		t.Fatalf("write user AGENTS: %v", err)
+	}
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	if err := os.MkdirAll(logPath, 0o755); err != nil {
+		t.Fatalf("mkdir sentinel telemetry path: %v", err)
+	}
+
+	path, err := writeSessionModelInstructionsWithTelemetryScope(cwd, "session-1", codexHome, contextTelemetryScope{RunID: "run-budget", TurnID: "turn-7"},
+		loadedSkillRuntimeDoc{Skill: "plan", ActualPath: "skills/plan/RUNTIME.md"},
+		loadedSkillRuntimeDoc{Skill: "tdd", ActualPath: "skills/tdd/RUNTIME.md"},
+		loadedSkillRuntimeDoc{Skill: "build-fix", ActualPath: "skills/build-fix/RUNTIME.md"},
+		loadedSkillRuntimeDoc{Skill: "code-review", ActualPath: "skills/code-review/RUNTIME.md"},
+	)
+	if err != nil {
+		t.Fatalf("writeSessionModelInstructionsWithTelemetryScope: %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read session instructions: %v", err)
+	}
+	text := string(content)
+	for _, want := range []string{
+		"<!-- NANA:SKILL_CONTEXT_BUDGET:START -->",
+		`scope="current turn_id=turn-7 within run_id=run-budget"`,
+		`docs="4/3"`,
+		"warning: skill runtime docs loaded 4 unique files (budget 3)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected session instructions to contain %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestWriteSessionModelInstructionsAccumulatesCurrentTurnBudgetAcrossLaunches(t *testing.T) {
+	cwd := t.TempDir()
+	codexHome := filepath.Join(t.TempDir(), ".codex-home")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatalf("mkdir codex home: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "AGENTS.md"), []byte("# User Only\n"), 0o644); err != nil {
+		t.Fatalf("write user AGENTS: %v", err)
+	}
+	writeTelemetryLog(t, filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson"), []string{
+		`{"timestamp":"2026-04-20T12:00:00Z","run_id":"run-budget","turn_id":"turn-7","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:00:01Z","run_id":"run-budget","turn_id":"turn-7","event":"skill_doc_load","skill":"tdd","path":"skills/tdd/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:00:02Z","run_id":"run-budget","turn_id":"turn-7","event":"skill_doc_load","skill":"build-fix","path":"skills/build-fix/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:01:00Z","run_id":"run-budget","turn_id":"turn-other","event":"skill_doc_load","skill":"web-clone","path":"skills/web-clone/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:01:01Z","run_id":"run-budget","turn_id":"turn-other","event":"skill_doc_load","skill":"security-review","path":"skills/security-review/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:01:02Z","run_id":"run-budget","turn_id":"turn-other","event":"skill_doc_load","skill":"code-review","path":"skills/code-review/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:01:03Z","run_id":"run-budget","turn_id":"turn-other","event":"skill_doc_load","skill":"ecomode","path":"skills/ecomode/RUNTIME.md"}`,
+	})
+
+	path, err := writeSessionModelInstructionsWithTelemetryScope(cwd, "session-1", codexHome, contextTelemetryScope{RunID: "run-budget", TurnID: "turn-7"},
+		loadedSkillRuntimeDoc{Skill: "code-review", ActualPath: "skills/code-review/RUNTIME.md"},
+	)
+	if err != nil {
+		t.Fatalf("writeSessionModelInstructionsWithTelemetryScope: %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read session instructions: %v", err)
+	}
+	text := string(content)
+	for _, want := range []string{
+		"<!-- NANA:SKILL_CONTEXT_BUDGET:START -->",
+		`scope="current turn_id=turn-7 within run_id=run-budget"`,
+		`docs="4/3"`,
+		"warning: skill runtime docs loaded 4 unique files (budget 3)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected session instructions to contain %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, `docs="7/3"`) {
+		t.Fatalf("expected advisory to stay scoped to the current turn instead of the whole run:\n%s", text)
+	}
+}
+
+func TestSessionSkillContextBudgetAdvisorySkipsTelemetryScanForFreshTurn(t *testing.T) {
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+	writeTelemetryLog(t, logPath, []string{
+		`{"timestamp":"2026-04-20T12:00:00Z","run_id":"run-parent","turn_id":"turn-old","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:00:01Z","run_id":"run-parent","turn_id":"turn-old","event":"skill_doc_load","skill":"tdd","path":"skills/tdd/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:00:02Z","run_id":"run-parent","turn_id":"turn-old","event":"skill_doc_load","skill":"build-fix","path":"skills/build-fix/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:00:03Z","run_id":"run-parent","turn_id":"turn-old","event":"skill_doc_load","skill":"code-review","path":"skills/code-review/RUNTIME.md"}`,
+	})
+
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-parent")
+	t.Setenv("NANA_WORK_RUN_ID", "")
+	t.Setenv("NANA_RUN_ID", "")
+	t.Setenv("NANA_SESSION_ID", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_TURN_ID", "")
+	t.Setenv("NANA_TURN_ID", "")
+	t.Setenv("CODEX_TURN_ID", "")
+
+	scope := resolveContextTelemetryScope(contextTelemetryScope{}, "nana-session")
+	if !scope.GeneratedTurnID {
+		t.Fatalf("expected a generated launch turn scope, got %+v", scope)
+	}
+
+	originalOpen := openTelemetrySkillBudgetLog
+	defer func() {
+		openTelemetrySkillBudgetLog = originalOpen
+	}()
+	openCalls := 0
+	openTelemetrySkillBudgetLog = func(path string) (telemetryBudgetLogReadSeeker, error) {
+		openCalls++
+		return originalOpen(path)
+	}
+
+	got := sessionSkillContextBudgetAdvisoryBlock(cwd, scope, []loadedSkillRuntimeDoc{
+		{Skill: "plan", ActualPath: "skills/plan/RUNTIME.md"},
+	})
+	if got != "" {
+		t.Fatalf("expected no advisory from stale sibling-turn telemetry, got %q", got)
+	}
+	if openCalls != 0 {
+		t.Fatalf("fresh launch turn should not scan historical telemetry log, opened it %d time(s)", openCalls)
+	}
+	cacheFiles, err := filepath.Glob(filepath.Join(BaseStateDir(cwd), "context-telemetry-skill-budget-*.json"))
+	if err != nil {
+		t.Fatalf("glob telemetry skill budget cache files: %v", err)
+	}
+	if len(cacheFiles) != 0 {
+		t.Fatalf("fresh launch turn should not create scoped skill budget cache files, got %v", cacheFiles)
+	}
+}
+
 func TestExecHelpPassesThroughToCodex(t *testing.T) {
 	cwd := t.TempDir()
 	home := filepath.Join(cwd, "home")
@@ -587,6 +724,322 @@ func TestRunCodexSessionLoadsSkillRuntimeDocsFromScopedCodexHome(t *testing.T) {
 	}
 }
 
+func TestResolveContextTelemetryScopeCoordinatesRunAndTurnInheritance(t *testing.T) {
+	testCases := []struct {
+		name          string
+		scope         contextTelemetryScope
+		envRunID      string
+		envTurnID     string
+		defaultRunID  string
+		wantRunID     string
+		wantSameTurn  bool
+		wantFreshTurn bool
+		wantGenerated bool
+	}{
+		{
+			name:         "inherits ambient run and turn together",
+			envRunID:     "run-parent",
+			envTurnID:    "turn-parent",
+			defaultRunID: "run-generated",
+			wantRunID:    "run-parent",
+			wantSameTurn: true,
+		},
+		{
+			name:          "inherited ambient run without turn starts fresh turn",
+			envRunID:      "run-parent",
+			defaultRunID:  "run-generated",
+			wantRunID:     "run-parent",
+			wantFreshTurn: true,
+			wantGenerated: true,
+		},
+		{
+			name:          "generated run ignores stale ambient turn",
+			envTurnID:     "turn-stale",
+			defaultRunID:  "run-generated",
+			wantRunID:     "run-generated",
+			wantFreshTurn: true,
+			wantGenerated: true,
+		},
+		{
+			name:          "explicit run ignores stale ambient turn",
+			scope:         contextTelemetryScope{RunID: "run-explicit"},
+			envTurnID:     "turn-stale",
+			defaultRunID:  "run-generated",
+			wantRunID:     "run-explicit",
+			wantFreshTurn: true,
+			wantGenerated: true,
+		},
+		{
+			name:         "preserves explicit run and turn pair",
+			scope:        contextTelemetryScope{RunID: "run-explicit", TurnID: "turn-explicit"},
+			envRunID:     "run-parent",
+			envTurnID:    "turn-parent",
+			defaultRunID: "run-generated",
+			wantRunID:    "run-explicit",
+			wantSameTurn: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", tc.envRunID)
+			t.Setenv("NANA_WORK_RUN_ID", "")
+			t.Setenv("NANA_RUN_ID", "")
+			t.Setenv("NANA_SESSION_ID", "")
+			t.Setenv("NANA_CONTEXT_TELEMETRY_TURN_ID", tc.envTurnID)
+			t.Setenv("NANA_TURN_ID", "")
+			t.Setenv("CODEX_TURN_ID", "")
+
+			resolved := resolveContextTelemetryScope(tc.scope, tc.defaultRunID)
+			if resolved.RunID != tc.wantRunID {
+				t.Fatalf("expected run_id %q, got %+v", tc.wantRunID, resolved)
+			}
+			if resolved.TurnID == "" {
+				t.Fatalf("expected turn_id to be set, got %+v", resolved)
+			}
+			switch {
+			case tc.wantSameTurn:
+				wantTurnID := firstNonEmptyString(strings.TrimSpace(tc.scope.TurnID), tc.envTurnID)
+				if resolved.TurnID != wantTurnID {
+					t.Fatalf("expected turn_id %q, got %+v", wantTurnID, resolved)
+				}
+			case tc.wantFreshTurn:
+				if resolved.TurnID == tc.envTurnID {
+					t.Fatalf("expected fresh turn_id instead of inherited stale value %q, got %+v", tc.envTurnID, resolved)
+				}
+				if !strings.HasPrefix(resolved.TurnID, "turn-") {
+					t.Fatalf("expected generated turn_id prefix, got %+v", resolved)
+				}
+			}
+			if resolved.GeneratedTurnID != tc.wantGenerated {
+				t.Fatalf("expected GeneratedTurnID=%v, got %+v", tc.wantGenerated, resolved)
+			}
+		})
+	}
+}
+
+func TestRunCodexSessionGeneratesSessionTelemetryScopeForBudgetAdvisories(t *testing.T) {
+	cwd := t.TempDir()
+	home := filepath.Join(t.TempDir(), "home")
+	scopedCodexHome := filepath.Join(t.TempDir(), "scoped-codex-home")
+	fakeBin := filepath.Join(t.TempDir(), "bin")
+	fakeCodexPath := filepath.Join(fakeBin, "codex")
+	logPath := filepath.Join(t.TempDir(), "session-instructions.log")
+	telemetryLogPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+
+	for _, skill := range []string{"plan", "tdd", "build-fix", "code-review"} {
+		writeSkillRuntimeDocForTest(t, scopedCodexHome, skill, skill+" runtime rules\n")
+	}
+	if err := os.WriteFile(filepath.Join(scopedCodexHome, "AGENTS.md"), []byte("# Scoped Launch Home\n"), 0o644); err != nil {
+		t.Fatalf("write scoped AGENTS: %v", err)
+	}
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		"printf 'session-env:%s\\n' \"$NANA_SESSION_ID\"",
+		"printf 'turn-env:%s\\n' \"$NANA_TURN_ID\"",
+		"for arg in \"$@\"; do",
+		"  case \"$arg\" in",
+		"    model_instructions_file=*)",
+		"      file=${arg#model_instructions_file=\\\"}",
+		"      file=${file%\\\"}",
+		"      cat \"$file\" > \"$FAKE_CODEX_INSTRUCTIONS_LOG\"",
+		"      ;;",
+		"  esac",
+		"done",
+		"printf 'ok\\n'",
+	}, "\n")
+	if err := os.WriteFile(fakeCodexPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_INSTRUCTIONS_LOG", logPath)
+	t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "")
+	t.Setenv("NANA_WORK_RUN_ID", "")
+	t.Setenv("NANA_RUN_ID", "")
+	t.Setenv("NANA_SESSION_ID", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_TURN_ID", "")
+	t.Setenv("NANA_TURN_ID", "")
+	t.Setenv("CODEX_TURN_ID", "")
+
+	output, err := captureStdout(t, func() error {
+		return runCodexSession(cwd, []string{"exec", "$plan $tdd $build-fix $code-review"}, NotifyTempContract{}, scopedCodexHome)
+	})
+	if err != nil {
+		t.Fatalf("runCodexSession: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "ok") {
+		t.Fatalf("expected fake codex output, got %q", output)
+	}
+
+	rawInstructions, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read session instructions log: %v", err)
+	}
+	instructions := string(rawInstructions)
+	for _, want := range []string{
+		"<!-- NANA:SKILL_CONTEXT_BUDGET:START -->",
+		`docs="4/3"`,
+		"warning: skill runtime docs loaded 4 unique files (budget 3)",
+	} {
+		if !strings.Contains(instructions, want) {
+			t.Fatalf("expected session instructions to contain %q:\n%s", want, instructions)
+		}
+	}
+
+	events := readTelemetryEventsForTest(t, telemetryLogPath)
+	skillLoadCount := 0
+	runID := ""
+	turnID := ""
+	for _, event := range events {
+		if telemetryString(event, "event") != "skill_doc_load" {
+			continue
+		}
+		skillLoadCount++
+		eventRunID := telemetryString(event, "run_id")
+		eventTurnID := telemetryString(event, "turn_id")
+		if eventRunID == "" {
+			t.Fatalf("expected generated run_id in skill telemetry: %+v", event)
+		}
+		if eventTurnID == "" {
+			t.Fatalf("expected generated turn_id in skill telemetry: %+v", event)
+		}
+		if runID == "" {
+			runID = eventRunID
+		} else if runID != eventRunID {
+			t.Fatalf("expected a stable generated run_id, got %q and %q", runID, eventRunID)
+		}
+		if turnID == "" {
+			turnID = eventTurnID
+		} else if turnID != eventTurnID {
+			t.Fatalf("expected a stable generated turn_id, got %q and %q", turnID, eventTurnID)
+		}
+	}
+	if skillLoadCount != 4 {
+		t.Fatalf("expected 4 skill_doc_load events, got %d", skillLoadCount)
+	}
+	if !strings.HasPrefix(runID, "nana-") {
+		t.Fatalf("expected generated session-backed run_id, got %q", runID)
+	}
+	if !strings.HasPrefix(turnID, "turn-") {
+		t.Fatalf("expected generated launch turn_id, got %q", turnID)
+	}
+	scopeLabel := `scope="current turn_id=` + turnID + ` within run_id=` + runID + `"`
+	if !strings.Contains(instructions, scopeLabel) {
+		t.Fatalf("expected session instructions to contain %q:\n%s", scopeLabel, instructions)
+	}
+	if !strings.Contains(output, "session-env:"+runID) {
+		t.Fatalf("expected codex env to inherit generated session id %q, got %q", runID, output)
+	}
+	if !strings.Contains(output, "turn-env:"+turnID) {
+		t.Fatalf("expected codex env to inherit generated turn id %q, got %q", turnID, output)
+	}
+}
+
+func TestRunCodexSessionFiltersSkillContextBudgetAdvisoryToCurrentLaunchTurn(t *testing.T) {
+	cwd := t.TempDir()
+	home := filepath.Join(t.TempDir(), "home")
+	scopedCodexHome := filepath.Join(t.TempDir(), "scoped-codex-home")
+	fakeBin := filepath.Join(t.TempDir(), "bin")
+	fakeCodexPath := filepath.Join(fakeBin, "codex")
+	logPath := filepath.Join(t.TempDir(), "session-instructions.log")
+	telemetryLogPath := filepath.Join(cwd, ".nana", "logs", "context-telemetry.ndjson")
+
+	writeSkillRuntimeDocForTest(t, scopedCodexHome, "plan", "plan runtime rules\n")
+	if err := os.WriteFile(filepath.Join(scopedCodexHome, "AGENTS.md"), []byte("# Scoped Launch Home\n"), 0o644); err != nil {
+		t.Fatalf("write scoped AGENTS: %v", err)
+	}
+	writeTelemetryLog(t, telemetryLogPath, []string{
+		`{"timestamp":"2026-04-20T12:00:00Z","run_id":"run-parent","turn_id":"turn-old","event":"skill_doc_load","skill":"plan","path":"skills/plan/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:00:01Z","run_id":"run-parent","turn_id":"turn-old","event":"skill_doc_load","skill":"tdd","path":"skills/tdd/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:00:02Z","run_id":"run-parent","turn_id":"turn-old","event":"skill_doc_load","skill":"build-fix","path":"skills/build-fix/RUNTIME.md"}`,
+		`{"timestamp":"2026-04-20T12:00:03Z","run_id":"run-parent","turn_id":"turn-old","event":"skill_doc_load","skill":"code-review","path":"skills/code-review/RUNTIME.md"}`,
+	})
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		"printf 'session-env:%s\\n' \"$NANA_SESSION_ID\"",
+		"printf 'turn-env:%s\\n' \"$NANA_TURN_ID\"",
+		"for arg in \"$@\"; do",
+		"  case \"$arg\" in",
+		"    model_instructions_file=*)",
+		"      file=${arg#model_instructions_file=\\\"}",
+		"      file=${file%\\\"}",
+		"      cat \"$file\" > \"$FAKE_CODEX_INSTRUCTIONS_LOG\"",
+		"      ;;",
+		"  esac",
+		"done",
+		"printf 'ok\\n'",
+	}, "\n")
+	if err := os.WriteFile(fakeCodexPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_INSTRUCTIONS_LOG", logPath)
+	t.Setenv("NANA_CONTEXT_TELEMETRY_LOG", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_RUN_ID", "run-parent")
+	t.Setenv("NANA_WORK_RUN_ID", "")
+	t.Setenv("NANA_RUN_ID", "")
+	t.Setenv("NANA_SESSION_ID", "")
+	t.Setenv("NANA_CONTEXT_TELEMETRY_TURN_ID", "")
+	t.Setenv("NANA_TURN_ID", "")
+	t.Setenv("CODEX_TURN_ID", "")
+
+	output, err := captureStdout(t, func() error {
+		return runCodexSession(cwd, []string{"exec", "$plan"}, NotifyTempContract{}, scopedCodexHome)
+	})
+	if err != nil {
+		t.Fatalf("runCodexSession: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "ok") {
+		t.Fatalf("expected fake codex output, got %q", output)
+	}
+
+	rawInstructions, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read session instructions log: %v", err)
+	}
+	instructions := string(rawInstructions)
+	if strings.Contains(instructions, "<!-- NANA:SKILL_CONTEXT_BUDGET:START -->") {
+		t.Fatalf("expected current-launch turn to stay under budget despite stale run history:\n%s", instructions)
+	}
+
+	events := readTelemetryEventsForTest(t, telemetryLogPath)
+	if len(events) == 0 {
+		t.Fatal("expected telemetry events")
+	}
+	lastEvent := events[len(events)-1]
+	if telemetryString(lastEvent, "event") != "skill_doc_load" {
+		t.Fatalf("expected appended skill_doc_load event, got %+v", lastEvent)
+	}
+	if telemetryString(lastEvent, "run_id") != "run-parent" {
+		t.Fatalf("expected launch telemetry to reuse current run id, got %+v", lastEvent)
+	}
+	if gotTurnID := telemetryString(lastEvent, "turn_id"); gotTurnID == "" || gotTurnID == "turn-old" {
+		t.Fatalf("expected a fresh launch turn_id, got %+v", lastEvent)
+	} else {
+		if !strings.Contains(output, "session-env:run-parent") {
+			t.Fatalf("expected codex env to inherit selected run id, got %q", output)
+		}
+		if !strings.Contains(output, "turn-env:"+gotTurnID) {
+			t.Fatalf("expected codex env to inherit selected turn id %q, got %q", gotTurnID, output)
+		}
+	}
+}
+
 func TestRunCodexSessionSwitchesManagedAccountAfterRateLimit(t *testing.T) {
 	cwd := t.TempDir()
 	home := filepath.Join(cwd, "home")
@@ -654,6 +1107,39 @@ func TestRunCodexSessionSwitchesManagedAccountAfterRateLimit(t *testing.T) {
 	if len(lines) != 2 || lines[0] != "primary-token" || lines[1] != "secondary-token" {
 		t.Fatalf("expected primary then secondary token usage, got %#v", lines)
 	}
+}
+
+func writeSkillRuntimeDocForTest(t *testing.T, codexHome string, skill string, content string) {
+	t.Helper()
+	runtimePath := filepath.Join(codexHome, "skills", skill, "RUNTIME.md")
+	if err := os.MkdirAll(filepath.Dir(runtimePath), 0o755); err != nil {
+		t.Fatalf("mkdir runtime dir for %s: %v", skill, err)
+	}
+	if err := os.WriteFile(runtimePath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write runtime doc for %s: %v", skill, err)
+	}
+}
+
+func readTelemetryEventsForTest(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read telemetry log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	events := make([]map[string]any, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("unmarshal telemetry line %q: %v", line, err)
+		}
+		events = append(events, event)
+	}
+	return events
 }
 
 func TestRunCodexSessionWaitsForRetryAfterWhenNoAlternateAccountExists(t *testing.T) {

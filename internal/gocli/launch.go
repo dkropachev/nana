@@ -320,16 +320,17 @@ func runCodexSession(cwd string, codexArgs []string, notifyContract NotifyTempCo
 	}
 
 	sessionID := fmt.Sprintf("nana-%d", time.Now().UnixNano())
+	telemetryScope := launchSessionTelemetryScope(sessionID)
 	if err := writeLaunchSessionStart(cwd, sessionID); err != nil {
 		return err
 	}
 	defer removeLaunchSessionState(cwd)
 
-	activatedDocs, err := loadActivatedSkillRuntimeDocs(cwd, promptFromCodexArgs(codexArgs), codexHome)
+	activatedDocs, err := loadActivatedSkillRuntimeDocsWithTelemetryScope(cwd, promptFromCodexArgs(codexArgs), telemetryScope, codexHome)
 	if err != nil {
 		return err
 	}
-	sessionInstructionsPath, err := writeSessionModelInstructions(cwd, sessionID, codexHome, activatedDocs...)
+	sessionInstructionsPath, err := writeSessionModelInstructionsWithTelemetryScope(cwd, sessionID, codexHome, telemetryScope, activatedDocs...)
 	if err != nil {
 		return err
 	}
@@ -353,7 +354,9 @@ func runCodexSession(cwd string, codexArgs []string, notifyContract NotifyTempCo
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = io.MultiWriter(os.Stdout, &stdoutCapture)
 		cmd.Stderr = authManager.wrapOutput(io.MultiWriter(os.Stderr, &stderrCapture))
-		cmd.Env = buildCodexEnv(notifyContract, codexHome)
+		envMap := buildCodexEnvMap(notifyContract, codexHome)
+		applyContextTelemetryScopeEnv(envMap, telemetryScope)
+		cmd.Env = envMapToList(envMap)
 
 		runErr := cmd.Run()
 		if runErr == nil || authManager == nil {
@@ -409,6 +412,20 @@ func buildCodexEnvMap(notifyContract NotifyTempContract, codexHome string) map[s
 		}
 	}
 	return envMap
+}
+
+func applyContextTelemetryScopeEnv(envMap map[string]string, scope contextTelemetryScope) {
+	if envMap == nil {
+		return
+	}
+	if runID := strings.TrimSpace(scope.RunID); runID != "" {
+		envMap["NANA_CONTEXT_TELEMETRY_RUN_ID"] = runID
+		envMap["NANA_SESSION_ID"] = runID
+	}
+	if turnID := strings.TrimSpace(scope.TurnID); turnID != "" {
+		envMap["NANA_CONTEXT_TELEMETRY_TURN_ID"] = turnID
+		envMap["NANA_TURN_ID"] = turnID
+	}
 }
 
 func hydrateGithubAuthEnv(envMap map[string]string, apiBaseURL string) {
@@ -548,6 +565,24 @@ func envMapToList(envMap map[string]string) []string {
 	return entries
 }
 
+func envListToMap(env []string) map[string]string {
+	envMap := map[string]string{}
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		envMap[key] = value
+	}
+	return envMap
+}
+
+func withContextTelemetryScopeEnv(env []string, scope contextTelemetryScope) []string {
+	envMap := envListToMap(env)
+	applyContextTelemetryScopeEnv(envMap, scope)
+	return envMapToList(envMap)
+}
+
 func removeLaunchSessionState(cwd string) {
 	_ = os.Remove(launchSessionPath(cwd))
 }
@@ -556,7 +591,53 @@ func removeSessionInstructionsFile(cwd string, sessionID string) {
 	_ = os.Remove(sessionInstructionsPath(cwd, sessionID))
 }
 
+func resolveContextTelemetryScope(scope contextTelemetryScope, defaultRunID string) contextTelemetryScope {
+	resolved := contextTelemetryScope{
+		RunID:           strings.TrimSpace(scope.RunID),
+		TurnID:          strings.TrimSpace(scope.TurnID),
+		GeneratedRunID:  scope.GeneratedRunID,
+		GeneratedTurnID: scope.GeneratedTurnID,
+	}
+	ambientRunID := currentContextTelemetryRunID()
+	ambientTurnID := currentContextTelemetryTurnID()
+	runInheritedFromEnv := false
+	if resolved.RunID == "" {
+		if ambientRunID != "" {
+			resolved.RunID = ambientRunID
+			runInheritedFromEnv = true
+		} else {
+			resolved.RunID = strings.TrimSpace(defaultRunID)
+			resolved.GeneratedRunID = resolved.RunID != ""
+		}
+	}
+	if resolved.TurnID != "" && strings.TrimSpace(scope.RunID) != "" {
+		return resolved
+	}
+	if runInheritedFromEnv {
+		if resolved.TurnID == "" && ambientTurnID == "" {
+			resolved.TurnID = fmt.Sprintf("turn-%d", time.Now().UnixNano())
+			resolved.GeneratedTurnID = true
+			return resolved
+		}
+		resolved.TurnID = firstNonEmptyString(resolved.TurnID, ambientTurnID)
+		return resolved
+	}
+	if resolved.RunID != "" && resolved.TurnID == "" {
+		resolved.TurnID = fmt.Sprintf("turn-%d", time.Now().UnixNano())
+		resolved.GeneratedTurnID = true
+	}
+	return resolved
+}
+
+func launchSessionTelemetryScope(sessionID string) contextTelemetryScope {
+	return resolveContextTelemetryScope(contextTelemetryScope{}, sessionID)
+}
+
 func writeSessionModelInstructions(cwd string, sessionID string, codexHome string, activatedDocs ...loadedSkillRuntimeDoc) (string, error) {
+	return writeSessionModelInstructionsWithTelemetryScope(cwd, sessionID, codexHome, contextTelemetryScope{}, activatedDocs...)
+}
+
+func writeSessionModelInstructionsWithTelemetryScope(cwd string, sessionID string, codexHome string, scope contextTelemetryScope, activatedDocs ...loadedSkillRuntimeDoc) (string, error) {
 	path := sessionInstructionsPath(cwd, sessionID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
@@ -581,6 +662,9 @@ func writeSessionModelInstructions(cwd string, sessionID string, codexHome strin
 	}
 	if formattedDocs := formatLoadedSkillRuntimeDocs(activatedDocs); strings.TrimSpace(formattedDocs) != "" {
 		documents = append(documents, formattedDocs)
+	}
+	if advisory := sessionSkillContextBudgetAdvisoryBlock(cwd, scope, activatedDocs); strings.TrimSpace(advisory) != "" {
+		documents = append(documents, advisory)
 	}
 
 	overlay := strings.Join([]string{
