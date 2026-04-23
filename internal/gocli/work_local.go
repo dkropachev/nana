@@ -44,28 +44,29 @@ Behavior:
 `
 
 const (
-	localWorkDefaultMaxIterations  = 8
-	localWorkMaxReviewRounds       = 2
-	localWorkRuntimeName           = "work"
-	localWorkPromptCharLimit       = localWorkHardeningPromptCharLimit
-	localWorkGroupingPromptLimit   = localWorkGroupingPromptCharLimit
-	localWorkValidationPromptLimit = localWorkValidationPromptCharLimit
-	localWorkPromptSnippetChars    = 2000
-	localWorkPromptSnippetLines    = 25
-	localWorkValidationParallelism = 4
-	localWorkMaxValidationParallel = 8
-	localWorkMaxValidationGroups   = 8
-	localWorkMaxFindingsPerGroup   = 10
-	localWorkMaxGroupingAttempts   = 3
-	localWorkMaxValidatorAttempts  = 3
-	localWorkDefaultGroupingPolicy = "ai"
-	localWorkPathGroupingPolicy    = "path"
-	localWorkSingletonPolicy       = "singleton"
-	localWorkReadRetryAttempts     = 4
-	localWorkWriteRetryAttempts    = 4
-	localWorkStaleRunThreshold     = 5 * time.Minute
-	localWorkStaleCleanupError     = "stale running run cleaned up at start: no active process found"
-	localWorkDBSchemaMismatchError = "local work DB schema"
+	localWorkDefaultMaxIterations      = 8
+	localWorkMaxReviewRounds           = 2
+	localWorkRuntimeName               = "work"
+	localWorkPromptCharLimit           = localWorkHardeningPromptCharLimit
+	localWorkGroupingPromptLimit       = localWorkGroupingPromptCharLimit
+	localWorkValidationPromptLimit     = localWorkValidationPromptCharLimit
+	localWorkPromptSnippetChars        = 2000
+	localWorkPromptSnippetLines        = 25
+	localWorkValidationParallelism     = 4
+	localWorkMaxValidationParallel     = 8
+	localWorkMaxValidationGroups       = 8
+	localWorkMaxFindingsPerGroup       = 10
+	localWorkMaxGroupingAttempts       = 3
+	localWorkMaxValidatorAttempts      = 3
+	localWorkDefaultGroupingPolicy     = "ai"
+	localWorkPathGroupingPolicy        = "path"
+	localWorkSingletonPolicy           = "singleton"
+	localWorkReadRetryAttempts         = 4
+	localWorkWriteRetryAttempts        = 4
+	localWorkStaleRunThreshold         = 5 * time.Minute
+	localWorkFailedStaleRecoveryWindow = 48 * time.Hour
+	localWorkStaleCleanupError         = "stale running run cleaned up at start: no active process found"
+	localWorkDBSchemaMismatchError     = "local work DB schema"
 )
 
 var localWorkReadRetryDelay = 200 * time.Millisecond
@@ -1130,6 +1131,9 @@ func localWorkCanRecoverAfterStaleCleanup(manifest localWorkManifest) bool {
 	if !localWorkIsStaleCleanupError(manifest.LastError) {
 		return false
 	}
+	if !localWorkFailedRunIsRecent(manifest, localWorkFailedStaleRecoveryWindow) {
+		return false
+	}
 	if strings.TrimSpace(manifest.RunID) == "" ||
 		strings.TrimSpace(manifest.RepoRoot) == "" ||
 		strings.TrimSpace(manifest.SandboxPath) == "" ||
@@ -1140,6 +1144,34 @@ func localWorkCanRecoverAfterStaleCleanup(manifest localWorkManifest) bool {
 		return false
 	}
 	return true
+}
+
+func localWorkFailedRunIsRecent(manifest localWorkManifest, window time.Duration) bool {
+	if window <= 0 {
+		return true
+	}
+	for _, value := range []string{manifest.CompletedAt, manifest.UpdatedAt} {
+		parsed, ok := parseLocalWorkManifestTime(value)
+		if !ok {
+			continue
+		}
+		return time.Since(parsed) <= window
+	}
+	return false
+}
+
+func parseLocalWorkManifestTime(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed, true
+	}
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return parsed, true
+	}
+	return time.Time{}, false
 }
 
 func localWorkCanRestartAfterDBSchemaMismatch(manifest localWorkManifest) bool {
