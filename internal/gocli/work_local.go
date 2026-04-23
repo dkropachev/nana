@@ -973,6 +973,18 @@ func localWorkProcessLineIsDetachedRunner(line string) bool {
 	return strings.Contains(line, " work resume ") && strings.Contains(line, "--run-id")
 }
 
+func localWorkProcessLineMatchesRun(manifest localWorkManifest, line string) bool {
+	// Repo roots are shared across concurrent local-work runs, so matching only on
+	// the source checkout can keep a dead run looking "live" because some other
+	// run for the same repo is still active.
+	return localWorkProcessLineHasCandidate(
+		line,
+		manifest.RunID,
+		manifest.SandboxPath,
+		manifest.SandboxRepoPath,
+	)
+}
+
 func localWorkManifestHasLiveProcess(manifest localWorkManifest, snapshot string) bool {
 	for _, line := range strings.Split(snapshot, "\n") {
 		if line == "" {
@@ -981,13 +993,7 @@ func localWorkManifestHasLiveProcess(manifest localWorkManifest, snapshot string
 		if !localWorkProcessLineIsCodexWorker(line) && !localWorkProcessLineIsDetachedRunner(line) {
 			continue
 		}
-		if localWorkProcessLineHasCandidate(
-			line,
-			manifest.RunID,
-			manifest.SandboxPath,
-			manifest.SandboxRepoPath,
-			manifest.RepoRoot,
-		) {
+		if localWorkProcessLineMatchesRun(manifest, line) {
 			return true
 		}
 	}

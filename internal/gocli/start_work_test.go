@@ -1488,6 +1488,75 @@ func TestStartRepoCoordinatorLogsUnexpectedlyDeadStaleRunDuringCycle(t *testing.
 	}
 }
 
+func TestStartRepoCoordinatorCleansDeadRunEvenWhenAnotherRunSharesRepoRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+
+	manifest := localWorkManifest{
+		Version:      1,
+		RunID:        "lw-dead-shared-root-during-cycle",
+		CreatedAt:    time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339),
+		UpdatedAt:    time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339),
+		Status:       "running",
+		CurrentPhase: "review",
+		RepoRoot:     sourcePath,
+		RepoName:     filepath.Base(sourcePath),
+		RepoID:       localWorkRepoID(sourcePath),
+		SourceBranch: "main",
+		BaselineSHA:  strings.TrimSpace(runLocalWorkTestGitOutput(t, sourcePath, "rev-parse", "HEAD")),
+		SandboxPath:  filepath.Join(home, "sandboxes", "lw-dead-shared-root-during-cycle"),
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{Version: 6, RepoMode: "repo", IssuePickMode: "auto", PRForwardMode: "approve"}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) {
+		return "321 /tmp/nana work resume --run-id lw-other --repo " + sourcePath, nil
+	}
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	oldSync := startSyncRepoState
+	startSyncRepoState = func(options startWorkOptions) (startWorkOptions, *startWorkState, int, bool, error) {
+		return options, &startWorkState{
+			Version:       startWorkStateVersion,
+			SourceRepo:    repoSlug,
+			DefaultBranch: "main",
+			UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+			Issues:        map[string]startWorkIssueState{},
+			ServiceTasks:  map[string]startWorkServiceTask{},
+			PlannedItems:  map[string]startWorkPlannedItem{},
+		}, 0, false, nil
+	}
+	defer func() { startSyncRepoState = oldSync }()
+
+	output, err := captureStdout(t, func() error {
+		return runStartRepoSchedulerCycle(".", repoSlug, startWorkOptions{RepoSlug: repoSlug, Parallel: 1}, startOptions{Parallel: 1})
+	})
+	if err != nil {
+		t.Fatalf("runStartRepoSchedulerCycle: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "stale local work run lw-dead-shared-root-during-cycle marked failed unexpectedly") {
+		t.Fatalf("expected stale-run log in output, got %q", output)
+	}
+
+	updated, err := readLocalWorkManifestByRunID(manifest.RunID)
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
+	}
+	if updated.Status != "failed" {
+		t.Fatalf("expected stale run to be failed, got %+v", updated)
+	}
+}
+
 func TestStartRepoCoordinatorRecoversStaleScoutRunDuringCycle(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

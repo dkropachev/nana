@@ -466,6 +466,65 @@ func TestCleanupStaleLocalWorkRunsForRepoPreservesDetachedResumeProcess(t *testi
 	}
 }
 
+func TestCleanupStaleLocalWorkRunsIgnoresOtherRunOnSameRepoRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoRoot := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	oldUpdatedAt := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+
+	manifest := localWorkManifest{
+		Version:         1,
+		RunID:           "lw-stale-shared-root",
+		CreatedAt:       oldUpdatedAt,
+		UpdatedAt:       oldUpdatedAt,
+		Status:          "running",
+		CurrentPhase:    "review",
+		RepoRoot:        repoRoot,
+		RepoName:        filepath.Base(repoRoot),
+		RepoID:          localWorkRepoID(repoRoot),
+		SourceBranch:    "main",
+		BaselineSHA:     strings.TrimSpace(runLocalWorkTestGitOutput(t, repoRoot, "rev-parse", "HEAD")),
+		SandboxPath:     filepath.Join(home, "sandboxes", "lw-stale-shared-root"),
+		SandboxRepoPath: filepath.Join(home, "sandboxes", "lw-stale-shared-root", "repo"),
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("writeLocalWorkManifest: %v", err)
+	}
+
+	oldSnapshot := localWorkProcessSnapshot
+	localWorkProcessSnapshot = func() (string, error) {
+		return "321 /tmp/nana work resume --run-id lw-other --repo " + manifest.RepoRoot, nil
+	}
+	defer func() { localWorkProcessSnapshot = oldSnapshot }()
+
+	oldDetachedRunner := localWorkStartDetachedRunner
+	resumeCalls := []string{}
+	localWorkStartDetachedRunner = func(repoRoot string, runID string, codexArgs []string, logPath string) error {
+		resumeCalls = append(resumeCalls, repoRoot+"|"+runID+"|"+logPath)
+		return nil
+	}
+	defer func() { localWorkStartDetachedRunner = oldDetachedRunner }()
+
+	cleaned, err := cleanupStaleLocalWorkRunsForRepo(repoRoot)
+	if err != nil {
+		t.Fatalf("cleanupStaleLocalWorkRunsForRepo: %v", err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("expected stale run to be handled despite another run on the same repo root, got %d", cleaned)
+	}
+	if len(resumeCalls) != 1 || !strings.Contains(resumeCalls[0], manifest.RunID) {
+		t.Fatalf("expected detached resume launch for stale run, got %+v", resumeCalls)
+	}
+
+	updated, err := readLocalWorkManifestByRunID(manifest.RunID)
+	if err != nil {
+		t.Fatalf("readLocalWorkManifestByRunID: %v", err)
+	}
+	if updated.Status != "running" || updated.LastError != "" || updated.CompletedAt != "" {
+		t.Fatalf("expected stale run to be resumed, got %+v", updated)
+	}
+}
+
 func TestCleanupStaleLocalWorkRunsIgnoresNonWorkerProcessMentions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
