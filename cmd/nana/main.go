@@ -127,7 +127,7 @@ Core modes:
 Skill index:
   Planning                      $deep-interview, $plan, $ralplan
   Execution                     $autopilot, $ultrawork, $ecomode, $pipeline
-  Investigation and repair      $analyze, $deepsearch, $tdd, $build-fix
+  Investigation and repair      $analyze, $deepsearch, $tdd, $build-fix, $backend-performance-scout
   Review and cleanup            $code-review, $security-review, $review, $ai-slop-cleaner
   UI and visual                 $frontend-ui-ux, $visual-verdict, $web-clone
   Utility                       $help, $doctor, $hud, $trace, $skill, $note, $cancel, $nana-setup
@@ -154,6 +154,8 @@ Common trigger phrases:
       -> $tdd
   fix build | type errors
       -> $build-fix
+  backend performance scout | api hot paths | cpu hotspots
+      -> $backend-performance-scout
   review code | code review | code-review
       -> $code-review
   security review

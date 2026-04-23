@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "catalogVersion": "2026.02.28.1",
+  "catalogVersion": "2026.04.23.1",
   "skills": [
     {
       "name": "autopilot",
@@ -75,6 +75,14 @@
       "category": "shortcut",
       "status": "alias",
       "canonical": "build-fixer",
+      "core": false,
+      "internalRequired": false
+    },
+    {
+      "name": "backend-performance-scout",
+      "category": "shortcut",
+      "status": "active",
+      "canonical": "performance-reviewer",
       "core": false,
       "internalRequired": false
     },

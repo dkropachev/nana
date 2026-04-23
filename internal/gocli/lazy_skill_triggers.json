@@ -45,6 +45,10 @@
       "triggers": ["fix build", "type errors"]
     },
     {
+      "skill": "backend-performance-scout",
+      "triggers": ["backend performance scout", "api hot paths", "cpu hotspots"]
+    },
+    {
       "skill": "code-review",
       "triggers": ["review code", "code review", "code-review"]
     },

@@ -107,6 +107,7 @@ func TestSkillAssetsStayInSyncWithSkillFiles(t *testing.T) {
 	for _, name := range []string{
 		"ai-slop-cleaner/SKILL.md",
 		"autopilot/SKILL.md",
+		"backend-performance-scout/SKILL.md",
 		"deep-interview/SKILL.md",
 		"pipeline/SKILL.md",
 		"trace/SKILL.md",
@@ -148,6 +149,7 @@ func TestRuntimeSkillAssetsStayInSyncAndWithinBudget(t *testing.T) {
 		"cancel/RUNTIME.md",
 		"tdd/RUNTIME.md",
 		"build-fix/RUNTIME.md",
+		"backend-performance-scout/RUNTIME.md",
 		"code-review/RUNTIME.md",
 		"security-review/RUNTIME.md",
 		"web-clone/RUNTIME.md",

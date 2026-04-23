@@ -399,6 +399,8 @@ func TestRouteExplainImplicitKeywordsRespectTokenBoundaries(t *testing.T) {
 	for _, prompt := range []string{
 		"Please reconfigure this second step",
 		"I want analysis",
+		"backend performance scouting is scheduled for tomorrow",
+		"these cpu hotspotters are synthetic",
 	} {
 		t.Run(prompt, func(t *testing.T) {
 			preview := ExplainPromptRoute(prompt)
@@ -407,6 +409,35 @@ func TestRouteExplainImplicitKeywordsRespectTokenBoundaries(t *testing.T) {
 			}
 			if preview.NoActivationReason == "" {
 				t.Fatalf("expected no-activation reason for %q", prompt)
+			}
+		})
+	}
+}
+
+func TestRouteExplainBackendPerformanceScoutImplicitKeywords(t *testing.T) {
+	cases := []struct {
+		prompt  string
+		trigger string
+	}{
+		{prompt: "please run backend performance scout on this service", trigger: "backend performance scout"},
+		{prompt: "Please inspect API HOT PATHS in this worker", trigger: "API HOT PATHS"},
+		{prompt: "show me cpu hotspots in the queue consumer", trigger: "cpu hotspots"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.prompt, func(t *testing.T) {
+			preview := ExplainPromptRoute(tc.prompt)
+			if len(preview.Activations) != 1 {
+				t.Fatalf("expected one activation, got %#v", preview.Activations)
+			}
+			activation := preview.Activations[0]
+			if activation.Skill != "backend-performance-scout" || activation.Source != "implicit keyword" {
+				t.Fatalf("expected implicit backend-performance-scout activation, got %#v", activation)
+			}
+			if activation.Trigger != tc.trigger {
+				t.Fatalf("expected trigger %q, got %q", tc.trigger, activation.Trigger)
+			}
+			if !strings.HasSuffix(activation.RuntimePath, filepath.Join("skills", "backend-performance-scout", "RUNTIME.md")) {
+				t.Fatalf("expected runtime doc path for backend-performance-scout, got %#v", activation)
 			}
 		})
 	}
@@ -533,6 +564,27 @@ func TestRouteExplainExplicitBeforeImplicit(t *testing.T) {
 	}
 }
 
+func TestRouteExplainExplicitBackendPerformanceScoutSuppressesSameSkillImplicitKeyword(t *testing.T) {
+	preview := ExplainPromptRoute("$backend-performance-scout please inspect api hot paths")
+	if len(preview.Activations) != 1 {
+		t.Fatalf("expected one activation, got %#v", preview.Activations)
+	}
+	explicit := preview.Activations[0]
+	if explicit.Skill != "backend-performance-scout" || explicit.Source != "explicit invocation" {
+		t.Fatalf("expected explicit backend-performance-scout activation, got %#v", explicit)
+	}
+	foundIgnoredImplicit := false
+	for _, ignored := range preview.IgnoredTriggers {
+		if ignored.Skill == "backend-performance-scout" && ignored.Source == "implicit keyword" && ignored.Trigger == "api hot paths" {
+			foundIgnoredImplicit = true
+			break
+		}
+	}
+	if !foundIgnoredImplicit {
+		t.Fatalf("expected same-skill implicit trigger to be ignored, got %#v", preview.IgnoredTriggers)
+	}
+}
+
 func TestRouteExplainExplicitInvocationAllowsPunctuationDelimiters(t *testing.T) {
 	prompt := "Please run (`$tdd`) then analyze the failing test"
 	preview := ExplainPromptRoute(prompt)
@@ -640,6 +692,27 @@ func TestRouteExplainPromptInvocationSuppressesKeywords(t *testing.T) {
 	}
 	if strings.Contains(output, "$analyze") {
 		t.Fatalf("suppressed prompt should not activate analyze, got %q", output)
+	}
+}
+
+func TestRouteExplainPromptInvocationSuppressesBackendPerformanceScoutKeywords(t *testing.T) {
+	output, err := captureStdout(t, func() error {
+		return Route(t.TempDir(), []string{"--explain", "/prompts:executor please inspect API HOT PATHS"})
+	})
+	if err != nil {
+		t.Fatalf("Route(): %v", err)
+	}
+	for _, expected := range []string{
+		"Activations: none",
+		"/prompts:executor suppresses implicit keyword routing",
+		"Implicit keywords: suppressed by /prompts:executor",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected %q in route output, got %q", expected, output)
+		}
+	}
+	if strings.Contains(output, "$backend-performance-scout") {
+		t.Fatalf("suppressed prompt should not activate backend-performance-scout, got %q", output)
 	}
 }
 
