@@ -5121,6 +5121,7 @@
       title: "Schedule Task",
       size: "lg",
       width: "min(760px, 92vw)",
+      bodyClass: "mission-schedule-modal-body",
       content: '<div id="task-schedule-modal-content" class="drawer-shell"></div>',
     });
   }

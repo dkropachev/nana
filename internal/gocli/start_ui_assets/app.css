@@ -1642,17 +1642,28 @@ textarea {
   color: #5b718d;
 }
 
+.mission-schedule-modal-body {
+  display: flex;
+  flex-direction: column;
+  height: min(560px, calc(100vh - 220px));
+  min-height: min(360px, calc(100vh - 220px));
+}
+
+.mission-schedule-modal-body #task-schedule-modal-content {
+  flex: 1;
+  min-height: 0;
+}
+
 .mission-schedule-modal {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 16px;
-  height: min(560px, calc(100vh - 220px));
-  min-height: min(360px, calc(100vh - 220px));
-  max-height: calc(100vh - 220px);
+  flex: 1;
+  min-height: 0;
 }
 
 .task-composer-controls {
-  grid-template-columns: minmax(180px, 1.4fr) minmax(180px, 1.4fr) minmax(100px, 0.7fr) minmax(100px, 0.7fr) minmax(180px, 1.2fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .task-composer-description-field {
@@ -1660,12 +1671,14 @@ textarea {
   grid-template-rows: auto minmax(0, 1fr);
   gap: 6px;
   min-height: 0;
+  overflow: hidden;
 }
 
 .task-composer-description-field textarea {
   width: 100%;
   height: 100%;
   min-height: 0;
+  overflow: auto;
   resize: none;
 }
 
@@ -1707,6 +1720,10 @@ textarea {
 
   .config-json-grid {
     grid-template-columns: 1fr;
+  }
+
+  .task-composer-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -1786,5 +1803,11 @@ textarea {
   .data-cards {
     display: grid;
     gap: 12px;
+  }
+}
+
+@media (max-width: 640px) {
+  .task-composer-controls {
+    grid-template-columns: 1fr;
   }
 }

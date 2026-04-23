@@ -5583,6 +5583,9 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `task-composer-controls`) || !strings.Contains(string(appBody), `task-composer-description-field`) {
 		t.Fatalf("expected schedule task controls above expanding description layout, got %s", string(appBody))
 	}
+	if !strings.Contains(string(appBody), `bodyClass: "mission-schedule-modal-body"`) {
+		t.Fatalf("expected schedule task modal body class wiring for bounded modal height, got %s", string(appBody))
+	}
 	if !strings.Contains(string(appBody), `taskTemplateScoutPromptPreview`) || !strings.Contains(string(appBody), `scout_prompt_preview`) || !strings.Contains(string(appBody), `scoutPromptPreview ? "" : String(state.taskComposer.description || "").trim()`) {
 		t.Fatalf("expected scout presets to render read-only prompt previews without submitting them as descriptions, got %s", string(appBody))
 	}
@@ -5635,7 +5638,7 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read app.css body: %v", err)
 	}
-	if !strings.Contains(string(cssBody), `.task-composer-description-field textarea`) || !strings.Contains(string(cssBody), `height: min(560px, calc(100vh - 220px));`) || !strings.Contains(string(cssBody), `resize: none;`) || !strings.Contains(string(cssBody), `.task-composer-description-field textarea[readonly]`) {
+	if !strings.Contains(string(cssBody), `.mission-schedule-modal-body`) || !strings.Contains(string(cssBody), `#task-schedule-modal-content`) || !strings.Contains(string(cssBody), `.task-composer-description-field textarea`) || !strings.Contains(string(cssBody), `height: min(560px, calc(100vh - 220px));`) || !strings.Contains(string(cssBody), `resize: none;`) || !strings.Contains(string(cssBody), `.task-composer-description-field textarea[readonly]`) {
 		t.Fatalf("expected bounded task composer description layout in app.css, got %s", string(cssBody))
 	}
 }

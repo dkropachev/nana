@@ -228,6 +228,9 @@ func TestStartUIBrowserInteractionsMissionControlTasks(t *testing.T) {
 
 	startUITestChromedpClick(t, tabCtx, "#open-task-schedule-button")
 	startUITestChromedpWaitVisible(t, tabCtx, "#task-schedule-modal-content")
+	startUITestChromedpWaitNoVerticalOverflow(t, tabCtx, ".tx-modal-body")
+	startUITestChromedpWaitNoHorizontalOverflow(t, tabCtx, ".tx-modal-body")
+	startUITestChromedpWaitClientHeightAtLeast(t, tabCtx, "#task-composer-description", 60)
 	startUITestChromedpSetValue(t, tabCtx, "#task-composer-template", "template:scout:ui-scout")
 	startUITestChromedpWaitReadonly(t, tabCtx, "#task-composer-description", true)
 	startUITestChromedpWaitValueContains(t, tabCtx, "#task-composer-description", "UI")
@@ -1985,6 +1988,77 @@ func startUITestChromedpSetScrollTop(t *testing.T, ctx context.Context, selector
 	if scrollTop > 0 && state.ScrollTop == 0 {
 		t.Fatalf("selector %s did not scroll", selector)
 	}
+}
+
+func startUITestChromedpWaitNoHorizontalOverflow(t *testing.T, ctx context.Context, selector string) {
+	t.Helper()
+	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("no horizontal overflow for %s", selector), func() (bool, string, error) {
+		var state struct {
+			ScrollWidth float64 `json:"scrollWidth"`
+			ClientWidth float64 `json:"clientWidth"`
+		}
+		if err := chromedp.Run(ctx,
+			chromedp.WaitVisible(selector, chromedp.ByQuery),
+			chromedp.Evaluate(fmt.Sprintf(`(() => {
+				const el = document.querySelector(%q);
+				if (!el) return { scrollWidth: -1, clientWidth: 0 };
+				return {
+					scrollWidth: Number(el.scrollWidth || 0),
+					clientWidth: Number(el.clientWidth || 0),
+				};
+			})()`, selector), &state),
+		); err != nil {
+			return false, "", err
+		}
+		if state.ScrollWidth < 0 {
+			return false, "missing", nil
+		}
+		return state.ScrollWidth <= state.ClientWidth+1, fmt.Sprintf("scrollWidth=%0.0f clientWidth=%0.0f", state.ScrollWidth, state.ClientWidth), nil
+	})
+}
+
+func startUITestChromedpWaitNoVerticalOverflow(t *testing.T, ctx context.Context, selector string) {
+	t.Helper()
+	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("no vertical overflow for %s", selector), func() (bool, string, error) {
+		var state struct {
+			ScrollHeight float64 `json:"scrollHeight"`
+			ClientHeight float64 `json:"clientHeight"`
+		}
+		if err := chromedp.Run(ctx,
+			chromedp.WaitVisible(selector, chromedp.ByQuery),
+			chromedp.Evaluate(fmt.Sprintf(`(() => {
+				const el = document.querySelector(%q);
+				if (!el) return { scrollHeight: -1, clientHeight: 0 };
+				return {
+					scrollHeight: Number(el.scrollHeight || 0),
+					clientHeight: Number(el.clientHeight || 0),
+				};
+			})()`, selector), &state),
+		); err != nil {
+			return false, "", err
+		}
+		if state.ScrollHeight < 0 {
+			return false, "missing", nil
+		}
+		return state.ScrollHeight <= state.ClientHeight+1, fmt.Sprintf("scrollHeight=%0.0f clientHeight=%0.0f", state.ScrollHeight, state.ClientHeight), nil
+	})
+}
+
+func startUITestChromedpWaitClientHeightAtLeast(t *testing.T, ctx context.Context, selector string, minimum int) {
+	t.Helper()
+	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("clientHeight %s to be at least %d", selector, minimum), func() (bool, string, error) {
+		var clientHeight float64
+		if err := chromedp.Run(ctx,
+			chromedp.WaitVisible(selector, chromedp.ByQuery),
+			chromedp.Evaluate(fmt.Sprintf(`(() => {
+				const el = document.querySelector(%q);
+				return el ? Number(el.clientHeight || 0) : -1;
+			})()`, selector), &clientHeight),
+		); err != nil {
+			return false, "", err
+		}
+		return clientHeight >= float64(minimum), fmt.Sprintf("clientHeight=%0.0f", clientHeight), nil
+	})
 }
 
 func startUITestChromedpWaitScrollTopAtLeast(t *testing.T, ctx context.Context, selector string, minimum int) {
