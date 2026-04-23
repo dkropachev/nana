@@ -3175,7 +3175,7 @@ func TestStartUIAPIAssistantWorkspaceRoutes(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("write validator result: %v", err)
 	}
-	if err := writeGithubJSON(filepath.Join(investigateDir, "manifest.json"), investigateManifest{
+	if err := persistInvestigateManifest(filepath.Join(investigateDir, "manifest.json"), investigateManifest{
 		Version:         1,
 		RunID:           "investigate-100",
 		CreatedAt:       now,
@@ -3552,6 +3552,218 @@ func TestStartUIAPIWorkRunLogs(t *testing.T) {
 	}
 	if githubContent.Path != "lane-runtime/executor-stdout.log" || githubContent.Content != "beta\ngamma" {
 		t.Fatalf("unexpected github log content: %+v", githubContent)
+	}
+}
+
+func TestStartUIAPITasksListAndDetail(t *testing.T) {
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	response, err := http.Get(fixture.Server.URL + "/api/v1/tasks")
+	if err != nil {
+		t.Fatalf("GET tasks: %v", err)
+	}
+	defer response.Body.Close()
+	var payload struct {
+		Items []startUITaskSummary `json:"items"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode tasks payload: %v", err)
+	}
+	for _, kind := range []string{"issue", "planned_item", "scout_job", "investigation", "work_item"} {
+		if !slices.ContainsFunc(payload.Items, func(item startUITaskSummary) bool {
+			return item.Kind == kind
+		}) {
+			t.Fatalf("expected task kind %q in %+v", kind, payload.Items)
+		}
+	}
+
+	detailResponse, err := http.Get(fixture.Server.URL + "/api/v1/tasks/" + url.PathEscape("work-item:"+fixture.ReviewItemID))
+	if err != nil {
+		t.Fatalf("GET task detail: %v", err)
+	}
+	defer detailResponse.Body.Close()
+	var detail startUITaskDetail
+	if err := json.NewDecoder(detailResponse.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode task detail: %v", err)
+	}
+	if detail.WorkItem == nil || detail.Summary.Kind != "work_item" {
+		t.Fatalf("unexpected work-item task detail: %+v", detail)
+	}
+}
+
+func TestStartUIAPITaskCreateAndTemplateSave(t *testing.T) {
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	previousInfer := startUIInferTaskPlan
+	startUIInferTaskPlan = func(repoSlug string, description string, template startUITaskTemplate) (startUITaskInferenceResult, error) {
+		return startUITaskInferenceResult{
+			Title:            "Audit approvals surface",
+			LaunchKind:       "manual_scout",
+			ScoutRole:        uiScoutRole,
+			ScoutFocus:       []string{"approvals", "stale recovery"},
+			FindingsHandling: startWorkFindingsHandlingManualReview,
+		}, nil
+	}
+	defer func() {
+		startUIInferTaskPlan = previousInfer
+	}()
+
+	templateBody, err := json.Marshal(startUITaskTemplateCreateRequest{
+		RepoSlug:       fixture.RepoSlug,
+		Description:    "Audit the approvals surface and preserve stale scout recovery context.",
+		BaseTemplateID: "template:scout:" + uiScoutRole,
+	})
+	if err != nil {
+		t.Fatalf("marshal template body: %v", err)
+	}
+	templateResponse, err := http.Post(fixture.Server.URL+"/api/v1/tasks/templates", "application/json", strings.NewReader(string(templateBody)))
+	if err != nil {
+		t.Fatalf("POST task template: %v", err)
+	}
+	defer templateResponse.Body.Close()
+	var templatePayload struct {
+		Template startWorkTaskTemplate `json:"template"`
+	}
+	if err := json.NewDecoder(templateResponse.Body).Decode(&templatePayload); err != nil {
+		t.Fatalf("decode task template payload: %v", err)
+	}
+	if templatePayload.Template.ID == "" || templatePayload.Template.LaunchKindHint != "manual_scout" || templatePayload.Template.ScoutRoleHint != uiScoutRole {
+		t.Fatalf("unexpected task template payload: %+v", templatePayload.Template)
+	}
+
+	templatesResponse, err := http.Get(fixture.Server.URL + "/api/v1/tasks/templates?repo_slug=" + url.QueryEscape(fixture.RepoSlug))
+	if err != nil {
+		t.Fatalf("GET task templates: %v", err)
+	}
+	defer templatesResponse.Body.Close()
+	var templatesPayload struct {
+		Items []startUITaskTemplate `json:"items"`
+	}
+	if err := json.NewDecoder(templatesResponse.Body).Decode(&templatesPayload); err != nil {
+		t.Fatalf("decode task templates payload: %v", err)
+	}
+	if !slices.ContainsFunc(templatesPayload.Items, func(item startUITaskTemplate) bool {
+		return item.ID == templatePayload.Template.ID
+	}) {
+		t.Fatalf("expected saved task template %s in %+v", templatePayload.Template.ID, templatesPayload.Items)
+	}
+
+	taskBody, err := json.Marshal(startUITaskCreateRequest{
+		RepoSlug:    fixture.RepoSlug,
+		Description: "Audit the approvals surface and keep stale scout recovery details visible.",
+		TemplateID:  templatePayload.Template.ID,
+		Priority:    intPtr(1),
+	})
+	if err != nil {
+		t.Fatalf("marshal task body: %v", err)
+	}
+	taskResponse, err := http.Post(fixture.Server.URL+"/api/v1/tasks", "application/json", strings.NewReader(string(taskBody)))
+	if err != nil {
+		t.Fatalf("POST task: %v", err)
+	}
+	defer taskResponse.Body.Close()
+	var taskPayload struct {
+		PlannedItem startWorkPlannedItem       `json:"planned_item"`
+		Inference   startUITaskInferenceResult `json:"inference"`
+	}
+	if err := json.NewDecoder(taskResponse.Body).Decode(&taskPayload); err != nil {
+		t.Fatalf("decode task payload: %v", err)
+	}
+	if taskPayload.PlannedItem.LaunchKind != "manual_scout" || taskPayload.PlannedItem.ScoutRole != uiScoutRole || taskPayload.PlannedItem.Priority != 1 || taskPayload.PlannedItem.ScheduleAt == "" {
+		t.Fatalf("unexpected created task payload: %+v", taskPayload.PlannedItem)
+	}
+	if taskPayload.Inference.Title != "Audit approvals surface" {
+		t.Fatalf("unexpected task inference payload: %+v", taskPayload.Inference)
+	}
+
+	state, err := readStartWorkState(fixture.RepoSlug)
+	if err != nil {
+		t.Fatalf("read start work state: %v", err)
+	}
+	created, ok := state.PlannedItems[taskPayload.PlannedItem.ID]
+	if !ok || created.LaunchKind != "manual_scout" || created.Priority != 1 || created.ScheduleAt == "" {
+		t.Fatalf("expected persisted planned task, got %+v", state.PlannedItems)
+	}
+	dbTemplates, err := withLocalWorkReadStore(func(store *localWorkDBStore) ([]startWorkTaskTemplate, error) {
+		return store.listTaskTemplates(fixture.RepoSlug)
+	})
+	if err != nil {
+		t.Fatalf("listTaskTemplates: %v", err)
+	}
+	if !slices.ContainsFunc(dbTemplates, func(item startWorkTaskTemplate) bool {
+		return item.ID == templatePayload.Template.ID
+	}) {
+		t.Fatalf("expected persisted DB task template %s in %+v", templatePayload.Template.ID, dbTemplates)
+	}
+}
+
+func TestWriteStartWorkStateSyncsCanonicalTasks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	state := startWorkState{
+		Version:      startWorkStateVersion,
+		SourceRepo:   repoSlug,
+		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+		Issues:       map[string]startWorkIssueState{},
+		ServiceTasks: map[string]startWorkServiceTask{},
+		PlannedItems: map[string]startWorkPlannedItem{"planned-1": {
+			ID:        "planned-1",
+			RepoSlug:  repoSlug,
+			Title:     "Sync canonical planned task",
+			Priority:  2,
+			State:     startPlannedItemQueued,
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		}},
+		ScoutJobs:      map[string]startWorkScoutJob{},
+		Findings:       map[string]startWorkFinding{},
+		ImportSessions: map[string]startWorkFindingImportSession{},
+	}
+	if err := writeStartWorkState(state); err != nil {
+		t.Fatalf("writeStartWorkState: %v", err)
+	}
+	items, err := withLocalWorkReadStore(func(store *localWorkDBStore) ([]startUITaskSummary, error) {
+		return store.listCanonicalTasksForRepo(repoSlug)
+	})
+	if err != nil {
+		t.Fatalf("listCanonicalTasksForRepo: %v", err)
+	}
+	if !slices.ContainsFunc(items, func(item startUITaskSummary) bool {
+		return item.ID == "planned-item:planned-1" && item.Kind == "planned_item"
+	}) {
+		t.Fatalf("expected canonical planned task in %+v", items)
+	}
+}
+
+func TestEnqueueWorkItemSyncsCanonicalTask(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "github",
+		SourceKind: "review_request",
+		ExternalID: "canonical-task-1",
+		RepoSlug:   "acme/widget",
+		Subject:    "Canonical task work item",
+		TargetURL:  "https://github.com/acme/widget/pull/77",
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+	items, err := withLocalWorkReadStore(func(store *localWorkDBStore) ([]startUITaskSummary, error) {
+		return store.listCanonicalTasks()
+	})
+	if err != nil {
+		t.Fatalf("listCanonicalTasks: %v", err)
+	}
+	if !slices.ContainsFunc(items, func(candidate startUITaskSummary) bool {
+		return candidate.ID == "work-item:"+item.ID && candidate.Kind == "work_item"
+	}) {
+		t.Fatalf("expected canonical work-item task in %+v", items)
 	}
 }
 
@@ -6984,28 +7196,61 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 				"priority still pending reviewer confirmation",
 			},
 		},
-		"legacy-investigations": {
+		"investigations": {
 			hash: "view=investigations",
 			expect: []string{
-				"Attention Inbox",
-				"Investigate flaky scheduler failure",
-				"Flake reproduced in scheduler path.",
+				"Schedule Task",
+				"Presets",
+				"Task Center",
+				"Running",
+				"In Review",
+				"Blocked",
+				"No tasks in this state.",
 			},
 		},
-		"legacy-approvals": {
+		"repo-findings": {
+			hash: "view=repo&repo=acme/widget&tab=findings",
+			expect: []string{
+				"Findings Inbox",
+				"Finding Detail",
+				"Import Sessions",
+				"Candidate Detail",
+			},
+		},
+		"work": {
+			hash: "view=work",
+			expect: []string{
+				"Work Runs",
+				"gh-ui-blocked",
+				"lw-browser-active",
+				"completion-harden",
+				"ci_waiting",
+			},
+		},
+		"feedback-reviews": {
+			hash: "view=feedback&tab=reviews",
+			expect: []string{
+				"Review Drafts",
+				"Review feature PR",
+				"REQUEST_CHANGES",
+				"Flaky assertion needs a guard.",
+			},
+		},
+		"feedback-replies": {
+			hash: "view=feedback&tab=replies",
+			expect: []string{
+				"Reply Drafts",
+				"Reply in thread",
+				"Reply with fix summary.",
+			},
+		},
+		"approvals": {
 			hash: "view=approvals",
 			expect: []string{
 				"Attention Inbox",
 				"Reply in thread",
 				"Review feature PR",
 				"approval required",
-			},
-		},
-		"legacy-work": {
-			hash: "view=work",
-			expect: []string{
-				"Attention Inbox",
-				"No attention items match these filters.",
 			},
 		},
 		"usage": {
@@ -7744,7 +7989,7 @@ func startUITestSetupBrowserFixtureWithOptions(t *testing.T, options startUITest
 	}); err != nil {
 		t.Fatalf("write validator result: %v", err)
 	}
-	if err := writeGithubJSON(filepath.Join(investigateDir, "manifest.json"), investigateManifest{
+	if err := persistInvestigateManifest(filepath.Join(investigateDir, "manifest.json"), investigateManifest{
 		Version:         1,
 		RunID:           "investigate-100",
 		CreatedAt:       now,

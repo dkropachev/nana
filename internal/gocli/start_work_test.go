@@ -270,6 +270,7 @@ func TestStartWorkBuildImplementationQueueSkipsFutureScheduledIssues(t *testing.
 }
 
 func TestStartRepoCoordinatorBuildsSeparateServiceQueueWithDependencies(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	coordinator := &startRepoCoordinator{
 		repoSlug: "acme/widget",
 		cycleID:  "cycle-1",
@@ -277,6 +278,7 @@ func TestStartRepoCoordinatorBuildsSeparateServiceQueueWithDependencies(t *testi
 			ImplementMode: "labeled",
 		},
 		state: &startWorkState{
+			SourceRepo: "acme/widget",
 			Issues: map[string]startWorkIssueState{
 				"1": {
 					SourceNumber:      1,
@@ -325,6 +327,7 @@ func TestStartRepoCoordinatorBuildsSeparateServiceQueueWithDependencies(t *testi
 }
 
 func TestStartRepoCoordinatorQueuesDuePlannedLaunchTask(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	coordinator := &startRepoCoordinator{
 		repoSlug: "acme/widget",
 		cycleID:  "cycle-1",
@@ -355,6 +358,54 @@ func TestStartRepoCoordinatorQueuesDuePlannedLaunchTask(t *testing.T) {
 	queue := coordinator.buildServiceQueue()
 	if len(queue) != 1 || queue[0].Kind != startTaskKindPlannedLaunch || queue[0].PlannedItemID != "planned-1" {
 		t.Fatalf("expected planned launch task, got %#v", queue)
+	}
+}
+
+func TestStartRepoCoordinatorPrioritizesHigherPriorityPlannedLaunchTask(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	coordinator := &startRepoCoordinator{
+		repoSlug: "acme/widget",
+		cycleID:  "cycle-1",
+		workOptions: startWorkOptions{
+			ImplementMode: "labeled",
+		},
+		state: &startWorkState{
+			SourceRepo:   "acme/widget",
+			Issues:       map[string]startWorkIssueState{},
+			ServiceTasks: map[string]startWorkServiceTask{},
+			PlannedItems: map[string]startWorkPlannedItem{
+				"planned-low": {
+					ID:         "planned-low",
+					RepoSlug:   "acme/widget",
+					Title:      "Low priority task",
+					Priority:   4,
+					ScheduleAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+					State:      startPlannedItemQueued,
+					CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+					UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+				},
+				"planned-high": {
+					ID:         "planned-high",
+					RepoSlug:   "acme/widget",
+					Title:      "High priority task",
+					Priority:   1,
+					ScheduleAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+					State:      startPlannedItemQueued,
+					CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+					UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+				},
+			},
+		},
+	}
+	if err := coordinator.syncServiceTasks(); err != nil {
+		t.Fatalf("syncServiceTasks: %v", err)
+	}
+	queue := coordinator.buildServiceQueue()
+	if len(queue) != 2 {
+		t.Fatalf("expected both planned launch tasks, got %#v", queue)
+	}
+	if queue[0].PlannedItemID != "planned-high" || queue[1].PlannedItemID != "planned-low" {
+		t.Fatalf("expected higher priority planned item first, got %#v", queue)
 	}
 }
 
@@ -424,6 +475,7 @@ func TestStartWorkPlannedItemDueRequiresExplicitSchedule(t *testing.T) {
 }
 
 func TestStartRepoCoordinatorKeepsManualLaunchingPlannedItemsQueued(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	repoSlug := "acme/widget"
 	coordinator := &startRepoCoordinator{
 		repoSlug: repoSlug,
@@ -703,6 +755,7 @@ func TestStartRepoCoordinatorQueuesReconcileForStaleInProgressIssue(t *testing.T
 			ImplementMode: "labeled",
 		},
 		state: &startWorkState{
+			SourceRepo: "acme/widget",
 			Issues: map[string]startWorkIssueState{
 				"1": {
 					SourceNumber: 1,
@@ -837,6 +890,7 @@ func TestStartRepoCoordinatorReconcileRequeuesWhileMetadataIsPending(t *testing.
 }
 
 func TestStartRepoCoordinatorBuildServiceQueueSkipsTasksUntilWaitUntil(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	coordinator := &startRepoCoordinator{
 		repoSlug: "acme/widget",
 		cycleID:  "cycle-1",
@@ -855,6 +909,9 @@ func TestStartRepoCoordinatorBuildServiceQueueSkipsTasksUntilWaitUntil(t *testin
 		},
 		running: map[string]startRepoTask{},
 	}
+	if err := syncCanonicalRepoTasksFromState(coordinator.repoSlug, coordinator.state); err != nil {
+		t.Fatalf("syncCanonicalRepoTasksFromState: %v", err)
+	}
 	if queue := coordinator.buildServiceQueue(); len(queue) != 0 {
 		t.Fatalf("expected future wait_until to suppress queueing, got %+v", queue)
 	}
@@ -865,6 +922,9 @@ func TestStartRepoCoordinatorBuildServiceQueueSkipsTasksUntilWaitUntil(t *testin
 		Status:    startWorkServiceTaskQueued,
 		IssueKey:  "1",
 		WaitUntil: time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
+	}
+	if err := syncCanonicalRepoTasksFromState(coordinator.repoSlug, coordinator.state); err != nil {
+		t.Fatalf("syncCanonicalRepoTasksFromState: %v", err)
 	}
 	if queue := coordinator.buildServiceQueue(); len(queue) != 1 || queue[0].Key != "triage:1" {
 		t.Fatalf("expected expired wait_until to be runnable, got %+v", queue)

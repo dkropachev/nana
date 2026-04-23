@@ -34,6 +34,7 @@
     scoutItems: defaultScoutItemsState(),
     taskFindings: defaultTaskFindingsState(),
     findingImports: defaultFindingImportsState(),
+    taskDetailModal: null,
     workItemDrawer: null,
     workItemSelection: defaultWorkItemSelection(),
     issueQueue: defaultIssueQueueState(),
@@ -57,6 +58,16 @@
     { id: "tomorrow", title: "Tomorrow", copy: "Schedules the issue for tomorrow at 09:00 local time." },
     { id: "next-week", title: "Next Week", copy: "Schedules the issue for next Monday at 09:00 local time." },
     { id: "later", title: "Later", copy: "Schedules the issue two weeks out at 09:00 local time." },
+  ];
+
+  const TASK_STATUS_GROUPS = [
+    { id: "running", title: "Running", copy: "Active Nana work and execution jobs." },
+    { id: "queued", title: "Queued", copy: "Due or scheduled tasks waiting to run." },
+    { id: "paused", title: "Paused", copy: "Tasks waiting for retry windows or recovery." },
+    { id: "in_review", title: "In Review", copy: "Drafted work waiting for a human pass." },
+    { id: "blocked", title: "Blocked", copy: "Tasks that need attention before they can move." },
+    { id: "dismissed", title: "Dismissed", copy: "Suppressed or intentionally dropped tasks." },
+    { id: "completed", title: "Completed", copy: "Finished tasks and launched work." },
   ];
 
   function defaultLogSelection() {
@@ -205,26 +216,23 @@
       detailLoading: false,
       loaded: false,
       error: "",
-      draftQuery: "",
-      starting: false,
+      templates: [],
+      templatesLoading: false,
+      templatesLoaded: false,
+      templatesRepoSlug: "",
+      templatesError: "",
     };
   }
 
   function defaultTaskComposerState() {
     return {
       repoSlug: "",
-      kind: "investigation",
-      title: "",
       description: "",
       scheduleAt: "",
+      priority: "3",
+      templateID: "template:custom",
       creating: false,
-      investigationQuery: "",
-      codingWorkType: "feature",
-      codingPriority: "3",
-      scoutRole: "improvement-scout",
-      scoutDestination: "review",
-      scoutSessionLimit: "4",
-      scoutFocus: "",
+      savingTemplate: false,
     };
   }
 
@@ -1059,6 +1067,11 @@
     return repoSummaryBySlug(repo.repo_slug) || repo;
   }
 
+  function selectedTaskTemplate() {
+    const templates = state.investigations.templates || [];
+    return templates.find((item) => item.id === state.taskComposer.templateID) || templates[0] || null;
+  }
+
   function selectedTaskScopeRepoSummary() {
     if (!state.selectedRepo) return null;
     return selectedRepoSummary();
@@ -1833,17 +1846,17 @@
       state.taskFindings.error = "";
     }
     if (!options.silent || !state.taskFindings.items.length) {
-      renderInvestigationsPage();
+      renderTaskDataWorkspace();
     }
     return api(`/api/v1/repos/${repoSlug}/findings`).then((payload) => {
       if (state.taskFindings.repoSlug !== repoSlug) return;
       applyTaskFindingsPayload(repoSlug, payload);
-      renderInvestigationsPage();
+      renderTaskDataWorkspace();
     }).catch((error) => {
       if (state.taskFindings.repoSlug !== repoSlug) return;
       state.taskFindings.loading = false;
       state.taskFindings.error = error.message;
-      renderInvestigationsPage();
+      renderTaskDataWorkspace();
       if (!options.silent) {
         toast("danger", "Findings load failed", error.message);
       }
@@ -1852,7 +1865,7 @@
 
   function saveTaskFinding(repoSlug, findingID, payload) {
     state.taskFindings.saving = true;
-    renderInvestigationsPage();
+    renderTaskDataWorkspace();
     return api(`/api/v1/repos/${repoSlug}/findings/${encodeURIComponent(findingID)}`, {
       method: "PATCH",
       body: JSON.stringify(payload),
@@ -1864,7 +1877,7 @@
       return loadTaskFindings(repoSlug, { silent: true }).then(() => response);
     }).catch((error) => {
       state.taskFindings.saving = false;
-      renderInvestigationsPage();
+      renderTaskDataWorkspace();
       toast("danger", "Finding save failed", error.message);
       throw error;
     });
@@ -1926,6 +1939,16 @@
     return session.candidates.find((candidate) => candidate.candidate_id === state.findingImports.selectedCandidateID) || session.candidates[0] || null;
   }
 
+  function renderTaskDataWorkspace() {
+    if (state.currentView === "repo" && state.repoTab === "findings" && selectedRepoSummary()) {
+      renderRepoFindingsPage(selectedRepoSummary());
+      return;
+    }
+    if (state.currentView === "investigations") {
+      renderInvestigationsPage();
+    }
+  }
+
   function applyFindingImportsPayload(repoSlug, payload) {
     if (payload.repo) {
       mergeRepoSummary(payload.repo, { rerender: false, resetScouts: false });
@@ -1953,17 +1976,17 @@
       state.findingImports.error = "";
     }
     if (!options.silent || !state.findingImports.items.length) {
-      renderInvestigationsPage();
+      renderTaskDataWorkspace();
     }
     return api(`/api/v1/repos/${repoSlug}/finding-import-sessions`).then((payload) => {
       if (state.findingImports.repoSlug !== repoSlug) return;
       applyFindingImportsPayload(repoSlug, payload);
-      renderInvestigationsPage();
+      renderTaskDataWorkspace();
     }).catch((error) => {
       if (state.findingImports.repoSlug !== repoSlug) return;
       state.findingImports.loading = false;
       state.findingImports.error = error.message;
-      renderInvestigationsPage();
+      renderTaskDataWorkspace();
       if (!options.silent) {
         toast("danger", "Import sessions failed", error.message);
       }
@@ -1972,7 +1995,7 @@
 
   function createFindingImportSession(repoSlug, filePath, markdown) {
     state.findingImports.importing = true;
-    renderInvestigationsPage();
+    renderTaskDataWorkspace();
     return api(`/api/v1/repos/${repoSlug}/finding-import-sessions`, {
       method: "POST",
       body: JSON.stringify({ file_path: filePath, markdown }),
@@ -1983,12 +2006,12 @@
           state.findingImports.selectedSessionID = payload.session.id;
           state.findingImports.selectedCandidateID = payload.session.candidates && payload.session.candidates[0] ? payload.session.candidates[0].candidate_id : "";
         }
-        renderInvestigationsPage();
+        renderTaskDataWorkspace();
         return payload;
       });
     }).catch((error) => {
       state.findingImports.importing = false;
-      renderInvestigationsPage();
+      renderTaskDataWorkspace();
       toast("danger", "Markdown import failed", error.message);
       throw error;
     });
@@ -2006,7 +2029,7 @@
       return loadFindingImports(repoSlug, { silent: true }).then(() => {
         state.findingImports.selectedSessionID = sessionID;
         state.findingImports.selectedCandidateID = candidateID;
-        renderInvestigationsPage();
+        renderTaskDataWorkspace();
         return payload;
       });
     }).catch((error) => {
@@ -2064,18 +2087,14 @@
     if (state.currentView === "investigations") {
       renderInvestigationsPage();
     }
-    return api("/api/v1/investigations").then((payload) => {
+    return api("/api/v1/tasks").then((payload) => {
       state.investigations.items = payload.items || [];
       state.investigations.loading = false;
       state.investigations.loaded = true;
       state.investigations.error = "";
-      if (!state.investigations.selectedRunID || !state.investigations.items.some((item) => item.run_id === state.investigations.selectedRunID)) {
-        state.investigations.selectedRunID = state.investigations.items[0] ? state.investigations.items[0].run_id : "";
+      if (state.investigations.selectedRunID && !state.investigations.items.some((item) => item.id === state.investigations.selectedRunID)) {
+        state.investigations.selectedRunID = "";
       }
-      if (state.investigations.selectedRunID) {
-        return loadInvestigationDetail(state.investigations.selectedRunID, { silent: true });
-      }
-      state.investigations.detail = null;
       if (state.currentView === "investigations") {
         renderInvestigationsPage();
       }
@@ -2092,14 +2111,15 @@
   }
 
   function loadInvestigationDetail(runID, options = {}) {
-    if (!runID) {
+    const taskID = defaultString(runID, state.investigations.selectedRunID);
+    if (!taskID) {
       state.investigations.detail = null;
       if (state.currentView === "investigations") {
         renderInvestigationsPage();
       }
       return Promise.resolve();
     }
-    state.investigations.selectedRunID = runID;
+    state.investigations.selectedRunID = taskID;
     state.investigations.detailLoading = true;
     if (!options.silent) {
       state.investigations.error = "";
@@ -2107,22 +2127,59 @@
     if (state.currentView === "investigations") {
       renderInvestigationsPage();
     }
-    return api(`/api/v1/investigations/${encodeURIComponent(runID)}`).then((payload) => {
-      if (state.investigations.selectedRunID !== runID) return;
+    return api(`/api/v1/tasks/${encodeURIComponent(taskID)}`).then((payload) => {
+      if (state.investigations.selectedRunID !== taskID) return;
       state.investigations.detail = payload;
       state.investigations.detailLoading = false;
+      renderTaskDetailModal();
       if (state.currentView === "investigations") {
         renderInvestigationsPage();
       }
     }).catch((error) => {
-      if (state.investigations.selectedRunID !== runID) return;
+      if (state.investigations.selectedRunID !== taskID) return;
       state.investigations.detailLoading = false;
       state.investigations.error = error.message;
+      renderTaskDetailModal();
       if (state.currentView === "investigations") {
         renderInvestigationsPage();
       }
       if (!options.silent) {
-        toast("danger", "Investigation detail failed", error.message);
+        toast("danger", "Task detail failed", error.message);
+      }
+    });
+  }
+
+  function loadTaskTemplates(options = {}) {
+    const repo = selectedTaskComposerRepoSummary();
+    const repoSlug = repo ? repo.repo_slug : "";
+    state.investigations.templatesLoading = true;
+    if (!options.silent) {
+      state.investigations.templatesError = "";
+    }
+    if (state.currentView === "investigations") {
+      renderInvestigationsPage();
+    }
+    const query = repoSlug ? `?repo_slug=${encodeURIComponent(repoSlug)}` : "";
+    return api(`/api/v1/tasks/templates${query}`).then((payload) => {
+      state.investigations.templates = payload.items || [];
+      state.investigations.templatesLoading = false;
+      state.investigations.templatesLoaded = true;
+      state.investigations.templatesRepoSlug = repoSlug;
+      state.investigations.templatesError = "";
+      if (!selectedTaskTemplate()) {
+        state.taskComposer.templateID = state.investigations.templates[0] ? state.investigations.templates[0].id : "template:custom";
+      }
+      if (state.currentView === "investigations") {
+        renderInvestigationsPage();
+      }
+    }).catch((error) => {
+      state.investigations.templatesLoading = false;
+      state.investigations.templatesError = error.message;
+      if (state.currentView === "investigations") {
+        renderInvestigationsPage();
+      }
+      if (!options.silent) {
+        toast("danger", "Task presets failed", error.message);
       }
     });
   }
@@ -2415,18 +2472,8 @@
         if (!state.investigations.loaded && !state.investigations.loading) {
           loadInvestigations({ silent: true });
         }
-        {
-          const repo = selectedTaskScopeRepoSummary();
-          if (repo) {
-            ensureTaskFindingsState(repo);
-            ensureFindingImportsState(repo);
-            if (!state.taskFindings.loaded && !state.taskFindings.loading) {
-              loadTaskFindings(repo.repo_slug, { silent: true });
-            }
-            if (!state.findingImports.loaded && !state.findingImports.loading) {
-              loadFindingImports(repo.repo_slug, { silent: true });
-            }
-          }
+        if (!state.investigations.templatesLoaded || state.investigations.templatesRepoSlug !== defaultString(selectedTaskComposerRepoSummary() && selectedTaskComposerRepoSummary().repo_slug, "")) {
+          loadTaskTemplates({ silent: true });
         }
         break;
       case "feedback":
@@ -2911,7 +2958,9 @@
     const totals = state.overview ? state.overview.totals || {} : {};
     const homeActive = state.currentView === "home";
     const homeCount = pendingRuns().length + pendingWorkItems().length + Number(totals.approval_items || 0);
-    const taskCount = Number(totals.investigations || 0) + Number(totals.planned_queued || 0) + Number(totals.planned_launching || 0);
+    const taskCount = state.investigations.loaded
+      ? Number((state.investigations.items || []).length)
+      : Number(totals.investigations || 0) + Number(totals.planned_queued || 0) + Number(totals.planned_launching || 0);
     nav.innerHTML = `
       <div class="sidebar-nav-shell">
         <div class="nav-main-links" role="navigation" aria-label="Workspace views">
@@ -2975,7 +3024,7 @@
         updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
       } else if (state.currentView === "investigations") {
         title.textContent = "Tasks";
-        subtitle.textContent = "Unified scheduling for investigations, coding work, manual scouts, and resulting findings.";
+        subtitle.textContent = "Universal task board for scheduled, running, paused, blocked, and in-review Nana work.";
         updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
       } else if (state.currentView === "feedback") {
         title.textContent = "Feedback";
@@ -3012,8 +3061,8 @@
     if (state.currentView === "investigations") {
       title.textContent = "Tasks";
       subtitle.textContent = state.selectedRepo
-        ? `Unified scheduling, findings, and manual scout work for ${state.selectedRepo}.`
-        : "Unified scheduling for investigations, coding work, manual scouts, and resulting findings.";
+        ? `Universal task scheduling and task state for ${state.selectedRepo}.`
+        : "Universal task scheduling and execution state across Nana work.";
       return;
     }
     if (state.currentView === "work") {
@@ -3053,6 +3102,8 @@
     title.textContent = repo.repo_slug;
     subtitle.textContent = state.repoTab === "controls"
       ? "GitHub issue search, tracked issue scheduling, and planned launch controls."
+      : state.repoTab === "findings"
+        ? "Persisted findings, markdown imports, and promotion into executable work."
       : state.repoTab === "scouts"
         ? "Scout-discovered items, proposal details, and repo-local management actions."
       : state.repoTab === "config"
@@ -3101,10 +3152,11 @@
     host.setAttribute("role", "tablist");
     host.setAttribute("aria-label", "Repo sections");
     host.innerHTML = [
-      tabButtonMarkup("repo", "overview", "Overview", state.repoTab === "overview", 0, 4),
-      tabButtonMarkup("repo", "scouts", "Scouts", state.repoTab === "scouts", 1, 4),
-      tabButtonMarkup("repo", "config", "Config", state.repoTab === "config", 2, 4),
-      tabButtonMarkup("repo", "controls", "Controls", state.repoTab === "controls", 3, 4),
+      tabButtonMarkup("repo", "overview", "Overview", state.repoTab === "overview", 0, 5),
+      tabButtonMarkup("repo", "findings", "Findings", state.repoTab === "findings", 1, 5),
+      tabButtonMarkup("repo", "scouts", "Scouts", state.repoTab === "scouts", 2, 5),
+      tabButtonMarkup("repo", "config", "Config", state.repoTab === "config", 3, 5),
+      tabButtonMarkup("repo", "controls", "Controls", state.repoTab === "controls", 4, 5),
     ].join("");
   }
 
@@ -4021,7 +4073,7 @@
     return (state.investigations.items || []).filter((item) => {
       return matchesRepoFilter(item, filter.repo) &&
         matchesAttentionFilter(item, filter.attention) &&
-        matchesQuery(item, ["query", "repo_slug", "overall_short_explanation", "run_id", "pause_reason", "pause_until"], filter.query);
+        matchesQuery(item, ["title", "summary", "description", "repo_slug", "kind", "status", "raw_status", "run_id", "external_url", "work_type"], filter.query);
     });
   }
 
@@ -4553,294 +4605,382 @@
     `;
   }
 
+  function taskStatusLabel(status) {
+    switch (status) {
+      case "in_review":
+        return "In Review";
+      default:
+        return status.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
+    }
+  }
+
+  function taskStatusTone(status) {
+    switch (status) {
+      case "running":
+        return "active";
+      case "paused":
+      case "in_review":
+      case "blocked":
+        return "blocked";
+      case "dismissed":
+      case "completed":
+        return "completed";
+      default:
+        return "queued";
+    }
+  }
+
+  function taskItemsForStatus(items, status) {
+    return (items || []).filter((item) => item.status === status);
+  }
+
+  function taskSummaryCards(items) {
+    return TASK_STATUS_GROUPS.map((group) => {
+      const count = taskItemsForStatus(items, group.id).length;
+      return `
+        <article class="task-summary-card">
+          <span class="task-summary-value">${count}</span>
+          <span class="task-summary-label">${escapeHTML(group.title)}</span>
+          <p class="task-summary-copy">${escapeHTML(group.copy)}</p>
+        </article>
+      `;
+    }).join("");
+  }
+
+  function renderTaskCard(item) {
+    const selected = item.id === state.investigations.selectedRunID;
+    const repo = defaultString(item.repo_slug, "Workspace");
+    const priority = item.priority_label ? `<span class="task-card-tag">${escapeHTML(item.priority_label)}</span>` : "";
+    const schedule = item.schedule_at ? `<span class="task-card-meta">Scheduled ${escapeHTML(formatDateTime(item.schedule_at))}</span>` : "";
+    const runMeta = item.can_open_job && item.run_id ? `<span class="task-card-meta">Job ${escapeHTML(item.run_id)}</span>` : "";
+    const kind = item.kind ? `<span class="task-card-tag">${escapeHTML(item.kind.replace(/_/g, " "))}</span>` : "";
+    return `
+      <button class="task-card ${selected ? "task-card-selected" : ""}" type="button" data-task-open="${escapeHTML(item.id)}">
+        <div class="task-card-head">
+          <div>
+            <span class="task-card-repo">${escapeHTML(repo)}</span>
+            <h4>${escapeHTML(defaultString(item.title, item.id))}</h4>
+          </div>
+          ${renderStatePill(taskStatusTone(item.status), taskStatusLabel(defaultString(item.status, "queued")))}
+        </div>
+        <p class="task-card-copy">${escapeHTML(defaultString(item.summary, item.description || "No summary recorded."))}</p>
+        <div class="task-card-tags">
+          ${kind}
+          ${priority}
+          ${item.work_type ? `<span class="task-card-tag">${escapeHTML(workTypeLabel(item.work_type))}</span>` : ""}
+        </div>
+        <div class="task-card-foot">
+          <span class="task-card-meta">Updated ${escapeHTML(formatDateTime(item.updated_at))}</span>
+          ${schedule}
+          ${runMeta}
+        </div>
+      </button>
+    `;
+  }
+
+  function renderTaskColumns(items) {
+    return TASK_STATUS_GROUPS.map((group) => {
+      const bucket = taskItemsForStatus(items, group.id);
+      return `
+        <section class="task-column">
+          <div class="task-column-head">
+            <div>
+              <h3>${escapeHTML(group.title)}</h3>
+              <p>${escapeHTML(group.copy)}</p>
+            </div>
+            <span class="nav-count">${bucket.length}</span>
+          </div>
+          <div class="task-column-body">
+            ${bucket.length ? bucket.map(renderTaskCard).join("") : '<div class="task-empty">No tasks in this state.</div>'}
+          </div>
+        </section>
+      `;
+    }).join("");
+  }
+
+  function taskDetailSourceMarkup(detail) {
+    if (!detail || !detail.summary) {
+      return '<div class="status-pill">Task detail is unavailable.</div>';
+    }
+    if (detail.work_run) {
+      const run = detail.work_run;
+      return `
+        <div class="queue-summary">
+          <article class="queue-item"><span class="queue-label">Phase</span><p class="queue-copy">${escapeHTML(defaultString(run.summary.current_phase, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Backend</span><p class="queue-copy">${escapeHTML(defaultString(run.summary.backend, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Target</span><p class="queue-copy">${escapeHTML(defaultString(run.summary.target_url, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Next Action</span><p class="queue-copy">${escapeHTML(defaultString(run.next_action, "(none)"))}</p></article>
+        </div>
+      `;
+    }
+    if (detail.work_item && detail.work_item.item) {
+      const item = detail.work_item.item;
+      return `
+        <div class="queue-summary">
+          <article class="queue-item"><span class="queue-label">Source</span><p class="queue-copy">${escapeHTML(defaultString(item.source, "-"))}/${escapeHTML(defaultString(item.source_kind, "-"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Target</span><p class="queue-copy">${escapeHTML(defaultString(item.target_url, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Draft</span><p class="queue-copy">${escapeHTML(defaultString(item.latest_draft && item.latest_draft.summary, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Body</span><p class="queue-copy">${escapeHTML(defaultString(item.body, "(none)"))}</p></article>
+        </div>
+      `;
+    }
+    if (detail.investigation && detail.investigation.summary) {
+      const item = detail.investigation.summary;
+      return `
+        <div class="queue-summary">
+          <article class="queue-item"><span class="queue-label">Query</span><p class="queue-copy">${escapeHTML(defaultString(item.query, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Result</span><p class="queue-copy">${escapeHTML(defaultString(item.overall_status, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Proofs</span><p class="queue-copy">${escapeHTML(defaultString(item.proof_count, 0))}</p></article>
+          <article class="queue-item"><span class="queue-label">Validator</span><p class="queue-copy">${escapeHTML(defaultString(detail.investigation.latest_validator_result && detail.investigation.latest_validator_result.accepted ? "accepted" : "", detail.investigation.latest_validator_result ? "rejected" : "(none)"))}</p></article>
+        </div>
+      `;
+    }
+    if (detail.planned_item) {
+      const item = detail.planned_item;
+      return `
+        <div class="queue-summary">
+          <article class="queue-item"><span class="queue-label">Launch Kind</span><p class="queue-copy">${escapeHTML(defaultString(item.launch_kind, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Description</span><p class="queue-copy">${escapeHTML(defaultString(item.description, "(none)"))}</p></article>
+          ${item.investigation_query ? `<article class="queue-item"><span class="queue-label">Investigation Query</span><p class="queue-copy">${escapeHTML(item.investigation_query)}</p></article>` : ""}
+          ${item.scout_role ? `<article class="queue-item"><span class="queue-label">Scout Role</span><p class="queue-copy">${escapeHTML(item.scout_role)}</p></article>` : ""}
+          ${item.last_error ? `<article class="queue-item"><span class="queue-label">Last Error</span><p class="queue-copy">${escapeHTML(item.last_error)}</p></article>` : ""}
+        </div>
+      `;
+    }
+    if (detail.issue) {
+      const item = detail.issue;
+      return `
+        <div class="queue-summary">
+          <article class="queue-item"><span class="queue-label">Issue</span><p class="queue-copy">${escapeHTML(defaultString(item.source_url, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Triage</span><p class="queue-copy">${escapeHTML(defaultString(item.triage_rationale, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Blocked Reason</span><p class="queue-copy">${escapeHTML(defaultString(item.blocked_reason, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Priority Source</span><p class="queue-copy">${escapeHTML(defaultString(item.priority_source, "(none)"))}</p></article>
+        </div>
+      `;
+    }
+    if (detail.scout_job) {
+      const item = detail.scout_job;
+      return `
+        <div class="queue-summary">
+          <article class="queue-item"><span class="queue-label">Role</span><p class="queue-copy">${escapeHTML(defaultString(item.role, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Summary</span><p class="queue-copy">${escapeHTML(defaultString(item.summary, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Evidence</span><p class="queue-copy">${escapeHTML(defaultString(item.evidence, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Last Error</span><p class="queue-copy">${escapeHTML(defaultString(item.last_error, "(none)"))}</p></article>
+        </div>
+      `;
+    }
+    if (detail.service_task) {
+      const item = detail.service_task;
+      return `
+        <div class="queue-summary">
+          <article class="queue-item"><span class="queue-label">Kind</span><p class="queue-copy">${escapeHTML(defaultString(item.kind, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Queue</span><p class="queue-copy">${escapeHTML(defaultString(item.queue, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Last Error</span><p class="queue-copy">${escapeHTML(defaultString(item.last_error, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Result</span><p class="queue-copy">${escapeHTML(defaultString(item.result_summary, "(none)"))}</p></article>
+        </div>
+      `;
+    }
+    return '<div class="status-pill">No source detail is available for this task.</div>';
+  }
+
+  function renderTaskDetailModal() {
+    const host = document.getElementById("task-detail-modal-content");
+    if (!host) return;
+    const detail = state.investigations.detail;
+    if (!state.investigations.selectedRunID) {
+      host.innerHTML = '<div class="log-empty">Choose a task to inspect it.</div>';
+      return;
+    }
+    if (state.investigations.detailLoading && !detail) {
+      host.innerHTML = '<div class="log-empty">Loading task detail...</div>';
+      return;
+    }
+    if (state.investigations.error && !detail) {
+      host.innerHTML = `<div class="log-empty">${escapeHTML(state.investigations.error)}</div>`;
+      return;
+    }
+    if (!detail || !detail.summary) {
+      host.innerHTML = '<div class="log-empty">Task detail is unavailable.</div>';
+      return;
+    }
+    const summary = detail.summary;
+    const actionButtons = [];
+    if (detail.related_run && detail.related_run.summary && detail.related_run.summary.run_id) {
+      actionButtons.push(`<button class="tx-btn tx-btn-secondary" type="button" data-task-open-job="${escapeHTML(detail.related_run.summary.run_id)}">Open Job</button>`);
+    }
+    if (summary.kind === "planned_item" && detail.planned_item && ["queued", "failed"].includes(defaultString(detail.planned_item.state, ""))) {
+      actionButtons.push(`<button class="tx-btn tx-btn-primary" type="button" data-task-action="run-now" data-task-id="${escapeHTML(summary.id)}">Run Now</button>`);
+      actionButtons.push(`<button class="tx-btn tx-btn-secondary" type="button" data-task-action="dismiss" data-task-id="${escapeHTML(summary.id)}">Dismiss</button>`);
+    }
+    if (summary.kind === "work_item" && detail.work_item && detail.work_item.item) {
+      actionButtons.push(`<button class="tx-btn tx-btn-secondary" type="button" data-work-item-show="${escapeHTML(detail.work_item.item.id)}">Open Draft</button>`);
+    }
+    if (summary.kind === "scout_job" && detail.scout_job) {
+      if (detail.scout_job.status === "failed" || detail.scout_job.status === "dismissed") {
+        actionButtons.push(`<button class="tx-btn tx-btn-secondary" type="button" data-task-action="retry" data-task-id="${escapeHTML(summary.id)}">Retry</button>`);
+      }
+      if (detail.scout_job.status === "queued" || detail.scout_job.status === "failed") {
+        actionButtons.push(`<button class="tx-btn tx-btn-secondary" type="button" data-task-action="dismiss" data-task-id="${escapeHTML(summary.id)}">Dismiss</button>`);
+      }
+    }
+    host.innerHTML = `
+      <div class="drawer-summary">
+        <div>
+          <span class="drawer-label">${escapeHTML(defaultString(summary.kind, "task").replace(/_/g, " "))}</span>
+          <span class="drawer-value">${escapeHTML(defaultString(summary.title, summary.id))}</span>
+          <p class="drawer-copy">${escapeHTML(defaultString(summary.repo_slug, "Workspace"))}</p>
+        </div>
+        <div class="drawer-summary-grid">
+          <div class="drawer-summary-card">
+            <span class="drawer-label">Status</span>
+            <span class="drawer-value">${renderStatePill(taskStatusTone(summary.status), taskStatusLabel(defaultString(summary.status, "queued")))}</span>
+          </div>
+          <div class="drawer-summary-card">
+            <span class="drawer-label">Priority</span>
+            <span class="drawer-value">${escapeHTML(defaultString(summary.priority_label, "P3"))}</span>
+          </div>
+          <div class="drawer-summary-card">
+            <span class="drawer-label">Updated</span>
+            <span class="drawer-value">${escapeHTML(formatDateTime(summary.updated_at))}</span>
+          </div>
+          <div class="drawer-summary-card">
+            <span class="drawer-label">Scheduled</span>
+            <span class="drawer-value">${escapeHTML(defaultString(summary.schedule_at ? formatDateTime(summary.schedule_at) : "", "Now"))}</span>
+          </div>
+        </div>
+      </div>
+      ${actionButtons.length ? `<div class="drawer-toolbar">${actionButtons.join("")}</div>` : ""}
+      <div class="surface">
+        <div class="surface-head">
+          <div>
+            <h3>Task Detail</h3>
+            <p>${escapeHTML(defaultString(summary.summary, summary.description || "No task summary recorded."))}</p>
+          </div>
+        </div>
+        ${taskDetailSourceMarkup(detail)}
+      </div>
+    `;
+  }
+
+  function initTaskDetailModal() {
+    if (state.taskDetailModal) return;
+    state.taskDetailModal = Teryx.modal({
+      title: "Task Detail",
+      size: "xl",
+      maximizable: true,
+      width: "min(1120px, 92vw)",
+      content: '<div id="task-detail-modal-content" class="drawer-shell"></div>',
+      onClose() {
+        state.investigations.selectedRunID = "";
+        state.investigations.detail = null;
+        renderInvestigationsPage();
+        renderTaskDetailModal();
+      },
+    });
+  }
+
+  function openTaskDetailModal(taskID) {
+    initTaskDetailModal();
+    state.investigations.selectedRunID = taskID;
+    state.investigations.detail = null;
+    state.investigations.detailLoading = true;
+    renderInvestigationsPage();
+    renderTaskDetailModal();
+    state.taskDetailModal.open();
+    loadInvestigationDetail(taskID, { silent: true });
+  }
+
   function renderInvestigationsPage() {
     const items = filteredInvestigations();
-    const detail = state.investigations.detail;
-    const scopedRepo = selectedTaskScopeRepoSummary();
     const composerRepo = selectedTaskComposerRepoSummary();
-    ensureTaskFindingsState(scopedRepo);
-    ensureFindingImportsState(scopedRepo);
-    if (scopedRepo && (!state.taskFindings.loaded || state.taskFindings.repoSlug !== scopedRepo.repo_slug) && !state.taskFindings.loading) {
-      loadTaskFindings(scopedRepo.repo_slug, { silent: true });
-    }
-    if (scopedRepo && (!state.findingImports.loaded || state.findingImports.repoSlug !== scopedRepo.repo_slug) && !state.findingImports.loading) {
-      loadFindingImports(scopedRepo.repo_slug, { silent: true });
-    }
-    const supportsSessionLimit = repoScoutMeta(state.taskComposer.scoutRole, composerRepo).supportsSessionLimit;
-    const scheduledRows = taskScheduledRows(scopedRepo);
-    ensureBodyStructure(`investigations:${defaultString(state.selectedRepo, "all")}`, `
-      <section class="layout-two-col">
-        <div class="surface">
-          <div class="surface-head">
-            <div>
-              <h3>Schedule Task</h3>
-              <p>Queue an investigation, coding task, or manual scout from one intake surface.</p>
-            </div>
-          </div>
-          <div class="config-grid">
-            ${state.selectedRepo ? `
-              <div class="config-field">
-                <span class="config-label">Repo</span>
-                <div class="scope-chip">${escapeHTML(state.selectedRepo)}</div>
-              </div>
-            ` : `
-              <label class="config-field">
-                <span class="config-label">Repo</span>
-                <select id="task-composer-repo">
-                  ${sortedRepos().map((entry) => `<option value="${escapeHTML(entry.repo_slug)}" ${state.taskComposer.repoSlug === entry.repo_slug ? "selected" : ""}>${escapeHTML(entry.repo_slug)}</option>`).join("")}
-                </select>
-              </label>
-            `}
-            <label class="config-field">
-              <span class="config-label">Task Type</span>
-              <select id="task-composer-kind">
-                <option value="investigation" ${state.taskComposer.kind === "investigation" ? "selected" : ""}>Investigation</option>
-                <option value="coding" ${state.taskComposer.kind === "coding" ? "selected" : ""}>Coding</option>
-                <option value="manual_scout" ${state.taskComposer.kind === "manual_scout" ? "selected" : ""}>Manual Scout</option>
-              </select>
-            </label>
-            <label class="config-field">
-              <span class="config-label">Schedule</span>
-              <input id="task-composer-schedule" type="datetime-local" value="${escapeHTML(state.taskComposer.scheduleAt)}" />
-            </label>
-            <label class="config-field config-field-wide">
-              <span class="config-label">Task Title</span>
-              <input id="task-composer-title" type="text" value="${escapeHTML(state.taskComposer.title)}" placeholder="${state.taskComposer.kind === "coding" ? "Implement approval retry copy cleanup" : state.taskComposer.kind === "manual_scout" ? "Run a focused UI scout review" : "Label this investigation task"}" />
-            </label>
-            <label class="config-field config-field-wide">
-              <span class="config-label">Description</span>
-              <textarea id="task-composer-description" rows="3" placeholder="${state.taskComposer.kind === "coding" ? "Describe the work Nana should execute." : state.taskComposer.kind === "manual_scout" ? "Optional notes for why this scout run matters." : "Optional context that should stay attached to the scheduled task."}">${escapeHTML(state.taskComposer.description)}</textarea>
-            </label>
-            <label class="config-field">
-              <span class="config-label">Findings Handling</span>
-              <select id="task-findings-handling">
-                <option value="review" ${state.taskComposer.scoutDestination === "review" ? "selected" : ""}>Manual Review</option>
-                <option value="local" ${state.taskComposer.scoutDestination === "local" ? "selected" : ""}>Auto Promote</option>
-              </select>
-            </label>
-            ${state.taskComposer.kind === "investigation" ? `
-              <label class="config-field config-field-wide">
-                <span class="config-label">Investigation Query</span>
-                <textarea id="task-investigation-query" rows="4" placeholder="Investigate why approval retry timing drifts between the queue and the drawer.">${escapeHTML(state.taskComposer.investigationQuery)}</textarea>
-              </label>
-            ` : ""}
-            ${state.taskComposer.kind === "coding" ? `
-              <label class="config-field">
-                <span class="config-label">Work Type</span>
-                <select id="task-coding-work-type">
-                  ${["bug_fix", "refactor", "feature", "test_only"].map((value) => `<option value="${escapeHTML(value)}" ${state.taskComposer.codingWorkType === value ? "selected" : ""}>${escapeHTML(workTypeLabel(value))}</option>`).join("")}
-                </select>
-              </label>
-              <label class="config-field">
-                <span class="config-label">Priority</span>
-                <select id="task-coding-priority">
-                  ${[0, 1, 2, 3, 4, 5].map((priority) => `<option value="${priority}" ${String(state.taskComposer.codingPriority) === String(priority) ? "selected" : ""}>P${priority}</option>`).join("")}
-                </select>
-              </label>
-            ` : ""}
-            ${state.taskComposer.kind === "manual_scout" ? `
-              <label class="config-field">
-                <span class="config-label">Scout Role</span>
-                <select id="task-scout-role">
-                  ${repoScoutCatalog(composerRepo).map((entry) => `<option value="${escapeHTML(entry.role)}" ${state.taskComposer.scoutRole === entry.role ? "selected" : ""}>${escapeHTML(entry.display_label)}</option>`).join("")}
-                </select>
-              </label>
-              ${supportsSessionLimit ? `
-                <label class="config-field">
-                  <span class="config-label">Session Limit</span>
-                  <input id="task-scout-session-limit" type="number" min="1" max="6" value="${escapeHTML(state.taskComposer.scoutSessionLimit)}" />
-                </label>
-              ` : ""}
-              <label class="config-field config-field-wide">
-                <span class="config-label">Focus</span>
-                <input id="task-scout-focus" type="text" value="${escapeHTML(state.taskComposer.scoutFocus)}" placeholder="approvals, retry flow, queue wording" />
-              </label>
-            ` : ""}
-          </div>
-          <div class="config-actions">
-            <button id="task-schedule-button" class="tx-btn tx-btn-primary" type="button" ${state.taskComposer.creating || !composerRepo ? "disabled" : ""}>${state.taskComposer.creating ? "Scheduling..." : "Schedule Task"}</button>
-          </div>
-        </div>
-        <div class="surface">
-          <div class="surface-head">
-            <div>
-              <h3>Scheduled Tasks</h3>
-              <p>${scopedRepo ? `Queued task launches for ${escapeHTML(scopedRepo.repo_slug)}.` : "Select a repo from the header picker to inspect scheduled tasks."}</p>
-            </div>
-          </div>
-          <div id="task-planned-grid"></div>
-        </div>
+    const selectedTemplate = selectedTaskTemplate();
+    ensureBodyStructure(`investigations:${defaultString(state.selectedRepo, "all")}:${sortedRepos().length}`, `
+      <section class="layout-two-col task-shell">
+        <div id="task-schedule-surface" class="surface"></div>
+        <div id="task-presets-surface" class="surface"></div>
       </section>
-      <section class="layout-two-col">
-        <div class="surface">
-          <div class="surface-head">
-            <div>
-              <h3>Investigation Runs</h3>
-              <p>Accepted, running, paused, and failed investigation runs.</p>
-            </div>
-          </div>
-          ${buildFilterToolbar("investigations", { placeholder: "Search query, repo, summary, or run id" })}
-          <div id="investigations-grid"></div>
-        </div>
-        <div class="surface detail-surface">
-          <div class="surface-head">
-            <div>
-              <h3>Investigation Detail</h3>
-              <p>Proofs, validator output, and stored artifacts.</p>
-            </div>
-          </div>
-          <div id="investigation-detail"></div>
-        </div>
-      </section>
-      <section class="layout-two-col">
-        <div class="surface">
-          <div class="surface-head">
-            <div>
-              <h3>Findings Inbox</h3>
-              <p>${scopedRepo ? `Persisted findings for ${escapeHTML(scopedRepo.repo_slug)} with source lineage and promotion controls.` : "Select a repo from the header picker to inspect findings."}</p>
-            </div>
-            <div class="config-actions">
-              <input id="task-findings-import-file" type="file" accept=".md,text/markdown" ${scopedRepo ? "" : "disabled"} />
-              <button id="task-findings-import-button" class="tx-btn tx-btn-secondary tx-btn-sm" type="button" ${scopedRepo && !state.findingImports.importing ? "" : "disabled"}>${state.findingImports.importing ? "Importing..." : "Import Findings from Markdown"}</button>
-            </div>
-          </div>
-          <div id="task-findings-grid"></div>
-        </div>
-        <div class="surface detail-surface">
-          <div class="surface-head">
-            <div>
-              <h3>Finding Detail</h3>
-              <p>Edit persisted findings, dismiss them, or promote them into planned work.</p>
-            </div>
-          </div>
-          <div id="task-finding-detail"></div>
-        </div>
-      </section>
-      <section class="layout-two-col">
-        <div class="surface">
-          <div class="surface-head">
-            <div>
-              <h3>Import Sessions</h3>
-              <p>${scopedRepo ? `Markdown imports and candidate findings for ${escapeHTML(scopedRepo.repo_slug)}.` : "Select a repo from the header picker to inspect import sessions."}</p>
-            </div>
-          </div>
-          <div id="task-import-sessions-grid"></div>
-          <div id="task-import-candidates-grid"></div>
-        </div>
-        <div class="surface detail-surface">
-          <div class="surface-head">
-            <div>
-              <h3>Candidate Detail</h3>
-              <p>Review, edit, drop, or promote markdown-derived candidates.</p>
-            </div>
-          </div>
-          <div id="task-import-detail"></div>
-        </div>
-      </section>
+      <section id="task-center-surface" class="surface"></section>
     `);
-    renderGrid("task-planned-grid", [
-      { field: "launch_kind", label: "Type" },
-      { field: "title", label: "Title" },
-      { field: "state", label: "Status", render: (row) => renderStatePill(row.state === "failed" ? "blocked" : row.state, row.state) },
-      { field: "schedule_at", label: "Scheduled" },
-      { field: "updated_at", label: "Updated" },
-      {
-        field: "id",
-        label: "Actions",
-        action: true,
-        render(row) {
-          const actions = [];
-          if (row.can_launch) {
-            actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-task-planned-launch="${escapeHTML(row.id)}">Launch Now</button>`);
-          }
-          if (row.can_remove) {
-            actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-task-planned-remove="${escapeHTML(row.id)}">Remove</button>`);
-          }
-          return actions.length ? `<div class="scout-actions">${actions.join("")}</div>` : '<span class="data-value-text">No actions</span>';
-        },
-      },
-    ], scheduledRows, {
-      maxHeight: "340px",
-      emptyMessage: scopedRepo ? "No scheduled tasks are queued for this repo." : "Select a repo from the header picker to inspect scheduled tasks.",
-    });
-    renderGrid("investigations-grid", [
-      { field: "repo_slug", label: "Repo", render: (row) => `<span class="data-value-text">${escapeHTML(defaultString(row.repo_slug, "Workspace"))}</span>` },
-      { field: "status", label: "Run", render: (row) => renderStatePillWithPause(row.attention_state, row.status, row.pause_until, row.pause_reason) },
-      { field: "overall_status", label: "Result" },
-      { field: "query", label: "Query" },
-      { field: "updated_at", label: "Updated", render: (row) => `<span class="data-value-text">${escapeHTML(formatDateTime(row.updated_at))}</span>` },
-    ], items, {
-      maxHeight: "520px",
-      emptyMessage: state.investigations.loading ? "Loading investigations..." : defaultString(state.investigations.error, "No investigations are available."),
-      rowSelect(row) {
-        return {
-          kind: "investigation",
-          value: row.run_id,
-          selected: detail && detail.summary ? detail.summary.run_id === row.run_id : false,
-        };
-      },
-    });
-    renderTaskInvestigationDetail(detail);
-    renderGrid("task-findings-grid", [
-      { field: "title", label: "Title" },
-      { field: "source", label: "Source" },
-      { field: "parent_task", label: "Parent Task" },
-      { field: "status", label: "Status", render: (row) => renderStatePill(row.status_key, row.status) },
-      { field: "severity", label: "Severity" },
-      { field: "work_type", label: "Work Type" },
-      { field: "promoted_task", label: "Planned Task" },
-      { field: "updated_at", label: "Updated" },
-    ], taskFindingRows(state.taskFindings.items), {
-      maxHeight: "420px",
-      emptyMessage: scopedRepo
-        ? (state.taskFindings.loading ? "Loading findings..." : defaultString(state.taskFindings.error, "No findings are available for this repo."))
-        : "Select a repo from the header picker to inspect findings.",
-      rowSelect(row) {
-        return {
-          kind: "finding",
-          value: row.id,
-          selected: selectedTaskFinding() ? selectedTaskFinding().id === row.id : false,
-        };
-      },
-    });
-    renderTaskFindingDetail(scopedRepo, selectedTaskFinding());
-    renderGrid("task-import-sessions-grid", [
-      { field: "id", label: "Session" },
-      { field: "file_path", label: "Source File" },
-      { field: "parse_status", label: "Parse" },
-      { field: "candidate_count", label: "Candidates" },
-      { field: "updated_at", label: "Updated" },
-    ], findingImportSessionRows(state.findingImports.items), {
-      maxHeight: "220px",
-      emptyMessage: scopedRepo
-        ? (state.findingImports.loading ? "Loading import sessions..." : defaultString(state.findingImports.error, "No import sessions exist for this repo."))
-        : "Select a repo from the header picker to inspect import sessions.",
-      rowSelect(row) {
-        return {
-          kind: "import-session",
-          value: row.id,
-          selected: selectedFindingImportSession() ? selectedFindingImportSession().id === row.id : false,
-        };
-      },
-    });
-    renderGrid("task-import-candidates-grid", [
-      { field: "candidate_id", label: "Candidate" },
-      { field: "title", label: "Title" },
-      { field: "status", label: "Status" },
-      { field: "severity", label: "Severity" },
-      { field: "work_type", label: "Work Type" },
-    ], findingImportCandidateRows(selectedFindingImportSession()), {
-      maxHeight: "220px",
-      emptyMessage: "No candidates are available for the selected import session.",
-      rowSelect(row) {
-        return {
-          kind: "import-candidate",
-          value: row.candidate_id,
-          selected: selectedFindingImportCandidate() ? selectedFindingImportCandidate().candidate_id === row.candidate_id : false,
-        };
-      },
-    });
-    renderFindingImportDetail(scopedRepo, selectedFindingImportSession(), selectedFindingImportCandidate());
+    const scheduleHost = document.getElementById("task-schedule-surface");
+    if (scheduleHost) {
+      scheduleHost.innerHTML = `
+        <div class="surface-head">
+          <div>
+            <h3>Schedule Task</h3>
+            <p>Create a task from one description. Nana infers the title and task kind for you.</p>
+          </div>
+        </div>
+        <div class="config-grid">
+          ${state.selectedRepo ? `
+            <div class="config-field">
+              <span class="config-label">Repo</span>
+              <div class="scope-chip">${escapeHTML(state.selectedRepo)}</div>
+            </div>
+          ` : `
+            <label class="config-field">
+              <span class="config-label">Repo</span>
+              <select id="task-composer-repo">
+                ${sortedRepos().map((entry) => `<option value="${escapeHTML(entry.repo_slug)}" ${state.taskComposer.repoSlug === entry.repo_slug ? "selected" : ""}>${escapeHTML(entry.repo_slug)}</option>`).join("")}
+              </select>
+            </label>
+          `}
+          <label class="config-field">
+            <span class="config-label">Run At</span>
+            <input id="task-composer-schedule" type="datetime-local" value="${escapeHTML(state.taskComposer.scheduleAt)}" />
+          </label>
+          <label class="config-field">
+            <span class="config-label">Priority</span>
+            <select id="task-composer-priority">
+              ${[0, 1, 2, 3, 4, 5].map((priority) => `<option value="${priority}" ${String(state.taskComposer.priority) === String(priority) ? "selected" : ""}>${escapeHTML(`P${priority}`)}</option>`).join("")}
+            </select>
+          </label>
+          <label class="config-field config-field-wide">
+            <span class="config-label">Description</span>
+            <textarea id="task-composer-description" rows="5" placeholder="Describe the work Nana should do. Example: investigate why paused runs stay in the approvals queue and then patch the UI copy if needed.">${escapeHTML(state.taskComposer.description)}</textarea>
+          </label>
+        </div>
+        <div class="config-actions">
+          <button id="task-schedule-button" class="tx-btn tx-btn-primary" type="button" ${state.taskComposer.creating || !composerRepo ? "disabled" : ""}>${state.taskComposer.creating ? "Scheduling..." : "Schedule Task"}</button>
+          <button id="task-save-template-button" class="tx-btn tx-btn-secondary" type="button" ${state.taskComposer.savingTemplate || !composerRepo ? "disabled" : ""}>${state.taskComposer.savingTemplate ? "Saving..." : "Save As Preset"}</button>
+        </div>
+      `;
+    }
+    const presetsHost = document.getElementById("task-presets-surface");
+    if (presetsHost) {
+      presetsHost.innerHTML = `
+        <div class="surface-head">
+          <div>
+            <h3>Presets</h3>
+            <p>Use a starter when you want to bias Nana toward a specific task family.</p>
+          </div>
+        </div>
+        <div class="task-template-list">
+          ${(state.investigations.templates || []).map((template) => `
+            <button class="task-template-card ${selectedTemplate && selectedTemplate.id === template.id ? "task-template-card-selected" : ""}" type="button" data-task-template="${escapeHTML(template.id)}">
+              <div class="task-template-head">
+                <strong>${escapeHTML(template.name)}</strong>
+                ${template.built_in ? '<span class="task-card-tag">built-in</span>' : '<span class="task-card-tag">saved</span>'}
+              </div>
+              <p>${escapeHTML(defaultString(template.description, "Use this preset as a starting point."))}</p>
+            </button>
+          `).join("") || '<div class="task-empty">No presets are available yet.</div>'}
+        </div>
+      `;
+    }
+    const taskCenterHost = document.getElementById("task-center-surface");
+    if (taskCenterHost) {
+      taskCenterHost.innerHTML = `
+        <div class="surface-head">
+          <div>
+            <h3>Task Center</h3>
+            <p>Everything Nana is tracking or actively executing, grouped by current state.</p>
+          </div>
+        </div>
+        <div class="task-summary-grid">${taskSummaryCards(items)}</div>
+        ${buildFilterToolbar("investigations", { placeholder: "Search task title, summary, repo, kind, URL, or run id" })}
+        <div class="task-board">${renderTaskColumns(items)}</div>
+      `;
+    }
   }
 
   function renderWorkPage() {
@@ -6502,6 +6642,120 @@
     renderRepoSchedulerDetail(repo);
   }
 
+  function renderRepoFindingsPage(repo) {
+    ensureTaskFindingsState(repo);
+    ensureFindingImportsState(repo);
+    if (repo && (!state.taskFindings.loaded || state.taskFindings.repoSlug !== repo.repo_slug || !state.taskFindings.items.length) && !state.taskFindings.loading) {
+      loadTaskFindings(repo.repo_slug, { silent: true });
+    }
+    if (repo && (!state.findingImports.loaded || state.findingImports.repoSlug !== repo.repo_slug || !state.findingImports.items.length) && !state.findingImports.loading) {
+      loadFindingImports(repo.repo_slug, { silent: true });
+    }
+    ensureBodyStructure(`repo:${repo.repo_slug}:findings`, `
+      <section class="layout-two-col">
+        <div class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Findings Inbox</h3>
+              <p>Persisted findings for ${escapeHTML(repo.repo_slug)} with lineage and promotion controls.</p>
+            </div>
+            <div class="config-actions">
+              <input id="task-findings-import-file" type="file" accept=".md,text/markdown" />
+              <button id="task-findings-import-button" class="tx-btn tx-btn-secondary tx-btn-sm" type="button" ${state.findingImports.importing ? "disabled" : ""}>${state.findingImports.importing ? "Importing..." : "Import Findings from Markdown"}</button>
+            </div>
+          </div>
+          <div id="task-findings-grid"></div>
+        </div>
+        <div class="surface detail-surface">
+          <div class="surface-head">
+            <div>
+              <h3>Finding Detail</h3>
+              <p>Edit persisted findings, dismiss them, or promote them into planned work.</p>
+            </div>
+          </div>
+          <div id="task-finding-detail"></div>
+        </div>
+      </section>
+      <section class="layout-two-col">
+        <div class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Import Sessions</h3>
+              <p>Markdown imports and candidate findings for ${escapeHTML(repo.repo_slug)}.</p>
+            </div>
+          </div>
+          <div id="task-import-sessions-grid"></div>
+          <div id="task-import-candidates-grid"></div>
+        </div>
+        <div class="surface detail-surface">
+          <div class="surface-head">
+            <div>
+              <h3>Candidate Detail</h3>
+              <p>Review, edit, drop, or promote markdown-derived candidates.</p>
+            </div>
+          </div>
+          <div id="task-import-detail"></div>
+        </div>
+      </section>
+    `);
+    renderGrid("task-findings-grid", [
+      { field: "title", label: "Title" },
+      { field: "source", label: "Source" },
+      { field: "parent_task", label: "Parent Task" },
+      { field: "status", label: "Status", render: (row) => renderStatePill(row.status_key, row.status) },
+      { field: "severity", label: "Severity" },
+      { field: "work_type", label: "Work Type" },
+      { field: "promoted_task", label: "Planned Task" },
+      { field: "updated_at", label: "Updated" },
+    ], taskFindingRows(state.taskFindings.items), {
+      maxHeight: "420px",
+      emptyMessage: state.taskFindings.loading ? "Loading findings..." : defaultString(state.taskFindings.error, "No findings are available for this repo."),
+      rowSelect(row) {
+        return {
+          kind: "finding",
+          value: row.id,
+          selected: selectedTaskFinding() ? selectedTaskFinding().id === row.id : false,
+        };
+      },
+    });
+    renderTaskFindingDetail(repo, selectedTaskFinding());
+    renderGrid("task-import-sessions-grid", [
+      { field: "id", label: "Session" },
+      { field: "file_path", label: "Source File" },
+      { field: "parse_status", label: "Parse" },
+      { field: "candidate_count", label: "Candidates" },
+      { field: "updated_at", label: "Updated" },
+    ], findingImportSessionRows(state.findingImports.items), {
+      maxHeight: "220px",
+      emptyMessage: state.findingImports.loading ? "Loading import sessions..." : defaultString(state.findingImports.error, "No import sessions exist for this repo."),
+      rowSelect(row) {
+        return {
+          kind: "import-session",
+          value: row.id,
+          selected: selectedFindingImportSession() ? selectedFindingImportSession().id === row.id : false,
+        };
+      },
+    });
+    renderGrid("task-import-candidates-grid", [
+      { field: "candidate_id", label: "Candidate" },
+      { field: "title", label: "Title" },
+      { field: "status", label: "Status" },
+      { field: "severity", label: "Severity" },
+      { field: "work_type", label: "Work Type" },
+    ], findingImportCandidateRows(selectedFindingImportSession()), {
+      maxHeight: "220px",
+      emptyMessage: "No candidates are available for the selected import session.",
+      rowSelect(row) {
+        return {
+          kind: "import-candidate",
+          value: row.candidate_id,
+          selected: selectedFindingImportCandidate() ? selectedFindingImportCandidate().candidate_id === row.candidate_id : false,
+        };
+      },
+    });
+    renderFindingImportDetail(repo, selectedFindingImportSession(), selectedFindingImportCandidate());
+  }
+
   function renderBody() {
     if (state.currentView === "home") {
       renderGlobalPage();
@@ -6549,6 +6803,10 @@
     }
     if (state.repoTab === "scouts") {
       renderRepoScoutsPage(repo);
+      return;
+    }
+    if (state.repoTab === "findings") {
+      renderRepoFindingsPage(repo);
       return;
     }
     if (state.repoTab === "config") {
@@ -7144,8 +7402,15 @@
       if (state.currentView !== "usage") {
         refreshCurrentView({ silent: true });
       }
+      if (state.currentView === "investigations") {
+        loadTaskTemplates({ silent: true });
+      }
       if (((state.currentView === "repo" && state.repoTab === "scouts") || state.currentView === "investigations") && state.selectedRepo) {
         loadScoutItems(state.selectedRepo, { silent: true });
+      }
+      if (state.currentView === "repo" && state.repoTab === "findings" && state.selectedRepo) {
+        loadTaskFindings(state.selectedRepo, { silent: true });
+        loadFindingImports(state.selectedRepo, { silent: true });
       }
       if (state.logSelection.runID) {
         loadRunDetail(state.logSelection.runID);
@@ -7444,13 +7709,14 @@
       const schedulerSaveButton = event.target.closest("[data-scheduler-save]");
       if (schedulerSaveButton) {
         const itemID = schedulerSaveButton.getAttribute("data-scheduler-save") || "";
+        const taskID = `planned-item:${itemID}`;
         const draftScope = repoSchedulerDetailDraftScope(selectedRepoSummary(), selectedTrackedIssuePlannedItem(selectedRepoSummary()));
         const titleInput = document.getElementById("repo-scheduler-detail-title");
         const priorityInput = document.getElementById("repo-scheduler-detail-priority");
         const workTypeInput = document.getElementById("repo-scheduler-detail-work-type");
         const scheduleInput = document.getElementById("repo-scheduler-detail-schedule");
         const descriptionInput = document.getElementById("repo-scheduler-detail-description");
-        api(`/api/v1/planned-items/${encodeURIComponent(itemID)}`, {
+        api(`/api/v1/tasks/${encodeURIComponent(taskID)}`, {
           method: "PATCH",
           body: JSON.stringify({
             title: titleInput ? String(titleInput.value || "").trim() : "",
@@ -7474,13 +7740,18 @@
       const schedulerDeleteButton = event.target.closest("[data-scheduler-delete]");
       if (schedulerDeleteButton) {
         const itemID = schedulerDeleteButton.getAttribute("data-scheduler-delete") || "";
+        const taskID = `planned-item:${itemID}`;
         clearDraftScope(repoSchedulerDetailDraftScope(selectedRepoSummary(), selectedTrackedIssuePlannedItem(selectedRepoSummary())));
-        api(`/api/v1/planned-items/${encodeURIComponent(itemID)}`, {
-          method: "DELETE",
+        api(`/api/v1/tasks/${encodeURIComponent(taskID)}/dismiss`, {
+          method: "POST",
         }).then((payload) => {
           state.repoScheduler.selectedPlannedItemID = "";
-          mergeRepoState(payload.state);
-          toast("success", "Scheduled issue removed", payload.removed_item.title);
+          if (payload.state) {
+            mergeRepoState(payload.state);
+          } else {
+            load();
+          }
+          toast("success", "Scheduled issue removed", defaultString(payload.removed_item && payload.removed_item.title, itemID));
         }).catch((error) => {
           toast("danger", "Remove failed", error.message);
         });
@@ -7490,12 +7761,17 @@
       const schedulerLaunchButton = event.target.closest("[data-scheduler-launch]");
       if (schedulerLaunchButton) {
         const itemID = schedulerLaunchButton.getAttribute("data-scheduler-launch") || "";
+        const taskID = `planned-item:${itemID}`;
         clearDraftScope(repoSchedulerDetailDraftScope(selectedRepoSummary(), selectedTrackedIssuePlannedItem(selectedRepoSummary())));
-        api(`/api/v1/planned-items/${encodeURIComponent(itemID)}/launch-now`, {
+        api(`/api/v1/tasks/${encodeURIComponent(taskID)}/run-now`, {
           method: "POST",
         }).then((payload) => {
-          mergeRepoState(payload.state);
-          toast("success", "Tracked issue launched", payload.launch.result || payload.planned_item.title);
+          if (payload.state) {
+            mergeRepoState(payload.state);
+          } else {
+            load();
+          }
+          toast("success", "Tracked issue launched", payload.launch && payload.launch.result || payload.planned_item && payload.planned_item.title || itemID);
         }).catch((error) => {
           toast("danger", "Launch failed", error.message);
         });
@@ -7595,93 +7871,126 @@
         return;
       }
 
+      const taskTemplateButton = event.target.closest("[data-task-template]");
+      if (taskTemplateButton) {
+        const templateID = taskTemplateButton.getAttribute("data-task-template") || "template:custom";
+        const template = (state.investigations.templates || []).find((item) => item.id === templateID);
+        state.taskComposer.templateID = templateID;
+        if (template && !String(state.taskComposer.description || "").trim()) {
+          state.taskComposer.description = String(template.description || "");
+        }
+        renderInvestigationsPage();
+        return;
+      }
+
+      const taskOpenButton = event.target.closest("[data-task-open]");
+      if (taskOpenButton) {
+        const taskID = taskOpenButton.getAttribute("data-task-open") || "";
+        if (taskID) {
+          openTaskDetailModal(taskID);
+        }
+        return;
+      }
+
+      const taskOpenJobButton = event.target.closest("[data-task-open-job]");
+      if (taskOpenJobButton) {
+        const runID = taskOpenJobButton.getAttribute("data-task-open-job") || "";
+        if (runID) {
+          openLogDrawer(runID);
+        }
+        return;
+      }
+
+      const taskActionButton = event.target.closest("[data-task-action]");
+      if (taskActionButton) {
+        const taskID = taskActionButton.getAttribute("data-task-id") || "";
+        const action = taskActionButton.getAttribute("data-task-action") || "";
+        if (!taskID || !action) return;
+        api(`/api/v1/tasks/${encodeURIComponent(taskID)}/${encodeURIComponent(action)}`, {
+          method: "POST",
+        }).then(() => {
+          load();
+          loadApprovals({ silent: true });
+          loadInvestigations({ silent: true });
+          if (state.taskDetailModal && state.taskDetailModal.isOpen()) {
+            state.taskDetailModal.close();
+          }
+          toast("success", "Task updated", taskID);
+        }).catch((error) => {
+          toast("danger", "Task action failed", error.message);
+        });
+        return;
+      }
+
       if (event.target.id === "task-schedule-button") {
         const repo = selectedTaskComposerRepoSummary();
         if (!repo) {
           toast("warning", "No repo selected", "Pick a repo before scheduling a task.");
           return;
         }
-        const kind = state.taskComposer.kind;
-        const scheduleAt = fromDateTimeLocal(state.taskComposer.scheduleAt);
-        const findingsHandling = String(state.taskComposer.scoutDestination || "review").trim() === "local" ? "auto_promote" : "manual_review";
-        let payload = null;
-        if (kind === "investigation") {
-          const query = String(state.taskComposer.investigationQuery || "").trim();
-          if (!query) {
-            toast("warning", "Missing query", "Enter the investigation query first.");
-            return;
-          }
-          payload = {
-            title: String(state.taskComposer.title || "").trim() || `Investigate: ${query.slice(0, 80)}`,
-            description: String(state.taskComposer.description || "").trim(),
-            schedule_at: scheduleAt,
-            launch_kind: "investigation",
-            findings_handling: findingsHandling,
-            investigation_query: query,
-          };
-        } else if (kind === "coding") {
-          const title = String(state.taskComposer.title || "").trim();
-          if (!title) {
-            toast("warning", "Missing title", "Name the coding task before scheduling it.");
-            return;
-          }
-          payload = {
-            title,
-            description: String(state.taskComposer.description || "").trim(),
-            work_type: String(state.taskComposer.codingWorkType || "feature").trim(),
-            priority: Number.parseInt(String(state.taskComposer.codingPriority || "3"), 10),
-            schedule_at: scheduleAt,
-            launch_kind: "local_work",
-            findings_handling: findingsHandling,
-          };
-        } else {
-          const role = String(state.taskComposer.scoutRole || "").trim();
-          const focus = String(state.taskComposer.scoutFocus || "")
-            .split(/[\n,]/)
-            .map((value) => value.trim())
-            .filter(Boolean);
-          payload = {
-            title: String(state.taskComposer.title || "").trim() || `Run ${scoutRoleLabel(role)}`,
-            description: String(state.taskComposer.description || "").trim(),
-            schedule_at: scheduleAt,
-            launch_kind: "manual_scout",
-            findings_handling: findingsHandling,
-            scout_role: role,
-            scout_destination: String(state.taskComposer.scoutDestination || "review").trim(),
-            scout_focus: focus,
-          };
-          const sessionLimitInput = document.getElementById("task-scout-session-limit");
-          if (sessionLimitInput) {
-            payload.scout_session_limit = Number.parseInt(String(sessionLimitInput.value || "0"), 10) || 0;
-          }
+        const description = String(state.taskComposer.description || "").trim();
+        if (!description) {
+          toast("warning", "Missing description", "Describe the task first.");
+          return;
         }
+        const priority = Number.parseInt(String(state.taskComposer.priority || "3"), 10);
+        const scheduleAt = fromDateTimeLocal(state.taskComposer.scheduleAt);
         state.taskComposer.creating = true;
         renderInvestigationsPage();
-        api(`/api/v1/repos/${repo.repo_slug}/planned-items`, {
+        api("/api/v1/tasks", {
           method: "POST",
-          body: JSON.stringify(payload),
+          body: JSON.stringify({
+            repo_slug: repo.repo_slug,
+            description,
+            schedule_at: scheduleAt,
+            priority,
+            template_id: defaultString(state.taskComposer.templateID, "template:custom"),
+          }),
         }).then((response) => {
           state.taskComposer.creating = false;
-          state.taskComposer.title = "";
           state.taskComposer.description = "";
           state.taskComposer.scheduleAt = "";
-          if (kind === "investigation") {
-            state.taskComposer.investigationQuery = "";
-          }
-          if (kind === "manual_scout") {
-            state.taskComposer.scoutFocus = "";
-          }
+          state.taskComposer.priority = "3";
           if (response.state) {
             mergeRepoState(response.state);
           } else {
             load();
           }
           loadApprovals({ silent: true });
-          toast("success", "Task scheduled", response.planned_item && response.planned_item.title || payload.title);
+          loadInvestigations({ silent: true });
+          toast("success", "Task scheduled", response.planned_item && response.planned_item.title || description);
         }).catch((error) => {
           state.taskComposer.creating = false;
           renderInvestigationsPage();
           toast("danger", "Task scheduling failed", error.message);
+        });
+        return;
+      }
+
+      if (event.target.id === "task-save-template-button") {
+        const repo = selectedTaskComposerRepoSummary();
+        const description = String(state.taskComposer.description || "").trim();
+        if (!repo || !description) {
+          toast("warning", "Missing preset description", "Write the preset description first.");
+          return;
+        }
+        state.taskComposer.savingTemplate = true;
+        renderInvestigationsPage();
+        api("/api/v1/tasks/templates", {
+          method: "POST",
+          body: JSON.stringify({
+            repo_slug: repo.repo_slug,
+            description,
+            base_template_id: defaultString(state.taskComposer.templateID, "template:custom"),
+          }),
+        }).then((payload) => {
+          state.taskComposer.savingTemplate = false;
+          toast("success", "Preset saved", payload.template && payload.template.name || "Custom preset");
+          loadTaskTemplates({ silent: true });
+        }).catch((error) => {
+          state.taskComposer.savingTemplate = false;
+          renderInvestigationsPage();
+          toast("danger", "Preset save failed", error.message);
         });
         return;
       }
@@ -7697,6 +8006,10 @@
             mergeRepoState(payload.state);
           }
           loadApprovals({ silent: true });
+          loadInvestigations({ silent: true });
+          if (state.taskDetailModal && state.taskDetailModal.isOpen()) {
+            state.taskDetailModal.close();
+          }
           toast("success", "Task launched", payload.launch.result || defaultString(payload.planned_item && payload.planned_item.title, itemID));
         }).catch((error) => {
           toast("danger", "Launch failed", error.message);
@@ -7715,9 +8028,47 @@
             mergeRepoState(payload.state);
           }
           loadApprovals({ silent: true });
+          loadInvestigations({ silent: true });
+          if (state.taskDetailModal && state.taskDetailModal.isOpen()) {
+            state.taskDetailModal.close();
+          }
           toast("success", "Task removed", defaultString(payload.removed_item && payload.removed_item.title, itemID));
         }).catch((error) => {
           toast("danger", "Remove failed", error.message);
+        });
+        return;
+      }
+
+      const taskScoutRetryButton = event.target.closest("[data-task-scout-retry]");
+      if (taskScoutRetryButton) {
+        const jobID = taskScoutRetryButton.getAttribute("data-task-scout-retry") || "";
+        const detail = state.investigations.detail;
+        if (!jobID || !(detail && detail.summary && detail.summary.repo_slug)) return;
+        api(`/api/v1/repos/${detail.summary.repo_slug}/scout-items/${encodeURIComponent(jobID)}/retry`, {
+          method: "POST",
+        }).then(() => {
+          load();
+          loadInvestigations({ silent: true });
+          toast("success", "Scout task retried", jobID);
+        }).catch((error) => {
+          toast("danger", "Scout retry failed", error.message);
+        });
+        return;
+      }
+
+      const taskScoutDismissButton = event.target.closest("[data-task-scout-dismiss]");
+      if (taskScoutDismissButton) {
+        const jobID = taskScoutDismissButton.getAttribute("data-task-scout-dismiss") || "";
+        const detail = state.investigations.detail;
+        if (!jobID || !(detail && detail.summary && detail.summary.repo_slug)) return;
+        api(`/api/v1/repos/${detail.summary.repo_slug}/scout-items/${encodeURIComponent(jobID)}/dismiss`, {
+          method: "POST",
+        }).then(() => {
+          load();
+          loadInvestigations({ silent: true });
+          toast("success", "Scout task dismissed", jobID);
+        }).catch((error) => {
+          toast("danger", "Scout dismiss failed", error.message);
         });
         return;
       }
@@ -7821,8 +8172,9 @@
         if (!repo || !session || !candidateID || !candidate) return;
         mutateFindingImportCandidate(repo.repo_slug, session.id, candidateID, "POST", "promote").then(() => {
           clearDraftScope(findingImportCandidateDraftScope(repo, session, candidate));
-          loadTaskFindings(repo.repo_slug, { silent: true });
-          toast("success", "Candidate promoted", candidateID);
+          return loadTaskFindings(repo.repo_slug, { silent: true }).then(() => {
+            toast("success", "Candidate promoted", candidateID);
+          });
         });
         return;
       }
@@ -8127,33 +8479,14 @@
         });
         state.taskComposer.repoSlug = nextRepoSlug;
         state.scoutItems = defaultScoutItemsState();
+        state.investigations.templatesLoaded = false;
+        state.investigations.templatesRepoSlug = "";
+        loadTaskTemplates({ silent: true });
         renderInvestigationsPage();
         return;
       }
-      if (event.target.id === "task-composer-kind") {
-        state.taskComposer.kind = String(event.target.value || "investigation");
-        renderInvestigationsPage();
-        return;
-      }
-      if (event.target.id === "task-coding-work-type") {
-        state.taskComposer.codingWorkType = String(event.target.value || "feature");
-        return;
-      }
-      if (event.target.id === "task-coding-priority") {
-        state.taskComposer.codingPriority = String(event.target.value || "3");
-        return;
-      }
-      if (event.target.id === "task-scout-role") {
-        state.taskComposer.scoutRole = String(event.target.value || "improvement-scout");
-        renderInvestigationsPage();
-        return;
-      }
-      if (event.target.id === "task-findings-handling") {
-        state.taskComposer.scoutDestination = String(event.target.value || "review");
-        return;
-      }
-      if (event.target.id === "task-scout-session-limit") {
-        state.taskComposer.scoutSessionLimit = String(event.target.value || "");
+      if (event.target.id === "task-composer-priority") {
+        state.taskComposer.priority = String(event.target.value || "3");
         return;
       }
       if (event.target.id === "issue-select") {
@@ -8238,10 +8571,6 @@
 
     document.getElementById("page-body").addEventListener("input", (event) => {
       captureDraftField(event.target);
-      if (event.target.id === "task-composer-title") {
-        state.taskComposer.title = String(event.target.value || "");
-        return;
-      }
       if (event.target.id === "task-composer-description") {
         state.taskComposer.description = String(event.target.value || "");
         return;

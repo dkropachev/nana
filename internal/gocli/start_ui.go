@@ -1052,6 +1052,9 @@ func (h *startUIAPI) routes() http.Handler {
 	mux.HandleFunc("/api/v1/usage", h.handleUsage)
 	mux.HandleFunc("/api/v1/attention", h.handleAttention)
 	mux.HandleFunc("/api/v1/issues", h.handleIssues)
+	mux.HandleFunc("/api/v1/tasks", h.handleTasks)
+	mux.HandleFunc("/api/v1/tasks/templates", h.handleTaskTemplates)
+	mux.HandleFunc("/api/v1/tasks/", h.handleTask)
 	mux.HandleFunc("/api/v1/investigations", h.handleInvestigations)
 	mux.HandleFunc("/api/v1/investigations/", h.handleInvestigation)
 	mux.HandleFunc("/api/v1/reviews", h.handleReviews)
@@ -4148,13 +4151,16 @@ func loadStartUIApprovals() ([]startUIApprovalQueueItem, error) {
 				AttentionState: "failed",
 			})
 		}
-		for _, item := range repo.State.PlannedItems {
-			if startWorkPlannedItemLooksScoutDerived(item) {
-				continue
-			}
-			if item.State != startPlannedItemQueued && item.State != startPlannedItemFailed {
-				continue
-			}
+			for _, item := range repo.State.PlannedItems {
+				if startWorkPlannedItemLooksScoutDerived(item) {
+					continue
+				}
+				if strings.TrimSpace(item.ScheduleAt) != "" {
+					continue
+				}
+				if item.State != startPlannedItemQueued && item.State != startPlannedItemFailed {
+					continue
+				}
 			reason := "launch requested from approvals"
 			if item.State == startPlannedItemFailed && strings.TrimSpace(item.LastError) != "" {
 				reason = item.LastError
@@ -6611,20 +6617,21 @@ func ensureStartUIStateUnlocked(repoSlug string) (*startWorkState, error) {
 		return nil, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	state = &startWorkState{
-		Version:        startWorkStateVersion,
-		SourceRepo:     repoSlug,
-		CreatedAt:      now,
-		UpdatedAt:      now,
-		Issues:         map[string]startWorkIssueState{},
-		ServiceTasks:   map[string]startWorkServiceTask{},
-		Promotions:     map[string]startWorkPromotion{},
-		PromotionSkips: map[string]startWorkPromotionSkip{},
-		PlannedItems:   map[string]startWorkPlannedItem{},
-		ScoutJobs:      map[string]startWorkScoutJob{},
-		Findings:       map[string]startWorkFinding{},
-		ImportSessions: map[string]startWorkFindingImportSession{},
-	}
+		state = &startWorkState{
+			Version:        startWorkStateVersion,
+			SourceRepo:     repoSlug,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+			Issues:         map[string]startWorkIssueState{},
+			ServiceTasks:   map[string]startWorkServiceTask{},
+			Promotions:     map[string]startWorkPromotion{},
+			PromotionSkips: map[string]startWorkPromotionSkip{},
+			PlannedItems:   map[string]startWorkPlannedItem{},
+			TaskTemplates:  map[string]startWorkTaskTemplate{},
+			ScoutJobs:      map[string]startWorkScoutJob{},
+			Findings:       map[string]startWorkFinding{},
+			ImportSessions: map[string]startWorkFindingImportSession{},
+		}
 	return state, nil
 }
 

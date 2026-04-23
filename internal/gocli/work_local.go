@@ -785,7 +785,10 @@ func (s *localWorkDBStore) writeManifest(manifest localWorkManifest) error {
 	if err := writeWorkRunIndexTx(tx, localWorkRunIndexEntry(manifest)); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return syncCanonicalLocalWorkRunTask(manifest)
 }
 
 func (s *localWorkDBStore) writeActiveState(manifest localWorkManifest, state *localWorkIterationRuntimeState) error {
@@ -865,7 +868,10 @@ func (s *localWorkDBStore) writeActiveState(manifest localWorkManifest, state *l
 	if err := writeWorkRunIndexTx(tx, localWorkRunIndexEntry(manifest)); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return syncCanonicalLocalWorkRunTask(manifest)
 }
 
 func (s *localWorkDBStore) readManifest(runID string) (localWorkManifest, error) {

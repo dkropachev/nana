@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const localWorkDBSchemaVersion = 2
+const localWorkDBSchemaVersion = 3
 
 type localWorkDBMigration struct {
 	From  int
@@ -24,6 +24,7 @@ type localWorkDBMigration struct {
 var localWorkDBMigrations = []localWorkDBMigration{
 	{From: 0, To: 1, Apply: migrateLegacyLocalWorkDB},
 	{From: 1, To: 2, Apply: migrateLocalWorkDBV2UsageSQLite},
+	{From: 2, To: 3, Apply: migrateLocalWorkDBV3TaskStore},
 }
 
 type localWorkDBDiagnostic struct {
@@ -439,6 +440,56 @@ func localWorkCurrentSchemaDDL() []string {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS tasks (
+			id TEXT PRIMARY KEY CHECK(length(trim(id)) > 0),
+			repo_slug TEXT,
+			kind TEXT NOT NULL CHECK(length(trim(kind)) > 0),
+			executor_kind TEXT NOT NULL CHECK(length(trim(executor_kind)) > 0),
+			queue_class TEXT NOT NULL CHECK(length(trim(queue_class)) > 0),
+			status TEXT NOT NULL CHECK(length(trim(status)) > 0),
+			raw_status TEXT,
+			priority INTEGER NOT NULL DEFAULT 3 CHECK(priority BETWEEN 0 AND 5),
+			scheduled_at TEXT,
+			title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+			summary TEXT,
+			description TEXT,
+			external_url TEXT,
+			work_type TEXT,
+			run_id TEXT,
+			item_id TEXT,
+			source_kind TEXT NOT NULL CHECK(length(trim(source_kind)) > 0),
+			source_ref TEXT NOT NULL CHECK(length(trim(source_ref)) > 0),
+			payload_json TEXT NOT NULL CHECK(length(trim(payload_json)) > 0),
+			created_at TEXT NOT NULL CHECK(length(trim(created_at)) > 0),
+			updated_at TEXT NOT NULL CHECK(length(trim(updated_at)) > 0)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_status_priority_updated ON tasks(status, priority, updated_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_repo_status_updated ON tasks(repo_slug, status, updated_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_source ON tasks(source_kind, source_ref);`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_run_id ON tasks(run_id);`,
+		`CREATE TABLE IF NOT EXISTS task_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id TEXT NOT NULL,
+			created_at TEXT NOT NULL CHECK(length(trim(created_at)) > 0),
+			event_type TEXT NOT NULL CHECK(length(trim(event_type)) > 0),
+			payload_json TEXT NOT NULL CHECK(length(trim(payload_json)) > 0),
+			FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_task_events_task_created ON task_events(task_id, created_at DESC, id DESC);`,
+		`CREATE TABLE IF NOT EXISTS task_templates (
+			id TEXT PRIMARY KEY CHECK(length(trim(id)) > 0),
+			repo_slug TEXT NOT NULL CHECK(length(trim(repo_slug)) > 0),
+			name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+			description TEXT,
+			launch_kind_hint TEXT,
+			scout_role_hint TEXT,
+			work_type_hint TEXT,
+			default_priority INTEGER NOT NULL DEFAULT 3 CHECK(default_priority BETWEEN 0 AND 5),
+			built_in INTEGER NOT NULL DEFAULT 0 CHECK(built_in IN (0, 1)),
+			created_at TEXT NOT NULL CHECK(length(trim(created_at)) > 0),
+			updated_at TEXT NOT NULL CHECK(length(trim(updated_at)) > 0)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_task_templates_repo_name ON task_templates(repo_slug, name);`,
 	}
 }
 
@@ -864,6 +915,26 @@ func migrateLocalWorkDBV2UsageSQLite(db *sql.DB) ([]string, error) {
 	return []string{fmt.Sprintf("migrated SQLite schema to version %d", localWorkDBSchemaVersion)}, nil
 }
 
+func migrateLocalWorkDBV3TaskStore(db *sql.DB) ([]string, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	for _, stmt := range localWorkCurrentSchemaDDL() {
+		if _, err := tx.Exec(stmt); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version=%d`, localWorkDBSchemaVersion)); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return []string{fmt.Sprintf("migrated SQLite schema to version %d", localWorkDBSchemaVersion)}, nil
+}
+
 func inspectLocalWorkDB() (localWorkDBCheckReport, error) {
 	report := localWorkDBCheckReport{
 		DatabasePath:         localWorkDBPath(),
@@ -1064,6 +1135,30 @@ func collectLocalWorkDBLogicalDiagnostics(db *sql.DB) ([]localWorkDBDiagnostic, 
 			code:  "invalid_work_item_required_text",
 			query: `SELECT COUNT(*) FROM work_items WHERE trim(id) = '' OR trim(dedupe_key) = '' OR trim(source) = '' OR trim(source_kind) = '' OR trim(external_id) = '' OR trim(subject) = '' OR trim(received_at) = '' OR trim(status) = '' OR trim(created_at) = '' OR trim(updated_at) = ''`,
 			label: "work item row(s) have empty required text fields",
+		},
+		{
+			table: "task_events",
+			code:  "orphan_task_events",
+			query: `SELECT COUNT(*) FROM task_events WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.id = task_events.task_id)`,
+			label: "task event row(s) reference missing tasks",
+		},
+		{
+			table: "tasks",
+			code:  "invalid_task_priority",
+			query: `SELECT COUNT(*) FROM tasks WHERE priority NOT BETWEEN 0 AND 5`,
+			label: "task row(s) have invalid priority values",
+		},
+		{
+			table: "tasks",
+			code:  "invalid_task_required_text",
+			query: `SELECT COUNT(*) FROM tasks WHERE trim(id) = '' OR trim(kind) = '' OR trim(executor_kind) = '' OR trim(queue_class) = '' OR trim(status) = '' OR trim(title) = '' OR trim(source_kind) = '' OR trim(source_ref) = '' OR trim(payload_json) = '' OR trim(created_at) = '' OR trim(updated_at) = ''`,
+			label: "task row(s) have empty required text fields",
+		},
+		{
+			table: "task_templates",
+			code:  "invalid_task_template_priority",
+			query: `SELECT COUNT(*) FROM task_templates WHERE default_priority NOT BETWEEN 0 AND 5`,
+			label: "task template row(s) have invalid priority values",
 		},
 	}
 	for _, check := range checks {
@@ -1476,7 +1571,7 @@ func inspectLocalWorkDBDetailed() (localWorkDBInspectReport, error) {
 		return report, nil
 	}
 
-	tableQueries := []string{"usage_sources", "usage_sessions", "usage_checkpoints", "work_run_index", "work_items"}
+	tableQueries := []string{"usage_sources", "usage_sessions", "usage_checkpoints", "work_run_index", "work_items", "tasks", "task_events", "task_templates"}
 	for _, table := range tableQueries {
 		var count int64
 		if err := store.db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM %s`, table)).Scan(&count); err != nil {
@@ -1500,6 +1595,12 @@ func inspectLocalWorkDBDetailed() (localWorkDBInspectReport, error) {
 		{Name: "idx_usage_sources_repo_root", Table: "usage_sources"},
 		{Name: "idx_usage_sessions_root_timestamp", Table: "usage_sessions"},
 		{Name: "idx_work_run_index_updated", Table: "work_run_index"},
+		{Name: "idx_tasks_status_priority_updated", Table: "tasks"},
+		{Name: "idx_tasks_repo_status_updated", Table: "tasks"},
+		{Name: "idx_tasks_source", Table: "tasks"},
+		{Name: "idx_tasks_run_id", Table: "tasks"},
+		{Name: "idx_task_events_task_created", Table: "task_events"},
+		{Name: "idx_task_templates_repo_name", Table: "task_templates"},
 	} {
 		var count int
 		if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, index.Name).Scan(&count); err != nil {

@@ -28,7 +28,7 @@ These files live under `~/.nana/work/` rather than the source repo:
 | --- | --- | --- |
 | `~/.nana/work/repos/<repo-id>/runs/<run-id>/manifest.json` | Local-work manifest JSON object. | Includes runtime fields such as `status`, `current_phase`, `work_type`, `iterations`, and optional `followup_decision` / `followup_rounds`. |
 | `~/.nana/work/repos/<owner>/<repo>/runs/<run-id>/manifest.json` | GitHub-work manifest JSON object. | Includes `target_url`, `target_kind`, `work_type`, completion summaries, and optional `followup_decision` / `followup_rounds`. |
-| `~/.nana/work/repos/<owner>/<repo>/start-state.json` | Start automation state JSON object. | Planned items, mirrored issues, and scout jobs may now carry `work_type` so scheduled launches stay typed end-to-end. |
+| `~/.nana/work/repos/<owner>/<repo>/start-state.json` | Start automation export/recovery JSON object. | Repo metadata plus derived task/export details used for visibility and recovery; canonical task state and saved task templates now live in `~/.nana/work/state.db`. |
 
 ## Minimal examples
 

@@ -196,63 +196,17 @@ func attentionModeRank(mode string) int {
 }
 
 func listAttentionItems(cwd string) ([]attentionItem, error) {
-	approvals, err := loadStartUIApprovals()
-	if err != nil {
-		return nil, err
-	}
-	workRuns, err := loadStartUIWorkRuns(50)
-	if err != nil {
-		return nil, err
-	}
-	workItems, _, _, err := loadStartUIWorkItemsWithHiddenCount(50)
-	if err != nil {
-		return nil, err
-	}
-	investigations, err := listStartUIInvestigations(cwd)
-	if err != nil {
-		return nil, err
-	}
-	issues, err := listStartUIIssueQueue()
+	tasks, err := listStartUITasks(cwd)
 	if err != nil {
 		return nil, err
 	}
 
 	items := []attentionItem{}
-	seenRunIDs := map[string]bool{}
-	seenItemIDs := map[string]bool{}
-
-	for _, approval := range approvals {
-		items = append(items, attentionItemFromApproval(approval))
-		if strings.TrimSpace(approval.RunID) != "" {
-			seenRunIDs[approval.RunID] = true
-		}
-		if strings.TrimSpace(approval.ItemID) != "" {
-			seenItemIDs[approval.ItemID] = true
-		}
-	}
-	for _, run := range workRuns {
-		if !run.Pending || seenRunIDs[run.RunID] {
+	for _, task := range tasks {
+		if task.Status == startUITaskStatusCompleted || task.Status == startUITaskStatusDismissed {
 			continue
 		}
-		items = append(items, attentionItemFromWorkRun(run))
-	}
-	for _, item := range workItems {
-		if !item.Pending || seenItemIDs[item.ID] {
-			continue
-		}
-		items = append(items, attentionItemFromWorkItem(item))
-	}
-	for _, investigation := range investigations {
-		if investigation.AttentionState == "completed" {
-			continue
-		}
-		items = append(items, attentionItemFromInvestigation(investigation))
-	}
-	for _, issue := range issues {
-		if issue.AttentionState == "completed" {
-			continue
-		}
-		items = append(items, attentionItemFromIssue(issue))
+		items = append(items, attentionItemFromTask(task))
 	}
 
 	sort.SliceStable(items, func(i, j int) bool {
@@ -279,172 +233,67 @@ func listAttentionItems(cwd string) ([]attentionItem, error) {
 
 func attentionKindRank(kind string) int {
 	switch strings.TrimSpace(kind) {
-	case "approval":
+	case "service_task":
 		return 0
-	case "work_run":
+	case "planned_item":
 		return 1
-	case "work_item":
+	case "work_run":
 		return 2
-	case "investigation":
+	case "work_item":
 		return 3
-	case "issue":
+	case "investigation":
 		return 4
-	default:
+	case "scout_job":
 		return 5
+	case "issue":
+		return 6
+	default:
+		return 7
 	}
 }
 
-func attentionItemFromApproval(item startUIApprovalQueueItem) attentionItem {
-	summary := strings.TrimSpace(item.Subject)
-	if strings.TrimSpace(item.RepoSlug) != "" {
-		summary = item.RepoSlug + ": " + summary
-	}
+func attentionItemFromTask(item startUITaskSummary) attentionItem {
 	return attentionItem{
-		Kind:               "approval",
+		Kind:               item.Kind,
 		ID:                 item.ID,
 		RepoSlug:           item.RepoSlug,
-		Summary:            defaultString(summary, item.ID),
-		Reason:             defaultString(strings.TrimSpace(item.Reason), strings.TrimSpace(item.NextAction)),
-		AttentionState:     defaultString(strings.TrimSpace(item.AttentionState), "queued"),
-		RecommendedCommand: recommendedCommandForApproval(item),
-		TargetURL:          defaultString(strings.TrimSpace(item.ExternalURL), strings.TrimSpace(item.TargetURL)),
+		Summary:            defaultString(item.Title, item.ID),
+		Reason:             defaultString(strings.TrimSpace(item.Summary), strings.TrimSpace(item.RawStatus)),
+		AttentionState:     defaultString(strings.TrimSpace(item.AttentionState), startUITaskAttentionStateForStatus(item.Status)),
+		RecommendedCommand: recommendedCommandForTask(item),
+		TargetURL:          strings.TrimSpace(item.ExternalURL),
 		RunID:              strings.TrimSpace(item.RunID),
-		ItemID:             strings.TrimSpace(item.ItemID),
+		ItemID:             strings.TrimSpace(strings.TrimPrefix(item.ID, "work-item:")),
 		UpdatedAt:          strings.TrimSpace(item.UpdatedAt),
 	}
 }
 
-func recommendedCommandForApproval(item startUIApprovalQueueItem) string {
-	switch {
-	case strings.TrimSpace(item.RunID) != "" && item.ActionKind == "sync_run":
-		return "nana work sync --run-id " + item.RunID + " --reviewer @me"
-	case strings.TrimSpace(item.RunID) != "" && item.ActionKind == "review_on_github":
-		return "nana work sync --run-id " + item.RunID + " --reviewer @me"
-	case strings.TrimSpace(item.RunID) != "":
-		return "nana work status --run-id " + item.RunID
-	case strings.TrimSpace(item.ItemID) != "":
-		return "nana work items show " + item.ItemID
-	case strings.TrimSpace(item.PlannedItemID) != "" && strings.TrimSpace(item.RepoSlug) != "":
-		return "nana start --once --repo " + item.RepoSlug
-	default:
-		return "nana status"
-	}
-}
-
-func attentionItemFromWorkRun(run startUIWorkRun) attentionItem {
-	summary := strings.TrimSpace(run.RepoLabel)
-	if strings.TrimSpace(run.TargetURL) != "" {
-		summary = defaultString(run.RepoSlug, run.RepoLabel) + ": " + run.TargetURL
-	}
-	reason := defaultString(strings.TrimSpace(run.CurrentPhase), strings.TrimSpace(run.PublicationState))
-	if reason == "" {
-		reason = strings.TrimSpace(run.Status)
-	}
-	return attentionItem{
-		Kind:               "work_run",
-		ID:                 run.RunID,
-		RepoSlug:           run.RepoSlug,
-		Summary:            defaultString(summary, run.RunID),
-		Reason:             reason,
-		AttentionState:     defaultString(strings.TrimSpace(run.AttentionState), "active"),
-		RecommendedCommand: recommendedCommandForWorkRun(run),
-		TargetURL:          strings.TrimSpace(run.TargetURL),
-		RunID:              run.RunID,
-		UpdatedAt:          strings.TrimSpace(run.UpdatedAt),
-	}
-}
-
-func recommendedCommandForWorkRun(run startUIWorkRun) string {
-	switch run.Backend {
-	case "github":
-		if run.AttentionState == "blocked" {
-			return "nana work sync --run-id " + run.RunID + " --reviewer @me"
+func recommendedCommandForTask(item startUITaskSummary) string {
+	switch item.Kind {
+	case "work_item":
+		itemID := strings.TrimSpace(strings.TrimPrefix(item.ID, "work-item:"))
+		if itemID == "" {
+			return "nana work items show"
 		}
-		if run.AttentionState == "failed" {
-			return "nana work logs --run-id " + run.RunID + " --tail 200"
+		if item.Status == startUITaskStatusQueued {
+			return "nana work items run " + itemID
 		}
-		return "nana work status --run-id " + run.RunID
-	default:
-		if run.AttentionState == "failed" {
-			return "nana work logs --run-id " + run.RunID + " --tail 200"
+		return "nana work items show " + itemID
+	case "work_run":
+		if strings.TrimSpace(item.RunID) != "" {
+			if item.AttentionState == "blocked" && strings.Contains(strings.TrimSpace(item.ExternalURL), "github.com/") {
+				return "nana work sync --run-id " + item.RunID + " --reviewer @me"
+			}
+			return "nana work status --run-id " + item.RunID
 		}
-		return "nana work status --run-id " + run.RunID
+	case "investigation":
+		if strings.TrimSpace(item.Description) != "" {
+			return "nana investigate " + strconv.Quote(item.Description)
+		}
+	case "planned_item", "service_task", "issue", "scout_job":
+		if strings.TrimSpace(item.RepoSlug) != "" {
+			return "nana start --once --repo " + item.RepoSlug
+		}
 	}
-}
-
-func attentionItemFromWorkItem(item startUIWorkItem) attentionItem {
-	reason := strings.TrimSpace(item.Status)
-	switch strings.TrimSpace(item.Status) {
-	case workItemStatusDraftReady:
-		reason = "draft ready for review and submission"
-	case workItemStatusNeedsRouting:
-		reason = "needs routing"
-	case workItemStatusFailed:
-		reason = "work item execution failed"
-	}
-	return attentionItem{
-		Kind:               "work_item",
-		ID:                 item.ID,
-		RepoSlug:           item.RepoSlug,
-		Summary:            defaultString(item.Subject, item.ID),
-		Reason:             reason,
-		AttentionState:     defaultString(strings.TrimSpace(item.AttentionState), "queued"),
-		RecommendedCommand: recommendedCommandForWorkItem(item),
-		TargetURL:          strings.TrimSpace(item.TargetURL),
-		ItemID:             item.ID,
-		UpdatedAt:          strings.TrimSpace(item.UpdatedAt),
-	}
-}
-
-func recommendedCommandForWorkItem(item startUIWorkItem) string {
-	switch strings.TrimSpace(item.Status) {
-	case workItemStatusQueued:
-		return "nana work items run " + item.ID
-	default:
-		return "nana work items show " + item.ID
-	}
-}
-
-func attentionItemFromInvestigation(item startUIInvestigationSummary) attentionItem {
-	reason := defaultString(strings.TrimSpace(item.LastError), strings.TrimSpace(item.OverallShortExplanation))
-	if reason == "" {
-		reason = strings.TrimSpace(item.Status)
-	}
-	return attentionItem{
-		Kind:               "investigation",
-		ID:                 item.RunID,
-		RepoSlug:           item.RepoSlug,
-		Summary:            defaultString(item.Query, item.RunID),
-		Reason:             reason,
-		AttentionState:     defaultString(strings.TrimSpace(item.AttentionState), "queued"),
-		RecommendedCommand: "nana investigate " + strconv.Quote(item.Query),
-		RunID:              item.RunID,
-		UpdatedAt:          strings.TrimSpace(item.UpdatedAt),
-	}
-}
-
-func attentionItemFromIssue(item startUIIssueQueueItem) attentionItem {
-	reason := defaultString(strings.TrimSpace(item.BlockedReason), strings.TrimSpace(item.TriageError))
-	if reason == "" {
-		reason = defaultString(strings.TrimSpace(item.TriageRationale), strings.TrimSpace(item.Status))
-	}
-	summary := fmt.Sprintf("%s#%d: %s", defaultString(item.RepoSlug, "repo"), item.SourceNumber, item.Title)
-	return attentionItem{
-		Kind:               "issue",
-		ID:                 item.ID,
-		RepoSlug:           item.RepoSlug,
-		Summary:            summary,
-		Reason:             reason,
-		AttentionState:     defaultString(strings.TrimSpace(item.AttentionState), "queued"),
-		RecommendedCommand: recommendedCommandForIssue(item),
-		TargetURL:          strings.TrimSpace(item.SourceURL),
-		UpdatedAt:          strings.TrimSpace(item.UpdatedAt),
-	}
-}
-
-func recommendedCommandForIssue(item startUIIssueQueueItem) string {
-	if strings.TrimSpace(item.RepoSlug) != "" {
-		return "nana start --once --repo " + item.RepoSlug
-	}
-	return "nana start --once"
+	return "nana status"
 }

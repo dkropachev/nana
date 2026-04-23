@@ -448,6 +448,13 @@ func readInvestigateRunManifest(path string) (investigateManifest, error) {
 	return manifest, nil
 }
 
+func persistInvestigateManifest(manifestPath string, manifest investigateManifest) error {
+	if err := writeGithubJSON(manifestPath, manifest); err != nil {
+		return err
+	}
+	return syncCanonicalInvestigationTask(manifest)
+}
+
 func executeInvestigationRun(manifestPath string, manifest *investigateManifest, codexArgs []string) error {
 	writeFailure := func(status string, runErr error) error {
 		if pauseErr, ok := isCodexRateLimitPauseError(runErr); ok {
@@ -457,7 +464,7 @@ func executeInvestigationRun(manifestPath string, manifest *investigateManifest,
 			manifest.LastError = codexPauseInfoMessage(pauseErr.Info)
 			manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 			manifest.CompletedAt = ""
-			_ = writeGithubJSON(manifestPath, manifest)
+				_ = persistInvestigateManifest(manifestPath, *manifest)
 			return runErr
 		}
 		manifest.Status = status
@@ -468,7 +475,7 @@ func executeInvestigationRun(manifestPath string, manifest *investigateManifest,
 		}
 		manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		manifest.CompletedAt = manifest.UpdatedAt
-		_ = writeGithubJSON(manifestPath, manifest)
+			_ = persistInvestigateManifest(manifestPath, *manifest)
 		return runErr
 	}
 
@@ -476,7 +483,7 @@ func executeInvestigationRun(manifestPath string, manifest *investigateManifest,
 	if err != nil {
 		return writeFailure(investigateRunStatusFailedExecutor, err)
 	}
-	if err := writeGithubJSON(manifestPath, manifest); err != nil {
+	if err := persistInvestigateManifest(manifestPath, *manifest); err != nil {
 		return writeFailure(investigateRunStatusFailedExecutor, err)
 	}
 	if len(mcpStatus.ConfiguredServers) > 0 && !mcpStatus.AllOK {
@@ -545,9 +552,9 @@ func executeInvestigationRun(manifestPath string, manifest *investigateManifest,
 			}
 			manifest.Rounds[len(manifest.Rounds)-1].Status = "needs_revision"
 			manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-			if err := writeGithubJSON(manifestPath, manifest); err != nil {
-				return writeFailure(investigateRunStatusFailedExecutor, err)
-			}
+				if err := persistInvestigateManifest(manifestPath, *manifest); err != nil {
+					return writeFailure(investigateRunStatusFailedExecutor, err)
+				}
 			continue
 		}
 		if err := writeJSONArtifact(roundState.ReportPath, report); err != nil {
@@ -606,18 +613,18 @@ func executeInvestigationRun(manifestPath string, manifest *investigateManifest,
 			if err := writeJSONArtifact(manifest.FinalReportPath, report); err != nil {
 				return writeFailure(investigateRunStatusFailedExecutor, err)
 			}
-			if err := writeGithubJSON(manifestPath, manifest); err != nil {
-				return writeFailure(investigateRunStatusFailedExecutor, err)
-			}
+				if err := persistInvestigateManifest(manifestPath, *manifest); err != nil {
+					return writeFailure(investigateRunStatusFailedExecutor, err)
+				}
 			break
 		}
 
 		violations = validatorResult.Violations
 		manifest.Rounds[len(manifest.Rounds)-1].Status = "needs_revision"
 		manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		if err := writeGithubJSON(manifestPath, manifest); err != nil {
-			return writeFailure(investigateRunStatusFailedExecutor, err)
-		}
+			if err := persistInvestigateManifest(manifestPath, *manifest); err != nil {
+				return writeFailure(investigateRunStatusFailedExecutor, err)
+			}
 	}
 
 	if !accepted {
@@ -1175,7 +1182,7 @@ func runInvestigateCodexPrompt(manifestPath string, manifest investigateManifest
 			manifest.LastError = codexPauseInfoMessage(info)
 			manifest.UpdatedAt = ISOTimeNow()
 			manifest.CompletedAt = ""
-			_ = writeGithubJSON(manifestPath, manifest)
+			_ = persistInvestigateManifest(manifestPath, manifest)
 		},
 		OnResume: func(info codexRateLimitPauseInfo) {
 			manifest.Status = investigateRunStatusRunning
@@ -1183,7 +1190,7 @@ func runInvestigateCodexPrompt(manifestPath string, manifest investigateManifest
 			manifest.PauseUntil = ""
 			manifest.LastError = ""
 			manifest.UpdatedAt = ISOTimeNow()
-			_ = writeGithubJSON(manifestPath, manifest)
+			_ = persistInvestigateManifest(manifestPath, manifest)
 		},
 	})
 	return investigateExecutionResult{Stdout: result.Stdout, Stderr: result.Stderr}, err

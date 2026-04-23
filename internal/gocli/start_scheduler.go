@@ -321,6 +321,9 @@ func (c *startRepoCoordinator) reloadPersistedState() error {
 		return err
 	}
 	c.state = state
+	if err := syncCanonicalRepoTasksFromState(c.repoSlug, c.state); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -370,6 +373,9 @@ func (c *startRepoCoordinator) refreshRepoState() error {
 		return err
 	}
 	if err := c.syncServiceTasks(); err != nil {
+		return err
+	}
+	if err := syncCanonicalRepoTasksFromState(c.repoSlug, c.state); err != nil {
 		return err
 	}
 	c.refreshState = false
@@ -649,75 +655,127 @@ func (c *startRepoCoordinator) buildServiceQueue() []startRepoTask {
 	if c.state.ServiceTasks == nil {
 		return nil
 	}
-	taskKeys := make([]string, 0, len(c.state.ServiceTasks))
-	for key, task := range c.state.ServiceTasks {
-		if task.Queue != startTaskQueueService || task.Status != startWorkServiceTaskQueued {
-			continue
-		}
-		if task.WaitCycle != "" && task.WaitCycle == c.cycleID {
-			continue
-		}
-		if taskWaitUntilPending(task, time.Now().UTC()) {
-			continue
-		}
-		if !c.serviceTaskReady(task) {
-			continue
-		}
-		taskKeys = append(taskKeys, key)
+	items, err := c.canonicalQueuedRepoTasks()
+	if err != nil {
+		return nil
 	}
-	slices.SortFunc(taskKeys, func(a, b string) int {
-		left := c.state.ServiceTasks[a]
-		right := c.state.ServiceTasks[b]
-		if serviceTaskPriority(left.Kind) != serviceTaskPriority(right.Kind) {
-			return serviceTaskPriority(left.Kind) - serviceTaskPriority(right.Kind)
+	queue := make([]startRepoTask, 0, len(items))
+	now := time.Now().UTC()
+	for _, item := range items {
+		switch item.Kind {
+		case "service_task":
+			_, taskID, err := parseStartUITaskScopedID(item.ID, "service-task:")
+			if err != nil {
+				continue
+			}
+			task, ok := c.state.ServiceTasks[taskID]
+			if !ok || task.Queue != startTaskQueueService || task.Status != startWorkServiceTaskQueued {
+				continue
+			}
+			if task.WaitCycle != "" && task.WaitCycle == c.cycleID {
+				continue
+			}
+			if taskWaitUntilPending(task, now) {
+				continue
+			}
+			if !c.serviceTaskReady(task) {
+				continue
+			}
+			repoTask := startRepoTask{
+				Key:           task.ID,
+				Queue:         task.Queue,
+				Kind:          task.Kind,
+				IssueKey:      task.IssueKey,
+				PlannedItemID: task.PlannedItemID,
+				ScoutRole:     task.ScoutRole,
+				RunID:         task.RunID,
+			}
+			if task.IssueKey != "" {
+				repoTask.Issue = c.state.Issues[task.IssueKey]
+			}
+			if task.PlannedItemID != "" {
+				repoTask.PlannedItem = c.state.PlannedItems[task.PlannedItemID]
+			}
+			queue = append(queue, repoTask)
+		case "planned_item":
+			itemID := strings.TrimSpace(strings.TrimPrefix(item.ID, "planned-item:"))
+			planned, ok := c.state.PlannedItems[itemID]
+			if !ok || strings.TrimSpace(planned.State) != startPlannedItemQueued {
+				continue
+			}
+			taskKey := startServiceTaskKey(startTaskKindPlannedLaunch, itemID)
+			if task, exists := c.state.ServiceTasks[taskKey]; exists && strings.TrimSpace(task.Status) == startWorkServiceTaskQueued {
+				continue
+			}
+			if startWorkPlannedItemLooksScoutDerived(planned) {
+				continue
+			}
+			if !startWorkPlannedItemDue(planned, now) {
+				continue
+			}
+			queue = append(queue, startRepoTask{
+				Key:           taskKey,
+				Queue:         startTaskQueueService,
+				Kind:          startTaskKindPlannedLaunch,
+				PlannedItemID: itemID,
+				PlannedItem:   planned,
+			})
 		}
-		if left.IssueKey != "" || right.IssueKey != "" {
-			return compareStartIssueKeys(left.IssueKey, right.IssueKey)
-		}
-		return strings.Compare(a, b)
-	})
-	queue := make([]startRepoTask, 0, len(taskKeys))
-	for _, key := range taskKeys {
-		task := c.state.ServiceTasks[key]
-		repoTask := startRepoTask{
-			Key:           task.ID,
-			Queue:         task.Queue,
-			Kind:          task.Kind,
-			IssueKey:      task.IssueKey,
-			PlannedItemID: task.PlannedItemID,
-			ScoutRole:     task.ScoutRole,
-			RunID:         task.RunID,
-		}
-		if task.IssueKey != "" {
-			repoTask.Issue = c.state.Issues[task.IssueKey]
-		}
-		if task.PlannedItemID != "" {
-			repoTask.PlannedItem = c.state.PlannedItems[task.PlannedItemID]
-		}
-		queue = append(queue, repoTask)
 	}
 	return queue
 }
 
 func (c *startRepoCoordinator) buildImplementationQueue() ([]startRepoTask, string) {
 	issues, skippedReason := startWorkBuildImplementationQueue(c.state, c.workOptions, c.openPRs)
-	tasks := make([]startRepoTask, 0, len(issues))
+	runnableIssues := map[string]startWorkIssueState{}
 	for _, issue := range issues {
-		issueKey := fmt.Sprintf("%d", issue.SourceNumber)
-		taskKey := startServiceTaskKey(startTaskKindIssue, issueKey)
-		if c.running[taskKey].Key != "" {
-			continue
-		}
-		tasks = append(tasks, startRepoTask{
-			Key:      taskKey,
-			Queue:    startTaskQueueImplementation,
-			Kind:     startTaskKindIssue,
-			IssueKey: issueKey,
-			Issue:    issue,
-		})
+		runnableIssues[fmt.Sprintf("%d", issue.SourceNumber)] = issue
 	}
 	scoutTasks := c.buildScoutJobQueue()
-	tasks = append(tasks, scoutTasks...)
+	runnableScoutJobs := map[string]startRepoTask{}
+	for _, task := range scoutTasks {
+		runnableScoutJobs[task.ScoutJobID] = task
+	}
+	items, err := c.canonicalQueuedRepoTasks()
+	if err != nil {
+		return nil, skippedReason
+	}
+	tasks := make([]startRepoTask, 0, len(items))
+	for _, item := range items {
+		switch item.Kind {
+		case "issue":
+			_, issueNumber, err := parseStartUITaskIssueID(item.ID)
+			if err != nil {
+				continue
+			}
+			issueKey := fmt.Sprintf("%d", issueNumber)
+			issue, ok := runnableIssues[issueKey]
+			if !ok {
+				continue
+			}
+			taskKey := startServiceTaskKey(startTaskKindIssue, issueKey)
+			if c.running[taskKey].Key != "" {
+				continue
+			}
+			tasks = append(tasks, startRepoTask{
+				Key:      taskKey,
+				Queue:    startTaskQueueImplementation,
+				Kind:     startTaskKindIssue,
+				IssueKey: issueKey,
+				Issue:    issue,
+			})
+		case "scout_job":
+			_, scoutJobID, err := parseStartUITaskScopedID(item.ID, "scout-job:")
+			if err != nil {
+				continue
+			}
+			task, ok := runnableScoutJobs[scoutJobID]
+			if !ok {
+				continue
+			}
+			tasks = append(tasks, task)
+		}
+	}
 	if len(tasks) == 0 {
 		return nil, skippedReason
 	}
@@ -768,6 +826,12 @@ func (c *startRepoCoordinator) buildScoutJobQueue() []startRepoTask {
 		})
 	}
 	return tasks
+}
+
+func (c *startRepoCoordinator) canonicalQueuedRepoTasks() ([]startUITaskSummary, error) {
+	return withLocalWorkReadStore(func(store *localWorkDBStore) ([]startUITaskSummary, error) {
+		return store.listCanonicalTasksForRepo(c.repoSlug, startUITaskStatusQueued)
+	})
 }
 
 func (c *startRepoCoordinator) availableWorkerSlots() int {
@@ -1495,6 +1559,23 @@ func serviceTaskPriority(kind string) int {
 	default:
 		return 5
 	}
+}
+
+func startSchedulerServiceTaskPriority(state *startWorkState, task startWorkServiceTask) int {
+	if state == nil {
+		return 3
+	}
+	if task.PlannedItemID != "" {
+		if item, ok := state.PlannedItems[task.PlannedItemID]; ok {
+			return clampTaskPriority(item.Priority)
+		}
+	}
+	if task.IssueKey != "" {
+		if issue, ok := state.Issues[task.IssueKey]; ok {
+			return clampTaskPriority(startWorkEffectivePriority(issue))
+		}
+	}
+	return 3
 }
 
 func startServiceTaskKey(kind string, target string) string {

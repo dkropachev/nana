@@ -25,7 +25,7 @@ Use:
 `
 
 const (
-	startWorkStateVersion         = 7
+	startWorkStateVersion         = 8
 	startWorkDefaultParallel      = 3
 	startWorkDefaultOpenPRCap     = 10
 	startWorkStatusQueued         = "queued"
@@ -84,6 +84,7 @@ type startWorkState struct {
 	Promotions     map[string]startWorkPromotion            `json:"promotions,omitempty"`
 	PromotionSkips map[string]startWorkPromotionSkip        `json:"promotion_skips,omitempty"`
 	PlannedItems   map[string]startWorkPlannedItem          `json:"planned_items,omitempty"`
+	TaskTemplates  map[string]startWorkTaskTemplate         `json:"task_templates,omitempty"`
 	ScoutJobs      map[string]startWorkScoutJob             `json:"scout_jobs,omitempty"`
 	Findings       map[string]startWorkFinding              `json:"findings,omitempty"`
 	ImportSessions map[string]startWorkFindingImportSession `json:"import_sessions,omitempty"`
@@ -213,6 +214,18 @@ type startWorkPlannedItem struct {
 	LastError          string   `json:"last_error,omitempty"`
 	CreatedAt          string   `json:"created_at"`
 	UpdatedAt          string   `json:"updated_at"`
+}
+
+type startWorkTaskTemplate struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Description     string `json:"description,omitempty"`
+	LaunchKindHint  string `json:"launch_kind_hint,omitempty"`
+	ScoutRoleHint   string `json:"scout_role_hint,omitempty"`
+	WorkTypeHint    string `json:"work_type_hint,omitempty"`
+	DefaultPriority int    `json:"default_priority,omitempty"`
+	CreatedAt       string `json:"created_at,omitempty"`
+	UpdatedAt       string `json:"updated_at,omitempty"`
 }
 
 type startWorkScoutJob struct {
@@ -1732,6 +1745,9 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 	if state.PlannedItems == nil {
 		state.PlannedItems = map[string]startWorkPlannedItem{}
 	}
+	if state.TaskTemplates == nil {
+		state.TaskTemplates = map[string]startWorkTaskTemplate{}
+	}
 	if state.ScoutJobs == nil {
 		state.ScoutJobs = map[string]startWorkScoutJob{}
 	}
@@ -1798,6 +1814,18 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 		item.FindingsHandling = normalizeFindingsHandling(item.FindingsHandling, item.ScoutDestination, item.LaunchKind)
 		state.PlannedItems[key] = item
 	}
+	for key, template := range state.TaskTemplates {
+		template.ID = defaultString(strings.TrimSpace(template.ID), key)
+		template.Name = strings.TrimSpace(template.Name)
+		template.Description = strings.TrimSpace(template.Description)
+		template.LaunchKindHint = strings.TrimSpace(template.LaunchKindHint)
+		template.ScoutRoleHint = strings.TrimSpace(template.ScoutRoleHint)
+		template.WorkTypeHint = normalizeWorkType(template.WorkTypeHint)
+		if template.DefaultPriority < 0 || template.DefaultPriority > 5 {
+			template.DefaultPriority = 3
+		}
+		state.TaskTemplates[key] = template
+	}
 	for key, job := range state.ScoutJobs {
 		job.ID = defaultString(strings.TrimSpace(job.ID), key)
 		job.Status = defaultString(strings.TrimSpace(job.Status), startScoutJobQueued)
@@ -1863,7 +1891,10 @@ func writeStartWorkStateUnlocked(state startWorkState) error {
 	if _, err := normalizeStartWorkStateUnlocked(&state); err != nil {
 		return err
 	}
-	return writeGithubJSON(startWorkStatePath(state.SourceRepo), state)
+	if err := writeGithubJSON(startWorkStatePath(state.SourceRepo), state); err != nil {
+		return err
+	}
+	return syncCanonicalRepoTasksFromState(state.SourceRepo, &state)
 }
 
 func githubAPIGetJSONWithStatus(apiBaseURL string, token string, path string, target interface{}) (int, error) {

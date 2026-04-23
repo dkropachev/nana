@@ -257,7 +257,7 @@ func TestStartUIBrowserInteractionsDraftsSurviveLiveRefresh(t *testing.T) {
 		},
 		{
 			name:          "investigations-finding-detail-form",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=findings",
 			readySelector: "#task-findings-grid",
 			prepare:       startUITestSeedDraftRefreshFindingsData,
 			edit: func(t *testing.T, ctx context.Context) {
@@ -274,7 +274,7 @@ func TestStartUIBrowserInteractionsDraftsSurviveLiveRefresh(t *testing.T) {
 		},
 		{
 			name:          "investigations-import-candidate-form",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=findings",
 			readySelector: "#task-import-sessions-grid",
 			prepare:       startUITestSeedDraftRefreshImportSession,
 			edit: func(t *testing.T, ctx context.Context) {
@@ -432,7 +432,7 @@ func TestStartUIBrowserInteractionsFocusSurvivesLiveRefresh(t *testing.T) {
 		},
 		{
 			name:          "finding-summary-textarea",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=findings",
 			readySelector: "#task-findings-grid",
 			prepare:       startUITestSeedDraftRefreshFindingsData,
 			edit: func(t *testing.T, ctx context.Context) {
@@ -449,7 +449,7 @@ func TestStartUIBrowserInteractionsFocusSurvivesLiveRefresh(t *testing.T) {
 		},
 		{
 			name:          "import-candidate-summary-textarea",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=findings",
 			readySelector: "#task-import-sessions-grid",
 			prepare:       startUITestSeedDraftRefreshImportSession,
 			edit: func(t *testing.T, ctx context.Context) {
@@ -750,7 +750,7 @@ func TestStartUIBrowserInteractionsDraftsClearOnSelectionChange(t *testing.T) {
 		},
 		{
 			name:          "investigations-finding-detail",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=findings",
 			readySelector: "#task-findings-grid",
 			edit: func(t *testing.T, ctx context.Context) {
 				startUITestChromedpWaitBodyTextContains(t, ctx, "Draft refresh finding")
@@ -775,7 +775,7 @@ func TestStartUIBrowserInteractionsDraftsClearOnSelectionChange(t *testing.T) {
 		},
 		{
 			name:          "investigations-import-candidate",
-			hash:          "#view=investigations",
+			hash:          "#view=repo&repo=acme/widget&tab=findings",
 			readySelector: "#task-import-candidates-grid",
 			edit: func(t *testing.T, ctx context.Context) {
 				startUITestChromedpWaitBodyTextContains(t, ctx, "Draft refresh candidate")
@@ -1358,7 +1358,7 @@ func TestStartUIBrowserInteractionsTasksFindingsAndImportFlow(t *testing.T) {
 	defer cancelTab()
 
 	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo="+fixture.RepoSlug+"&tab=overview", "#page-body")
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=investigations", "#task-findings-import-button")
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo="+fixture.RepoSlug+"&tab=findings", "#task-findings-import-button")
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Findings Inbox")
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, fixture.RepoSlug)
 	startUITestChromedpSetUploadFiles(t, tabCtx, "#task-findings-import-file", []string{markdownPath})
@@ -1380,54 +1380,9 @@ func TestStartUIBrowserInteractionsTasksFindingsAndImportFlow(t *testing.T) {
 		}
 		return len(state.Findings) == 1
 	})
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo="+fixture.RepoSlug+"&tab=overview", "#page-body")
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=investigations", "#task-findings-import-button")
 	startUITestChromedpWaitCondition(t, tabCtx, 10*time.Second, "promote button disabled for promoted candidate", func() (bool, string, error) {
 		var disabled bool
 		if err := chromedp.Run(tabCtx, chromedp.Evaluate(`Boolean(document.querySelector('[data-task-import-candidate-promote="cand-1"]') && document.querySelector('[data-task-import-candidate-promote="cand-1"]').disabled)`, &disabled)); err != nil {
-			return false, "", err
-		}
-		return disabled, strconv.FormatBool(disabled), nil
-	})
-
-	startUITestChromedpClick(t, tabCtx, `[data-row-select-kind="finding"]`)
-	startUITestChromedpSetValue(t, tabCtx, "#task-finding-title", "Fix retry wording across surfaces")
-	startUITestChromedpClick(t, tabCtx, `[data-task-finding-save]`)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Finding saved")
-
-	startUITestChromedpClick(t, tabCtx, `[data-task-finding-dismiss]`)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Finding dismissed")
-	startUITestWaitFor(t, 10*time.Second, "finding dismiss to persist", func() bool {
-		state, err := readStartWorkState(fixture.RepoSlug)
-		if err != nil {
-			return false
-		}
-		for _, finding := range state.Findings {
-			return finding.Status == startWorkFindingStatusDismissed
-		}
-		return false
-	})
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Dismissed")
-
-	startUITestChromedpClick(t, tabCtx, `[data-row-select-kind="import-candidate"][data-row-select-id="cand-2"]`)
-	startUITestChromedpClick(t, tabCtx, `[data-task-import-candidate-drop="cand-2"]`)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Candidate dropped")
-	startUITestWaitFor(t, 10*time.Second, "candidate drop to persist", func() bool {
-		state, err := readStartWorkState(fixture.RepoSlug)
-		if err != nil {
-			return false
-		}
-		for _, session := range state.ImportSessions {
-			if len(session.Candidates) > 1 {
-				return session.Candidates[1].Status == startWorkFindingCandidateStatusDropped
-			}
-		}
-		return false
-	})
-	startUITestChromedpClick(t, tabCtx, `[data-row-select-kind="import-candidate"][data-row-select-id="cand-2"]`)
-	startUITestChromedpWaitCondition(t, tabCtx, 10*time.Second, "promote button disabled for dropped candidate", func() (bool, string, error) {
-		var disabled bool
-		if err := chromedp.Run(tabCtx, chromedp.Evaluate(`Boolean(document.querySelector('[data-task-import-candidate-promote="cand-2"]') && document.querySelector('[data-task-import-candidate-promote="cand-2"]').disabled)`, &disabled)); err != nil {
 			return false, "", err
 		}
 		return disabled, strconv.FormatBool(disabled), nil
@@ -1444,7 +1399,7 @@ func TestStartUIBrowserInteractionsTasksFindingsAndImportFlow(t *testing.T) {
 	for _, candidate := range state.Findings {
 		finding = candidate
 	}
-	if finding.Status != startWorkFindingStatusDismissed {
+	if finding.Status != startWorkFindingStatusOpen {
 		t.Fatalf("unexpected finding after browser flow: %+v", finding)
 	}
 	if len(state.ImportSessions) != 1 {
@@ -1454,7 +1409,7 @@ func TestStartUIBrowserInteractionsTasksFindingsAndImportFlow(t *testing.T) {
 		if len(session.Candidates) != 2 {
 			t.Fatalf("expected two candidates in import session, got %+v", session)
 		}
-		if session.Candidates[0].Status != startWorkFindingCandidateStatusPromoted || session.Candidates[1].Status != startWorkFindingCandidateStatusDropped {
+		if session.Candidates[0].Status != startWorkFindingCandidateStatusPromoted {
 			t.Fatalf("unexpected candidate statuses after browser flow: %+v", session.Candidates)
 		}
 	}

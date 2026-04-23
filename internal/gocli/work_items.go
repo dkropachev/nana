@@ -1640,11 +1640,14 @@ func (s *localWorkDBStore) upsertWorkItemWithLinks(item workItem, actor string, 
 			return workItem{}, false, err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return workItem{}, false, err
+		if err := tx.Commit(); err != nil {
+			return workItem{}, false, err
+		}
+		if err := syncCanonicalWorkItemTask(item); err != nil {
+			return workItem{}, false, err
+		}
+		return item, created, nil
 	}
-	return item, created, nil
-}
 
 func (s *localWorkDBStore) updateWorkItem(item workItem) error {
 	tx, err := s.db.Begin()
@@ -1655,7 +1658,10 @@ func (s *localWorkDBStore) updateWorkItem(item workItem) error {
 	if err := writeWorkItemTx(tx, item); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return syncCanonicalWorkItemTask(item)
 }
 
 func (s *localWorkDBStore) appendWorkItemEvent(itemID string, eventType string, actor string, payload map[string]any) error {
@@ -1717,7 +1723,10 @@ func (s *localWorkDBStore) updateWorkItemWithEvent(item workItem, eventType stri
 	if err := appendWorkItemEventTx(tx, item.ID, eventType, actor, payload); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return syncCanonicalWorkItemTask(item)
 }
 
 func (s *localWorkDBStore) updateWorkItemWithLinksAndEvent(item workItem, links []workItemLink, eventType string, actor string, payload map[string]any) error {
@@ -1735,7 +1744,10 @@ func (s *localWorkDBStore) updateWorkItemWithLinksAndEvent(item workItem, links 
 	if err := appendWorkItemEventTx(tx, item.ID, eventType, actor, payload); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return syncCanonicalWorkItemTask(item)
 }
 
 func (s *localWorkDBStore) startWorkItemAttempt(itemID string, attemptDir string, actor string) (workItem, error) {
@@ -1760,6 +1772,9 @@ func (s *localWorkDBStore) startWorkItemAttempt(itemID string, attemptDir string
 		return workItem{}, err
 	}
 	if err := tx.Commit(); err != nil {
+		return workItem{}, err
+	}
+	if err := syncCanonicalWorkItemTask(item); err != nil {
 		return workItem{}, err
 	}
 	return item, nil

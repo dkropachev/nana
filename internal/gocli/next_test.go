@@ -60,8 +60,8 @@ func TestBuildAttentionReportPrefersBlockedGithubRun(t *testing.T) {
 	if report.Next == nil {
 		t.Fatalf("expected next attention item, got %+v", report)
 	}
-	if report.Next.RunID != "gh-attn" || report.Next.Kind != "approval" {
-		t.Fatalf("expected blocked GitHub approval to rank first, got %+v", report.Next)
+	if report.Next.RunID != "gh-attn" || report.Next.Kind != "work_run" {
+		t.Fatalf("expected blocked GitHub work task to rank first, got %+v", report.Next)
 	}
 	if report.Next.RecommendedCommand != "nana work sync --run-id gh-attn --reviewer @me" {
 		t.Fatalf("unexpected recommended command: %+v", report.Next)

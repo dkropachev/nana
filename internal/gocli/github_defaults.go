@@ -1714,7 +1714,7 @@ func indexGithubWorkRunManifest(manifestPath string, manifest githubWorkManifest
 	if updatedAt == "" {
 		updatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
-	return writeWorkRunIndex(workRunIndexEntry{
+	if err := writeWorkRunIndex(workRunIndexEntry{
 		RunID:        manifest.RunID,
 		Backend:      "github",
 		RepoKey:      manifest.RepoSlug,
@@ -1724,7 +1724,10 @@ func indexGithubWorkRunManifest(manifestPath string, manifest githubWorkManifest
 		ManifestPath: manifestPath,
 		UpdatedAt:    updatedAt,
 		TargetKind:   manifest.TargetKind,
-	})
+	}); err != nil {
+		return err
+	}
+	return syncCanonicalGithubWorkRunTask(manifestPath, manifest)
 }
 
 func githubThreadUsageRoots(sandboxPath string) []string {
