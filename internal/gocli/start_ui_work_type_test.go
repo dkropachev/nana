@@ -110,6 +110,41 @@ func TestStartUIBuiltinTaskTemplatesIncludeBackendPerformanceScout(t *testing.T)
 	}
 }
 
+func TestHeuristicStartUITaskInferenceRecognizesPerformanceScoutDescriptions(t *testing.T) {
+	template := startUITaskTemplate{ID: "template:custom", Name: "Custom task"}
+
+	tests := []struct {
+		name        string
+		description string
+		wantRole    string
+	}{
+		{
+			name:        "plain performance scout",
+			description: "Schedule a performance scout for this repo.",
+			wantRole:    backendPerformanceScoutRole,
+		},
+		{
+			name:        "common typo still maps to backend performance",
+			description: "Schedule a peformance scout for this repo.",
+			wantRole:    backendPerformanceScoutRole,
+		},
+		{
+			name:        "ui wording still prefers ui scout",
+			description: "Schedule a UI performance scout for the approvals screen.",
+			wantRole:    uiScoutRole,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := heuristicStartUITaskInference(tc.description, template)
+			if result.LaunchKind != "manual_scout" || result.ScoutRole != tc.wantRole {
+				t.Fatalf("unexpected inference for %q: %+v", tc.description, result)
+			}
+		})
+	}
+}
+
 func TestCreateStartUIPlannedItemAllowsInvestigationWithoutWorkType(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

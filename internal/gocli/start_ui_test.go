@@ -3885,6 +3885,36 @@ func TestStartUIAPITaskCreateAndTemplateSave(t *testing.T) {
 		t.Fatalf("expected fixed scout inference, got %+v", builtinScoutPayload.Inference)
 	}
 
+	backendScoutBody, err := json.Marshal(startUITaskCreateRequest{
+		RepoSlug:   fixture.RepoSlug,
+		TemplateID: "template:scout:" + backendPerformanceScoutRole,
+		Priority:   intPtr(1),
+	})
+	if err != nil {
+		t.Fatalf("marshal backend scout task body: %v", err)
+	}
+	backendScoutResponse, err := http.Post(fixture.Server.URL+"/api/v1/tasks", "application/json", strings.NewReader(string(backendScoutBody)))
+	if err != nil {
+		t.Fatalf("POST backend scout task: %v", err)
+	}
+	defer backendScoutResponse.Body.Close()
+	var backendScoutPayload struct {
+		PlannedItem startWorkPlannedItem       `json:"planned_item"`
+		Inference   startUITaskInferenceResult `json:"inference"`
+	}
+	if err := json.NewDecoder(backendScoutResponse.Body).Decode(&backendScoutPayload); err != nil {
+		t.Fatalf("decode backend scout task payload: %v", err)
+	}
+	if backendScoutPayload.PlannedItem.LaunchKind != "manual_scout" || backendScoutPayload.PlannedItem.ScoutRole != backendPerformanceScoutRole || backendScoutPayload.PlannedItem.Priority != 1 {
+		t.Fatalf("unexpected backend scout task payload: %+v", backendScoutPayload.PlannedItem)
+	}
+	if strings.TrimSpace(backendScoutPayload.PlannedItem.Description) != "" {
+		t.Fatalf("expected backend scout task description to stay empty, got %q", backendScoutPayload.PlannedItem.Description)
+	}
+	if backendScoutPayload.Inference.Title != "Run Backend Performance Scout" {
+		t.Fatalf("expected fixed backend scout inference, got %+v", backendScoutPayload.Inference)
+	}
+
 	taskBody, err := json.Marshal(startUITaskCreateRequest{
 		RepoSlug:    fixture.RepoSlug,
 		Description: "Audit the approvals surface and keep stale scout recovery details visible.",

@@ -682,6 +682,8 @@ func buildStartUITaskInferencePrompt(repoSlug string, description string, templa
 		"- Pick the single best launch_kind for the described work.",
 		"- Use `investigation` when the user wants diagnosis, explanation, or evidence gathering.",
 		"- Use `manual_scout` only for scout-style audits or when the template strongly hints a scout role.",
+		"- Use `backend-performance-scout` for backend, API, worker, queue, latency, throughput, CPU, hot-path, or performance audits.",
+		"- Use `ui-scout` for UI, UX, interface, or screen audits.",
 		"- Otherwise prefer `local_work`.",
 		"- Keep `title` short and specific.",
 		"- Keep `investigation_query` empty unless launch_kind is `investigation`.",
@@ -1314,7 +1316,7 @@ func startUITaskScoutRoleFromDescription(lower string) string {
 	switch {
 	case strings.Contains(lower, "ui"), strings.Contains(lower, "ux"), strings.Contains(lower, "layout"), strings.Contains(lower, "css"), strings.Contains(lower, "screen"):
 		return uiScoutRole
-	case strings.Contains(lower, "backend"), strings.Contains(lower, "api "), strings.Contains(lower, "api-"), strings.Contains(lower, "hot path"), strings.Contains(lower, "hotpath"), strings.Contains(lower, "hotspot"), strings.Contains(lower, "cpu"), strings.Contains(lower, "throughput"), strings.Contains(lower, "latency"), strings.Contains(lower, "worker"), strings.Contains(lower, "queue"):
+	case strings.Contains(lower, "backend"), strings.Contains(lower, "api "), strings.Contains(lower, "api-"), strings.Contains(lower, "hot path"), strings.Contains(lower, "hotpath"), strings.Contains(lower, "hotspot"), strings.Contains(lower, "cpu"), strings.Contains(lower, "throughput"), strings.Contains(lower, "latency"), strings.Contains(lower, "performance"), strings.Contains(lower, "peformance"), strings.Contains(lower, "worker"), strings.Contains(lower, "queue"):
 		return backendPerformanceScoutRole
 	case strings.Contains(lower, "enhanc"):
 		return enhancementScoutRole
