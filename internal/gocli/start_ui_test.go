@@ -6962,7 +6962,8 @@ func setupStartUISyntheticOverviewBenchmark(b *testing.B, repoCount int, workIte
 			key := fmt.Sprintf("task-%d", j)
 			state.ServiceTasks[key] = startWorkServiceTask{ID: key, Kind: startTaskKindTriage, Queue: startTaskQueueService, Status: status, UpdatedAt: state.UpdatedAt}
 		}
-		state.PlannedItems["planned-1"] = startWorkPlannedItem{ID: "planned-1", RepoSlug: repoSlug, Title: "Synthetic planned work", State: startPlannedItemQueued, UpdatedAt: state.UpdatedAt}
+		plannedID := fmt.Sprintf("planned-%02d", i)
+		state.PlannedItems[plannedID] = startWorkPlannedItem{ID: plannedID, RepoSlug: repoSlug, Title: "Synthetic planned work", State: startPlannedItemQueued, UpdatedAt: state.UpdatedAt}
 		if err := writeStartWorkState(state); err != nil {
 			b.Fatalf("write start state: %v", err)
 		}
