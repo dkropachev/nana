@@ -223,6 +223,7 @@
       templatesLoaded: false,
       templatesRepoSlug: "",
       templatesError: "",
+      openFilterMenu: "",
     };
   }
 
@@ -1252,18 +1253,30 @@
   }
 
   function matchesTaskStatusFilter(item, value) {
-    if (!value || value === "all") return true;
-    return defaultString(item && item.status, "") === value;
+    return matchesFilterSelection(defaultString(item && item.status, ""), value, "all");
   }
 
   function matchesRepoFilter(item, value) {
-    if (!value) return true;
-    return defaultString(item && item.repo_slug, "") === value;
+    return matchesFilterSelection(defaultString(item && item.repo_slug, ""), value, "");
   }
 
   function matchesKindFilter(item, value) {
-    if (!value || value === "all") return true;
-    return defaultString(item && item.kind, defaultString(item && item.backend, "")) === value;
+    return matchesFilterSelection(defaultString(item && item.kind, defaultString(item && item.backend, "")), value, "all");
+  }
+
+  function filterSelectionValues(value, inactiveValue) {
+    if (Array.isArray(value)) {
+      return value.map((item) => String(item || "").trim()).filter((item) => item && item !== inactiveValue);
+    }
+    const single = String(value || "").trim();
+    if (!single || single === inactiveValue) return [];
+    return [single];
+  }
+
+  function matchesFilterSelection(actual, value, inactiveValue) {
+    const selected = filterSelectionValues(value, inactiveValue);
+    if (!selected.length) return true;
+    return selected.includes(defaultString(actual, ""));
   }
 
   function matchesQuery(item, fields, query) {
@@ -2757,40 +2770,6 @@
     `;
   }
 
-  function buildBreadcrumbs() {
-    const items = [{ label: "Workspace" }];
-    if (state.currentView === "home") {
-      items.push({ label: "All Repos", current: true });
-      return items;
-    }
-    if (state.currentView === "repo") {
-      const repo = selectedRepoSummary();
-      items.push({ label: repo ? repo.repo_slug : "Repo" });
-      items.push({ label: defaultString(state.repoTab, "overview").replace(/^./, (value) => value.toUpperCase()), current: true });
-      return items;
-    }
-    if (state.currentView === "feedback") {
-      items.push({ label: "Feedback" });
-      items.push({ label: state.feedbackTab === "reviews" ? "Reviews" : "Replies", current: true });
-      return items;
-    }
-    const viewLabel = defaultString(state.currentView, "home").replace(/^./, (value) => value.toUpperCase());
-    items.push({ label: viewLabel, current: true });
-    return items;
-  }
-
-  function renderBreadcrumbs() {
-    const host = document.getElementById("page-breadcrumb");
-    if (!host) return;
-    host.innerHTML = `
-      <ol class="breadcrumb-list">
-        ${buildBreadcrumbs().map((item) => `
-          <li>${item.current ? `<span class="breadcrumb-current">${escapeHTML(item.label)}</span>` : `<span>${escapeHTML(item.label)}</span>`}</li>
-        `).join("")}
-      </ol>
-    `;
-  }
-
   function tabButtonMarkup(group, id, label, selected, index, total) {
     // Static identifiers retained for start_ui asset tests:
     // data-repo-tab="overview"
@@ -3011,44 +2990,47 @@
     const title = document.getElementById("page-title");
     const subtitle = document.getElementById("page-subtitle");
     const updated = document.getElementById("overview-updated");
+    const setSubtitle = (value) => {
+      if (subtitle) subtitle.textContent = value;
+    };
 
     if (!state.overview) {
       if (state.currentView === "usage") {
         title.textContent = "Usage";
         if (state.overviewError) {
-          subtitle.textContent = "Usage data can still load while the workspace overview is unavailable.";
+          setSubtitle("Usage data can still load while the workspace overview is unavailable.");
           updated.textContent = "Overview unavailable.";
         } else if (state.usage.error) {
-          subtitle.textContent = "Usage data failed while the workspace overview is still loading.";
+          setSubtitle("Usage data failed while the workspace overview is still loading.");
           updated.textContent = "Overview still loading.";
         } else if (state.usage.loaded) {
-          subtitle.textContent = "Usage data is ready while the workspace overview is still loading.";
+          setSubtitle("Usage data is ready while the workspace overview is still loading.");
           updated.textContent = "Overview still loading.";
         } else {
-          subtitle.textContent = "Loading usage data and workspace overview.";
+          setSubtitle("Loading usage data and workspace overview.");
           updated.textContent = "Waiting for state...";
         }
       } else if (state.currentView === "issues") {
         title.textContent = "Issues";
-        subtitle.textContent = "Tracked issues, triage evidence, scheduling, and direct launch actions.";
+        setSubtitle("Tracked issues, triage evidence, scheduling, and direct launch actions.");
         updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
       } else if (state.currentView === "investigations") {
         title.textContent = "Nana Mission Control";
-        subtitle.textContent = "One task feed for scheduled, running, paused, blocked, and in-review Nana work.";
+        setSubtitle("");
         updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
       } else if (state.currentView === "feedback") {
         title.textContent = "Feedback";
-        subtitle.textContent = state.feedbackTab === "reviews"
+        setSubtitle(state.feedbackTab === "reviews"
           ? "Review requests and drafted PR feedback."
-          : "Drafted thread replies and comment follow-ups.";
+          : "Drafted thread replies and comment follow-ups.");
         updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
       } else if (state.currentView === "approvals") {
         title.textContent = "Approvals";
-        subtitle.textContent = "Human-gate queue across publication, feedback submission, and planned launches.";
+        setSubtitle("Human-gate queue across publication, feedback submission, and planned launches.");
         updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
       } else {
         title.textContent = "All Repos";
-        subtitle.textContent = state.overviewError ? "Workspace overview is unavailable." : "Waiting for state...";
+        setSubtitle(state.overviewError ? "Workspace overview is unavailable." : "Waiting for state...");
         updated.textContent = state.overviewError ? "Overview unavailable." : "Waiting for state...";
       }
       return;
@@ -3058,59 +3040,57 @@
 
     if (state.currentView === "home") {
       title.textContent = "All Repos";
-      subtitle.textContent = "Assistant queue across issues, runs, feedback, approvals, and repo automation.";
+      setSubtitle("Assistant queue across issues, runs, feedback, approvals, and repo automation.");
       return;
     }
     if (state.currentView === "issues") {
       title.textContent = "Issues";
-      subtitle.textContent = state.selectedRepo
+      setSubtitle(state.selectedRepo
         ? `Tracked issues, triage evidence, scheduling, and direct launch actions for ${state.selectedRepo}.`
-        : "Tracked issues, triage evidence, scheduling, and direct launch actions.";
+        : "Tracked issues, triage evidence, scheduling, and direct launch actions.");
       return;
     }
     if (state.currentView === "investigations") {
       title.textContent = "Nana Mission Control";
-      subtitle.textContent = state.selectedRepo
-        ? `Task scheduling and execution state for ${state.selectedRepo}.`
-        : "Task scheduling and execution state across Nana work.";
+      setSubtitle("");
       return;
     }
     if (state.currentView === "work") {
       title.textContent = "Work";
-      subtitle.textContent = state.selectedRepo
+      setSubtitle(state.selectedRepo
         ? `Local and GitHub-backed work runs for ${state.selectedRepo}.`
-        : "Local and GitHub-backed work runs with detail, state, and logs.";
+        : "Local and GitHub-backed work runs with detail, state, and logs.");
       return;
     }
     if (state.currentView === "usage") {
       title.textContent = "Usage";
-      subtitle.textContent = "Token spend across NANA-managed sessions, lanes, phases, and activity buckets.";
+      setSubtitle("Token spend across NANA-managed sessions, lanes, phases, and activity buckets.");
       return;
     }
     if (state.currentView === "feedback") {
       title.textContent = "Feedback";
-      subtitle.textContent = state.feedbackTab === "reviews"
+      setSubtitle(state.feedbackTab === "reviews"
         ? (state.selectedRepo ? `Review requests and drafted PR feedback for ${state.selectedRepo}.` : "Review requests and drafted PR feedback.")
-        : (state.selectedRepo ? `Drafted thread replies and comment follow-ups for ${state.selectedRepo}.` : "Drafted thread replies and comment follow-ups.");
+        : (state.selectedRepo ? `Drafted thread replies and comment follow-ups for ${state.selectedRepo}.` : "Drafted thread replies and comment follow-ups."));
       return;
     }
     if (state.currentView === "approvals") {
       title.textContent = "Approvals";
-      subtitle.textContent = state.selectedRepo
+      setSubtitle(state.selectedRepo
         ? `Human-gate queue across publication, feedback submission, and planned launches for ${state.selectedRepo}.`
-        : "Human-gate queue across publication, feedback submission, and planned launches.";
+        : "Human-gate queue across publication, feedback submission, and planned launches.");
       return;
     }
 
     const repo = selectedRepoSummary();
     if (!repo) {
       title.textContent = "All Repos";
-      subtitle.textContent = "Assistant queue across issues, runs, feedback, approvals, and repo automation.";
+      setSubtitle("Assistant queue across issues, runs, feedback, approvals, and repo automation.");
       return;
     }
 
     title.textContent = repo.repo_slug;
-    subtitle.textContent = state.repoTab === "controls"
+    setSubtitle(state.repoTab === "controls"
       ? "GitHub issue search, tracked issue scheduling, and planned launch controls."
       : state.repoTab === "findings"
         ? "Persisted findings, markdown imports, and promotion into executable work."
@@ -3118,7 +3098,7 @@
         ? "Scout-discovered items, proposal details, and repo-local management actions."
       : state.repoTab === "config"
         ? "Start-facing repo configuration and participation controls."
-        : "Repo queue posture, pending jobs, and tracked work.";
+        : "Repo queue posture, pending jobs, and tracked work.");
   }
 
   function renderRepoPicker() {
@@ -4677,36 +4657,97 @@
   function activeTaskFilterCount(filter) {
     if (!filter) return 0;
     return (String(filter.query || "").trim() ? 1 : 0) +
-      (filter.status && filter.status !== "all" ? 1 : 0) +
-      (filter.kind && filter.kind !== "all" ? 1 : 0) +
-      (filter.repo ? 1 : 0);
+      filterSelectionValues(filter.status, "all").length +
+      filterSelectionValues(filter.kind, "all").length +
+      filterSelectionValues(filter.repo, "").length;
   }
 
-  function taskFilterChip(label, value, field) {
-    if (!value || value === "all") return "";
-    const text = field === "query" ? `"${value}"` : `${label}: ${value}`;
+  function taskMultiFilterInactiveValue(field) {
+    return field === "repo" ? "" : "all";
+  }
+
+  function taskFilterOptionLabel(options, value) {
+    const match = (options || []).find((option) => option.value === value);
+    return match ? match.label : value;
+  }
+
+  function taskFilterSummary(options, values, allLabel) {
+    if (!values.length) return allLabel;
+    if (values.length === 1) return taskFilterOptionLabel(options, values[0]);
+    return `${values.length} selected`;
+  }
+
+  function taskFilterChip(label, value, field, options) {
+    if (field === "query") {
+      const query = String(value || "").trim();
+      return query ? `<button class="mission-filter-chip" type="button" data-task-filter-clear="query">${escapeHTML(`"${query}"`)} ×</button>` : "";
+    }
+    const values = filterSelectionValues(value, taskMultiFilterInactiveValue(field));
+    if (!values.length) return "";
+    const labels = values.map((item) => taskFilterOptionLabel(options, item));
+    const valueText = labels.length > 2 ? `${labels.length} selected` : labels.join(", ");
+    const text = `${label}: ${valueText}`;
     return `<button class="mission-filter-chip" type="button" data-task-filter-clear="${escapeHTML(field)}">${escapeHTML(text)} ×</button>`;
+  }
+
+  function renderTaskMultiFilter(field, label, allLabel, options) {
+    const filter = filterState("investigations");
+    const inactiveValue = taskMultiFilterInactiveValue(field);
+    const selectedValues = filterSelectionValues(filter[field], inactiveValue);
+    const selected = new Set(selectedValues);
+    const summary = taskFilterSummary(options, selectedValues, allLabel);
+    const isOpen = state.investigations.openFilterMenu === field;
+    const allChecked = selectedValues.length ? "" : "checked";
+    const optionRows = (options || []).map((option) => `
+      <label class="mission-multi-option">
+        <input type="checkbox" data-task-multi-filter-field="${escapeHTML(field)}" data-task-multi-filter-value="${escapeHTML(option.value)}" ${selected.has(option.value) ? "checked" : ""} />
+        ${escapeHTML(option.label)}
+      </label>
+    `).join("");
+    return `
+      <details class="mission-select mission-multi-select ${field === "repo" ? "mission-select-repo" : ""}" data-task-multi-filter-menu="${escapeHTML(field)}" ${isOpen ? "open" : ""}>
+        <summary>
+          <span>${escapeHTML(label)}</span>
+          <strong>${escapeHTML(summary)}</strong>
+        </summary>
+        <div class="mission-multi-options">
+          <label class="mission-multi-option">
+            <input type="checkbox" data-task-multi-filter-field="${escapeHTML(field)}" data-task-multi-filter-value="${escapeHTML(inactiveValue)}" ${allChecked} />
+            ${escapeHTML(allLabel)}
+          </label>
+          ${optionRows}
+        </div>
+      </details>
+    `;
+  }
+
+  function updateTaskMultiFilter(field, rawValue, checked) {
+    const inactiveValue = taskMultiFilterInactiveValue(field);
+    const value = String(rawValue || "");
+    if (value === inactiveValue) {
+      updateFilter("investigations", field, inactiveValue);
+      return;
+    }
+    const selected = new Set(filterSelectionValues(filterState("investigations")[field], inactiveValue));
+    if (checked) {
+      selected.add(value);
+    } else {
+      selected.delete(value);
+    }
+    updateFilter("investigations", field, selected.size ? Array.from(selected).sort() : inactiveValue);
   }
 
   function renderTaskToolbar(items) {
     const filter = filterState("investigations");
     const activeCount = activeTaskFilterCount(filter);
-    const statusOptions = [{ id: "all", title: "All" }, ...TASK_STATUS_GROUPS].map((option) => {
-      const selected = filter.status === option.id ? "selected" : "";
-      return `<option value="${escapeHTML(option.id)}" ${selected}>${escapeHTML(option.title)}</option>`;
-    }).join("");
-    const kindOptions = [{ value: "all", label: "All" }, ...taskKindOptions(items)].map((option) => {
-      const selected = filter.kind === option.value ? "selected" : "";
-      return `<option value="${escapeHTML(option.value)}" ${selected}>${escapeHTML(option.label)}</option>`;
-    }).join("");
-    const repoOptions = [`<option value="" ${filter.repo ? "" : "selected"}>All repos</option>`]
-      .concat(taskRepoOptions(items).map((repo) => `<option value="${escapeHTML(repo)}" ${filter.repo === repo ? "selected" : ""}>${escapeHTML(repo)}</option>`))
-      .join("");
+    const statusOptions = TASK_STATUS_GROUPS.map((option) => ({ value: option.id, label: option.title }));
+    const kindOptions = taskKindOptions(items);
+    const repoOptions = taskRepoOptions(items).map((repo) => ({ value: repo, label: repo }));
     const chips = [
-      taskFilterChip("Status", TASK_STATUS_GROUPS.find((item) => item.id === filter.status)?.title || "", "status"),
-      taskFilterChip("Type", filter.kind !== "all" ? taskTypeLabel(filter.kind) : "", "kind"),
-      taskFilterChip("Repo", filter.repo, "repo"),
-      taskFilterChip("", String(filter.query || "").trim(), "query"),
+      taskFilterChip("Status", filter.status, "status", statusOptions),
+      taskFilterChip("Type", filter.kind, "kind", kindOptions),
+      taskFilterChip("Repo", filter.repo, "repo", repoOptions),
+      taskFilterChip("", filter.query, "query"),
     ].filter(Boolean).join("");
     return `
       <section class="mission-toolbar surface">
@@ -4715,37 +4756,15 @@
             <span class="sr-only">Search tasks</span>
             <input type="search" value="${escapeHTML(filter.query)}" placeholder="Search tasks..." data-view-filter="investigations" data-view-filter-name="query" />
           </label>
-          <label class="mission-select">
-            <span>Status</span>
-            <select data-view-filter="investigations" data-view-filter-name="status">${statusOptions}</select>
-          </label>
-          <label class="mission-select">
-            <span>Type</span>
-            <select data-view-filter="investigations" data-view-filter-name="kind">${kindOptions}</select>
-          </label>
-          <label class="mission-select mission-select-repo">
-            <span>Repo</span>
-            <select data-view-filter="investigations" data-view-filter-name="repo">${repoOptions}</select>
-          </label>
-          <span class="mission-filter-count">${activeCount ? `${activeCount} active` : "No filters"}</span>
+          ${renderTaskMultiFilter("status", "Status", "All statuses", statusOptions)}
+          ${renderTaskMultiFilter("kind", "Type", "All types", kindOptions)}
+          ${renderTaskMultiFilter("repo", "Repo", "All repos", repoOptions)}
           ${activeCount ? `<button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-task-filter-clear="all">Clear</button>` : ""}
           <button id="open-task-schedule-button" class="tx-btn tx-btn-primary mission-add-button" type="button">+ Task</button>
         </div>
         ${chips ? `<div class="mission-filter-chips">${chips}</div>` : ""}
       </section>
     `;
-  }
-
-  function taskStatusStrip(items) {
-    return TASK_STATUS_GROUPS.map((group) => {
-      const count = taskItemsForStatus(items, group.id).length;
-      return `
-        <button class="mission-status-chip ${filterState("investigations").status === group.id ? "mission-status-chip-active" : ""}" type="button" data-task-status-filter="${escapeHTML(group.id)}">
-          <span>${escapeHTML(group.title)}</span>
-          <strong>${count}</strong>
-        </button>
-      `;
-    }).join("");
   }
 
   function renderTaskFeedRow(item) {
@@ -5144,14 +5163,11 @@
     ensureBodyStructure(`investigations:${defaultString(state.selectedRepo, "all")}:${sortedRepos().length}`, `
       <section class="mission-control-shell">
         <div id="mission-toolbar-host"></div>
-        <div id="mission-status-strip" class="mission-status-strip"></div>
         <section id="mission-feed" class="mission-feed"></section>
       </section>
     `);
     const toolbarHost = document.getElementById("mission-toolbar-host");
     if (toolbarHost) toolbarHost.innerHTML = renderTaskToolbar(state.investigations.items || []);
-    const statusHost = document.getElementById("mission-status-strip");
-    if (statusHost) statusHost.innerHTML = taskStatusStrip(state.investigations.items || []);
     const feedHost = document.getElementById("mission-feed");
     if (feedHost) feedHost.innerHTML = renderTaskFeed(items);
     renderTaskScheduleModal();
@@ -7560,7 +7576,6 @@
     renderHeader();
     renderRepoPicker();
     renderRepoOnboardingDrawer();
-    renderBreadcrumbs();
     renderTabs();
     renderBody();
     renderConfirmDialog();
@@ -8051,18 +8066,10 @@
         return;
       }
 
-      const taskStatusFilterButton = event.target.closest("[data-task-status-filter]");
-      if (taskStatusFilterButton) {
-        const status = taskStatusFilterButton.getAttribute("data-task-status-filter") || "all";
-        const current = filterState("investigations").status;
-        updateFilter("investigations", "status", current === status ? "all" : status);
-        renderInvestigationsPage();
-        return;
-      }
-
       const taskFilterClearButton = event.target.closest("[data-task-filter-clear]");
       if (taskFilterClearButton) {
         const field = taskFilterClearButton.getAttribute("data-task-filter-clear") || "";
+        state.investigations.openFilterMenu = "";
         if (field === "all") {
           state.filters.investigations = defaultScopedViewFilter("");
         } else if (field === "query") {
@@ -8699,6 +8706,17 @@
         }
         state.selectedIssue = nextIssue;
         renderIssueForm(selectedIssueRecord());
+        return;
+      }
+      const taskMultiFilterField = event.target.getAttribute("data-task-multi-filter-field");
+      if (taskMultiFilterField) {
+        updateTaskMultiFilter(
+          taskMultiFilterField,
+          event.target.getAttribute("data-task-multi-filter-value") || "",
+          Boolean(event.target.checked),
+        );
+        state.investigations.openFilterMenu = taskMultiFilterField;
+        renderInvestigationsPage();
         return;
       }
       const filterView = event.target.getAttribute("data-view-filter");

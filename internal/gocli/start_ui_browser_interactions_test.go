@@ -198,14 +198,16 @@ func TestStartUIBrowserInteractionsMissionControlTasks(t *testing.T) {
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Nana Mission Control")
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Fix flaky test")
 
-	startUITestChromedpSetValue(t, tabCtx, `[data-view-filter="investigations"][data-view-filter-name="status"]`, "blocked")
+	startUITestChromedpClick(t, tabCtx, `[data-task-multi-filter-menu="status"] summary`)
+	startUITestChromedpClick(t, tabCtx, `[data-task-multi-filter-field="status"][data-task-multi-filter-value="blocked"]`)
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Status: Blocked")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "gh-ui-blocked")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "completion-harden")
 	startUITestChromedpWaitBodyTextAbsent(t, tabCtx, "Reply in thread")
 
-	startUITestChromedpSetValue(t, tabCtx, `[data-view-filter="investigations"][data-view-filter-name="kind"]`, "work_run")
+	startUITestChromedpClick(t, tabCtx, `[data-task-multi-filter-menu="kind"] summary`)
+	startUITestChromedpClick(t, tabCtx, `[data-task-multi-filter-field="kind"][data-task-multi-filter-value="work_run"]`)
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Type: work run")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "gh-ui-blocked")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "completion-harden")
 	startUITestChromedpWaitBodyTextAbsent(t, tabCtx, "Warm staging environment")
 
 	startUITestChromedpSetValue(t, tabCtx, `[data-view-filter="investigations"][data-view-filter-name="query"]`, "no-match-token")

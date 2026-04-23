@@ -238,37 +238,6 @@ textarea {
   font-weight: 600;
 }
 
-.breadcrumb-trail {
-  margin-top: 8px;
-}
-
-.breadcrumb-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  color: #4e627a;
-  font-size: 13px;
-}
-
-.breadcrumb-list li {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.breadcrumb-list li + li::before {
-  content: "/";
-  color: #92a4ba;
-}
-
-.breadcrumb-current {
-  color: #21324a;
-  font-weight: 600;
-}
-
 .updated-copy {
   margin: 0;
 }
@@ -1391,7 +1360,7 @@ textarea {
 
 .mission-toolbar-main {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(130px, max-content) minmax(130px, max-content) minmax(160px, max-content) max-content max-content max-content;
+  grid-template-columns: minmax(220px, 1fr) minmax(130px, max-content) minmax(130px, max-content) minmax(160px, max-content) max-content max-content;
   gap: 8px;
   align-items: center;
 }
@@ -1422,7 +1391,8 @@ textarea {
   background: #ffffff;
 }
 
-.mission-select span {
+.mission-select > span,
+.mission-multi-select summary > span {
   color: #4f6787;
   font-size: 12px;
   font-weight: 800;
@@ -1439,11 +1409,70 @@ textarea {
   min-width: 132px;
 }
 
-.mission-filter-count {
-  color: #4e627a;
-  font-size: 12px;
-  font-weight: 800;
+.mission-multi-select {
+  position: relative;
+  padding-left: 0;
+}
+
+.mission-multi-select summary {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.mission-multi-select summary::-webkit-details-marker {
+  display: none;
+}
+
+.mission-multi-select summary strong {
+  overflow: hidden;
+  color: #142033;
+  font-size: 13px;
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.mission-multi-options {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 25;
+  display: grid;
+  gap: 2px;
+  min-width: 220px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid #c7d5e8;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 18px 40px rgba(20, 32, 51, 0.16);
+}
+
+.mission-select-repo .mission-multi-options {
+  min-width: 280px;
+}
+
+.mission-multi-option {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  color: #21324a;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.mission-multi-option:hover {
+  background: #edf5ff;
 }
 
 .mission-add-button {
@@ -1469,42 +1498,6 @@ textarea {
   background: #edf5ff;
   color: #223d5f;
   cursor: pointer;
-}
-
-.mission-status-strip {
-  display: flex;
-  gap: 8px;
-  overflow-x: auto;
-  padding-bottom: 2px;
-}
-
-.mission-status-chip {
-  display: inline-grid;
-  grid-auto-flow: column;
-  align-items: center;
-  gap: 8px;
-  min-height: 36px;
-  padding: 0 12px;
-  border: 1px solid #d6deea;
-  border-radius: 999px;
-  background: #ffffff;
-  color: #35506f;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.mission-status-chip strong {
-  color: #142033;
-}
-
-.mission-status-chip-active {
-  border-color: #315f9a;
-  background: #17324f;
-  color: #ffffff;
-}
-
-.mission-status-chip-active strong {
-  color: #ffffff;
 }
 
 .mission-feed {

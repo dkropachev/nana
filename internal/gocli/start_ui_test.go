@@ -5442,6 +5442,9 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(body), "Assistant Workspace") || !strings.Contains(string(body), "All Repos") {
 		t.Fatalf("expected assistant workspace shell, got %s", string(body))
 	}
+	if strings.Contains(string(body), `<p class="eyebrow">Workspace</p>`) || strings.Contains(string(body), `id="page-subtitle"`) || strings.Contains(string(body), `id="page-breadcrumb"`) {
+		t.Fatalf("expected compact workspace header shell, got %s", string(body))
+	}
 
 	appResponse, err := http.Get(server.URL + "/app.js")
 	if err != nil {
@@ -5538,6 +5541,12 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	}
 	if !strings.Contains(string(appBody), `renderStatePill(taskStatusTone(item.status), taskStatusLabel(defaultString(item.status, "queued")))`) {
 		t.Fatalf("expected task feed rows to keep state pill rendering, got %s", string(appBody))
+	}
+	if strings.Contains(string(appBody), `mission-status-strip`) || strings.Contains(string(appBody), `data-task-status-filter`) || strings.Contains(string(appBody), `mission-filter-count`) {
+		t.Fatalf("expected investigations toolbar to omit status strip and filter count, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `data-task-multi-filter-menu="${escapeHTML(field)}"`) || !strings.Contains(string(appBody), `data-task-multi-filter-field="${escapeHTML(field)}"`) {
+		t.Fatalf("expected investigations toolbar multi-select filters, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `data-task-action="run-now"`) {
 		t.Fatalf("expected task run-now control wiring in app.js, got %s", string(appBody))
