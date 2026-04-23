@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunManagedCodexPromptReturnsPauseErrorOnRateLimit(t *testing.T) {
@@ -76,6 +77,114 @@ func TestRunManagedCodexPromptReturnsPauseErrorOnRateLimit(t *testing.T) {
 	}
 	if strings.TrimSpace(checkpoint.PauseUntil) == "" {
 		t.Fatalf("expected pause_until, got %#v", checkpoint)
+	}
+}
+
+func TestRunManagedCodexPromptCapturesSessionBeforeProcessExit(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	fakeBin := filepath.Join(home, "bin")
+	releasePath := filepath.Join(home, "release.marker")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`mkdir -p "$CODEX_HOME/sessions/2026/04/17"`,
+		`printf '{"type":"session_meta","payload":{"id":"session-live","timestamp":"2099-01-01T00:00:00Z","cwd":"%s"}}\n' "$PWD" > "$CODEX_HOME/sessions/2026/04/17/rollout-session-live.jsonl"`,
+		`while [ ! -f "$FAKE_CODEX_RELEASE_PATH" ]; do sleep 0.05; done`,
+		`printf 'ok\n'`,
+	}, "\n"))
+
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_RELEASE_PATH", releasePath)
+
+	oldHeartbeat := managedPromptRecoveryHeartbeatInterval
+	oldSessionPoll := managedPromptRecoverySessionPoll
+	managedPromptRecoveryHeartbeatInterval = 25 * time.Millisecond
+	managedPromptRecoverySessionPoll = 25 * time.Millisecond
+	defer func() {
+		managedPromptRecoveryHeartbeatInterval = oldHeartbeat
+		managedPromptRecoverySessionPoll = oldSessionPoll
+	}()
+
+	cwd := t.TempDir()
+	checkpointPath := filepath.Join(cwd, "checkpoint.json")
+	type promptResult struct {
+		result codexManagedPromptResult
+		err    error
+	}
+	resultCh := make(chan promptResult, 1)
+	go func() {
+		result, err := runManagedCodexPrompt(codexManagedPromptOptions{
+			CommandDir:       cwd,
+			InstructionsRoot: cwd,
+			CodexHome:        codexHome,
+			FreshArgsPrefix:  []string{"exec", "-C", cwd},
+			Prompt:           "say hello",
+			PromptTransport:  codexPromptTransportArg,
+			CheckpointPath:   checkpointPath,
+			StepKey:          "test-live-session",
+			RecoverySpec: codexManagedPromptRecoverySpec{
+				OwnerKind:    "test",
+				OwnerID:      "live-session",
+				ArtifactRoot: cwd,
+				LogPath:      filepath.Join(cwd, "recovery.log"),
+				CWD:          cwd,
+				ResumeArgv:   []string{"work", "resume", "--run-id", "live-session"},
+			},
+			Env: append(buildCodexEnv(NotifyTempContract{}, codexHome), "NANA_PROJECT_AGENTS_ROOT="+cwd),
+		})
+		resultCh <- promptResult{result: result, err: err}
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	captured := false
+	for time.Now().Before(deadline) {
+		checkpoint, err := readCodexStepCheckpoint(checkpointPath)
+		if err == nil {
+			records, listErr := listManagedPromptRecoveryRecords()
+			if listErr == nil && checkpoint.Status == managedPromptRecoveryStatusRunning && checkpoint.SessionID == "session-live" && len(records) == 1 && records[0].SessionID == "session-live" {
+				captured = true
+				break
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !captured {
+		t.Fatalf("expected running checkpoint and recovery row to capture the live session")
+	}
+	if err := os.WriteFile(releasePath, []byte("ok"), 0o644); err != nil {
+		t.Fatalf("write release marker: %v", err)
+	}
+
+	select {
+	case outcome := <-resultCh:
+		if outcome.err != nil {
+			t.Fatalf("runManagedCodexPrompt: %v", outcome.err)
+		}
+		if strings.TrimSpace(outcome.result.Stdout) != "ok" {
+			t.Fatalf("expected fake codex output, got %q", outcome.result.Stdout)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for managed prompt to finish")
+	}
+
+	checkpoint, err := readCodexStepCheckpoint(checkpointPath)
+	if err != nil {
+		t.Fatalf("readCodexStepCheckpoint: %v", err)
+	}
+	if checkpoint.Status != "completed" || checkpoint.SessionID != "session-live" {
+		t.Fatalf("unexpected final checkpoint: %#v", checkpoint)
+	}
+	records, err := listManagedPromptRecoveryRecords()
+	if err != nil {
+		t.Fatalf("listManagedPromptRecoveryRecords: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("expected recovery row cleanup after completion, got %+v", records)
 	}
 }
 

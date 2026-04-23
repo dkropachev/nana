@@ -36,12 +36,14 @@ type codexStepCheckpoint struct {
 	PauseUntil        string `json:"pause_until,omitempty"`
 	PausedAt          string `json:"paused_at,omitempty"`
 	SessionID         string `json:"session_id,omitempty"`
+	SessionPath       string `json:"session_path,omitempty"`
 	PromptFingerprint string `json:"prompt_fingerprint,omitempty"`
 	ResumeStrategy    string `json:"resume_strategy,omitempty"`
 	ResumeEligible    bool   `json:"resume_eligible,omitempty"`
 	TelemetryRunID    string `json:"telemetry_run_id,omitempty"`
 	TelemetryTurnID   string `json:"telemetry_turn_id,omitempty"`
 	LastLaunchMode    string `json:"last_launch_mode,omitempty"`
+	OwnerPID          int    `json:"owner_pid,omitempty"`
 	StartedAt         string `json:"started_at,omitempty"`
 	UpdatedAt         string `json:"updated_at,omitempty"`
 	CompletedAt       string `json:"completed_at,omitempty"`
@@ -67,6 +69,7 @@ type codexManagedPromptOptions struct {
 	TelemetryScope     contextTelemetryScope
 	Env                []string
 	RateLimitPolicy    codexRateLimitPolicy
+	RecoverySpec       codexManagedPromptRecoverySpec
 	OnPause            func(codexRateLimitPauseInfo)
 	OnResume           func(codexRateLimitPauseInfo)
 }
@@ -95,6 +98,11 @@ func runManagedCodexPrompt(options codexManagedPromptOptions) (codexManagedPromp
 		options.ContinuationPrompt = buildCodexContinuationPrompt(options.StepKey)
 	}
 	options.RateLimitPolicy = codexRateLimitPolicyDefault(options.RateLimitPolicy)
+	if recoverySpec, ok := normalizeManagedPromptRecoverySpec(options.RecoverySpec, options.CheckpointPath, options.CommandDir); ok {
+		options.RecoverySpec = recoverySpec
+	} else {
+		options.RecoverySpec = codexManagedPromptRecoverySpec{}
+	}
 	promptFingerprint := sha256Hex(strings.TrimSpace(options.Prompt))
 	ephemeral := hasCodexEphemeralArg(options.CommonArgs)
 	checkpoint, _ := readCodexStepCheckpoint(options.CheckpointPath)
@@ -211,6 +219,7 @@ func managedPromptShouldResume(ephemeral bool, checkpoint codexStepCheckpoint, p
 
 func executeManagedCodexPrompt(options codexManagedPromptOptions, sessionID string, prompt string, resumed bool) (codexManagedPromptResult, error) {
 	startedAt := time.Now().UTC()
+	promptFingerprint := sha256Hex(strings.TrimSpace(prompt))
 	args := []string{}
 	if resumed {
 		args = append(args, "exec", "resume", strings.TrimSpace(sessionID))
@@ -255,23 +264,59 @@ func executeManagedCodexPrompt(options codexManagedPromptOptions, sessionID stri
 	var stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
 
 	result := codexManagedPromptResult{
-		Stdout:  stdout.String(),
-		Stderr:  stderr.String(),
 		Resumed: resumed,
 	}
 	if resumed {
 		result.SessionID = strings.TrimSpace(sessionID)
-	} else if !hasCodexEphemeralArg(options.CommonArgs) {
-		result.SessionID, result.SessionPath = discoverCodexSession(options.CodexHome, startedAt)
-	}
-	if result.SessionPath == "" && strings.TrimSpace(result.SessionID) != "" {
 		result.SessionPath = findCodexSessionPathByID(options.CodexHome, result.SessionID)
 	}
-	result.ResumeEligible = strings.TrimSpace(result.SessionID) != "" && err != nil
-	return result, err
+	if err := cmd.Start(); err != nil {
+		return result, err
+	}
+	if err := syncManagedPromptInFlightState(options, telemetryScope, promptFingerprint, &result, startedAt, resumed, !resumed && !hasCodexEphemeralArg(options.CommonArgs)); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return result, err
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+	heartbeat := time.NewTicker(managedPromptRecoveryHeartbeatInterval)
+	defer heartbeat.Stop()
+	var sessionPoll *time.Ticker
+	var sessionPollC <-chan time.Time
+	if !resumed && !hasCodexEphemeralArg(options.CommonArgs) {
+		sessionPoll = time.NewTicker(managedPromptRecoverySessionPoll)
+		defer sessionPoll.Stop()
+		sessionPollC = sessionPoll.C
+	}
+	for {
+		select {
+		case err := <-done:
+			if syncErr := syncManagedPromptInFlightState(options, telemetryScope, promptFingerprint, &result, startedAt, resumed, !resumed && !hasCodexEphemeralArg(options.CommonArgs)); syncErr != nil {
+				return result, syncErr
+			}
+			result.Stdout = stdout.String()
+			result.Stderr = stderr.String()
+			result.ResumeEligible = strings.TrimSpace(result.SessionID) != "" && err != nil
+			return result, err
+		case <-heartbeat.C:
+			if err := syncManagedPromptInFlightState(options, telemetryScope, promptFingerprint, &result, startedAt, resumed, false); err != nil {
+				_ = cmd.Process.Kill()
+				<-done
+				return result, err
+			}
+		case <-sessionPollC:
+			if err := syncManagedPromptInFlightState(options, telemetryScope, promptFingerprint, &result, startedAt, resumed, true); err != nil {
+				_ = cmd.Process.Kill()
+				<-done
+				return result, err
+			}
+		}
+	}
 }
 
 func finalizeManagedCodexPrompt(options codexManagedPromptOptions, promptFingerprint string, result codexManagedPromptResult, runErr error) (codexManagedPromptResult, error) {
@@ -281,17 +326,24 @@ func finalizeManagedCodexPrompt(options codexManagedPromptOptions, promptFingerp
 	if strings.TrimSpace(options.CheckpointPath) == "" {
 		return result, runErr
 	}
+	existing, _ := readCodexStepCheckpoint(options.CheckpointPath)
+	startedAt := strings.TrimSpace(existing.StartedAt)
+	if startedAt == "" {
+		startedAt = ISOTimeNow()
+	}
 	checkpoint := codexStepCheckpoint{
 		Version:           1,
 		StepKey:           options.StepKey,
 		SessionID:         strings.TrimSpace(result.SessionID),
+		SessionPath:       strings.TrimSpace(result.SessionPath),
 		PromptFingerprint: promptFingerprint,
 		ResumeStrategy:    string(options.ResumeStrategy),
 		ResumeEligible:    result.ResumeEligible,
 		TelemetryRunID:    strings.TrimSpace(options.TelemetryScope.RunID),
 		TelemetryTurnID:   strings.TrimSpace(options.TelemetryScope.TurnID),
 		LastLaunchMode:    "fresh",
-		StartedAt:         ISOTimeNow(),
+		OwnerPID:          os.Getpid(),
+		StartedAt:         startedAt,
 		UpdatedAt:         ISOTimeNow(),
 	}
 	if result.Resumed {
@@ -309,6 +361,9 @@ func finalizeManagedCodexPrompt(options codexManagedPromptOptions, promptFingerp
 	if writeErr := writeCodexStepCheckpoint(options.CheckpointPath, checkpoint); writeErr != nil {
 		return result, writeErr
 	}
+	if deleteErr := deleteManagedPromptRecovery(options.CheckpointPath); deleteErr != nil {
+		return result, deleteErr
+	}
 	return result, runErr
 }
 
@@ -325,12 +380,14 @@ func writePausedCodexCheckpoint(options codexManagedPromptOptions, promptFingerp
 		PauseUntil:        strings.TrimSpace(pauseInfo.RetryAfter),
 		PausedAt:          now,
 		SessionID:         strings.TrimSpace(result.SessionID),
+		SessionPath:       strings.TrimSpace(result.SessionPath),
 		PromptFingerprint: promptFingerprint,
 		ResumeStrategy:    string(options.ResumeStrategy),
 		ResumeEligible:    result.ResumeEligible,
 		TelemetryRunID:    strings.TrimSpace(options.TelemetryScope.RunID),
 		TelemetryTurnID:   strings.TrimSpace(options.TelemetryScope.TurnID),
 		LastLaunchMode:    "fresh",
+		OwnerPID:          os.Getpid(),
 		StartedAt:         now,
 		UpdatedAt:         now,
 		LastError:         codexPauseInfoMessage(pauseInfo),
@@ -338,7 +395,93 @@ func writePausedCodexCheckpoint(options codexManagedPromptOptions, promptFingerp
 	if result.Resumed {
 		checkpoint.LastLaunchMode = "resume"
 	}
-	return writeCodexStepCheckpoint(options.CheckpointPath, checkpoint)
+	if err := writeCodexStepCheckpoint(options.CheckpointPath, checkpoint); err != nil {
+		return err
+	}
+	if recoverySpec, ok := normalizeManagedPromptRecoverySpec(options.RecoverySpec, options.CheckpointPath, options.CommandDir); ok {
+		return upsertManagedPromptRecovery(managedPromptRecoveryRecord{
+			CheckpointPath:    strings.TrimSpace(options.CheckpointPath),
+			OwnerKind:         recoverySpec.OwnerKind,
+			OwnerID:           recoverySpec.OwnerID,
+			OwnerPayload:      cloneManagedPromptRecoveryPayload(recoverySpec.OwnerPayload),
+			StepKey:           strings.TrimSpace(options.StepKey),
+			Status:            managedPromptRecoveryStatusPaused,
+			CWD:               recoverySpec.CWD,
+			ResumeArgv:        append([]string{}, recoverySpec.ResumeArgv...),
+			ArtifactRoot:      recoverySpec.ArtifactRoot,
+			LogPath:           recoverySpec.LogPath,
+			PromptFingerprint: promptFingerprint,
+			SessionID:         strings.TrimSpace(result.SessionID),
+			SessionPath:       strings.TrimSpace(result.SessionPath),
+			LastLaunchMode:    checkpoint.LastLaunchMode,
+			PauseReason:       checkpoint.PauseReason,
+			PauseUntil:        checkpoint.PauseUntil,
+			LastError:         checkpoint.LastError,
+			OwnerPID:          os.Getpid(),
+			HeartbeatAt:       now,
+			StartedAt:         checkpoint.StartedAt,
+			UpdatedAt:         now,
+		})
+	}
+	return nil
+}
+
+func syncManagedPromptInFlightState(options codexManagedPromptOptions, telemetryScope contextTelemetryScope, promptFingerprint string, result *codexManagedPromptResult, startedAt time.Time, resumed bool, discoverSession bool) error {
+	if result == nil {
+		return nil
+	}
+	if discoverSession && strings.TrimSpace(result.SessionID) == "" {
+		result.SessionID, result.SessionPath = discoverCodexSession(options.CodexHome, startedAt)
+	}
+	if result.SessionPath == "" && strings.TrimSpace(result.SessionID) != "" {
+		result.SessionPath = findCodexSessionPathByID(options.CodexHome, result.SessionID)
+	}
+	if strings.TrimSpace(options.CheckpointPath) == "" {
+		return nil
+	}
+	now := ISOTimeNow()
+	checkpoint := codexStepCheckpoint{
+		Version:           1,
+		StepKey:           options.StepKey,
+		Status:            managedPromptRecoveryStatusRunning,
+		SessionID:         strings.TrimSpace(result.SessionID),
+		SessionPath:       strings.TrimSpace(result.SessionPath),
+		PromptFingerprint: promptFingerprint,
+		ResumeStrategy:    string(options.ResumeStrategy),
+		ResumeEligible:    strings.TrimSpace(result.SessionID) != "",
+		TelemetryRunID:    strings.TrimSpace(telemetryScope.RunID),
+		TelemetryTurnID:   strings.TrimSpace(telemetryScope.TurnID),
+		LastLaunchMode:    map[bool]string{true: "resume", false: "fresh"}[resumed],
+		OwnerPID:          os.Getpid(),
+		StartedAt:         startedAt.Format(time.RFC3339Nano),
+		UpdatedAt:         now,
+	}
+	if err := writeCodexStepCheckpoint(options.CheckpointPath, checkpoint); err != nil {
+		return err
+	}
+	if recoverySpec, ok := normalizeManagedPromptRecoverySpec(options.RecoverySpec, options.CheckpointPath, options.CommandDir); ok {
+		return upsertManagedPromptRecovery(managedPromptRecoveryRecord{
+			CheckpointPath:    strings.TrimSpace(options.CheckpointPath),
+			OwnerKind:         recoverySpec.OwnerKind,
+			OwnerID:           recoverySpec.OwnerID,
+			OwnerPayload:      cloneManagedPromptRecoveryPayload(recoverySpec.OwnerPayload),
+			StepKey:           strings.TrimSpace(options.StepKey),
+			Status:            managedPromptRecoveryStatusRunning,
+			CWD:               recoverySpec.CWD,
+			ResumeArgv:        append([]string{}, recoverySpec.ResumeArgv...),
+			ArtifactRoot:      recoverySpec.ArtifactRoot,
+			LogPath:           recoverySpec.LogPath,
+			PromptFingerprint: promptFingerprint,
+			SessionID:         strings.TrimSpace(result.SessionID),
+			SessionPath:       strings.TrimSpace(result.SessionPath),
+			LastLaunchMode:    checkpoint.LastLaunchMode,
+			OwnerPID:          os.Getpid(),
+			HeartbeatAt:       now,
+			StartedAt:         checkpoint.StartedAt,
+			UpdatedAt:         now,
+		})
+	}
+	return nil
 }
 
 func buildCodexPromptInput(prompt string, transport codexPromptTransport) ([]string, io.Reader) {

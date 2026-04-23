@@ -579,6 +579,9 @@ func runScoutWithPolicyOverride(cwd string, options ImproveOptions, role string,
 		if err != nil {
 			return err
 		}
+		runtime.RunID = manifest.RunID
+		runtime.Role = role
+		runtime.RecoveryArgv = managedPromptResumeArgv([]string{scoutCommandForRole(role), "--resume", manifest.RunID, "--repo", repoPath}, options.CodexArgs)
 		runtime.RateLimitPolicy = codexRateLimitPolicyDefault(options.RateLimitPolicy)
 		runtime.OnPause = func(info codexRateLimitPauseInfo) {
 			manifest.Status = "paused"
@@ -1425,6 +1428,7 @@ func runScoutPrompt(runtime scoutExecutionRuntime, task string, codexArgs []stri
 		CheckpointPath:   filepath.Join(runtime.StateDir, sanitizePathToken(alias)+"-checkpoint.json"),
 		StepKey:          alias,
 		ResumeStrategy:   codexResumeSamePrompt,
+		RecoverySpec:     scoutManagedPromptRecoverySpec(runtime),
 		Env:              append(buildCodexEnv(NotifyTempContract{}, runtime.CodexHome), "NANA_PROJECT_AGENTS_ROOT="+runtime.RepoPath),
 		RateLimitPolicy:  codexRateLimitPolicyDefault(runtime.RateLimitPolicy),
 		OnPause:          runtime.OnPause,
@@ -1445,6 +1449,17 @@ func normalizeUIScoutPreflightMode(value string) string {
 		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return ""
+	}
+}
+
+func scoutCommandForRole(role string) string {
+	switch strings.TrimSpace(role) {
+	case enhancementScoutRole:
+		return "enhance"
+	case uiScoutRole:
+		return "ui-scout"
+	default:
+		return "improve"
 	}
 }
 

@@ -145,6 +145,7 @@ func executeGithubLane(runID string, useLast bool, laneAlias string, task string
 		UsageRepoSlug:    manifest.RepoSlug,
 		UsageBackend:     "github",
 		UsageSandboxPath: manifest.SandboxPath,
+		RecoverySpec:     githubWorkManagedPromptRecoverySpec(manifest, runtimeDir, managedPromptResumeArgv(githubLaneRecoveryArgv(manifest.RunID, lane.Alias, task), codexArgs)),
 		Env: append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, manifest.APIBaseURL),
 			"NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath,
 		),
@@ -217,6 +218,14 @@ func executeGithubLane(runID string, useLast bool, laneAlias string, task string
 	}
 	_ = repoRoot
 	return nil
+}
+
+func githubLaneRecoveryArgv(runID string, laneAlias string, task string) []string {
+	args := []string{"work", "lane-exec", "--run-id", strings.TrimSpace(runID), "--lane", strings.TrimSpace(laneAlias)}
+	if strings.TrimSpace(task) != "" {
+		args = append(args, "--task", task)
+	}
+	return args
 }
 
 func findGithubPipelineLane(lanes []githubPipelineLane, alias string) *githubPipelineLane {

@@ -703,6 +703,7 @@ func resumeGithubWork(options localWorkResumeOptions) error {
 		UsageRepoSlug:    manifest.RepoSlug,
 		UsageBackend:     "github",
 		UsageSandboxPath: manifest.SandboxPath,
+		RecoverySpec:     githubWorkManagedPromptRecoverySpec(manifest, runDir, managedPromptResumeArgv([]string{"work", "resume", "--run-id", manifest.RunID}, options.CodexArgs)),
 		Env:              append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, manifest.APIBaseURL), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
 		OnPause: func(info codexRateLimitPauseInfo) {
 			manifest.ExecutionStatus = "paused"

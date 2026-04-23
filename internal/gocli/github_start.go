@@ -220,6 +220,7 @@ func startGithubWork(options githubWorkStartOptions) (githubWorkManifest, error)
 		UsageRepoSlug:    manifest.RepoSlug,
 		UsageBackend:     "github",
 		UsageSandboxPath: manifest.SandboxPath,
+		RecoverySpec:     githubWorkManagedPromptRecoverySpec(manifest, runDir, managedPromptResumeArgv([]string{"work", "resume", "--run-id", manifest.RunID}, options.CodexArgs)),
 		Env:              append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, apiBaseURL), "NANA_PROJECT_AGENTS_ROOT="+sandboxRepoPath),
 		RateLimitPolicy:  codexRateLimitPolicyDefault(options.RateLimitPolicy),
 		OnPause: func(info codexRateLimitPauseInfo) {

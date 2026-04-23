@@ -337,6 +337,83 @@ func TestRunWorkItemArtifactFailureLeavesPreFinalState(t *testing.T) {
 	}
 }
 
+func TestParseWorkItemRunArgsAcceptsHiddenAttemptDir(t *testing.T) {
+	options, err := parseWorkItemRunArgs([]string{"wi-1", "--attempt-dir", "/tmp/attempt-001", "--", "--model", "gpt-5.4"})
+	if err != nil {
+		t.Fatalf("parseWorkItemRunArgs: %v", err)
+	}
+	if options.ItemID != "wi-1" || options.AttemptDir != "/tmp/attempt-001" {
+		t.Fatalf("unexpected parsed options: %+v", options)
+	}
+	if got := strings.Join(options.CodexArgs, " "); got != "--model gpt-5.4" {
+		t.Fatalf("unexpected codex args: %q", got)
+	}
+}
+
+func TestRunWorkItemByIDWithOptionsReusesAttemptDir(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("HOME", home)
+
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "email",
+		SourceKind: "task",
+		ExternalID: "resume-attempt",
+		Subject:    "Draft a reply",
+		Body:       "Need an answer.",
+		Metadata: map[string]any{
+			"task_mode": "reply",
+		},
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+
+	attemptDir := workItemAttemptDir(item.ID, 1)
+	if err := os.MkdirAll(attemptDir, 0o755); err != nil {
+		t.Fatalf("mkdir attempt dir: %v", err)
+	}
+
+	oldRunner := workItemRunManagedPrompt
+	workItemRunManagedPrompt = func(options codexManagedPromptOptions) (codexManagedPromptResult, error) {
+		return codexManagedPromptResult{
+			Stdout: `{"kind":"reply","body":"Response","summary":"Summary","suggested_disposition":"needs_review","confidence":0.6}`,
+		}, nil
+	}
+	defer func() {
+		workItemRunManagedPrompt = oldRunner
+	}()
+
+	result, err := runWorkItemByIDWithOptions(cwd, workItemRunCommandOptions{
+		ItemID:     item.ID,
+		AttemptDir: attemptDir,
+	}, false)
+	if err != nil {
+		t.Fatalf("runWorkItemByIDWithOptions: %v", err)
+	}
+	if result.Item.LatestArtifactRoot != attemptDir {
+		t.Fatalf("expected reused attempt dir, got %+v", result.Item)
+	}
+
+	detail, err := readWorkItemDetail(item.ID)
+	if err != nil {
+		t.Fatalf("readWorkItemDetail: %v", err)
+	}
+	if detail.Item.LatestArtifactRoot != attemptDir || detail.Item.Status != workItemStatusDraftReady {
+		t.Fatalf("unexpected item after resumed attempt: %+v", detail.Item)
+	}
+	foundResumeEvent := false
+	for _, event := range detail.Events {
+		if event.EventType == "run_resumed" {
+			foundResumeEvent = true
+			break
+		}
+	}
+	if !foundResumeEvent {
+		t.Fatalf("expected run_resumed event, got %+v", detail.Events)
+	}
+}
+
 func TestResolveWorkItemLinkedRunIDUsesMatchingRunIndex(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

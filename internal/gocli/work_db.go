@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const localWorkDBSchemaVersion = 3
+const localWorkDBSchemaVersion = 4
 
 type localWorkDBMigration struct {
 	From  int
@@ -25,6 +25,7 @@ var localWorkDBMigrations = []localWorkDBMigration{
 	{From: 0, To: 1, Apply: migrateLegacyLocalWorkDB},
 	{From: 1, To: 2, Apply: migrateLocalWorkDBV2UsageSQLite},
 	{From: 2, To: 3, Apply: migrateLocalWorkDBV3TaskStore},
+	{From: 3, To: 4, Apply: migrateLocalWorkDBV4ManagedPromptRecovery},
 }
 
 type localWorkDBDiagnostic struct {
@@ -69,17 +70,25 @@ type localWorkDBInspectMetadata struct {
 }
 
 type localWorkDBInspectReport struct {
-	DatabasePath         string                        `json:"database_path"`
-	Exists               bool                          `json:"exists"`
-	Empty                bool                          `json:"empty,omitempty"`
-	SchemaVersion        int                           `json:"schema_version"`
-	CurrentSchemaVersion int                           `json:"current_schema_version"`
-	SizeBytes            int64                         `json:"size_bytes,omitempty"`
-	WALSizeBytes         int64                         `json:"wal_size_bytes,omitempty"`
-	SHMSizeBytes         int64                         `json:"shm_size_bytes,omitempty"`
-	Tables               []localWorkDBInspectTableStat `json:"tables,omitempty"`
-	Indices              []localWorkDBInspectIndexStat `json:"indices,omitempty"`
-	Metadata             []localWorkDBInspectMetadata  `json:"metadata,omitempty"`
+	DatabasePath          string                               `json:"database_path"`
+	Exists                bool                                 `json:"exists"`
+	Empty                 bool                                 `json:"empty,omitempty"`
+	SchemaVersion         int                                  `json:"schema_version"`
+	CurrentSchemaVersion  int                                  `json:"current_schema_version"`
+	SizeBytes             int64                                `json:"size_bytes,omitempty"`
+	WALSizeBytes          int64                                `json:"wal_size_bytes,omitempty"`
+	SHMSizeBytes          int64                                `json:"shm_size_bytes,omitempty"`
+	Tables                []localWorkDBInspectTableStat        `json:"tables,omitempty"`
+	Indices               []localWorkDBInspectIndexStat        `json:"indices,omitempty"`
+	Metadata              []localWorkDBInspectMetadata         `json:"metadata,omitempty"`
+	ManagedPromptRecovery *managedPromptRecoveryInspectSummary `json:"managed_prompt_recovery,omitempty"`
+}
+
+type managedPromptRecoveryInspectSummary struct {
+	Total      int            `json:"total"`
+	ByStatus   map[string]int `json:"by_status,omitempty"`
+	ByOwner    map[string]int `json:"by_owner,omitempty"`
+	StaleCount int            `json:"stale_count,omitempty"`
 }
 
 type localWorkDBMaintainOptions struct {
@@ -294,6 +303,31 @@ func localWorkCurrentSchemaDDL() []string {
 			PRIMARY KEY(run_id, iteration),
 			FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
 		);`,
+		`CREATE TABLE IF NOT EXISTS managed_prompt_recovery (
+			checkpoint_path TEXT PRIMARY KEY CHECK(length(trim(checkpoint_path)) > 0),
+			owner_kind TEXT NOT NULL CHECK(length(trim(owner_kind)) > 0),
+			owner_id TEXT NOT NULL CHECK(length(trim(owner_id)) > 0),
+			owner_payload_json TEXT,
+			step_key TEXT NOT NULL CHECK(length(trim(step_key)) > 0),
+			status TEXT NOT NULL CHECK(length(trim(status)) > 0),
+			cwd TEXT NOT NULL CHECK(length(trim(cwd)) > 0),
+			resume_argv_json TEXT NOT NULL CHECK(length(trim(resume_argv_json)) > 0),
+			artifact_root TEXT,
+			log_path TEXT,
+			prompt_fingerprint TEXT,
+			session_id TEXT,
+			session_path TEXT,
+			last_launch_mode TEXT,
+			pause_reason TEXT,
+			pause_until TEXT,
+			last_error TEXT,
+			owner_pid INTEGER NOT NULL DEFAULT 0,
+			heartbeat_at TEXT NOT NULL CHECK(length(trim(heartbeat_at)) > 0),
+			started_at TEXT NOT NULL CHECK(length(trim(started_at)) > 0),
+			updated_at TEXT NOT NULL CHECK(length(trim(updated_at)) > 0)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_managed_prompt_recovery_status_updated ON managed_prompt_recovery(status, updated_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_managed_prompt_recovery_owner_updated ON managed_prompt_recovery(owner_kind, owner_id, updated_at DESC);`,
 		`CREATE TABLE IF NOT EXISTS finding_history (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			run_id TEXT NOT NULL,
@@ -522,6 +556,9 @@ func ensureLocalWorkCurrentSchemaCompatibility(db *sql.DB) error {
 		if _, err := db.Exec(stmt); err != nil {
 			return err
 		}
+	}
+	if err := ensureSQLiteColumn(db, "managed_prompt_recovery", "owner_payload_json", `ALTER TABLE managed_prompt_recovery ADD COLUMN owner_payload_json TEXT`); err != nil {
+		return err
 	}
 	if err := ensureSQLiteColumn(db, "work_run_index", "repo_slug", `ALTER TABLE work_run_index ADD COLUMN repo_slug TEXT`); err != nil {
 		return err
@@ -916,6 +953,26 @@ func migrateLocalWorkDBV2UsageSQLite(db *sql.DB) ([]string, error) {
 }
 
 func migrateLocalWorkDBV3TaskStore(db *sql.DB) ([]string, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	for _, stmt := range localWorkCurrentSchemaDDL() {
+		if _, err := tx.Exec(stmt); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version=%d`, localWorkDBSchemaVersion)); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return []string{fmt.Sprintf("migrated SQLite schema to version %d", localWorkDBSchemaVersion)}, nil
+}
+
+func migrateLocalWorkDBV4ManagedPromptRecovery(db *sql.DB) ([]string, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
@@ -1374,6 +1431,11 @@ func repairCurrentLocalWorkDB(db *sql.DB) ([]string, error) {
 	if err := tx.Commit(); err != nil {
 		return actions, err
 	}
+	recoveryActions, err := cleanupManagedPromptRecoveryRowsDB(db, managedPromptRecoveryCleanupModeRepair)
+	actions = append(actions, recoveryActions...)
+	if err != nil {
+		return actions, err
+	}
 	return actions, nil
 }
 
@@ -1571,7 +1633,7 @@ func inspectLocalWorkDBDetailed() (localWorkDBInspectReport, error) {
 		return report, nil
 	}
 
-	tableQueries := []string{"usage_sources", "usage_sessions", "usage_checkpoints", "work_run_index", "work_items", "tasks", "task_events", "task_templates"}
+	tableQueries := []string{"managed_prompt_recovery", "usage_sources", "usage_sessions", "usage_checkpoints", "work_run_index", "work_items", "tasks", "task_events", "task_templates"}
 	for _, table := range tableQueries {
 		var count int64
 		if err := store.db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM %s`, table)).Scan(&count); err != nil {
@@ -1585,11 +1647,18 @@ func inspectLocalWorkDBDetailed() (localWorkDBInspectReport, error) {
 	sort.Slice(report.Tables, func(i, j int) bool {
 		return report.Tables[i].Name < report.Tables[j].Name
 	})
+	recoverySummary, err := inspectManagedPromptRecoveryRows(store.db)
+	if err != nil {
+		return report, err
+	}
+	report.ManagedPromptRecovery = recoverySummary
 
 	for _, index := range []struct {
 		Name  string
 		Table string
 	}{
+		{Name: "idx_managed_prompt_recovery_status_updated", Table: "managed_prompt_recovery"},
+		{Name: "idx_managed_prompt_recovery_owner_updated", Table: "managed_prompt_recovery"},
 		{Name: "idx_usage_checkpoints_ts_session", Table: "usage_checkpoints"},
 		{Name: "idx_usage_checkpoints_session_ts", Table: "usage_checkpoints"},
 		{Name: "idx_usage_sources_repo_root", Table: "usage_sources"},
@@ -1946,6 +2015,11 @@ func printLocalWorkDBInspectReport(report localWorkDBInspectReport) {
 	}
 	fmt.Fprintf(currentWorkStdout(), "[work-db] Size: db=%d wal=%d shm=%d bytes\n", report.SizeBytes, report.WALSizeBytes, report.SHMSizeBytes)
 	fmt.Fprintf(currentWorkStdout(), "[work-db] Schema version: %d (current=%d)\n", report.SchemaVersion, report.CurrentSchemaVersion)
+	if report.ManagedPromptRecovery != nil {
+		fmt.Fprintf(currentWorkStdout(), "[work-db] Managed prompt recovery: total=%d stale=%d\n", report.ManagedPromptRecovery.Total, report.ManagedPromptRecovery.StaleCount)
+		printManagedPromptInspectCounts("status", report.ManagedPromptRecovery.ByStatus)
+		printManagedPromptInspectCounts("owner", report.ManagedPromptRecovery.ByOwner)
+	}
 	for _, table := range report.Tables {
 		fmt.Fprintf(currentWorkStdout(), "[work-db] Table %s: %d row(s)\n", table.Name, table.Rows)
 	}
@@ -1958,6 +2032,20 @@ func printLocalWorkDBInspectReport(report localWorkDBInspectReport) {
 	}
 	for _, item := range report.Metadata {
 		fmt.Fprintf(currentWorkStdout(), "[work-db] Metadata %s=%s\n", item.Key, item.Value)
+	}
+}
+
+func printManagedPromptInspectCounts(label string, counts map[string]int) {
+	if len(counts) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Fprintf(currentWorkStdout(), "[work-db] Managed prompt %s %s: %d row(s)\n", label, key, counts[key])
 	}
 }
 

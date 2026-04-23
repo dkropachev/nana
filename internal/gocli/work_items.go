@@ -180,6 +180,12 @@ type workItemSyncCommandOptions struct {
 	CodexArgs []string
 }
 
+type workItemRunCommandOptions struct {
+	ItemID     string
+	CodexArgs  []string
+	AttemptDir string
+}
+
 type workItemFixCommandOptions struct {
 	ItemID      string
 	Instruction string
@@ -223,11 +229,11 @@ func workItemsCommand(cwd string, args []string) error {
 		_, err = syncGithubWorkItems(options)
 		return err
 	case "run":
-		itemID, codexArgs, err := parseWorkItemRunArgs(args[1:])
+		options, err := parseWorkItemRunArgs(args[1:])
 		if err != nil {
 			return err
 		}
-		_, err = runWorkItemByID(cwd, itemID, codexArgs, false)
+		_, err = runWorkItemByIDWithOptions(cwd, options, false)
 		return err
 	case "submit":
 		itemID, err := parseSingleWorkItemArg(args[1:], "submit")
@@ -398,7 +404,8 @@ func parseWorkItemSyncArgs(args []string) (workItemSyncCommandOptions, error) {
 	return options, nil
 }
 
-func parseWorkItemRunArgs(args []string) (string, []string, error) {
+func parseWorkItemRunArgs(args []string) (workItemRunCommandOptions, error) {
+	options := workItemRunCommandOptions{}
 	passthroughIndex := len(args)
 	for index, token := range args {
 		if token == "--" {
@@ -407,12 +414,33 @@ func parseWorkItemRunArgs(args []string) (string, []string, error) {
 		}
 	}
 	parseArgs := args[:passthroughIndex]
-	codexArgs := []string{}
 	if passthroughIndex < len(args) {
-		codexArgs = append(codexArgs, args[passthroughIndex+1:]...)
+		options.CodexArgs = append(options.CodexArgs, args[passthroughIndex+1:]...)
 	}
-	itemID, err := parseSingleWorkItemArg(parseArgs, "run")
-	return itemID, codexArgs, err
+	positionals := []string{}
+	for index := 0; index < len(parseArgs); index++ {
+		token := parseArgs[index]
+		switch {
+		case token == "--attempt-dir":
+			value, err := requireFlagValue(parseArgs, index, token)
+			if err != nil {
+				return workItemRunCommandOptions{}, fmt.Errorf("Missing value after --attempt-dir.\n\n%s", WorkItemsHelp)
+			}
+			options.AttemptDir = strings.TrimSpace(value)
+			index++
+		case strings.HasPrefix(token, "--attempt-dir="):
+			options.AttemptDir = strings.TrimSpace(strings.TrimPrefix(token, "--attempt-dir="))
+		case strings.HasPrefix(token, "-"):
+			return workItemRunCommandOptions{}, fmt.Errorf("Unknown work items run option: %s\n\n%s", token, WorkItemsHelp)
+		default:
+			positionals = append(positionals, token)
+		}
+	}
+	if len(positionals) != 1 {
+		return workItemRunCommandOptions{}, fmt.Errorf("Usage: nana work items run <item-id> [-- codex-args...]\n\n%s", WorkItemsHelp)
+	}
+	options.ItemID = positionals[0]
+	return options, nil
 }
 
 func parseWorkItemFixArgs(args []string) (workItemFixCommandOptions, error) {
@@ -828,23 +856,39 @@ func writeOptionalWorkItemArtifact(path string, content []byte) {
 }
 
 func runWorkItemByID(cwd string, itemID string, codexArgs []string, background bool) (workItemExecutionResult, error) {
+	return runWorkItemByIDWithOptions(cwd, workItemRunCommandOptions{
+		ItemID:    itemID,
+		CodexArgs: append([]string{}, codexArgs...),
+	}, background)
+}
+
+func runWorkItemByIDWithOptions(cwd string, options workItemRunCommandOptions, background bool) (workItemExecutionResult, error) {
+	itemID := strings.TrimSpace(options.ItemID)
 	item, err := withLocalWorkReadStore(func(store *localWorkDBStore) (workItem, error) {
 		return store.readWorkItem(itemID)
 	})
 	if err != nil {
 		return workItemExecutionResult{}, err
 	}
-	attemptDir, _, err := nextWorkItemAttemptDir(item.ID)
-	if err != nil {
-		return workItemExecutionResult{}, err
+	attemptDir := strings.TrimSpace(options.AttemptDir)
+	if attemptDir == "" {
+		var nextAttempt int
+		attemptDir, nextAttempt, err = nextWorkItemAttemptDir(item.ID)
+		if err != nil {
+			return workItemExecutionResult{}, err
+		}
+		_ = nextAttempt
 	}
 	item, err = withLocalWorkWriteStore(func(store *localWorkDBStore) (workItem, error) {
+		if strings.TrimSpace(options.AttemptDir) != "" {
+			return store.resumeWorkItemAttempt(itemID, attemptDir, ternaryString(background, "auto", "user"))
+		}
 		return store.startWorkItemAttempt(itemID, attemptDir, ternaryString(background, "auto", "user"))
 	})
 	if err != nil {
 		return workItemExecutionResult{}, err
 	}
-	result, rawOutput, err := executeWorkItem(cwd, item, attemptDir, codexArgs)
+	result, rawOutput, err := executeWorkItem(cwd, item, attemptDir, options.CodexArgs)
 	if err != nil {
 		if pauseErr, ok := isCodexRateLimitPauseError(err); ok {
 			item.Status = workItemStatusPaused
@@ -900,7 +944,7 @@ func runWorkItemByID(cwd string, itemID string, codexArgs []string, background b
 		item.PauseUntil = ""
 		item.Metadata = clearWorkItemPauseMetadata(item.Metadata)
 	}
-	if item.LatestDraft != nil && item.Status == "" {
+	if item.LatestDraft != nil && (item.Status == "" || item.Status == workItemStatusRunning) {
 		item.Status = workItemStatusDraftReady
 	}
 	if shouldSilenceWorkItem(item) {
@@ -1151,6 +1195,7 @@ func runWorkItemCodexPrompt(target workItemCodexTarget, attemptDir string, promp
 			CheckpointPath:   filepath.Join(attemptDir, "reply-checkpoint.json"),
 			StepKey:          "work-item-reply",
 			ResumeStrategy:   codexResumeSamePrompt,
+			RecoverySpec:     workItemManagedPromptRecoverySpec(filepath.Base(filepath.Dir(attemptDir)), attemptDir, repoPath, codexArgs),
 			Env: append(buildGithubCodexEnv(NotifyTempContract{}, codexHome, strings.TrimSpace(os.Getenv("GITHUB_API_URL"))),
 				"NANA_PROJECT_AGENTS_ROOT="+repoPath,
 			),
@@ -1769,6 +1814,37 @@ func (s *localWorkDBStore) startWorkItemAttempt(itemID string, attemptDir string
 		return workItem{}, err
 	}
 	if err := appendWorkItemEventTx(tx, item.ID, "run_started", actor, map[string]any{"attempt_dir": attemptDir}); err != nil {
+		return workItem{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return workItem{}, err
+	}
+	if err := syncCanonicalWorkItemTask(item); err != nil {
+		return workItem{}, err
+	}
+	return item, nil
+}
+
+func (s *localWorkDBStore) resumeWorkItemAttempt(itemID string, attemptDir string, actor string) (workItem, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return workItem{}, err
+	}
+	defer tx.Rollback()
+	item, err := readWorkItemTx(tx, itemID)
+	if err != nil {
+		return workItem{}, err
+	}
+	item.Status = workItemStatusRunning
+	item.Hidden = false
+	item.HiddenReason = ""
+	item.LatestArtifactRoot = attemptDir
+	item.LatestActionAt = ISOTimeNow()
+	item.UpdatedAt = item.LatestActionAt
+	if err := writeWorkItemTx(tx, item); err != nil {
+		return workItem{}, err
+	}
+	if err := appendWorkItemEventTx(tx, item.ID, "run_resumed", actor, map[string]any{"attempt_dir": attemptDir}); err != nil {
 		return workItem{}, err
 	}
 	if err := tx.Commit(); err != nil {

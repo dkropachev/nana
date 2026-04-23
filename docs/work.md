@@ -110,6 +110,13 @@ Validation behavior:
 - if final source commit is blocked because the source checkout is dirty or no longer at the run baseline, the run remains blocked until `resolve` refreshes the source checkout and retries final apply
 - if source apply succeeds but commit creation or push fails, the source checkout remains blocked until `resolve` retries the pending commit/push path
 
+Restart recovery:
+
+- managed prompt execution now persists in-flight recovery state in `~/.nana/work/state.db` beside per-step checkpoint files
+- the next `nana start` pass will auto-recover supported interrupted managed runs when their owner process is gone but the step is still resumable
+- this currently covers local work, GitHub work, investigate, direct scouts, and work-item drafting; `nana work sync --resume-last` also uses a single-use stored feedback artifact
+- Start UI task inference remains best-effort and intentionally does not participate in restart recovery
+
 Final commit recovery:
 
 - `blocked-before-apply`: run `nana work resolve --run-id <id>` to refresh the source checkout and retry final apply.

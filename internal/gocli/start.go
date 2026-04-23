@@ -85,6 +85,7 @@ var startRunScoutStart = runScoutStart
 var startRunLocalScoutPickup = runLocalScoutDiscoveredItems
 var startRunRepoCycle = runStartRepoCycle
 var startRunRepoCyclesBatch = runStartRepoCyclesSharedWorkers
+var startRecoverManagedPromptSteps = recoverStaleManagedPromptSteps
 var startLaunchLocalWorkDBProxySupervisor = launchLocalWorkDBProxySupervisor
 var startLaunchNanaServiceSupervisor = launchNanaServiceSupervisor
 var startLoopNow = time.Now
@@ -102,6 +103,9 @@ func Start(cwd string, args []string) error {
 	if len(args) > 0 && isHelpToken(args[0]) {
 		fmt.Fprint(os.Stdout, StartHelp)
 		return nil
+	}
+	if len(args) > 0 && args[0] == "__recover-triage" {
+		return recoverStartWorkIssueTriage(args[1:])
 	}
 	cleanArgs, runtime, err := parseStartRuntimeArgs(args)
 	if err != nil {
@@ -489,6 +493,12 @@ func runStartLoop(runtime startRuntimeOptions, runOnce func() error) error {
 			fmt.Fprintf(os.Stdout, "[start] Cycle %d/forever.\n", cycle)
 		} else if runtime.Cycles > 1 {
 			fmt.Fprintf(os.Stdout, "[start] Cycle %d/%d.\n", cycle, runtime.Cycles)
+		}
+		if err := startRecoverManagedPromptSteps(); err != nil {
+			if !runtime.Forever {
+				return err
+			}
+			fmt.Fprintf(os.Stdout, "[start] Managed prompt recovery failed: %v\n", err)
 		}
 		if err := runOnce(); err != nil {
 			if !runtime.Forever {

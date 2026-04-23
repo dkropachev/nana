@@ -1178,6 +1178,7 @@ func runInvestigateCodexPrompt(manifestPath string, manifest investigateManifest
 		CheckpointPath:   checkpointPath,
 		StepKey:          codexHomeAlias,
 		ResumeStrategy:   codexResumeSamePrompt,
+		RecoverySpec:     investigateManagedPromptRecoverySpec(manifest, codexArgs),
 		Env:              append(buildCodexEnv(NotifyTempContract{}, scopedCodexHome), "NANA_PROJECT_AGENTS_ROOT="+manifest.WorkspaceRoot),
 		OnPause: func(info codexRateLimitPauseInfo) {
 			manifest.Status = "paused"

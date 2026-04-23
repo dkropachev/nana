@@ -227,3 +227,136 @@ func TestShowWorkItemCommandSurfacesRepairAction(t *testing.T) {
 		t.Fatalf("expected repair guidance error, got %v", err)
 	}
 }
+
+func TestInspectLocalWorkDBDetailedIncludesManagedPromptRecoverySummary(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	checkpointA := filepath.Join(home, "checkpoint-a.json")
+	checkpointB := filepath.Join(home, "checkpoint-b.json")
+	if err := os.WriteFile(checkpointA, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write checkpoint A: %v", err)
+	}
+	if err := os.WriteFile(checkpointB, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write checkpoint B: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := upsertManagedPromptRecovery(managedPromptRecoveryRecord{
+		CheckpointPath: checkpointA,
+		OwnerKind:      "investigate",
+		OwnerID:        "inv-1",
+		StepKey:        "investigator-round-1",
+		Status:         managedPromptRecoveryStatusRunning,
+		CWD:            home,
+		ResumeArgv:     []string{"investigate", "--resume", "inv-1"},
+		HeartbeatAt:    now.Add(-5 * time.Minute).Format(time.RFC3339Nano),
+		StartedAt:      now.Add(-10 * time.Minute).Format(time.RFC3339Nano),
+		UpdatedAt:      now.Add(-5 * time.Minute).Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("upsert record A: %v", err)
+	}
+	if err := upsertManagedPromptRecovery(managedPromptRecoveryRecord{
+		CheckpointPath: checkpointB,
+		OwnerKind:      "work-item",
+		OwnerID:        "wi-1",
+		StepKey:        "work-item-reply",
+		Status:         managedPromptRecoveryStatusPaused,
+		CWD:            home,
+		ResumeArgv:     []string{"work", "items", "run", "wi-1", "--attempt-dir", filepath.Join(home, "attempt-001")},
+		HeartbeatAt:    now.Format(time.RFC3339Nano),
+		StartedAt:      now.Add(-time.Minute).Format(time.RFC3339Nano),
+		UpdatedAt:      now.Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("upsert record B: %v", err)
+	}
+
+	report, err := inspectLocalWorkDBDetailed()
+	if err != nil {
+		t.Fatalf("inspectLocalWorkDBDetailed: %v", err)
+	}
+	if report.ManagedPromptRecovery == nil {
+		t.Fatalf("expected managed prompt recovery summary in inspect report")
+	}
+	if report.ManagedPromptRecovery.Total != 2 || report.ManagedPromptRecovery.ByStatus[managedPromptRecoveryStatusRunning] != 1 || report.ManagedPromptRecovery.ByStatus[managedPromptRecoveryStatusPaused] != 1 {
+		t.Fatalf("unexpected recovery status summary: %+v", report.ManagedPromptRecovery)
+	}
+	if report.ManagedPromptRecovery.ByOwner["investigate"] != 1 || report.ManagedPromptRecovery.ByOwner["work-item"] != 1 {
+		t.Fatalf("unexpected recovery owner summary: %+v", report.ManagedPromptRecovery)
+	}
+	if report.ManagedPromptRecovery.StaleCount != 1 {
+		t.Fatalf("expected one stale recovery row, got %+v", report.ManagedPromptRecovery)
+	}
+}
+
+func TestRepairLocalWorkDBRemovesOrphanManagedPromptRecoveryRows(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "email",
+		SourceKind: "task",
+		ExternalID: "managed-prompt-repair",
+		Subject:    "Repair recovery rows",
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+	item.Status = workItemStatusDraftReady
+	item.UpdatedAt = ISOTimeNow()
+	item.LatestActionAt = item.UpdatedAt
+	if _, err := withLocalWorkWriteStore(func(store *localWorkDBStore) (workItem, error) {
+		return item, store.updateWorkItem(item)
+	}); err != nil {
+		t.Fatalf("updateWorkItem: %v", err)
+	}
+
+	checkpointMissing := filepath.Join(home, "missing-checkpoint.json")
+	checkpointTerminal := filepath.Join(home, "terminal-checkpoint.json")
+	if err := os.WriteFile(checkpointTerminal, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write terminal checkpoint: %v", err)
+	}
+	if err := upsertManagedPromptRecovery(managedPromptRecoveryRecord{
+		CheckpointPath: checkpointMissing,
+		OwnerKind:      "investigate",
+		OwnerID:        "inv-missing",
+		StepKey:        "investigator-round-1",
+		Status:         managedPromptRecoveryStatusRunning,
+		CWD:            home,
+		ResumeArgv:     []string{"investigate", "--resume", "inv-missing"},
+		HeartbeatAt:    ISOTimeNow(),
+		StartedAt:      ISOTimeNow(),
+		UpdatedAt:      ISOTimeNow(),
+	}); err != nil {
+		t.Fatalf("upsert missing record: %v", err)
+	}
+	if err := upsertManagedPromptRecovery(managedPromptRecoveryRecord{
+		CheckpointPath: checkpointTerminal,
+		OwnerKind:      "work-item",
+		OwnerID:        item.ID,
+		StepKey:        "work-item-reply",
+		Status:         managedPromptRecoveryStatusPaused,
+		CWD:            home,
+		ResumeArgv:     []string{"work", "items", "run", item.ID},
+		HeartbeatAt:    ISOTimeNow(),
+		StartedAt:      ISOTimeNow(),
+		UpdatedAt:      ISOTimeNow(),
+	}); err != nil {
+		t.Fatalf("upsert terminal record: %v", err)
+	}
+
+	report, err := repairLocalWorkDB()
+	if err != nil {
+		t.Fatalf("repairLocalWorkDB: %v", err)
+	}
+	joined := strings.Join(report.Actions, "\n")
+	if !strings.Contains(joined, "managed prompt recovery row") {
+		t.Fatalf("expected repair actions to mention managed prompt cleanup, got %q", joined)
+	}
+	records, err := listManagedPromptRecoveryRecords()
+	if err != nil {
+		t.Fatalf("listManagedPromptRecoveryRecords: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("expected repaired DB to remove orphan recovery rows, got %+v", records)
+	}
+}

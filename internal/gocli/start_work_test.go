@@ -747,6 +747,43 @@ func TestStartRepoCoordinatorQueuedWaitTaskRunsAgainNextCycleAfterReload(t *test
 	}
 }
 
+func TestReadStartWorkStatePreservesRunningTriageWhenServiceTaskRunning(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	state := startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: "acme/widget",
+		UpdatedAt:  "now",
+		Issues: map[string]startWorkIssueState{
+			"1": {
+				SourceNumber: 1,
+				TriageStatus: startWorkTriageRunning,
+			},
+		},
+		ServiceTasks: map[string]startWorkServiceTask{
+			"triage:1": {
+				ID:       "triage:1",
+				Kind:     startTaskKindTriage,
+				Queue:    startTaskQueueService,
+				Status:   startWorkServiceTaskRunning,
+				IssueKey: "1",
+			},
+		},
+	}
+	if err := writeStartWorkState(state); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	loaded, err := readStartWorkState("acme/widget")
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	if loaded.Issues["1"].TriageStatus != startWorkTriageRunning {
+		t.Fatalf("expected running triage to remain running while service task is running, got %+v", loaded.Issues["1"])
+	}
+}
+
 func TestStartRepoCoordinatorQueuesReconcileForStaleInProgressIssue(t *testing.T) {
 	coordinator := &startRepoCoordinator{
 		repoSlug: "acme/widget",

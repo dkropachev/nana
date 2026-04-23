@@ -986,6 +986,142 @@ func TestRepoDefaultsApplyOnlyToManualGithubOnboard(t *testing.T) {
 	}
 }
 
+func TestRecoverStartWorkIssueTriageResumesExistingCheckpoint(t *testing.T) {
+	home := t.TempDir()
+	repoSlug := "acme/widget"
+	issueKey := "1"
+
+	t.Setenv("HOME", home)
+	state := startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  "now",
+		Issues: map[string]startWorkIssueState{
+			issueKey: {
+				SourceNumber: 1,
+				SourceBody:   "body",
+				Title:        "triage me",
+				State:        "open",
+				TriageStatus: startWorkTriageQueued,
+				Status:       startWorkStatusQueued,
+			},
+		},
+		ServiceTasks: map[string]startWorkServiceTask{
+			startServiceTaskKey(startTaskKindTriage, issueKey): {
+				ID:       startServiceTaskKey(startTaskKindTriage, issueKey),
+				Kind:     startTaskKindTriage,
+				Queue:    startTaskQueueService,
+				Status:   startWorkServiceTaskRunning,
+				IssueKey: issueKey,
+				Attempts: 1,
+			},
+		},
+	}
+	if err := writeStartWorkState(state); err != nil {
+		t.Fatalf("writeStartWorkState: %v", err)
+	}
+
+	oldRun := startRunIssueTriage
+	startRunIssueTriage = func(repoSlug string, actualIssueKey string, issue startWorkIssueState, codexArgs []string) (startWorkTriageResult, error) {
+		if repoSlug != "acme/widget" || actualIssueKey != issueKey || issue.SourceNumber != 1 {
+			t.Fatalf("unexpected triage recovery input: repo=%s key=%s issue=%+v", repoSlug, actualIssueKey, issue)
+		}
+		return startWorkTriageResult{Priority: 2, Rationale: "Recovered triage"}, nil
+	}
+	defer func() { startRunIssueTriage = oldRun }()
+
+	if err := recoverStartWorkIssueTriage([]string{"--repo-slug", repoSlug, "--issue-key", issueKey}); err != nil {
+		t.Fatalf("recoverStartWorkIssueTriage: %v", err)
+	}
+
+	updated, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("readStartWorkState: %v", err)
+	}
+	if updated.Issues[issueKey].TriageStatus != startWorkTriageCompleted || updated.Issues[issueKey].Priority != 2 {
+		t.Fatalf("unexpected recovered issue triage state: %+v", updated.Issues[issueKey])
+	}
+	task := updated.ServiceTasks[startServiceTaskKey(startTaskKindTriage, issueKey)]
+	if task.Status != startWorkServiceTaskCompleted || task.ResultSummary != "P2" {
+		t.Fatalf("unexpected recovered triage task state: %+v", task)
+	}
+}
+
+func TestStartRepoCoordinatorSyncServiceTasksPreservesRecoveredTriage(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoSlug := "acme/widget"
+	issueKey := "1"
+
+	oldSnapshot := managedPromptRecoveryProcessSnapshot
+	managedPromptRecoveryProcessSnapshot = func() (string, error) {
+		return "1234 nana start __recover-triage --repo-slug acme/widget --issue-key 1\n", nil
+	}
+	defer func() { managedPromptRecoveryProcessSnapshot = oldSnapshot }()
+
+	checkpointPath := filepath.Join(home, "triage-checkpoint.json")
+	if err := os.WriteFile(checkpointPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write checkpoint path: %v", err)
+	}
+	if err := upsertManagedPromptRecovery(managedPromptRecoveryRecord{
+		CheckpointPath: checkpointPath,
+		OwnerKind:      "start-triage",
+		OwnerID:        startTriageRecoveryOwnerID(repoSlug, issueKey),
+		OwnerPayload: map[string]any{
+			"repo_slug": repoSlug,
+			"issue_key": issueKey,
+		},
+		StepKey:     "triage-issue-1",
+		Status:      managedPromptRecoveryStatusRecovering,
+		CWD:         home,
+		ResumeArgv:  []string{"start", "__recover-triage", "--repo-slug", repoSlug, "--issue-key", issueKey},
+		OwnerPID:    1234,
+		HeartbeatAt: ISOTimeNow(),
+		StartedAt:   ISOTimeNow(),
+		UpdatedAt:   ISOTimeNow(),
+	}); err != nil {
+		t.Fatalf("upsertManagedPromptRecovery: %v", err)
+	}
+
+	coordinator := &startRepoCoordinator{
+		repoSlug: repoSlug,
+		cycleID:  "cycle-1",
+		state: &startWorkState{
+			SourceRepo: repoSlug,
+			Issues: map[string]startWorkIssueState{
+				issueKey: {
+					SourceNumber: 1,
+					State:        "open",
+					Status:       startWorkStatusQueued,
+					TriageStatus: startWorkTriageRunning,
+				},
+			},
+			ServiceTasks: map[string]startWorkServiceTask{
+				startServiceTaskKey(startTaskKindTriage, issueKey): {
+					ID:       startServiceTaskKey(startTaskKindTriage, issueKey),
+					Kind:     startTaskKindTriage,
+					Queue:    startTaskQueueService,
+					Status:   startWorkServiceTaskRunning,
+					IssueKey: issueKey,
+				},
+			},
+			PlannedItems: map[string]startWorkPlannedItem{},
+			ScoutJobs:    map[string]startWorkScoutJob{},
+		},
+		running: map[string]startRepoTask{},
+	}
+	if err := coordinator.syncServiceTasks(); err != nil {
+		t.Fatalf("syncServiceTasks: %v", err)
+	}
+	task := coordinator.state.ServiceTasks[startServiceTaskKey(startTaskKindTriage, issueKey)]
+	if task.Status != startWorkServiceTaskRunning {
+		t.Fatalf("expected recovered triage task to stay running, got %+v", task)
+	}
+	if coordinator.state.Issues[issueKey].TriageStatus != startWorkTriageRunning {
+		t.Fatalf("expected recovered triage issue to stay running, got %+v", coordinator.state.Issues[issueKey])
+	}
+}
+
 func mapsCloneStartWorkIssues(source map[string]startWorkIssueState) map[string]startWorkIssueState {
 	cloned := make(map[string]startWorkIssueState, len(source))
 	for key, value := range source {

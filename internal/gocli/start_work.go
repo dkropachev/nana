@@ -1765,7 +1765,11 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 			issue.Priority = 5
 		}
 		if issue.TriageStatus == startWorkTriageRunning {
-			issue.TriageStatus = startWorkTriageQueued
+			taskKey := startServiceTaskKey(startTaskKindTriage, key)
+			task, ok := state.ServiceTasks[taskKey]
+			if !ok || task.Status != startWorkServiceTaskRunning {
+				issue.TriageStatus = startWorkTriageQueued
+			}
 		}
 		if issue.PrioritySource == "" {
 			if priority, ok := startWorkManualPriority(issue.Labels); ok {

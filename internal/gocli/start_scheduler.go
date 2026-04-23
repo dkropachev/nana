@@ -94,8 +94,8 @@ func (c *startRepoCoordinator) withPersistedStateLock(fn func() error) error {
 	return fn()
 }
 
-var startRunIssueTriage = func(repoSlug string, issue startWorkIssueState, codexArgs []string) (startWorkTriageResult, error) {
-	return runStartWorkIssueTriage(repoSlug, issue, codexArgs)
+var startRunIssueTriage = func(repoSlug string, issueKey string, issue startWorkIssueState, codexArgs []string) (startWorkTriageResult, error) {
+	return runStartWorkIssueTriage(repoSlug, issueKey, issue, codexArgs)
 }
 
 var startRunScoutRole = func(cwd string, options ImproveOptions, role string) error {
@@ -485,6 +485,10 @@ func (c *startRepoCoordinator) syncServiceTasks() error {
 	}
 	nowTime := time.Now().UTC()
 	now := nowTime.Format(time.RFC3339)
+	activeTriageRecovery, err := managedPromptRecoveryActiveOwnerRecords("start-triage")
+	if err != nil {
+		return err
+	}
 	mutated := false
 	dueScoutRoles := map[string]bool{}
 	for _, role := range c.scoutRoles {
@@ -492,11 +496,23 @@ func (c *startRepoCoordinator) syncServiceTasks() error {
 	}
 	for key, task := range c.state.ServiceTasks {
 		if task.Status == startWorkServiceTaskRunning {
+			if task.Kind == startTaskKindTriage {
+				if _, ok := activeTriageRecovery[startTriageRecoveryOwnerID(c.repoSlug, task.IssueKey)]; ok {
+					continue
+				}
+			}
 			task.Status = startWorkServiceTaskQueued
 			task.StartedAt = ""
 			task.UpdatedAt = now
 			c.state.ServiceTasks[key] = task
 			mutated = true
+			if task.Kind == startTaskKindTriage && task.IssueKey != "" {
+				issue := c.state.Issues[task.IssueKey]
+				issue.TriageStatus = startWorkTriageQueued
+				issue.TriageUpdatedAt = now
+				issue.UpdatedAt = now
+				c.state.Issues[task.IssueKey] = issue
+			}
 		}
 		if task.Kind == startTaskKindScout && task.Status == startWorkServiceTaskQueued && !dueScoutRoles[task.ScoutRole] {
 			task.Status = startWorkServiceTaskCompleted
@@ -990,7 +1006,7 @@ func (c *startRepoCoordinator) executeTask(task startRepoTask) startRepoTaskResu
 			Err:  startRunIssueSync(c.workOptions),
 		}
 	case startTaskKindTriage:
-		triage, err := startRunIssueTriage(c.repoSlug, task.Issue, c.workOptions.CodexArgs)
+		triage, err := startRunIssueTriage(c.repoSlug, task.IssueKey, task.Issue, c.workOptions.CodexArgs)
 		return startRepoTaskResult{Task: task, Triage: &triage, Err: err}
 	case startTaskKindScout:
 		return startRepoTaskResult{
@@ -1118,59 +1134,9 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 			c.state.ServiceTasks[result.Task.Key] = serviceTask
 			c.refreshState = true
 		case startTaskKindTriage:
-			serviceTask := c.state.ServiceTasks[result.Task.Key]
-			issue := c.state.Issues[result.Task.IssueKey]
-			if result.Err != nil {
-				if serviceTask.Attempts < serviceTaskRetryLimit(serviceTask.Kind) {
-					serviceTask.Status = startWorkServiceTaskQueued
-					serviceTask.LastError = result.Err.Error()
-					serviceTask.ResultSummary = "retrying"
-					serviceTask.WaitCycle = ""
-					serviceTask.WaitUntil = ""
-					serviceTask.StartedAt = ""
-					serviceTask.UpdatedAt = now
-					c.state.ServiceTasks[result.Task.Key] = serviceTask
-					issue.TriageStatus = startWorkTriageQueued
-					issue.TriageError = result.Err.Error()
-					issue.TriageUpdatedAt = now
-					issue.UpdatedAt = now
-					c.state.Issues[result.Task.IssueKey] = issue
-					return writeStartWorkStateUnlocked(*c.state)
-				}
-				serviceTask.Status = startWorkServiceTaskFailed
-				serviceTask.LastError = result.Err.Error()
-				serviceTask.WaitCycle = ""
-				serviceTask.WaitUntil = ""
-				serviceTask.CompletedAt = now
-				serviceTask.UpdatedAt = now
-				c.state.ServiceTasks[result.Task.Key] = serviceTask
-				issue.TriageStatus = startWorkTriageFailed
-				issue.TriageError = result.Err.Error()
-				issue.TriageUpdatedAt = now
-				issue.UpdatedAt = now
-				c.state.Issues[result.Task.IssueKey] = issue
-				if err := writeStartWorkStateUnlocked(*c.state); err != nil {
-					return err
-				}
-				return fmt.Errorf("%s %s: %w", c.repoSlug, result.Task.Key, result.Err)
+			if err := applyStartWorkTriageResult(c.state, c.repoSlug, result.Task.Key, result.Task.IssueKey, result.Triage, result.Err, now); err != nil {
+				return err
 			}
-			serviceTask.Status = startWorkServiceTaskCompleted
-			serviceTask.ResultSummary = startWorkPriorityLabel(result.Triage.Priority)
-			serviceTask.WaitCycle = ""
-			serviceTask.WaitUntil = ""
-			serviceTask.CompletedAt = now
-			serviceTask.UpdatedAt = now
-			serviceTask.Fingerprint = issue.SourceFingerprint
-			c.state.ServiceTasks[result.Task.Key] = serviceTask
-			issue.Priority = result.Triage.Priority
-			issue.PrioritySource = "triage"
-			issue.TriageStatus = startWorkTriageCompleted
-			issue.TriageRationale = result.Triage.Rationale
-			issue.TriageFingerprint = issue.SourceFingerprint
-			issue.TriageUpdatedAt = now
-			issue.TriageError = ""
-			issue.UpdatedAt = now
-			c.state.Issues[result.Task.IssueKey] = issue
 		case startTaskKindReconcile:
 			serviceTask := c.state.ServiceTasks[result.Task.Key]
 			issue := c.state.Issues[result.Task.IssueKey]

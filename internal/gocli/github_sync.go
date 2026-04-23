@@ -29,6 +29,15 @@ type githubFeedbackSnapshot struct {
 	ReviewComments []githubPullReviewCommentPayload
 }
 
+type githubFeedbackResumeState struct {
+	Version           int                    `json:"version"`
+	Actors            []string               `json:"actors,omitempty"`
+	NewFeedback       githubFeedbackSnapshot `json:"new_feedback"`
+	FeedbackTargetURL string                 `json:"feedback_target_url,omitempty"`
+	PromptFingerprint string                 `json:"prompt_fingerprint,omitempty"`
+	UpdatedAt         string                 `json:"updated_at,omitempty"`
+}
+
 func syncGithubWork(options githubWorkSyncOptions) error {
 	manifestPath, _, err := resolveGithubRunManifestPath(options.RunID, options.UseLast)
 	if err != nil {
@@ -41,6 +50,7 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 	if _, err := captureGithubWorkBaselineIfMissing(manifestPath, &manifest); err != nil {
 		return err
 	}
+	runDir := filepath.Dir(manifestPath)
 	apiBaseURL := strings.TrimSpace(os.Getenv("GITHUB_API_URL"))
 	if apiBaseURL == "" {
 		apiBaseURL = manifest.APIBaseURL
@@ -48,82 +58,112 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 	if strings.TrimSpace(apiBaseURL) == "" {
 		apiBaseURL = "https://api.github.com"
 	}
-	token, err := resolveGithubToken()
-	if err != nil {
-		return err
-	}
-	reviewer := strings.TrimSpace(options.Reviewer)
-	if reviewer == "" && manifest.Policy == nil && len(manifest.ControlPlaneReviewers) == 0 {
-		reviewer = strings.TrimSpace(manifest.ReviewReviewer)
-	}
-	if reviewer == "" && manifest.Policy == nil && len(manifest.ControlPlaneReviewers) == 0 {
-		reviewer = "@me"
-	}
-	if reviewer == "@me" {
-		var viewer struct {
-			Login string `json:"login"`
+	resumeStatePath := githubFeedbackResumeStatePath(runDir)
+	actors := []string{}
+	newFeedback := githubFeedbackSnapshot{}
+	finalPrompt := ""
+	if options.ResumeLast {
+		resumeState, err := readGithubFeedbackResumeState(resumeStatePath)
+		if err != nil {
+			return err
 		}
-		if err := githubAPIGetJSON(apiBaseURL, token, "/user", &viewer); err == nil && strings.TrimSpace(viewer.Login) != "" {
-			reviewer = viewer.Login
+		actors = append([]string{}, resumeState.Actors...)
+		newFeedback = resumeState.NewFeedback
+		manifest.ControlPlaneReviewers = append([]string{}, actors...)
+		finalPrompt, err = validateGithubFeedbackResumeState(manifest, runDir, resumeState, options.FeedbackTargetURL, options.CodexArgs)
+		if err != nil {
+			return err
 		}
-	}
-	reviewer = strings.TrimPrefix(strings.TrimSpace(reviewer), "@")
-	actors, err := buildGithubControlPlaneReviewers(manifest, reviewer, apiBaseURL, token)
-	if err != nil {
-		return err
-	}
-	if len(actors) == 0 && reviewer != "" {
-		actors = []string{strings.ToLower(reviewer)}
-	}
-	manifest.ControlPlaneReviewers = append([]string{}, actors...)
+	} else {
+		token, err := resolveGithubToken()
+		if err != nil {
+			return err
+		}
+		reviewer := strings.TrimSpace(options.Reviewer)
+		if reviewer == "" && manifest.Policy == nil && len(manifest.ControlPlaneReviewers) == 0 {
+			reviewer = strings.TrimSpace(manifest.ReviewReviewer)
+		}
+		if reviewer == "" && manifest.Policy == nil && len(manifest.ControlPlaneReviewers) == 0 {
+			reviewer = "@me"
+		}
+		if reviewer == "@me" {
+			var viewer struct {
+				Login string `json:"login"`
+			}
+			if err := githubAPIGetJSON(apiBaseURL, token, "/user", &viewer); err == nil && strings.TrimSpace(viewer.Login) != "" {
+				reviewer = viewer.Login
+			}
+		}
+		reviewer = strings.TrimPrefix(strings.TrimSpace(reviewer), "@")
+		actors, err = buildGithubControlPlaneReviewers(manifest, reviewer, apiBaseURL, token)
+		if err != nil {
+			return err
+		}
+		if len(actors) == 0 && reviewer != "" {
+			actors = []string{strings.ToLower(reviewer)}
+		}
+		manifest.ControlPlaneReviewers = append([]string{}, actors...)
 
-	snapshot, err := fetchGithubFeedbackSnapshot(manifest, actors, apiBaseURL, token, options.FeedbackTargetURL)
-	if err != nil {
-		return err
-	}
-	manifest.IgnoredFeedbackActors = cloneGithubIgnoredActorMap(snapshot.IgnoredActors)
-	newFeedback := filterGithubNewFeedback(snapshot, manifest)
-	if len(newFeedback.IssueComments) == 0 && len(newFeedback.Reviews) == 0 && len(newFeedback.ReviewComments) == 0 {
-		manifest.NextAction = defaultString(manifest.NextAction, "continue")
-		if manifest.NeedsHuman {
-			manifest.NextAction = "wait_for_github_feedback"
+		snapshot, err := fetchGithubFeedbackSnapshot(manifest, actors, apiBaseURL, token, options.FeedbackTargetURL)
+		if err != nil {
+			return err
 		}
-		_ = writeGithubJSON(manifestPath, manifest)
-		fmt.Fprintf(currentWorkStdout(), "[github] No new feedback from %s for %s %s #%d.\n", formatGithubActorSet(actors), manifest.RepoSlug, manifest.TargetKind, manifest.TargetNumber)
-		return nil
+		manifest.IgnoredFeedbackActors = cloneGithubIgnoredActorMap(snapshot.IgnoredActors)
+		newFeedback = filterGithubNewFeedback(snapshot, manifest)
+		if len(newFeedback.IssueComments) == 0 && len(newFeedback.Reviews) == 0 && len(newFeedback.ReviewComments) == 0 {
+			manifest.NextAction = defaultString(manifest.NextAction, "continue")
+			if manifest.NeedsHuman {
+				manifest.NextAction = "wait_for_github_feedback"
+			}
+			_ = writeGithubJSON(manifestPath, manifest)
+			fmt.Fprintf(currentWorkStdout(), "[github] No new feedback from %s for %s %s #%d.\n", formatGithubActorSet(actors), manifest.RepoSlug, manifest.TargetKind, manifest.TargetNumber)
+			return nil
+		}
+		cursor := advanceGithubFeedbackCursor(snapshot, manifest)
+		manifest.LastSeenIssueCommentID = cursor.issueCommentID
+		manifest.LastSeenReviewID = cursor.reviewID
+		manifest.LastSeenReviewCommentID = cursor.reviewCommentID
+		manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		manifest.NeedsHuman = false
+		manifest.NeedsHumanReason = ""
+		manifest.NextAction = "continue_after_feedback"
+		if err := writeGithubJSON(manifestPath, manifest); err != nil {
+			return err
+		}
+		if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+			return err
+		}
+		feedbackInstructions := buildGithubFeedbackInstructions(manifest, actors, newFeedback)
+		prompt := buildGithubFeedbackContinuationPrompt(manifest, feedbackInstructions)
+		if err := writeGithubJSON(resumeStatePath, githubFeedbackResumeState{
+			Version:           1,
+			Actors:            append([]string{}, actors...),
+			NewFeedback:       newFeedback,
+			FeedbackTargetURL: options.FeedbackTargetURL,
+			PromptFingerprint: githubFeedbackResumeFingerprint(prompt, options.CodexArgs),
+			UpdatedAt:         manifest.UpdatedAt,
+		}); err != nil {
+			return err
+		}
+		if err := writeGithubJSON(filepath.Join(runDir, "feedback-snapshot.json"), snapshot); err != nil {
+			return err
+		}
+		if err := writeGithubJSON(filepath.Join(runDir, "feedback-summary.json"), map[string]any{
+			"actors":                actors,
+			"ignored_actors":        snapshot.IgnoredActors,
+			"new_issue_comments":    len(newFeedback.IssueComments),
+			"new_reviews":           len(newFeedback.Reviews),
+			"new_review_comments":   len(newFeedback.ReviewComments),
+			"issue_comment_cursor":  manifest.LastSeenIssueCommentID,
+			"review_cursor":         manifest.LastSeenReviewID,
+			"review_comment_cursor": manifest.LastSeenReviewCommentID,
+		}); err != nil {
+			return err
+		}
 	}
-	cursor := advanceGithubFeedbackCursor(snapshot, manifest)
-	manifest.LastSeenIssueCommentID = cursor.issueCommentID
-	manifest.LastSeenReviewID = cursor.reviewID
-	manifest.LastSeenReviewCommentID = cursor.reviewCommentID
-	manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	manifest.NeedsHuman = false
-	manifest.NeedsHumanReason = ""
-	manifest.NextAction = "continue_after_feedback"
-	if err := writeGithubJSON(manifestPath, manifest); err != nil {
-		return err
-	}
-	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
-		return err
-	}
-	runDir := filepath.Dir(manifestPath)
 	feedbackInstructionsPath := filepath.Join(runDir, "feedback-instructions.md")
-	if err := os.WriteFile(feedbackInstructionsPath, []byte(buildGithubFeedbackInstructions(manifest, actors, newFeedback)), 0o644); err != nil {
-		return err
-	}
-	if err := writeGithubJSON(filepath.Join(runDir, "feedback-snapshot.json"), snapshot); err != nil {
-		return err
-	}
-	if err := writeGithubJSON(filepath.Join(runDir, "feedback-summary.json"), map[string]any{
-		"actors":                actors,
-		"ignored_actors":        snapshot.IgnoredActors,
-		"new_issue_comments":    len(newFeedback.IssueComments),
-		"new_reviews":           len(newFeedback.Reviews),
-		"new_review_comments":   len(newFeedback.ReviewComments),
-		"issue_comment_cursor":  manifest.LastSeenIssueCommentID,
-		"review_cursor":         manifest.LastSeenReviewID,
-		"review_comment_cursor": manifest.LastSeenReviewCommentID,
-	}); err != nil {
+	feedbackInstructions := buildGithubFeedbackInstructions(manifest, actors, newFeedback)
+	if err := os.WriteFile(feedbackInstructionsPath, []byte(feedbackInstructions), 0o644); err != nil {
 		return err
 	}
 	sandboxLock, err := acquireSandboxWriteLock(manifest.SandboxRepoPath, repoAccessLockOwner{
@@ -144,8 +184,9 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 		return err
 	}
 
-	prompt := fmt.Sprintf("Continue GitHub %s #%d for %s after new reviewer feedback", manifest.TargetKind, manifest.TargetNumber, manifest.RepoSlug)
-	finalPrompt := buildGithubFeedbackInstructions(manifest, actors, newFeedback) + "\n\nTask:\n" + prompt
+	if finalPrompt == "" {
+		finalPrompt = buildGithubFeedbackContinuationPrompt(manifest, feedbackInstructions)
+	}
 	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(options.CodexArgs)
 	finalPrompt = prefixCodexFastPrompt(finalPrompt, fastMode)
 	transport := promptTransportForSize(finalPrompt, structuredPromptStdinThreshold)
@@ -164,6 +205,7 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 		UsageRepoSlug:    manifest.RepoSlug,
 		UsageBackend:     "github",
 		UsageSandboxPath: manifest.SandboxPath,
+		RecoverySpec:     githubWorkManagedPromptRecoverySpec(manifest, runDir, managedPromptResumeArgv([]string{"work", "sync", "--run-id", manifest.RunID, "--resume-last"}, options.CodexArgs)),
 		Env:              append(buildGithubCodexEnv(NotifyTempContract{}, laneCodexHome, apiBaseURL), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
 		RateLimitPolicy:  codexRateLimitPolicyDefault(options.RateLimitPolicy),
 		OnPause: func(info codexRateLimitPauseInfo) {
@@ -226,6 +268,11 @@ func syncGithubWork(options githubWorkSyncOptions) error {
 	}
 	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
 		return err
+	}
+	if runErr == nil && completionErr == nil {
+		if err := os.Remove(resumeStatePath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 
 	fmt.Fprintf(currentWorkStdout(), "[github] Stored new feedback for run %s.\n", manifest.RunID)
@@ -309,6 +356,58 @@ func fetchGithubFeedbackSnapshot(manifest githubWorkManifest, reviewers []string
 		Reviews:        filteredReviews,
 		ReviewComments: filteredReviewComments,
 	}, nil
+}
+
+func githubFeedbackResumeStatePath(runDir string) string {
+	return filepath.Join(runDir, "feedback-resume.json")
+}
+
+func readGithubFeedbackResumeState(path string) (githubFeedbackResumeState, error) {
+	var state githubFeedbackResumeState
+	if err := readGithubJSON(path, &state); err != nil {
+		if os.IsNotExist(err) {
+			return githubFeedbackResumeState{}, fmt.Errorf("work sync --resume-last requires a stored feedback resume artifact")
+		}
+		return githubFeedbackResumeState{}, err
+	}
+	return state, nil
+}
+
+func validateGithubFeedbackResumeState(manifest githubWorkManifest, runDir string, state githubFeedbackResumeState, feedbackTargetOverride string, codexArgs []string) (string, error) {
+	if len(state.Actors) == 0 || (len(state.NewFeedback.IssueComments) == 0 && len(state.NewFeedback.Reviews) == 0 && len(state.NewFeedback.ReviewComments) == 0) {
+		return "", fmt.Errorf("work sync --resume-last requires a stored feedback resume artifact with actors and pending feedback")
+	}
+	if strings.EqualFold(strings.TrimSpace(manifest.ExecutionStatus), "completed") && strings.TrimSpace(state.UpdatedAt) != "" {
+		return "", fmt.Errorf("work sync --resume-last stored feedback artifact is stale because the run is already completed")
+	}
+	if strings.TrimSpace(feedbackTargetOverride) != "" && strings.TrimSpace(state.FeedbackTargetURL) != "" && strings.TrimSpace(feedbackTargetOverride) != strings.TrimSpace(state.FeedbackTargetURL) {
+		return "", fmt.Errorf("work sync --resume-last target override does not match the stored feedback resume artifact")
+	}
+	checkpoint, err := readCodexStepCheckpoint(filepath.Join(runDir, "leader-checkpoint.json"))
+	if err != nil {
+		return "", fmt.Errorf("work sync --resume-last requires a leader checkpoint: %w", err)
+	}
+	if strings.TrimSpace(checkpoint.SessionID) == "" || !checkpoint.ResumeEligible {
+		return "", fmt.Errorf("work sync --resume-last requires a resumable leader checkpoint")
+	}
+	prompt := buildGithubFeedbackContinuationPrompt(manifest, buildGithubFeedbackInstructions(manifest, state.Actors, state.NewFeedback))
+	fingerprint := githubFeedbackResumeFingerprint(prompt, codexArgs)
+	if strings.TrimSpace(state.PromptFingerprint) == "" || strings.TrimSpace(state.PromptFingerprint) != fingerprint {
+		return "", fmt.Errorf("work sync --resume-last stored feedback artifact is stale or inconsistent with the current feedback prompt")
+	}
+	if strings.TrimSpace(checkpoint.PromptFingerprint) != "" && strings.TrimSpace(checkpoint.PromptFingerprint) != fingerprint {
+		return "", fmt.Errorf("work sync --resume-last leader checkpoint does not match the stored feedback artifact")
+	}
+	return prompt, nil
+}
+
+func buildGithubFeedbackContinuationPrompt(manifest githubWorkManifest, feedbackInstructions string) string {
+	return feedbackInstructions + "\n\nTask:\n" + fmt.Sprintf("Continue GitHub %s #%d for %s after new reviewer feedback", manifest.TargetKind, manifest.TargetNumber, manifest.RepoSlug)
+}
+
+func githubFeedbackResumeFingerprint(prompt string, codexArgs []string) string {
+	_, fastMode := NormalizeCodexLaunchArgsWithFast(codexArgs)
+	return sha256Hex(strings.TrimSpace(prefixCodexFastPrompt(prompt, fastMode)))
 }
 
 func filterGithubNewFeedback(snapshot githubFeedbackSnapshot, manifest githubWorkManifest) githubFeedbackSnapshot {

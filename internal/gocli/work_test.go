@@ -2,6 +2,8 @@ package gocli
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +124,213 @@ func TestResumeGithubWorkRejectsCompletionOnlyResumeWithoutBaseline(t *testing.T
 	err := resumeGithubWork(localWorkResumeOptions{RunSelection: localWorkRunSelection{RunID: runID}})
 	if err == nil || !strings.Contains(err.Error(), "missing baseline_sha") {
 		t.Fatalf("expected missing baseline error, got %v", err)
+	}
+}
+
+func TestSyncGithubWorkResumeLastUsesStoredFeedbackAndLeaderCheckpoint(t *testing.T) {
+	home := t.TempDir()
+	fakeBin := filepath.Join(home, "bin")
+	commandLogPath := filepath.Join(home, "codex-sync-commands.log")
+	failOncePath := filepath.Join(home, "codex-sync-fail-once.marker")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`printf '%s\n' "$*" >> "${FAKE_CODEX_LOG_PATH}"`,
+		`mkdir -p "$CODEX_HOME/sessions/2026/04/17"`,
+		`printf '{"type":"session_meta","payload":{"id":"session-gh-sync","timestamp":"2099-01-01T00:00:00Z","cwd":"%s"}}\n' "$PWD" > "$CODEX_HOME/sessions/2026/04/17/rollout-session-gh-sync.jsonl"`,
+		`if printf '%s' "$*" | grep -q "exec resume session-gh-sync"; then`,
+		`  printf 'github sync resumed\n'`,
+		`  exit 0`,
+		`fi`,
+		`if [ ! -f "${FAKE_CODEX_FAIL_ONCE_PATH}" ]; then`,
+		`  : > "${FAKE_CODEX_FAIL_ONCE_PATH}"`,
+		`  printf 'interrupted before feedback sync resume\n' >&2`,
+		`  exit 1`,
+		`fi`,
+		`printf 'unexpected fresh codex args: %s\n' "$*" >&2`,
+		`exit 1`,
+		"",
+	}, "\n"))
+
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_LOG_PATH", commandLogPath)
+	t.Setenv("FAKE_CODEX_FAIL_ONCE_PATH", failOncePath)
+	t.Setenv("GH_TOKEN", "test-token")
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/acme/widget/issues/1/comments":
+			_ = json.NewEncoder(w).Encode([]githubIssueCommentPayload{{
+				ID:        11,
+				HTMLURL:   "https://github.com/acme/widget/issues/1#issuecomment-11",
+				Body:      "Please continue",
+				UpdatedAt: "2026-04-23T20:00:00Z",
+				User:      githubActor{Login: "reviewer-a"},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("GITHUB_API_URL", server.URL)
+
+	repoRoot := githubWorkRepoRoot("acme/widget")
+	runID := "gh-sync-resume-last"
+	runDir := filepath.Join(repoRoot, "runs", runID)
+	sandboxPath := filepath.Join(runDir, "sandbox")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	createLocalWorkRepoAt(t, sandboxRepoPath)
+	baselineSHA := strings.TrimSpace(runLocalWorkTestGitOutput(t, sandboxRepoPath, "rev-parse", "HEAD"))
+	manifest := githubWorkManifest{
+		Version:         1,
+		RunID:           runID,
+		RepoSlug:        "acme/widget",
+		RepoOwner:       "acme",
+		RepoName:        "widget",
+		TargetURL:       "https://github.com/acme/widget/issues/1",
+		TargetKind:      "issue",
+		TargetNumber:    1,
+		BaselineSHA:     baselineSHA,
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+		UpdatedAt:       ISOTimeNow(),
+		APIBaseURL:      server.URL,
+	}
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	if err := writeGithubJSON(manifestPath, manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	err := syncGithubWork(githubWorkSyncOptions{RunID: runID, Reviewer: "reviewer-a"})
+	if err == nil {
+		t.Fatalf("expected initial sync to fail and leave resume state, got %v", err)
+	}
+	if _, err := os.Stat(githubFeedbackResumeStatePath(runDir)); err != nil {
+		t.Fatalf("expected feedback resume artifact after failed sync: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error {
+		return syncGithubWork(githubWorkSyncOptions{RunID: runID, ResumeLast: true})
+	})
+	if err != nil {
+		t.Fatalf("syncGithubWork: %v\n%s", err, output)
+	}
+	commandLog, err := os.ReadFile(commandLogPath)
+	if err != nil {
+		t.Fatalf("read command log: %v", err)
+	}
+	if !strings.Contains(string(commandLog), "exec resume session-gh-sync") {
+		t.Fatalf("expected exec resume in log, got %q", string(commandLog))
+	}
+	if _, err := os.Stat(githubFeedbackResumeStatePath(runDir)); !os.IsNotExist(err) {
+		t.Fatalf("expected feedback resume artifact to be removed after successful resume, got err=%v", err)
+	}
+}
+
+func TestSyncGithubWorkResumeLastRequiresStoredFeedbackArtifact(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot := githubWorkRepoRoot("acme/widget")
+	runID := "gh-sync-resume-missing-artifact"
+	runDir := filepath.Join(repoRoot, "runs", runID)
+	sandboxPath := filepath.Join(runDir, "sandbox")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	createLocalWorkRepoAt(t, sandboxRepoPath)
+	baselineSHA := strings.TrimSpace(runLocalWorkTestGitOutput(t, sandboxRepoPath, "rev-parse", "HEAD"))
+	manifest := githubWorkManifest{
+		Version:         1,
+		RunID:           runID,
+		RepoSlug:        "acme/widget",
+		RepoOwner:       "acme",
+		RepoName:        "widget",
+		TargetURL:       "https://github.com/acme/widget/issues/1",
+		TargetKind:      "issue",
+		TargetNumber:    1,
+		BaselineSHA:     baselineSHA,
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+		UpdatedAt:       ISOTimeNow(),
+		APIBaseURL:      "https://api.github.com",
+	}
+	if err := writeGithubJSON(filepath.Join(runDir, "manifest.json"), manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := writeCodexStepCheckpoint(filepath.Join(runDir, "leader-checkpoint.json"), codexStepCheckpoint{
+		Version:        1,
+		StepKey:        "github-leader",
+		Status:         "failed",
+		SessionID:      "session-gh-sync",
+		ResumeStrategy: string(codexResumeConversation),
+		ResumeEligible: true,
+	}); err != nil {
+		t.Fatalf("write checkpoint: %v", err)
+	}
+
+	err := syncGithubWork(githubWorkSyncOptions{RunID: runID, ResumeLast: true})
+	if err == nil || !strings.Contains(err.Error(), "stored feedback resume artifact") {
+		t.Fatalf("expected missing artifact error, got %v", err)
+	}
+}
+
+func TestSyncGithubWorkResumeLastRejectsInconsistentArtifact(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot := githubWorkRepoRoot("acme/widget")
+	runID := "gh-sync-resume-stale-artifact"
+	runDir := filepath.Join(repoRoot, "runs", runID)
+	sandboxPath := filepath.Join(runDir, "sandbox")
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	createLocalWorkRepoAt(t, sandboxRepoPath)
+	baselineSHA := strings.TrimSpace(runLocalWorkTestGitOutput(t, sandboxRepoPath, "rev-parse", "HEAD"))
+	manifest := githubWorkManifest{
+		Version:               1,
+		RunID:                 runID,
+		RepoSlug:              "acme/widget",
+		RepoOwner:             "acme",
+		RepoName:              "widget",
+		TargetURL:             "https://github.com/acme/widget/issues/1",
+		TargetKind:            "issue",
+		TargetNumber:          1,
+		BaselineSHA:           baselineSHA,
+		SandboxPath:           sandboxPath,
+		SandboxRepoPath:       sandboxRepoPath,
+		UpdatedAt:             ISOTimeNow(),
+		APIBaseURL:            "https://api.github.com",
+		ControlPlaneReviewers: []string{"reviewer-a"},
+	}
+	if err := writeGithubJSON(filepath.Join(runDir, "manifest.json"), manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := writeCodexStepCheckpoint(filepath.Join(runDir, "leader-checkpoint.json"), codexStepCheckpoint{
+		Version:           1,
+		StepKey:           "github-leader",
+		Status:            "failed",
+		SessionID:         "session-gh-sync",
+		PromptFingerprint: "some-other-prompt",
+		ResumeStrategy:    string(codexResumeConversation),
+		ResumeEligible:    true,
+	}); err != nil {
+		t.Fatalf("write checkpoint: %v", err)
+	}
+	if err := writeGithubJSON(githubFeedbackResumeStatePath(runDir), githubFeedbackResumeState{
+		Version:           1,
+		Actors:            []string{"reviewer-a"},
+		NewFeedback:       githubFeedbackSnapshot{Actors: []string{"reviewer-a"}, IssueComments: []githubIssueCommentPayload{{ID: 11, Body: "Please continue"}}},
+		PromptFingerprint: "mismatched-fingerprint",
+		UpdatedAt:         ISOTimeNow(),
+	}); err != nil {
+		t.Fatalf("write feedback resume state: %v", err)
+	}
+
+	err := syncGithubWork(githubWorkSyncOptions{RunID: runID, ResumeLast: true})
+	if err == nil || !strings.Contains(err.Error(), "stale or inconsistent") {
+		t.Fatalf("expected inconsistent artifact error, got %v", err)
 	}
 }
 

@@ -13,6 +13,9 @@ type scoutExecutionRuntime struct {
 	ArtifactDir     string
 	CodexHome       string
 	StateDir        string
+	RunID           string
+	Role            string
+	RecoveryArgv    []string
 	Cleanup         func()
 	RateLimitPolicy codexRateLimitPolicy
 	OnPause         func(codexRateLimitPauseInfo)

@@ -4020,6 +4020,14 @@ func runLocalWorkCodexPrompt(manifest localWorkManifest, codexArgs []string, pro
 
 	normalizedCodexArgs, fastMode := normalizeLocalWorkCodexArgsWithFast(codexArgs)
 	prompt = prefixCodexFastPrompt(prompt, fastMode)
+	recoverySpec := codexManagedPromptRecoverySpec{}
+	if strings.TrimSpace(manifest.PauseManifestPath) != "" {
+		recoverySpec = githubWorkManagedPromptRecoverySpec(
+			githubWorkManifest{RunID: manifest.RunID, SandboxPath: manifest.SandboxPath, ManagedRepoRoot: manifest.RepoRoot},
+			filepath.Dir(strings.TrimSpace(manifest.PauseManifestPath)),
+			managedPromptResumeArgv([]string{"work", "resume", "--run-id", manifest.RunID}, codexArgs),
+		)
+	}
 	result, err := runManagedCodexPrompt(codexManagedPromptOptions{
 		CommandDir:       manifest.SandboxPath,
 		InstructionsRoot: manifest.SandboxPath,
@@ -4037,6 +4045,7 @@ func runLocalWorkCodexPrompt(manifest localWorkManifest, codexArgs []string, pro
 		UsageSandboxPath: manifest.SandboxPath,
 		Env:              append(localWorkPromptEnv(manifest, scopedCodexHome), "NANA_PROJECT_AGENTS_ROOT="+manifest.SandboxRepoPath),
 		RateLimitPolicy:  codexRateLimitPolicyDefault(codexRateLimitPolicy(manifest.RateLimitPolicy)),
+		RecoverySpec:     recoverySpec,
 		OnPause: func(info codexRateLimitPauseInfo) {
 			updateLocalWorkPausedManifest(manifest, info, true)
 		},
