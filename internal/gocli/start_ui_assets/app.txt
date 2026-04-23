@@ -4737,6 +4737,19 @@
     updateFilter("investigations", field, selected.size ? Array.from(selected).sort() : inactiveValue);
   }
 
+  function closeTaskMultiFilterMenus(exceptMenu = null) {
+    document.querySelectorAll("[data-task-multi-filter-menu][open]").forEach((menu) => {
+      if (menu !== exceptMenu) {
+        menu.removeAttribute("open");
+      }
+    });
+    if (exceptMenu && exceptMenu.open) {
+      state.investigations.openFilterMenu = exceptMenu.getAttribute("data-task-multi-filter-menu") || "";
+      return;
+    }
+    state.investigations.openFilterMenu = "";
+  }
+
   function renderTaskToolbar(items) {
     const filter = filterState("investigations");
     const activeCount = activeTaskFilterCount(filter);
@@ -7712,6 +7725,24 @@
       tabs[nextIndex].focus();
       tabs[nextIndex].click();
     });
+
+    document.body.addEventListener("click", (event) => {
+      if (state.currentView !== "investigations") return;
+      if (event.target.closest("[data-task-multi-filter-menu]")) return;
+      closeTaskMultiFilterMenus();
+    });
+
+    document.getElementById("page-body").addEventListener("toggle", (event) => {
+      const menu = event.target;
+      if (!menu || !menu.matches || !menu.matches("[data-task-multi-filter-menu]")) return;
+      if (menu.open) {
+        closeTaskMultiFilterMenus(menu);
+        return;
+      }
+      if (state.investigations.openFilterMenu === (menu.getAttribute("data-task-multi-filter-menu") || "")) {
+        state.investigations.openFilterMenu = "";
+      }
+    }, true);
 
     document.getElementById("page-body").addEventListener("click", (event) => {
       const repoButton = event.target.closest("[data-open-repo]");

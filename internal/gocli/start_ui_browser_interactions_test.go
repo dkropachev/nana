@@ -200,6 +200,11 @@ func TestStartUIBrowserInteractionsMissionControlTasks(t *testing.T) {
 
 	startUITestChromedpClick(t, tabCtx, `[data-task-multi-filter-menu="status"] summary`)
 	startUITestChromedpClick(t, tabCtx, `[data-task-multi-filter-field="status"][data-task-multi-filter-value="blocked"]`)
+	startUITestChromedpWaitOpen(t, tabCtx, `[data-task-multi-filter-menu="status"]`, true)
+	if err := chromedp.Run(tabCtx, chromedp.Evaluate(`document.querySelector(".sidebar-brand").click()`, nil)); err != nil {
+		t.Fatalf("click sidebar brand: %v", err)
+	}
+	startUITestChromedpWaitOpen(t, tabCtx, `[data-task-multi-filter-menu="status"]`, false)
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Status: Blocked")
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "completion-harden")
 	startUITestChromedpWaitBodyTextAbsent(t, tabCtx, "Reply in thread")
@@ -1878,6 +1883,20 @@ func startUITestChromedpWaitValue(t *testing.T, ctx context.Context, selector st
 			return false, "", err
 		}
 		return value == expected, value, nil
+	})
+}
+
+func startUITestChromedpWaitOpen(t *testing.T, ctx context.Context, selector string, expected bool) {
+	t.Helper()
+	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("open state for %s to become %t", selector, expected), func() (bool, string, error) {
+		var open bool
+		if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`(() => {
+			const el = document.querySelector(%q);
+			return Boolean(el && el.open);
+		})()`, selector), &open)); err != nil {
+			return false, "", err
+		}
+		return open == expected, strconv.FormatBool(open), nil
 	})
 }
 
