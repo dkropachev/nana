@@ -4873,20 +4873,24 @@
     const priority = defaultString(item.priority_label, "P3");
     const kind = taskTypeLabel(item.kind);
     const schedule = item.schedule_at ? `scheduled ${formatDateTime(item.schedule_at)}` : `updated ${formatDateTime(item.updated_at)}`;
-    const headline = defaultString(item.title, defaultString(item.description, defaultString(item.summary, item.id)));
+    const headline = item.kind === "work_run"
+      ? defaultString(item.description, defaultString(item.summary, defaultString(item.title, item.id)))
+      : defaultString(item.title, defaultString(item.description, defaultString(item.summary, item.id)));
+    const showHeadline = headline !== repo;
     const reference = defaultString(item.id, "unknown");
-    const summary = defaultString(item.summary, item.description || "No summary recorded.");
+    const detail = defaultString(item.summary, item.description || "No summary recorded.");
+    const showDetail = detail !== headline;
     return `
       <button class="mission-task-row ${selected ? "mission-task-row-selected" : ""}" type="button" data-task-open="${escapeHTML(item.id)}">
         <span class="mission-task-priority">${escapeHTML(priority)}</span>
         <span class="mission-task-type">${escapeHTML(kind)}</span>
         <span class="mission-task-copy">
-          <strong>${escapeHTML(headline)}</strong>
+          ${showHeadline ? `<strong>${escapeHTML(headline)}</strong>` : ""}
           <span class="mission-task-reference">${escapeHTML(reference)}</span>
-          <span>${escapeHTML(repo)} · ${escapeHTML(schedule)}</span>
-          <em>${escapeHTML(summary)}</em>
+          ${showDetail ? `<em>${escapeHTML(detail)}</em>` : ""}
         </span>
         ${renderStatePill(taskStatusTone(item.status), taskStatusLabel(defaultString(item.status, "queued")))}
+        <span class="mission-task-meta">${escapeHTML(repo)} · ${escapeHTML(schedule)}</span>
       </button>
     `;
   }

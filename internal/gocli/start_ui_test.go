@@ -3864,10 +3864,15 @@ func TestStartUIAppTaskFeedHeadlinePrefersTitleOrDescription(t *testing.T) {
 	}
 	content := string(appBody)
 	for _, needle := range []string{
-		`const headline = defaultString(item.title, defaultString(item.description, defaultString(item.summary, item.id)));`,
+		`const headline = item.kind === "work_run"`,
+		`const showHeadline = headline !== repo;`,
 		`const reference = defaultString(item.id, "unknown");`,
-		`<strong>${escapeHTML(headline)}</strong>`,
+		`const detail = defaultString(item.summary, item.description || "No summary recorded.");`,
+		`const showDetail = detail !== headline;`,
+		`${showHeadline ? ` + "`<strong>${escapeHTML(headline)}</strong>`" + ` : ""}`,
 		`<span class="mission-task-reference">${escapeHTML(reference)}</span>`,
+		`${showDetail ? ` + "`<em>${escapeHTML(detail)}</em>`" + ` : ""}`,
+		`<span class="mission-task-meta">${escapeHTML(repo)} · ${escapeHTML(schedule)}</span>`,
 	} {
 		if !strings.Contains(content, needle) {
 			t.Fatalf("expected app asset to contain %q", needle)
@@ -3883,6 +3888,9 @@ func TestStartUIAppTaskFeedHeadlinePrefersTitleOrDescription(t *testing.T) {
 		`.mission-task-reference {`,
 		`font-family: ui-monospace`,
 		`font-size: 11px;`,
+		`.mission-task-meta {`,
+		`grid-area: meta;`,
+		`text-align: right;`,
 	} {
 		if !strings.Contains(cssContent, needle) {
 			t.Fatalf("expected app stylesheet to contain %q", needle)
