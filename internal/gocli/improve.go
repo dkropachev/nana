@@ -105,12 +105,12 @@ const (
 	improvementDestinationFork   = "fork"
 	improvementDestinationReview = "review"
 
-	improvementScoutRole     = "improvement-scout"
-	enhancementScoutRole     = "enhancement-scout"
+	improvementScoutRole        = "improvement-scout"
+	enhancementScoutRole        = "enhancement-scout"
 	backendPerformanceScoutRole = "backend-performance-scout"
-	uiScoutRole              = "ui-scout"
-	defaultScoutSessionLimit = 4
-	maxScoutSessionLimit     = 6
+	uiScoutRole                 = "ui-scout"
+	defaultScoutSessionLimit    = 4
+	maxScoutSessionLimit        = 6
 )
 
 const uiScoutPreflightPrompt = `You are running a short preflight for ui-scout.

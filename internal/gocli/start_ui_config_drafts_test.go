@@ -262,6 +262,18 @@ function runScoutDestinationCase() {
   };
 }
 
+function runBackendPerformanceCompatibilityCase() {
+  const { scope } = resetRepo();
+  setDraft(scope, 'scouts_by_role.backend-performance.session_limit', '5');
+  hooks.updateConfigDraft('scouts_by_role.backend-performance.session_limit', '5', { rerender: false });
+  return {
+    session_limit: hooks.state.configEditor.draft.scouts_by_role['backend-performance'].session_limit,
+    has_backend_role: Object.prototype.hasOwnProperty.call(hooks.state.configEditor.draft.scouts_by_role, 'backend-performance'),
+    has_backend_compat: Object.prototype.hasOwnProperty.call(hooks.state.configEditor.draft.scouts || {}, 'backend-performance'),
+    compat_session_limit: hooks.state.configEditor.draft.scouts['backend-performance'].session_limit,
+  };
+}
+
 function refreshScoutCatalog() {
   const refreshedRepo = makeRepo(['improvement', 'enhancement']);
   hooks.state.selectedRepo = refreshedRepo.repo_slug;
@@ -319,15 +331,30 @@ function runSuccessfulSaveCanonicalizationCase() {
   };
 }
 
+function runSilentRefreshKeepsDirtyDraftCase() {
+  const { scope } = resetRepo();
+  setDraft(scope, 'scouts_by_role.ui.session_limit', '5');
+  hooks.updateConfigDraft('scouts_by_role.ui.session_limit', '5', { rerender: false });
+  hooks.mergeRepoSummary(makeRepo(), { rerender: false, resetScouts: false });
+  return {
+    dirty: hooks.state.configEditor.dirty,
+    remote_changed: hooks.state.configEditor.remoteChanged,
+    session_limit: hooks.state.configEditor.draft.scouts_by_role.ui.session_limit,
+    has_session_limit_draft: Object.prototype.hasOwnProperty.call(currentDraft(scope), 'config:scouts_by_role.ui.session_limit'),
+  };
+}
+
 process.stdout.write(JSON.stringify({
   repo_mode_forward: runRepoModeForwardCase(),
   repo_mode_reverse: runRepoModeReverseCase(),
   issue_pick_forward: runIssuePickForwardCase(),
   issue_pick_reverse: runIssuePickReverseCase(),
   scout_destination: runScoutDestinationCase(),
+  backend_performance_compatibility: runBackendPerformanceCompatibilityCase(),
   scout_catalog_refresh_hidden: runScoutCatalogRefreshHiddenCase(),
   scout_catalog_refresh_visible: runScoutCatalogRefreshVisibleCase(),
   successful_save_canonicalization: runSuccessfulSaveCanonicalizationCase(),
+  silent_refresh_keeps_dirty_draft: runSilentRefreshKeepsDirtyDraftCase(),
 }));
 `
 	if err := os.WriteFile(harnessPath, []byte(harness), 0o644); err != nil {
@@ -368,6 +395,12 @@ process.stdout.write(JSON.stringify({
 			ForkRepo         string `json:"fork_repo"`
 			HasForkRepoDraft bool   `json:"has_fork_repo_draft"`
 		} `json:"scout_destination"`
+		BackendPerformanceCompatibility struct {
+			SessionLimit       int  `json:"session_limit"`
+			HasBackendRole     bool `json:"has_backend_role"`
+			HasBackendCompat   bool `json:"has_backend_compat"`
+			CompatSessionLimit int  `json:"compat_session_limit"`
+		} `json:"backend_performance_compatibility"`
 		ScoutCatalogRefreshHidden struct {
 			Dirty            bool `json:"dirty"`
 			RemoteChanged    bool `json:"remote_changed"`
@@ -390,6 +423,12 @@ process.stdout.write(JSON.stringify({
 			SessionLimit         int  `json:"session_limit"`
 			HasSessionLimitDraft bool `json:"has_session_limit_draft"`
 		} `json:"successful_save_canonicalization"`
+		SilentRefreshKeepsDirtyDraft struct {
+			Dirty                bool `json:"dirty"`
+			RemoteChanged        bool `json:"remote_changed"`
+			SessionLimit         int  `json:"session_limit"`
+			HasSessionLimitDraft bool `json:"has_session_limit_draft"`
+		} `json:"silent_refresh_keeps_dirty_draft"`
 	}
 	if err := json.Unmarshal(output, &got); err != nil {
 		t.Fatalf("decode node harness output %q: %v", strings.TrimSpace(string(output)), err)
@@ -410,6 +449,9 @@ process.stdout.write(JSON.stringify({
 	if got.ScoutDestination.IssueDestination != "local" || got.ScoutDestination.ForkRepo != "" || got.ScoutDestination.HasForkRepoDraft {
 		t.Fatalf("expected scout destination replay to keep fork repo cleared, got %+v", got.ScoutDestination)
 	}
+	if !got.BackendPerformanceCompatibility.HasBackendRole || !got.BackendPerformanceCompatibility.HasBackendCompat || got.BackendPerformanceCompatibility.SessionLimit != 5 || got.BackendPerformanceCompatibility.CompatSessionLimit != 5 {
+		t.Fatalf("expected backend-performance scout edits to stay in the compatibility payload, got %+v", got.BackendPerformanceCompatibility)
+	}
 	if got.ScoutCatalogRefreshHidden.Dirty || got.ScoutCatalogRefreshHidden.RemoteChanged || got.ScoutCatalogRefreshHidden.HasUIRole || got.ScoutCatalogRefreshHidden.HasUICompat || got.ScoutCatalogRefreshHidden.HasUILabelsDraft {
 		t.Fatalf("expected removed scout roles to clear hidden replay state, got %+v", got.ScoutCatalogRefreshHidden)
 	}
@@ -418,5 +460,8 @@ process.stdout.write(JSON.stringify({
 	}
 	if got.SuccessfulSaveCanonicalization.Dirty || got.SuccessfulSaveCanonicalization.RemoteChanged || got.SuccessfulSaveCanonicalization.SessionLimit != 5 || got.SuccessfulSaveCanonicalization.HasSessionLimitDraft {
 		t.Fatalf("expected successful save canonicalization to reset the editor to the server snapshot, got %+v", got.SuccessfulSaveCanonicalization)
+	}
+	if !got.SilentRefreshKeepsDirtyDraft.Dirty || got.SilentRefreshKeepsDirtyDraft.RemoteChanged || got.SilentRefreshKeepsDirtyDraft.SessionLimit != 5 || !got.SilentRefreshKeepsDirtyDraft.HasSessionLimitDraft {
+		t.Fatalf("expected silent repo refresh to preserve dirty config drafts, got %+v", got.SilentRefreshKeepsDirtyDraft)
 	}
 }

@@ -6365,9 +6365,8 @@ func startUITrackedIssuePlannedItemForURL(state *startWorkState, targetURL strin
 	return best, found
 }
 
-func startUIPlannedItemForIdempotencyKey(state *startWorkState, idempotencyKey string, fingerprint string) (startWorkPlannedItem, bool, error) {
+func startUIPlannedItemForIdempotencyKey(state *startWorkState, idempotencyKey string, fingerprints []string) (startWorkPlannedItem, bool, error) {
 	trimmedKey := strings.TrimSpace(idempotencyKey)
-	trimmedFingerprint := strings.TrimSpace(fingerprint)
 	if state == nil || trimmedKey == "" {
 		return startWorkPlannedItem{}, false, nil
 	}
@@ -6377,8 +6376,7 @@ func startUIPlannedItemForIdempotencyKey(state *startWorkState, idempotencyKey s
 		if strings.TrimSpace(item.IdempotencyKey) != trimmedKey {
 			continue
 		}
-		itemFingerprint := strings.TrimSpace(item.IdempotencyFingerprint)
-		if trimmedFingerprint != "" && itemFingerprint != "" && itemFingerprint != trimmedFingerprint {
+		if !startUIPlannedItemRequestFingerprintMatchesItem(item, fingerprints) {
 			return startWorkPlannedItem{}, false, startUIIdempotencyConflictError{Key: trimmedKey}
 		}
 		if !found || strings.TrimSpace(item.UpdatedAt) > strings.TrimSpace(best.UpdatedAt) {
@@ -6387,6 +6385,309 @@ func startUIPlannedItemForIdempotencyKey(state *startWorkState, idempotencyKey s
 		}
 	}
 	return best, found, nil
+}
+
+type startUIResolvedPlannedItemRequest struct {
+	Title              string
+	Description        string
+	WorkType           string
+	Priority           int
+	ScheduleAt         string
+	LaunchKind         string
+	FindingsHandling   string
+	TargetURL          string
+	InvestigationQuery string
+	ScoutRole          string
+	ScoutDestination   string
+	ScoutSessionLimit  int
+	ScoutFocus         []string
+}
+
+func resolveStartUIPlannedItemLaunchKind(repoSlug string, requested string) string {
+	launchKind := strings.TrimSpace(requested)
+	if launchKind != "" {
+		return launchKind
+	}
+	settings, _ := readGithubRepoSettings(githubRepoSettingsPath(repoSlug))
+	if resolvedGithubRepoMode(settings) == "local" {
+		return "local_work"
+	}
+	return "github_issue"
+}
+
+func resolveStartUIPlannedItemRequest(repoSlug string, payload startUIPlannedItemRequest) (startUIResolvedPlannedItemRequest, error) {
+	resolved := startUIResolvedPlannedItemRequest{
+		Title:       strings.TrimSpace(payload.Title),
+		Description: strings.TrimSpace(payload.Description),
+		Priority:    3,
+		ScheduleAt:  strings.TrimSpace(payload.ScheduleAt),
+		LaunchKind:  resolveStartUIPlannedItemLaunchKind(repoSlug, payload.LaunchKind),
+		TargetURL:   strings.TrimSpace(payload.TargetURL),
+	}
+	if payload.Priority != nil {
+		resolved.Priority = *payload.Priority
+		if resolved.Priority < 0 || resolved.Priority > 5 {
+			resolved.Priority = 3
+		}
+	}
+	switch resolved.LaunchKind {
+	case "local_work", "github_issue", "tracked_issue":
+		workType, err := parseRequiredWorkType(payload.WorkType, "work_type")
+		if err != nil {
+			return startUIResolvedPlannedItemRequest{}, err
+		}
+		resolved.WorkType = workType
+	case "investigation":
+		resolved.InvestigationQuery = strings.TrimSpace(payload.InvestigationQuery)
+		if resolved.InvestigationQuery == "" {
+			return startUIResolvedPlannedItemRequest{}, fmt.Errorf("investigation_query is required")
+		}
+		resolved.FindingsHandling = normalizeFindingsHandling(payload.FindingsHandling, "", resolved.LaunchKind)
+	case "manual_scout":
+		resolved.ScoutRole = strings.TrimSpace(payload.ScoutRole)
+		if !scoutRoleListIncludes(supportedScoutRoleOrder, resolved.ScoutRole) {
+			return startUIResolvedPlannedItemRequest{}, fmt.Errorf("unsupported scout_role %q", payload.ScoutRole)
+		}
+		resolved.ScoutDestination = normalizeScoutDestination(defaultString(payload.ScoutDestination, improvementDestinationReview))
+		if resolved.ScoutDestination != improvementDestinationLocal && resolved.ScoutDestination != improvementDestinationReview {
+			return startUIResolvedPlannedItemRequest{}, fmt.Errorf("unsupported scout_destination %q", payload.ScoutDestination)
+		}
+		if payload.ScoutSessionLimit > 0 {
+			if !scoutRoleSupportsSessionLimit(resolved.ScoutRole) {
+				return startUIResolvedPlannedItemRequest{}, fmt.Errorf("scout_role %s does not support session limits", resolved.ScoutRole)
+			}
+			if payload.ScoutSessionLimit < 1 || payload.ScoutSessionLimit > maxScoutSessionLimit {
+				return startUIResolvedPlannedItemRequest{}, fmt.Errorf("scout_session_limit must be between 1 and %d", maxScoutSessionLimit)
+			}
+			resolved.ScoutSessionLimit = payload.ScoutSessionLimit
+		}
+		resolved.ScoutFocus = make([]string, 0, len(payload.ScoutFocus))
+		for _, focus := range payload.ScoutFocus {
+			trimmed := strings.TrimSpace(focus)
+			if trimmed == "" {
+				continue
+			}
+			resolved.ScoutFocus = append(resolved.ScoutFocus, trimmed)
+		}
+		resolved.ScoutFocus = uniqueStrings(resolved.ScoutFocus)
+		resolved.FindingsHandling = normalizeFindingsHandling(payload.FindingsHandling, resolved.ScoutDestination, resolved.LaunchKind)
+	default:
+		return startUIResolvedPlannedItemRequest{}, fmt.Errorf("unsupported launch_kind %q", payload.LaunchKind)
+	}
+	if resolved.LaunchKind == "local_work" {
+		resolved.FindingsHandling = normalizeFindingsHandling(payload.FindingsHandling, "", resolved.LaunchKind)
+	}
+	return resolved, nil
+}
+
+func startUIPlannedItemFingerprintFromResolved(repoSlug string, resolved startUIResolvedPlannedItemRequest) string {
+	return startUIPlannedItemFingerprint(
+		repoSlug,
+		resolved.Title,
+		resolved.Description,
+		resolved.WorkType,
+		strconv.Itoa(resolved.Priority),
+		resolved.ScheduleAt,
+		resolved.LaunchKind,
+		resolved.FindingsHandling,
+		resolved.TargetURL,
+		resolved.InvestigationQuery,
+		resolved.ScoutRole,
+		resolved.ScoutDestination,
+		strconv.Itoa(resolved.ScoutSessionLimit),
+		resolved.ScoutFocus,
+	)
+}
+
+func startUIPlannedItemFingerprint(
+	repoSlug string,
+	title string,
+	description string,
+	workType string,
+	priority string,
+	scheduleAt string,
+	launchKind string,
+	findingsHandling string,
+	targetURL string,
+	investigationQuery string,
+	scoutRole string,
+	scoutDestination string,
+	scoutSessionLimit string,
+	scoutFocus []string,
+) string {
+	normalizedFocus := uniqueStrings(append([]string(nil), scoutFocus...))
+	sort.Strings(normalizedFocus)
+	return sha256Hex(strings.Join([]string{
+		strings.TrimSpace(repoSlug),
+		strings.TrimSpace(title),
+		strings.TrimSpace(description),
+		strings.TrimSpace(workType),
+		strings.TrimSpace(priority),
+		strings.TrimSpace(scheduleAt),
+		strings.TrimSpace(launchKind),
+		strings.TrimSpace(findingsHandling),
+		strings.TrimSpace(targetURL),
+		strings.TrimSpace(investigationQuery),
+		strings.TrimSpace(scoutRole),
+		strings.TrimSpace(scoutDestination),
+		strings.TrimSpace(scoutSessionLimit),
+		strings.Join(normalizedFocus, ","),
+	}, "\n"))
+}
+
+func startUIPlannedItemRequestFingerprint(repoSlug string, payload startUIPlannedItemRequest) string {
+	resolved, err := resolveStartUIPlannedItemRequest(repoSlug, payload)
+	if err == nil {
+		return startUIPlannedItemFingerprintFromResolved(repoSlug, resolved)
+	}
+	return startUIPlannedItemRawRequestFingerprint(repoSlug, payload)
+}
+
+func startUIPlannedItemRawRequestFingerprint(repoSlug string, payload startUIPlannedItemRequest) string {
+	workType := strings.TrimSpace(payload.WorkType)
+	if normalized := normalizeWorkType(workType); normalized != "" {
+		workType = normalized
+	}
+	priority := ""
+	if payload.Priority != nil {
+		normalizedPriority := *payload.Priority
+		if normalizedPriority < 0 || normalizedPriority > 5 {
+			normalizedPriority = 3
+		}
+		priority = strconv.Itoa(normalizedPriority)
+	}
+	launchKind := strings.ToLower(strings.TrimSpace(payload.LaunchKind))
+	findingsHandling := strings.ToLower(strings.TrimSpace(payload.FindingsHandling))
+	scoutDestination := strings.TrimSpace(payload.ScoutDestination)
+	if scoutDestination != "" {
+		scoutDestination = normalizeScoutDestination(scoutDestination)
+	}
+	scoutSessionLimit := ""
+	if payload.ScoutSessionLimit != 0 {
+		scoutSessionLimit = strconv.Itoa(payload.ScoutSessionLimit)
+	}
+	scoutFocus := make([]string, 0, len(payload.ScoutFocus))
+	for _, focus := range payload.ScoutFocus {
+		trimmed := strings.TrimSpace(focus)
+		if trimmed == "" {
+			continue
+		}
+		scoutFocus = append(scoutFocus, trimmed)
+	}
+	return startUIPlannedItemFingerprint(
+		repoSlug,
+		payload.Title,
+		payload.Description,
+		workType,
+		priority,
+		payload.ScheduleAt,
+		launchKind,
+		findingsHandling,
+		payload.TargetURL,
+		payload.InvestigationQuery,
+		payload.ScoutRole,
+		scoutDestination,
+		scoutSessionLimit,
+		scoutFocus,
+	)
+}
+
+func startUIPlannedItemLookupFingerprints(repoSlug string, payload startUIPlannedItemRequest) []string {
+	resolved, err := resolveStartUIPlannedItemRequest(repoSlug, payload)
+	if err != nil {
+		return []string{startUIPlannedItemRawRequestFingerprint(repoSlug, payload)}
+	}
+	fingerprints := startUIPlannedItemEquivalentRequestFingerprints(repoSlug, payload, resolved)
+	canonical := strings.TrimSpace(startUIPlannedItemFingerprintFromResolved(repoSlug, resolved))
+	if canonical == "" {
+		return fingerprints
+	}
+	for _, fingerprint := range fingerprints {
+		if fingerprint == canonical {
+			return fingerprints
+		}
+	}
+	return append(fingerprints, canonical)
+}
+
+func startUIPlannedItemEquivalentRequestFingerprints(repoSlug string, payload startUIPlannedItemRequest, resolved startUIResolvedPlannedItemRequest) []string {
+	variants := []startUIPlannedItemRequest{payload}
+	mutators := []func(startUIPlannedItemRequest) (startUIPlannedItemRequest, bool){}
+	if payload.Priority != nil && resolved.Priority == 3 {
+		mutators = append(mutators, func(candidate startUIPlannedItemRequest) (startUIPlannedItemRequest, bool) {
+			if candidate.Priority == nil {
+				return candidate, false
+			}
+			candidate.Priority = nil
+			return candidate, true
+		})
+	}
+	if strings.TrimSpace(payload.LaunchKind) != "" && (resolved.LaunchKind == "local_work" || resolved.LaunchKind == "github_issue") {
+		mutators = append(mutators, func(candidate startUIPlannedItemRequest) (startUIPlannedItemRequest, bool) {
+			if strings.TrimSpace(candidate.LaunchKind) == "" {
+				return candidate, false
+			}
+			candidate.LaunchKind = ""
+			return candidate, true
+		})
+	}
+	if strings.TrimSpace(payload.FindingsHandling) != "" && strings.TrimSpace(resolved.FindingsHandling) == normalizeFindingsHandling("", resolved.ScoutDestination, resolved.LaunchKind) {
+		mutators = append(mutators, func(candidate startUIPlannedItemRequest) (startUIPlannedItemRequest, bool) {
+			if strings.TrimSpace(candidate.FindingsHandling) == "" {
+				return candidate, false
+			}
+			candidate.FindingsHandling = ""
+			return candidate, true
+		})
+	}
+	if resolved.LaunchKind == "manual_scout" && strings.TrimSpace(payload.ScoutDestination) != "" && normalizeScoutDestination(payload.ScoutDestination) == improvementDestinationReview {
+		mutators = append(mutators, func(candidate startUIPlannedItemRequest) (startUIPlannedItemRequest, bool) {
+			if strings.TrimSpace(candidate.ScoutDestination) == "" {
+				return candidate, false
+			}
+			candidate.ScoutDestination = ""
+			return candidate, true
+		})
+	}
+	for _, mutate := range mutators {
+		current := append([]startUIPlannedItemRequest(nil), variants...)
+		for _, variant := range current {
+			next, ok := mutate(variant)
+			if ok {
+				variants = append(variants, next)
+			}
+		}
+	}
+	seen := map[string]struct{}{}
+	fingerprints := make([]string, 0, len(variants))
+	for _, variant := range variants {
+		fingerprint := strings.TrimSpace(startUIPlannedItemRawRequestFingerprint(repoSlug, variant))
+		if fingerprint == "" {
+			continue
+		}
+		if _, ok := seen[fingerprint]; ok {
+			continue
+		}
+		seen[fingerprint] = struct{}{}
+		fingerprints = append(fingerprints, fingerprint)
+	}
+	return fingerprints
+}
+
+func startUIPlannedItemRequestFingerprintMatchesItem(item startWorkPlannedItem, requestFingerprints []string) bool {
+	if len(requestFingerprints) == 0 {
+		return true
+	}
+	storedFingerprint := strings.TrimSpace(item.IdempotencyFingerprint)
+	if storedFingerprint == "" {
+		return true
+	}
+	for _, requestFingerprint := range requestFingerprints {
+		if strings.TrimSpace(requestFingerprint) == storedFingerprint {
+			return true
+		}
+	}
+	return false
 }
 
 func upsertStartUITrackedIssuePlannedItem(repoSlug string, payload startUITrackedIssueScheduleRequest) (*startWorkState, startWorkPlannedItem, error) {
@@ -6519,25 +6820,23 @@ func startUITrackedIssuePlannedItemDescriptionFromSearch(repoSlug string, target
 }
 
 func createStartUIPlannedItem(repoSlug string, payload startUIPlannedItemRequest) (*startWorkState, startWorkPlannedItem, error) {
-	title := strings.TrimSpace(payload.Title)
+	resolved, err := resolveStartUIPlannedItemRequest(repoSlug, payload)
+	if err != nil {
+		return nil, startWorkPlannedItem{}, err
+	}
+	title := resolved.Title
 	if title == "" {
 		return nil, startWorkPlannedItem{}, fmt.Errorf("title is required")
 	}
 	idempotencyKey := strings.TrimSpace(payload.IdempotencyKey)
 	idempotencyFingerprint := strings.TrimSpace(payload.IdempotencyFingerprint)
-	scheduleAt := strings.TrimSpace(payload.ScheduleAt)
+	scheduleAt := resolved.ScheduleAt
 	if scheduleAt != "" {
 		if _, err := time.Parse(time.RFC3339, scheduleAt); err != nil {
 			return nil, startWorkPlannedItem{}, fmt.Errorf("schedule_at must be RFC3339")
 		}
 	}
-	priority := 3
-	if payload.Priority != nil {
-		priority = *payload.Priority
-	}
-	if priority < 0 || priority > 5 {
-		priority = 3
-	}
+	priority := resolved.Priority
 	now := time.Now().UTC().Format(time.RFC3339)
 	startWorkStateFileMu.Lock()
 	defer startWorkStateFileMu.Unlock()
@@ -6545,86 +6844,43 @@ func createStartUIPlannedItem(repoSlug string, payload startUIPlannedItemRequest
 	if err != nil {
 		return nil, startWorkPlannedItem{}, err
 	}
-	if existing, found, err := startUIPlannedItemForIdempotencyKey(state, idempotencyKey, idempotencyFingerprint); err != nil {
-		return nil, startWorkPlannedItem{}, err
-	} else if found {
-		return state, existing, nil
-	}
-	launchKind := strings.TrimSpace(payload.LaunchKind)
-	if launchKind == "" {
-		settings, _ := readGithubRepoSettings(githubRepoSettingsPath(repoSlug))
-		if resolvedGithubRepoMode(settings) == "local" {
-			launchKind = "local_work"
-		} else {
-			launchKind = "github_issue"
-		}
-	}
+	launchKind := resolved.LaunchKind
 	switch launchKind {
 	case "local_work", "github_issue", "tracked_issue", "investigation", "manual_scout":
 	default:
 		return nil, startWorkPlannedItem{}, fmt.Errorf("unsupported launch_kind %q", payload.LaunchKind)
 	}
-	workType := ""
-	if launchKind == "local_work" || launchKind == "github_issue" || launchKind == "tracked_issue" {
-		workType, err = parseRequiredWorkType(payload.WorkType, "work_type")
-		if err != nil {
-			return nil, startWorkPlannedItem{}, err
-		}
+	workType := resolved.WorkType
+	investigationQuery := resolved.InvestigationQuery
+	scoutRole := resolved.ScoutRole
+	scoutDestination := resolved.ScoutDestination
+	scoutSessionLimit := resolved.ScoutSessionLimit
+	scoutFocus := append([]string{}, resolved.ScoutFocus...)
+	findingsHandling := resolved.FindingsHandling
+	lookupFingerprints := []string{}
+	if idempotencyFingerprint != "" {
+		lookupFingerprints = append(lookupFingerprints, idempotencyFingerprint)
+	} else {
+		lookupFingerprints = startUIPlannedItemLookupFingerprints(repoSlug, payload)
 	}
-	investigationQuery := ""
-	scoutRole := ""
-	scoutDestination := ""
-	scoutSessionLimit := 0
-	scoutFocus := []string{}
-	findingsHandling := ""
-	switch launchKind {
-	case "investigation":
-		investigationQuery = strings.TrimSpace(payload.InvestigationQuery)
-		if investigationQuery == "" {
-			return nil, startWorkPlannedItem{}, fmt.Errorf("investigation_query is required")
-		}
-		findingsHandling = normalizeFindingsHandling(payload.FindingsHandling, "", launchKind)
-	case "manual_scout":
-		scoutRole = strings.TrimSpace(payload.ScoutRole)
-		if !scoutRoleListIncludes(supportedScoutRoleOrder, scoutRole) {
-			return nil, startWorkPlannedItem{}, fmt.Errorf("unsupported scout_role %q", payload.ScoutRole)
-		}
-		scoutDestination = normalizeScoutDestination(defaultString(payload.ScoutDestination, improvementDestinationReview))
-		if scoutDestination != improvementDestinationLocal && scoutDestination != improvementDestinationReview {
-			return nil, startWorkPlannedItem{}, fmt.Errorf("unsupported scout_destination %q", payload.ScoutDestination)
-		}
-		if payload.ScoutSessionLimit > 0 {
-			if !scoutRoleSupportsSessionLimit(scoutRole) {
-				return nil, startWorkPlannedItem{}, fmt.Errorf("scout_role %s does not support session limits", scoutRole)
-			}
-			if payload.ScoutSessionLimit < 1 || payload.ScoutSessionLimit > maxScoutSessionLimit {
-				return nil, startWorkPlannedItem{}, fmt.Errorf("scout_session_limit must be between 1 and %d", maxScoutSessionLimit)
-			}
-			scoutSessionLimit = payload.ScoutSessionLimit
-		}
-		scoutFocus = make([]string, 0, len(payload.ScoutFocus))
-		for _, focus := range payload.ScoutFocus {
-			trimmed := strings.TrimSpace(focus)
-			if trimmed == "" {
-				continue
-			}
-			scoutFocus = append(scoutFocus, trimmed)
-		}
-		scoutFocus = uniqueStrings(scoutFocus)
-		findingsHandling = normalizeFindingsHandling(payload.FindingsHandling, scoutDestination, launchKind)
-	case "local_work":
-		findingsHandling = normalizeFindingsHandling(payload.FindingsHandling, "", launchKind)
+	if existing, found, err := startUIPlannedItemForIdempotencyKey(state, idempotencyKey, lookupFingerprints); err != nil {
+		return nil, startWorkPlannedItem{}, err
+	} else if found {
+		return state, existing, nil
+	}
+	if idempotencyFingerprint == "" {
+		idempotencyFingerprint = startUIPlannedItemRawRequestFingerprint(repoSlug, payload)
 	}
 	itemID := fmt.Sprintf("planned-%d", time.Now().UnixNano())
 	item := startWorkPlannedItem{
 		ID:                     itemID,
 		RepoSlug:               repoSlug,
 		Title:                  title,
-		Description:            strings.TrimSpace(payload.Description),
+		Description:            resolved.Description,
 		WorkType:               workType,
 		LaunchKind:             launchKind,
 		FindingsHandling:       findingsHandling,
-		TargetURL:              strings.TrimSpace(payload.TargetURL),
+		TargetURL:              resolved.TargetURL,
 		InvestigationQuery:     investigationQuery,
 		ScoutRole:              scoutRole,
 		ScoutDestination:       scoutDestination,

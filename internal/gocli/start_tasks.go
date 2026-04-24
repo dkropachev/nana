@@ -610,7 +610,7 @@ func findStartUITaskIdempotentReplay(repoSlug string, idempotencyKey string, fin
 		}
 		return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, false, err
 	}
-	item, found, err := startUIPlannedItemForIdempotencyKey(state, idempotencyKey, fingerprint)
+	item, found, err := startUIPlannedItemForIdempotencyKey(state, idempotencyKey, []string{fingerprint})
 	if err != nil {
 		return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, false, err
 	}

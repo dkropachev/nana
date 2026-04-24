@@ -238,7 +238,7 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 		t.Fatalf("expected role-keyed scout configs, got %+v", overview.Repos[0].ScoutsByRole)
 	}
 
-	settingsBody := strings.NewReader(`{"repo_mode":"repo","issue_pick_mode":"label","pr_forward_mode":"auto","fork_issues_mode":"labeled","implement_mode":"auto","publish_target":"repo","scouts":{"improvement":{"enabled":true,"mode":"manual","schedule":"daily","issue_destination":"repo","fork_repo":"","labels":["ux"]},"enhancement":{"enabled":false,"mode":"auto","schedule":"always","issue_destination":"local","fork_repo":"","labels":[]},"ui":{"enabled":true,"mode":"manual","schedule":"weekly","issue_destination":"local","fork_repo":"","labels":["qa"],"session_limit":6}}}`)
+	settingsBody := strings.NewReader(`{"repo_mode":"repo","issue_pick_mode":"label","pr_forward_mode":"auto","fork_issues_mode":"labeled","implement_mode":"auto","publish_target":"repo","scouts":{"improvement":{"enabled":true,"mode":"manual","schedule":"daily","issue_destination":"repo","fork_repo":"","labels":["ux"]},"enhancement":{"enabled":false,"mode":"auto","schedule":"always","issue_destination":"local","fork_repo":"","labels":[]},"backend-performance":{"enabled":true,"mode":"manual","schedule":"weekly","issue_destination":"local","fork_repo":"","labels":["perf"],"session_limit":5},"ui":{"enabled":true,"mode":"manual","schedule":"weekly","issue_destination":"local","fork_repo":"","labels":["qa"],"session_limit":6}}}`)
 	settingsRequest, err := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/repos/"+repoSlug+"/settings", settingsBody)
 	if err != nil {
 		t.Fatalf("new settings request: %v", err)
@@ -273,7 +273,10 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 	if !settingsPayload.Repo.Scouts.UI.Enabled || settingsPayload.Repo.Scouts.UI.SessionLimit != 6 || settingsPayload.Repo.Scouts.UI.Schedule != scoutScheduleWeekly {
 		t.Fatalf("unexpected patched ui scout: %+v", settingsPayload.Repo.Scouts.UI)
 	}
-	if settingsPayload.Repo.ScoutsByRole["ui"].SessionLimit != 6 || settingsPayload.Repo.ScoutsByRole["improvement"].Schedule != scoutScheduleDaily {
+	if !settingsPayload.Repo.Scouts.BackendPerformance.Enabled || settingsPayload.Repo.Scouts.BackendPerformance.SessionLimit != 5 || settingsPayload.Repo.Scouts.BackendPerformance.Schedule != scoutScheduleWeekly {
+		t.Fatalf("unexpected patched backend-performance scout: %+v", settingsPayload.Repo.Scouts.BackendPerformance)
+	}
+	if settingsPayload.Repo.ScoutsByRole["ui"].SessionLimit != 6 || settingsPayload.Repo.ScoutsByRole["improvement"].Schedule != scoutScheduleDaily || settingsPayload.Repo.ScoutsByRole["backend-performance"].SessionLimit != 5 {
 		t.Fatalf("expected patched role-keyed ui scout config: %+v", settingsPayload.Repo.ScoutsByRole)
 	}
 	if fileExists(filepath.Join(sourcePath, ".nana", "improvement-policy.json")) {
@@ -3186,140 +3189,6 @@ func TestStartUIAPIDropGithubWorkRunClearsPointers(t *testing.T) {
 	}
 }
 
-func TestStartUIAPIRerunLocalWorkRunStartsFreshDetachedRun(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	cwd := t.TempDir()
-	repo := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
-	repoID := localWorkRepoID(repo)
-	runID := "lw-ui-rerun-source"
-	runDir := localWorkRunDirByID(repoID, runID)
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		t.Fatalf("mkdir run dir: %v", err)
-	}
-	inputPath := filepath.Join(runDir, "input-plan.md")
-	if err := os.WriteFile(inputPath, []byte("rerun local work from UI\n"), 0o644); err != nil {
-		t.Fatalf("write input plan: %v", err)
-	}
-
-	manifest := localWorkManifest{
-		Version:               5,
-		RunID:                 runID,
-		CreatedAt:             "2026-04-23T00:00:00Z",
-		UpdatedAt:             "2026-04-23T00:05:00Z",
-		Status:                "failed",
-		CurrentPhase:          "max-iterations",
-		CurrentSubphase:       "iteration-complete",
-		CurrentIteration:      8,
-		RepoRoot:              repo,
-		RepoName:              filepath.Base(repo),
-		RepoID:                repoID,
-		SourceBranch:          "main",
-		BaselineSHA:           strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
-		SandboxPath:           filepath.Join(localWorkSandboxesDir(), repoID, runID),
-		SandboxRepoPath:       filepath.Join(localWorkSandboxesDir(), repoID, runID, "repo"),
-		InputPath:             inputPath,
-		InputMode:             "task",
-		WorkType:              "feature",
-		IntegrationPolicy:     "final",
-		GroupingPolicy:        localWorkDefaultGroupingPolicy,
-		ValidationParallelism: localWorkValidationParallelism,
-		MaxIterations:         8,
-		LastError:             "work run lw-ui-rerun-source reached max iterations (8)",
-	}
-	if err := writeLocalWorkManifest(manifest); err != nil {
-		t.Fatalf("write manifest: %v", err)
-	}
-
-	originalDetachedRunner := localWorkStartDetachedRunner
-	detachedCalls := 0
-	detachedRunID := ""
-	localWorkStartDetachedRunner = func(repoRoot string, nextRunID string, codexArgs []string, logPath string) error {
-		detachedCalls++
-		detachedRunID = nextRunID
-		if repoRoot != repo {
-			t.Fatalf("unexpected rerun repo root: %s", repoRoot)
-		}
-		if strings.TrimSpace(nextRunID) == "" || nextRunID == runID {
-			t.Fatalf("expected fresh rerun id, got %q", nextRunID)
-		}
-		if len(codexArgs) != 0 {
-			t.Fatalf("unexpected rerun codex args: %#v", codexArgs)
-		}
-		if !strings.HasSuffix(logPath, filepath.Join("runs", nextRunID, "runtime.log")) {
-			t.Fatalf("unexpected rerun log path: %s", logPath)
-		}
-		return nil
-	}
-	defer func() {
-		localWorkStartDetachedRunner = originalDetachedRunner
-	}()
-
-	server := httptest.NewServer((&startUIAPI{cwd: cwd, allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
-	defer server.Close()
-
-	detailResponse, err := http.Get(server.URL + "/api/v1/work/runs/" + runID)
-	if err != nil {
-		t.Fatalf("GET work run detail before rerun: %v", err)
-	}
-	defer detailResponse.Body.Close()
-	var before startUIWorkRunDetail
-	if err := json.NewDecoder(detailResponse.Body).Decode(&before); err != nil {
-		t.Fatalf("decode work run detail before rerun: %v", err)
-	}
-	if !before.RerunAllowed || !before.Summary.RerunAllowed {
-		t.Fatalf("expected failed run to allow rerun, got %+v", before)
-	}
-
-	rerunRequest, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/work/runs/"+runID+"/rerun", nil)
-	if err != nil {
-		t.Fatalf("new rerun request: %v", err)
-	}
-	rerunResponse, err := http.DefaultClient.Do(rerunRequest)
-	if err != nil {
-		t.Fatalf("POST work run rerun: %v", err)
-	}
-	defer rerunResponse.Body.Close()
-	if rerunResponse.StatusCode != http.StatusOK {
-		t.Fatalf("unexpected work run rerun status: %d", rerunResponse.StatusCode)
-	}
-	var rerunPayload struct {
-		RunID  string               `json:"run_id"`
-		Detail startUIWorkRunDetail `json:"detail"`
-	}
-	if err := json.NewDecoder(rerunResponse.Body).Decode(&rerunPayload); err != nil {
-		t.Fatalf("decode rerun payload: %v", err)
-	}
-	if rerunPayload.RunID == "" || rerunPayload.RunID == runID {
-		t.Fatalf("expected fresh rerun id, got %+v", rerunPayload)
-	}
-	if rerunPayload.RunID != detachedRunID {
-		t.Fatalf("expected rerun payload to return detached run id %q, got %+v", detachedRunID, rerunPayload)
-	}
-	if rerunPayload.Detail.Summary.RunID != rerunPayload.RunID || rerunPayload.Detail.Summary.Status != "running" {
-		t.Fatalf("expected rerun payload detail for fresh running run, got %+v", rerunPayload.Detail)
-	}
-	if rerunPayload.Detail.RerunAllowed || rerunPayload.Detail.Summary.RerunAllowed {
-		t.Fatalf("expected fresh running rerun to disable rerun affordance, got %+v", rerunPayload.Detail)
-	}
-	if detachedCalls != 1 {
-		t.Fatalf("expected one detached rerun launch, got %d", detachedCalls)
-	}
-
-	updated := mustLocalWorkManifestByRunID(t, rerunPayload.RunID)
-	if updated.Status != "running" || updated.CurrentPhase != "bootstrap" {
-		t.Fatalf("expected fresh running manifest, got %+v", updated)
-	}
-	content, err := os.ReadFile(updated.InputPath)
-	if err != nil {
-		t.Fatalf("read rerun input plan: %v", err)
-	}
-	if strings.TrimSpace(string(content)) != "rerun local work from UI" {
-		t.Fatalf("unexpected rerun input plan: %q", string(content))
-	}
-}
-
 func TestStartUIAPIAssistantWorkspaceRoutes(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -3597,19 +3466,6 @@ func TestStartUIAPIAssistantWorkspaceRoutes(t *testing.T) {
 	}
 	if investigationDetail.FinalReport == nil || investigationDetail.LatestValidatorResult == nil || !investigationDetail.LatestValidatorResult.Accepted {
 		t.Fatalf("unexpected investigation detail: %+v", investigationDetail)
-	}
-
-	legacyTaskDetailResponse, err := http.Get(server.URL + "/api/v1/investigations/" + url.PathEscape("work-run:lw-browser-active"))
-	if err != nil {
-		t.Fatalf("GET legacy task detail alias: %v", err)
-	}
-	defer legacyTaskDetailResponse.Body.Close()
-	var legacyTaskDetail startUITaskDetail
-	if err := json.NewDecoder(legacyTaskDetailResponse.Body).Decode(&legacyTaskDetail); err != nil {
-		t.Fatalf("decode legacy task detail alias payload: %v", err)
-	}
-	if legacyTaskDetail.Summary.ID != "work-run:lw-browser-active" || legacyTaskDetail.WorkRun == nil {
-		t.Fatalf("unexpected legacy task detail alias payload: %+v", legacyTaskDetail)
 	}
 
 	reviewsResponse, err := http.Get(server.URL + "/api/v1/reviews")
@@ -3935,20 +3791,6 @@ func TestStartUIAPITasksListAndDetail(t *testing.T) {
 		t.Fatalf("unexpected work-item task detail: %+v", detail)
 	}
 
-	scoutTaskID := "scout-job:" + fixture.RepoSlug + ":" + fixture.ScoutItemID
-	scoutTaskDetailResponse, err := http.Get(fixture.Server.URL + "/api/v1/tasks/" + url.PathEscape(scoutTaskID))
-	if err != nil {
-		t.Fatalf("GET scout-job task detail: %v", err)
-	}
-	defer scoutTaskDetailResponse.Body.Close()
-	var scoutTaskDetail startUITaskDetail
-	if err := json.NewDecoder(scoutTaskDetailResponse.Body).Decode(&scoutTaskDetail); err != nil {
-		t.Fatalf("decode scout-job task detail: %v", err)
-	}
-	if scoutTaskDetail.ScoutJob == nil || scoutTaskDetail.Summary.ID != scoutTaskID {
-		t.Fatalf("unexpected scout-job task detail: %+v", scoutTaskDetail)
-	}
-
 	runTaskDetailResponse, err := http.Get(fixture.Server.URL + "/api/v1/tasks/" + url.PathEscape("work-run:lw-browser-active"))
 	if err != nil {
 		t.Fatalf("GET work-run task detail: %v", err)
@@ -3966,7 +3808,26 @@ func TestStartUIAPITasksListAndDetail(t *testing.T) {
 	}
 }
 
-func TestStartUIAppTaskDetailSupportsReferenceAndDeepLinks(t *testing.T) {
+func TestStartUIInvestigationDetailRouteSupportsLegacyTaskAlias(t *testing.T) {
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	response, err := http.Get(fixture.Server.URL + "/api/v1/investigations/" + url.PathEscape("work-run:lw-browser-active"))
+	if err != nil {
+		t.Fatalf("GET investigation legacy detail: %v", err)
+	}
+	defer response.Body.Close()
+
+	var detail startUITaskDetail
+	if err := json.NewDecoder(response.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode investigation legacy detail: %v", err)
+	}
+	if detail.Summary.Kind != "work_run" || detail.WorkRun == nil || detail.WorkRun.Summary.RunID != "lw-browser-active" {
+		t.Fatalf("expected investigation detail route to fall back to the legacy task alias detail, got %+v", detail)
+	}
+}
+
+func TestStartUIAppInvestigationDeepLinksSupportLegacyTaskAlias(t *testing.T) {
 	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
 	if err != nil {
 		t.Fatalf("read app asset: %v", err)
@@ -3975,10 +3836,9 @@ func TestStartUIAppTaskDetailSupportsReferenceAndDeepLinks(t *testing.T) {
 	for _, needle := range []string{
 		`params.set("task", state.investigations.selectedRunID);`,
 		`const hasTaskSelection = params.has("task") || params.has("investigation");`,
-		`function syncTaskDetailModalState() {`,
-		`<span class="drawer-label">Task Start</span>`,
-		`<span class="drawer-label">Token Spend</span>`,
-		`<span class="drawer-label">Reference</span>`,
+		`syncHashState();`,
+		`<h3>Investigation Detail</h3>`,
+		`<h3>Detailed Explanation</h3>`,
 	} {
 		if !strings.Contains(content, needle) {
 			t.Fatalf("expected app asset to contain %q", needle)
@@ -3986,17 +3846,42 @@ func TestStartUIAppTaskDetailSupportsReferenceAndDeepLinks(t *testing.T) {
 	}
 }
 
-func TestStartUIAppTaskDetailSupportsWorkRunActionMenu(t *testing.T) {
+func TestStartUIAppPlannedItemSubmitPathsSendAndRotateIdempotencyKeys(t *testing.T) {
+	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
+	if err != nil {
+		t.Fatalf("read app asset: %v", err)
+	}
+	content := string(appBody)
+	if got := strings.Count(content, `headers: { "Idempotency-Key": idempotencyKey },`); got < 2 {
+		t.Fatalf("expected both planned-item submit flows to send Idempotency-Key headers, got %d matches", got)
+	}
+	if got := strings.Count(content, `idempotency_key: idempotencyKey,`); got < 2 {
+		t.Fatalf("expected both planned-item submit flows to send matching idempotency_key bodies, got %d matches", got)
+	}
+	for _, needle := range []string{
+		`function ensurePlannedFormIdempotencyKey(repoSlug) {`,
+		`resetPlannedFormIdempotencyKey(state.selectedRepo);`,
+		`const idempotencyKey = defaultString(state.taskComposer.idempotencyKey, nextTaskComposerIdempotencyKey());`,
+		`state.taskComposer.idempotencyKey = idempotencyKey;`,
+		`resetTaskComposerIdempotencyKey();`,
+	} {
+		if !strings.Contains(content, needle) {
+			t.Fatalf("expected app asset to contain %q", needle)
+		}
+	}
+}
+
+func TestStartUIAppMissionControlRepoCardsShowMetricsAndActions(t *testing.T) {
 	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
 	if err != nil {
 		t.Fatalf("read app asset: %v", err)
 	}
 	appContent := string(appBody)
 	for _, needle := range []string{
-		`function renderTaskDetailActionMenu(detail, summary) {`,
-		`data-run-rerun="${escapeHTML(runID)}"`,
-		`data-run-drop="${escapeHTML(runID)}"`,
-		`/api/v1/work/runs/${encodeURIComponent(runID)}/rerun`,
+		`<div class="repo-card-metrics">`,
+		`<div class="repo-card-actions">`,
+		`repo mode · ${escapeHTML(defaultString(repo.issue_pick_mode, "unknown"))} issue pick`,
+		`data-open-repo="${escapeHTML(repo.repo_slug)}"`,
 	} {
 		if !strings.Contains(appContent, needle) {
 			t.Fatalf("expected app asset to contain %q", needle)
@@ -4009,9 +3894,10 @@ func TestStartUIAppTaskDetailSupportsWorkRunActionMenu(t *testing.T) {
 	}
 	cssContent := string(cssBody)
 	for _, needle := range []string{
-		`.drawer-action-menu {`,
-		`.drawer-action-menu-summary {`,
-		`.drawer-action-menu-body {`,
+		`.repo-card-metrics {`,
+		`.repo-card-actions {`,
+		`display: grid;`,
+		`gap: 8px;`,
 	} {
 		if !strings.Contains(cssContent, needle) {
 			t.Fatalf("expected app stylesheet to contain %q", needle)
@@ -4019,54 +3905,19 @@ func TestStartUIAppTaskDetailSupportsWorkRunActionMenu(t *testing.T) {
 	}
 }
 
-func TestStartUIAppMissionControlRepoCardsShowBottomRightRepoTimestamp(t *testing.T) {
-	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
-	if err != nil {
-		t.Fatalf("read app asset: %v", err)
-	}
-	appContent := string(appBody)
-	for _, needle := range []string{
-		`<div class="repo-card-footer">`,
-		`${escapeHTML(repo.repo_slug)} · ${escapeHTML(` + "`updated ${formatDateTime(repo.updated_at)}`" + `)}`,
-	} {
-		if !strings.Contains(appContent, needle) {
-			t.Fatalf("expected app asset to contain %q", needle)
-		}
-	}
-
-	cssBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.css")
-	if err != nil {
-		t.Fatalf("read app stylesheet: %v", err)
-	}
-	cssContent := string(cssBody)
-	for _, needle := range []string{
-		`.repo-card-footer {`,
-		`margin-top: auto;`,
-		`justify-content: flex-end;`,
-		`text-align: right;`,
-	} {
-		if !strings.Contains(cssContent, needle) {
-			t.Fatalf("expected app stylesheet to contain %q", needle)
-		}
-	}
-}
-
-func TestStartUIAppTaskFeedHeadlinePrefersTitleOrDescription(t *testing.T) {
+func TestStartUIAppInvestigationsWorkspaceShowsDirectDetailSurfaces(t *testing.T) {
 	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
 	if err != nil {
 		t.Fatalf("read app asset: %v", err)
 	}
 	content := string(appBody)
 	for _, needle := range []string{
-		`const headline = item.kind === "work_run"`,
-		`const showHeadline = headline !== repo;`,
-		`const reference = defaultString(item.id, "unknown");`,
-		`const detail = defaultString(item.summary, item.description || "No summary recorded.");`,
-		`const showDetail = detail !== headline;`,
-		`${showHeadline ? ` + "`<strong>${escapeHTML(headline)}</strong>`" + ` : ""}`,
-		`<span class="mission-task-reference">${escapeHTML(reference)}</span>`,
-		`${showDetail ? ` + "`<em>${escapeHTML(detail)}</em>`" + ` : ""}`,
-		`<span class="mission-task-meta">${escapeHTML(repo)} · ${escapeHTML(schedule)}</span>`,
+		`<h3>Scheduled Tasks</h3>`,
+		`<h3>Investigation Detail</h3>`,
+		`<h3>Findings Inbox</h3>`,
+		`<h3>Import Sessions</h3>`,
+		`data-task-planned-launch="${escapeHTML(row.id)}"`,
+		`data-task-planned-remove="${escapeHTML(row.id)}"`,
 	} {
 		if !strings.Contains(content, needle) {
 			t.Fatalf("expected app asset to contain %q", needle)
@@ -4079,12 +3930,10 @@ func TestStartUIAppTaskFeedHeadlinePrefersTitleOrDescription(t *testing.T) {
 	}
 	cssContent := string(cssBody)
 	for _, needle := range []string{
-		`.mission-task-reference {`,
-		`font-family: ui-monospace`,
-		`font-size: 11px;`,
-		`.mission-task-meta {`,
-		`grid-area: meta;`,
-		`text-align: right;`,
+		`.detail-surface {`,
+		`.filter-disclosure {`,
+		`.filter-panel {`,
+		`.status-pill {`,
 	} {
 		if !strings.Contains(cssContent, needle) {
 			t.Fatalf("expected app stylesheet to contain %q", needle)
@@ -4092,7 +3941,7 @@ func TestStartUIAppTaskFeedHeadlinePrefersTitleOrDescription(t *testing.T) {
 	}
 }
 
-func TestStartUIBrowserTaskDetailDeepLinkOpensModal(t *testing.T) {
+func TestStartUIBrowserInvestigationDeepLinkShowsSelectedDetail(t *testing.T) {
 	chromePath := startUITestChromePath(t)
 	if chromePath == "" {
 		t.Skip("google-chrome is required for browser UI coverage")
@@ -4104,33 +3953,12 @@ func TestStartUIBrowserTaskDetailDeepLinkOpensModal(t *testing.T) {
 	taskID := "work-run:lw-browser-active"
 	output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=investigations&task="+url.QueryEscape(taskID))
 	for _, needle := range []string{
-		"Task Detail",
-		"Task Start",
-		"Token Spend",
-		"Reference",
+		"Investigation Detail",
+		"Detailed Explanation",
+		"Validator",
 		taskID,
 	} {
-		startUITestRequireText(t, output, needle, "task-detail-deeplink")
-	}
-}
-
-func TestStartUIBrowserLegacyInvestigationHashForScoutJobOpensTaskModal(t *testing.T) {
-	chromePath := startUITestChromePath(t)
-	if chromePath == "" {
-		t.Skip("google-chrome is required for browser UI coverage")
-	}
-
-	fixture := startUITestSetupBrowserFixture(t)
-	defer fixture.Server.Close()
-
-	taskID := "scout-job:" + fixture.RepoSlug + ":" + fixture.ScoutItemID
-	output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=investigations&investigation="+url.QueryEscape(taskID))
-	for _, needle := range []string{
-		"Task Detail",
-		"Reference",
-		taskID,
-	} {
-		startUITestRequireText(t, output, needle, "legacy-investigation-task-deeplink")
+		startUITestRequireText(t, output, needle, "investigation-detail-deeplink")
 	}
 }
 
@@ -6213,38 +6041,17 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if strings.Contains(string(appBody), `Describe the work. Nana infers the title and task type.`) {
 		t.Fatalf("expected schedule task helper copy to be removed, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `task-composer-controls`) || !strings.Contains(string(appBody), `task-composer-description-field`) {
-		t.Fatalf("expected schedule task controls above expanding description layout, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `bodyClass: "mission-schedule-modal-body"`) {
-		t.Fatalf("expected schedule task modal body class wiring for bounded modal height, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `taskTemplateScoutPromptPreview`) || !strings.Contains(string(appBody), `scout_prompt_preview`) || !strings.Contains(string(appBody), `scoutPromptPreview ? "" : String(state.taskComposer.description || "").trim()`) {
-		t.Fatalf("expected scout presets to render read-only prompt previews without submitting them as descriptions, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `task-composer-kind`) || !strings.Contains(string(appBody), `task-investigation-query`) || !strings.Contains(string(appBody), `task-coding-work-type`) || !strings.Contains(string(appBody), `task-scout-role`) || !strings.Contains(string(appBody), `task-findings-handling`) {
+		t.Fatalf("expected direct schedule task form controls in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `Idempotency-Key`) || !strings.Contains(string(appBody), `nextTaskComposerIdempotencyKey()`) {
 		t.Fatalf("expected task scheduling UI to send and rotate idempotency keys, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `!composerRepo || !canSavePreset`) {
-		t.Fatalf("expected Save As Preset to be disabled when a preset is selected, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `task-planned-launch`) || !strings.Contains(string(appBody), `task-planned-remove`) || !strings.Contains(string(appBody), `renderStatePill(row.state === "failed" ? "blocked" : row.state, row.state)`) {
+		t.Fatalf("expected scheduled task actions and state pills in app.js, got %s", string(appBody))
 	}
-	if strings.Contains(string(appBody), `class="mission-task-action"`) || strings.Contains(string(appBody), `taskPrimaryActionLabel`) {
-		t.Fatalf("expected task feed rows to render only the state pill, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `renderStatePill(taskStatusTone(item.status), taskStatusLabel(defaultString(item.status, "queued")))`) {
-		t.Fatalf("expected task feed rows to keep state pill rendering, got %s", string(appBody))
-	}
-	if strings.Contains(string(appBody), `mission-status-strip`) || strings.Contains(string(appBody), `data-task-status-filter`) || strings.Contains(string(appBody), `mission-filter-count`) {
-		t.Fatalf("expected investigations toolbar to omit status strip and filter count, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `data-task-multi-filter-menu="${escapeHTML(field)}"`) || !strings.Contains(string(appBody), `data-task-multi-filter-field="${escapeHTML(field)}"`) {
-		t.Fatalf("expected investigations toolbar multi-select filters, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `renderTaskMultiFilter("priority", "Priority", "All priorities", priorityOptions)`) || !strings.Contains(string(appBody), `matchesTaskPriorityFilter(item, filter.priority)`) {
-		t.Fatalf("expected investigations priority multi-select filter wiring, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `data-task-action="run-now"`) {
-		t.Fatalf("expected task run-now control wiring in app.js, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `filter-disclosure`) || !strings.Contains(string(appBody), `data-view-filter-reset`) || !strings.Contains(string(appBody), `placeholder: "Search query, repo, summary, or run id"`) {
+		t.Fatalf("expected investigations filter disclosure wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `data-scout-action="promote"`) {
 		t.Fatalf("expected manual scout promote control wiring in app.js, got %s", string(appBody))
@@ -6254,9 +6061,6 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	}
 	if !strings.Contains(string(appBody), `data-run-sync="`) {
 		t.Fatalf("expected run sync control wiring in app.js, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `data-run-stop="`) {
-		t.Fatalf("expected run stop control wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `function canRenderWithoutOverview(view)`) {
 		t.Fatalf("expected overview-optional view helper in app.js, got %s", string(appBody))
@@ -7989,12 +7793,12 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 		"investigations": {
 			hash: "view=investigations",
 			expect: []string{
-				"Nana Mission Control",
-				"Search tasks...",
-				"+ Task",
-				"Running",
-				"In Review",
-				"Blocked",
+				"Schedule Task",
+				"Scheduled Tasks",
+				"Investigation Runs",
+				"Investigation Detail",
+				"Findings Inbox",
+				"Import Sessions",
 				"Fix flaky test",
 				"work run",
 			},

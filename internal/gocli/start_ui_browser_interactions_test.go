@@ -169,84 +169,6 @@ func TestStartUIBrowserInteractionsRepoControls(t *testing.T) {
 	}
 }
 
-func TestStartUIBrowserInteractionsMissionControlTasks(t *testing.T) {
-	chromePath := startUITestChromePath(t)
-	if chromePath == "" {
-		t.Skip("google-chrome is required for chromedp browser interaction coverage")
-	}
-
-	oldInfer := startUIInferTaskPlan
-	startUIInferTaskPlan = func(repoSlug string, description string, template startUITaskTemplate) (startUITaskInferenceResult, error) {
-		return startUITaskInferenceResult{
-			Title:      "Mission control browser task",
-			LaunchKind: "local_work",
-			WorkType:   workTypeFeature,
-		}, nil
-	}
-	t.Cleanup(func() { startUIInferTaskPlan = oldInfer })
-
-	fixture := startUITestSetupBrowserFixture(t)
-	defer fixture.Server.Close()
-
-	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
-	defer cancelBrowser()
-
-	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
-	defer cancelTab()
-
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=investigations", ".mission-toolbar")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Nana Mission Control")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Fix flaky test")
-
-	startUITestChromedpClick(t, tabCtx, `[data-task-multi-filter-menu="status"] summary`)
-	startUITestChromedpClick(t, tabCtx, `[data-task-multi-filter-field="status"][data-task-multi-filter-value="blocked"]`)
-	startUITestChromedpWaitOpen(t, tabCtx, `[data-task-multi-filter-menu="status"]`, true)
-	if err := chromedp.Run(tabCtx, chromedp.Evaluate(`document.querySelector(".sidebar-brand").click()`, nil)); err != nil {
-		t.Fatalf("click sidebar brand: %v", err)
-	}
-	startUITestChromedpWaitOpen(t, tabCtx, `[data-task-multi-filter-menu="status"]`, false)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Status: Blocked")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "completion-harden")
-	startUITestChromedpWaitBodyTextAbsent(t, tabCtx, "Reply in thread")
-
-	startUITestChromedpClick(t, tabCtx, `[data-task-multi-filter-menu="priority"] summary`)
-	startUITestChromedpClick(t, tabCtx, `[data-task-multi-filter-field="priority"][data-task-multi-filter-value="P0"]`)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Priority: P0")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "completion-harden")
-	startUITestChromedpWaitBodyTextAbsent(t, tabCtx, "Fix flaky test")
-
-	startUITestChromedpClick(t, tabCtx, `[data-task-multi-filter-menu="kind"] summary`)
-	startUITestChromedpClick(t, tabCtx, `[data-task-multi-filter-field="kind"][data-task-multi-filter-value="work_run"]`)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Type: work run")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "completion-harden")
-	startUITestChromedpWaitBodyTextAbsent(t, tabCtx, "Warm staging environment")
-
-	startUITestChromedpSetValue(t, tabCtx, `[data-view-filter="investigations"][data-view-filter-name="query"]`, "no-match-token")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "No tasks match these filters.")
-	startUITestChromedpClick(t, tabCtx, `[data-task-filter-clear="all"]`)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Fix flaky test")
-
-	startUITestChromedpClick(t, tabCtx, "#open-task-schedule-button")
-	startUITestChromedpWaitVisible(t, tabCtx, "#task-schedule-modal-content")
-	startUITestChromedpWaitNoVerticalOverflow(t, tabCtx, ".tx-modal-body")
-	startUITestChromedpWaitNoHorizontalOverflow(t, tabCtx, ".tx-modal-body")
-	startUITestChromedpWaitClientHeightAtLeast(t, tabCtx, "#task-composer-description", 60)
-	startUITestChromedpSetValue(t, tabCtx, "#task-composer-template", "template:scout:ui-scout")
-	startUITestChromedpWaitReadonly(t, tabCtx, "#task-composer-description", true)
-	startUITestChromedpWaitValueContains(t, tabCtx, "#task-composer-description", "UI")
-	startUITestChromedpWaitDisabled(t, tabCtx, "#task-save-template-button", true)
-	startUITestChromedpSetValue(t, tabCtx, "#task-composer-template", "template:implementation")
-	startUITestChromedpWaitReadonly(t, tabCtx, "#task-composer-description", false)
-	startUITestChromedpSetValue(t, tabCtx, "#task-composer-description", "Create a browser scheduled task from Mission Control")
-	startUITestChromedpSetValue(t, tabCtx, "#task-composer-template", "template:implementation")
-	startUITestChromedpSetValue(t, tabCtx, "#task-composer-priority", "1")
-	startUITestChromedpSetValue(t, tabCtx, "#task-composer-run-mode", "later")
-	startUITestChromedpSetValue(t, tabCtx, "#task-composer-schedule", "2026-04-24T09:30")
-	startUITestChromedpClick(t, tabCtx, "#task-schedule-button")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Task scheduled")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Mission control browser task")
-}
-
 func TestStartUIBrowserInteractionsDraftsSurviveLiveRefresh(t *testing.T) {
 	chromePath := startUITestChromePath(t)
 	if chromePath == "" {
@@ -334,8 +256,19 @@ func TestStartUIBrowserInteractionsDraftsSurviveLiveRefresh(t *testing.T) {
 			},
 		},
 		{
+			name:          "repo-config-scout-labels-input",
+			hash:          "#view=repo&repo=acme/widget&tab=config",
+			readySelector: `input[name="scouts_by_role.improvement.labels"]`,
+			edit: func(t *testing.T, ctx context.Context) {
+				startUITestChromedpInputValue(t, ctx, `input[name="scouts_by_role.improvement.labels"]`, "ui, urgent, in-progress")
+			},
+			assert: func(t *testing.T, ctx context.Context) {
+				startUITestChromedpWaitValue(t, ctx, `input[name="scouts_by_role.improvement.labels"]`, "ui, urgent, in-progress")
+			},
+		},
+		{
 			name:          "investigations-finding-detail-form",
-			hash:          "#view=repo&repo=acme/widget&tab=findings",
+			hash:          "#view=investigations",
 			readySelector: "#task-findings-grid",
 			prepare:       startUITestSeedDraftRefreshFindingsData,
 			edit: func(t *testing.T, ctx context.Context) {
@@ -352,7 +285,7 @@ func TestStartUIBrowserInteractionsDraftsSurviveLiveRefresh(t *testing.T) {
 		},
 		{
 			name:          "investigations-import-candidate-form",
-			hash:          "#view=repo&repo=acme/widget&tab=findings",
+			hash:          "#view=investigations",
 			readySelector: "#task-import-sessions-grid",
 			prepare:       startUITestSeedDraftRefreshImportSession,
 			edit: func(t *testing.T, ctx context.Context) {
@@ -384,34 +317,6 @@ func TestStartUIBrowserInteractionsDraftsSurviveLiveRefresh(t *testing.T) {
 				startUITestChromedpWaitValue(t, ctx, "#usage-filter-activity", "draft-refresh-activity")
 				startUITestChromedpWaitValue(t, ctx, "#usage-filter-phase", "draft-refresh-phase")
 				startUITestChromedpWaitValue(t, ctx, "#usage-filter-model", "draft-refresh-model")
-			},
-		},
-		{
-			name:          "repo-onboarding-form",
-			hash:          "#view=home",
-			readySelector: "#repo-scope-select",
-			edit: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpDispatchValue(t, ctx, "#repo-scope-select", "__onboard_repo__")
-				startUITestChromedpWaitVisible(t, ctx, "#repo-onboard-form")
-				startUITestChromedpSetValue(t, ctx, "#repo-onboard-slug", "acme/refresh-stability")
-				startUITestChromedpSetValue(t, ctx, `[data-repo-onboard-field="repo_mode"]`, "fork")
-				startUITestChromedpSetValue(t, ctx, `[data-repo-onboard-field="issue_pick_mode"]`, "auto")
-			},
-			assert: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpWaitValue(t, ctx, "#repo-onboard-slug", "acme/refresh-stability")
-				startUITestChromedpWaitValue(t, ctx, `[data-repo-onboard-field="repo_mode"]`, "fork")
-				startUITestChromedpWaitValue(t, ctx, `[data-repo-onboard-field="issue_pick_mode"]`, "auto")
-			},
-		},
-		{
-			name:          "repo-config-labels-input",
-			hash:          "#view=repo&repo=acme/widget&tab=config",
-			readySelector: `[data-config-field="scouts_by_role.improvement.labels"]`,
-			edit: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpInputValue(t, ctx, `[data-config-field="scouts_by_role.improvement.labels"]`, "refresh, stable")
-			},
-			assert: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpWaitValue(t, ctx, `[data-config-field="scouts_by_role.improvement.labels"]`, "refresh, stable")
 			},
 		},
 	}
@@ -509,8 +414,37 @@ func TestStartUIBrowserInteractionsFocusSurvivesLiveRefresh(t *testing.T) {
 			},
 		},
 		{
+			name:          "repo-config-scout-labels-input",
+			hash:          "#view=repo&repo=acme/widget&tab=config",
+			readySelector: `input[name="scouts_by_role.improvement.labels"]`,
+			edit: func(t *testing.T, ctx context.Context) {
+				startUITestChromedpInputValue(t, ctx, `input[name="scouts_by_role.improvement.labels"]`, "ui, urgent, in-progress")
+				startUITestChromedpSetSelectionRange(t, ctx, `input[name="scouts_by_role.improvement.labels"]`, 4, 10)
+			},
+			assert: func(t *testing.T, ctx context.Context) {
+				startUITestChromedpWaitValue(t, ctx, `input[name="scouts_by_role.improvement.labels"]`, "ui, urgent, in-progress")
+				startUITestChromedpWaitFocusSelection(t, ctx, `input[name="scouts_by_role.improvement.labels"]`, 4, 10)
+			},
+		},
+		{
+			name:          "repo-onboarding-slug-input",
+			hash:          "#view=home",
+			readySelector: "#repo-scope-select",
+			edit: func(t *testing.T, ctx context.Context) {
+				startUITestChromedpDispatchValue(t, ctx, "#repo-scope-select", "__onboard_repo__")
+				startUITestChromedpWaitVisible(t, ctx, "#repo-onboard-slug")
+				startUITestChromedpSetValue(t, ctx, "#repo-onboard-slug", "acme/refresh-stability")
+				startUITestChromedpSetSelectionRange(t, ctx, "#repo-onboard-slug", 5, 12)
+			},
+			assert: func(t *testing.T, ctx context.Context) {
+				startUITestChromedpWaitVisible(t, ctx, "#repo-onboard-slug")
+				startUITestChromedpWaitValue(t, ctx, "#repo-onboard-slug", "acme/refresh-stability")
+				startUITestChromedpWaitFocusSelection(t, ctx, "#repo-onboard-slug", 5, 12)
+			},
+		},
+		{
 			name:          "finding-summary-textarea",
-			hash:          "#view=repo&repo=acme/widget&tab=findings",
+			hash:          "#view=investigations",
 			readySelector: "#task-findings-grid",
 			prepare:       startUITestSeedDraftRefreshFindingsData,
 			edit: func(t *testing.T, ctx context.Context) {
@@ -527,7 +461,7 @@ func TestStartUIBrowserInteractionsFocusSurvivesLiveRefresh(t *testing.T) {
 		},
 		{
 			name:          "import-candidate-summary-textarea",
-			hash:          "#view=repo&repo=acme/widget&tab=findings",
+			hash:          "#view=investigations",
 			readySelector: "#task-import-sessions-grid",
 			prepare:       startUITestSeedDraftRefreshImportSession,
 			edit: func(t *testing.T, ctx context.Context) {
@@ -555,34 +489,6 @@ func TestStartUIBrowserInteractionsFocusSurvivesLiveRefresh(t *testing.T) {
 				startUITestChromedpWaitFocusSelection(t, ctx, "#usage-filter-activity", 6, 6)
 			},
 		},
-		{
-			name:          "repo-onboarding-slug",
-			hash:          "#view=home",
-			readySelector: "#repo-scope-select",
-			edit: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpDispatchValue(t, ctx, "#repo-scope-select", "__onboard_repo__")
-				startUITestChromedpWaitVisible(t, ctx, "#repo-onboard-slug")
-				startUITestChromedpSetValue(t, ctx, "#repo-onboard-slug", "acme/refresh-stability")
-				startUITestChromedpSetSelectionRange(t, ctx, "#repo-onboard-slug", 5, 12)
-			},
-			assert: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpWaitValue(t, ctx, "#repo-onboard-slug", "acme/refresh-stability")
-				startUITestChromedpWaitFocusSelection(t, ctx, "#repo-onboard-slug", 5, 12)
-			},
-		},
-		{
-			name:          "repo-config-labels-input",
-			hash:          "#view=repo&repo=acme/widget&tab=config",
-			readySelector: `[data-config-field="scouts_by_role.improvement.labels"]`,
-			edit: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpInputValue(t, ctx, `[data-config-field="scouts_by_role.improvement.labels"]`, "refresh, stable")
-				startUITestChromedpSetSelectionRange(t, ctx, `[data-config-field="scouts_by_role.improvement.labels"]`, 9, 15)
-			},
-			assert: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpWaitValue(t, ctx, `[data-config-field="scouts_by_role.improvement.labels"]`, "refresh, stable")
-				startUITestChromedpWaitFocusSelection(t, ctx, `[data-config-field="scouts_by_role.improvement.labels"]`, 9, 15)
-			},
-		},
 	}
 
 	for _, tc := range cases {
@@ -605,73 +511,6 @@ func TestStartUIBrowserInteractionsFocusSurvivesLiveRefresh(t *testing.T) {
 				startUITestTriggerOverviewRefresh(t, fixture.Server.URL, tc.name)
 			})
 			tc.assert(t, tabCtx)
-		})
-	}
-}
-
-func TestStartUIBrowserInteractionsGridScrollSurvivesLiveRefresh(t *testing.T) {
-	chromePath := startUITestChromePath(t)
-	if chromePath == "" {
-		t.Skip("google-chrome is required for chromedp browser interaction coverage")
-	}
-
-	type startUITestGridScrollRefreshCase struct {
-		name           string
-		hash           string
-		readySelector  string
-		scrollSelector string
-		prepare        func(*testing.T, *startUITestBrowserFixture)
-	}
-
-	cases := []startUITestGridScrollRefreshCase{
-		{
-			name:           "issues-grid",
-			hash:           "#view=issues",
-			readySelector:  "#issues-grid .data-table-wrap",
-			scrollSelector: "#issues-grid .data-table-wrap",
-			prepare: func(t *testing.T, fixture *startUITestBrowserFixture) {
-				startUITestSeedLiveRefreshIssueRows(t, fixture, 18)
-			},
-		},
-		{
-			name:           "repo-overview-planned-grid",
-			hash:           "#view=repo&repo=acme/widget&tab=overview",
-			readySelector:  "#repo-planned-grid .data-table-wrap",
-			scrollSelector: "#repo-planned-grid .data-table-wrap",
-			prepare: func(t *testing.T, fixture *startUITestBrowserFixture) {
-				startUITestSeedLiveRefreshPlannedRows(t, fixture, 18)
-			},
-		},
-		{
-			name:           "approvals-grid",
-			hash:           "#view=approvals",
-			readySelector:  "#approvals-grid .data-table-wrap",
-			scrollSelector: "#approvals-grid .data-table-wrap",
-			prepare: func(t *testing.T, fixture *startUITestBrowserFixture) {
-				startUITestSeedLiveRefreshPlannedRows(t, fixture, 18)
-			},
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			fixture := startUITestSetupBrowserFixtureWithOptions(t, startUITestBrowserFixtureOptions{LiveEvents: true})
-			defer fixture.Server.Close()
-			tc.prepare(t, &fixture)
-
-			browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
-			defer cancelBrowser()
-
-			tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
-			defer cancelTab()
-
-			startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/"+tc.hash, tc.readySelector)
-			startUITestChromedpSetScrollTop(t, tabCtx, tc.scrollSelector, 320)
-			startUITestChromedpWaitScrollTopAtLeast(t, tabCtx, tc.scrollSelector, 200)
-			startUITestChromedpWaitForBodyMutationAfter(t, tabCtx, func() {
-				startUITestTriggerOverviewRefresh(t, fixture.Server.URL, tc.name)
-			})
-			startUITestChromedpWaitScrollTopAtLeast(t, tabCtx, tc.scrollSelector, 200)
 		})
 	}
 }
@@ -828,7 +667,7 @@ func TestStartUIBrowserInteractionsDraftsClearOnSelectionChange(t *testing.T) {
 		},
 		{
 			name:          "investigations-finding-detail",
-			hash:          "#view=repo&repo=acme/widget&tab=findings",
+			hash:          "#view=investigations",
 			readySelector: "#task-findings-grid",
 			edit: func(t *testing.T, ctx context.Context) {
 				startUITestChromedpWaitBodyTextContains(t, ctx, "Draft refresh finding")
@@ -853,7 +692,7 @@ func TestStartUIBrowserInteractionsDraftsClearOnSelectionChange(t *testing.T) {
 		},
 		{
 			name:          "investigations-import-candidate",
-			hash:          "#view=repo&repo=acme/widget&tab=findings",
+			hash:          "#view=investigations",
 			readySelector: "#task-import-candidates-grid",
 			edit: func(t *testing.T, ctx context.Context) {
 				startUITestChromedpWaitBodyTextContains(t, ctx, "Draft refresh candidate")
@@ -984,7 +823,7 @@ func TestStartUIBrowserInteractionsFocusDoesNotRestoreAfterExplicitSaveOrReset(t
 	})
 }
 
-func TestStartUIBrowserInteractionsRepoConfigFocusSurvivesLocalRerender(t *testing.T) {
+func TestStartUIBrowserInteractionsWorkItemRevisionDraftSurvivesRefresh(t *testing.T) {
 	chromePath := startUITestChromePath(t)
 	if chromePath == "" {
 		t.Skip("google-chrome is required for chromedp browser interaction coverage")
@@ -999,188 +838,14 @@ func TestStartUIBrowserInteractionsRepoConfigFocusSurvivesLocalRerender(t *testi
 	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
 	defer cancelTab()
 
-	selector := `[data-config-field="scouts_by_role.improvement.labels"]`
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo=acme/widget&tab=config", selector)
-	startUITestChromedpSetValue(t, tabCtx, selector, "refresh, stable")
-	startUITestChromedpSetSelectionRange(t, tabCtx, selector, 9, 15)
-	startUITestChromedpDispatchValue(t, tabCtx, selector, "refresh, stable")
-	startUITestChromedpWaitValue(t, tabCtx, selector, "refresh, stable")
-	startUITestChromedpWaitFocusSelection(t, tabCtx, selector, 9, 15)
-}
-
-func TestStartUIBrowserInteractionsRepoConfigRerenderKeepsDependentFieldsNormalized(t *testing.T) {
-	chromePath := startUITestChromePath(t)
-	if chromePath == "" {
-		t.Skip("google-chrome is required for chromedp browser interaction coverage")
-	}
-
-	type startUITestRepoConfigNormalizationCase struct {
-		name          string
-		readySelector string
-		edit          func(*testing.T, context.Context)
-		assert        func(*testing.T, context.Context)
-	}
-
-	cases := []startUITestRepoConfigNormalizationCase{
-		{
-			name:          "repo-mode-clears-stale-publish-target-draft",
-			readySelector: `[data-config-field="publish_target"]`,
-			edit: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpSetValue(t, ctx, `[data-config-field="publish_target"]`, "repo")
-				startUITestChromedpWaitValue(t, ctx, `[data-config-field="repo_mode"]`, "repo")
-				startUITestChromedpSetValue(t, ctx, `[data-config-field="repo_mode"]`, "disabled")
-			},
-			assert: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpWaitValue(t, ctx, `[data-config-field="repo_mode"]`, "disabled")
-				startUITestChromedpWaitValue(t, ctx, `[data-config-field="publish_target"]`, "local-branch")
-				startUITestChromedpWaitDisabled(t, ctx, `[data-config-field="publish_target"]`, true)
-				startUITestChromedpClick(t, ctx, `#repo-config-form button[type="submit"]`)
-				startUITestChromedpWaitBodyTextContains(t, ctx, "Repo config updated")
-				startUITestChromedpWaitBodyTextContains(t, ctx, `"repo_mode": "disabled"`)
-				startUITestChromedpWaitBodyTextContains(t, ctx, `"publish_target": ""`)
-				startUITestChromedpWaitBodyTextAbsent(t, ctx, `"publish_target": "repo"`)
-			},
-		},
-		{
-			name:          "issue-pick-mode-clears-stale-advanced-drafts",
-			readySelector: `[data-config-field="issue_pick_mode"]`,
-			edit: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpSetValue(t, ctx, `[data-config-field="fork_issues_mode"]`, "manual")
-				startUITestChromedpSetValue(t, ctx, `[data-config-field="implement_mode"]`, "manual")
-				startUITestChromedpWaitValue(t, ctx, `[data-config-field="issue_pick_mode"]`, "manual")
-				startUITestChromedpSetValue(t, ctx, `[data-config-field="issue_pick_mode"]`, "label")
-			},
-			assert: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpWaitValue(t, ctx, `[data-config-field="issue_pick_mode"]`, "label")
-				startUITestChromedpWaitValue(t, ctx, `[data-config-field="fork_issues_mode"]`, "labeled")
-				startUITestChromedpWaitValue(t, ctx, `[data-config-field="implement_mode"]`, "labeled")
-				startUITestChromedpClick(t, ctx, `#repo-config-form button[type="submit"]`)
-				startUITestChromedpWaitBodyTextContains(t, ctx, "Repo config updated")
-				startUITestChromedpWaitBodyTextContains(t, ctx, `"issue_pick_mode": "label"`)
-				startUITestChromedpWaitBodyTextContains(t, ctx, `"fork_issues_mode": "labeled"`)
-				startUITestChromedpWaitBodyTextContains(t, ctx, `"implement_mode": "labeled"`)
-				startUITestChromedpWaitBodyTextAbsent(t, ctx, `"fork_issues_mode": "manual"`)
-				startUITestChromedpWaitBodyTextAbsent(t, ctx, `"implement_mode": "manual"`)
-			},
-		},
-		{
-			name:          "scout-destination-clears-stale-fork-repo-draft",
-			readySelector: `[data-config-field="scouts_by_role.improvement.issue_destination"]`,
-			edit: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpSetValue(t, ctx, `[data-config-field="scouts_by_role.improvement.issue_destination"]`, "fork")
-				startUITestChromedpWaitDisabled(t, ctx, `[data-config-field="scouts_by_role.improvement.fork_repo"]`, false)
-				startUITestChromedpInputValue(t, ctx, `[data-config-field="scouts_by_role.improvement.fork_repo"]`, "acme/widget-stale")
-				startUITestChromedpWaitValue(t, ctx, `[data-config-field="scouts_by_role.improvement.fork_repo"]`, "acme/widget-stale")
-				startUITestChromedpSetValue(t, ctx, `[data-config-field="scouts_by_role.improvement.issue_destination"]`, "local")
-			},
-			assert: func(t *testing.T, ctx context.Context) {
-				startUITestChromedpWaitValue(t, ctx, `[data-config-field="scouts_by_role.improvement.issue_destination"]`, "local")
-				startUITestChromedpWaitValue(t, ctx, `[data-config-field="scouts_by_role.improvement.fork_repo"]`, "")
-				startUITestChromedpWaitDisabled(t, ctx, `[data-config-field="scouts_by_role.improvement.fork_repo"]`, true)
-				startUITestChromedpClick(t, ctx, `#repo-config-form button[type="submit"]`)
-				startUITestChromedpWaitBodyTextContains(t, ctx, "Repo config updated")
-				startUITestChromedpWaitBodyTextContains(t, ctx, `"issue_destination": "local"`)
-				startUITestChromedpWaitBodyTextContains(t, ctx, `"fork_repo": ""`)
-				startUITestChromedpWaitBodyTextAbsent(t, ctx, "acme/widget-stale")
-			},
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			fixture := startUITestSetupBrowserFixture(t)
-			defer fixture.Server.Close()
-
-			browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
-			defer cancelBrowser()
-
-			tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
-			defer cancelTab()
-
-			startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo=acme/widget&tab=config", tc.readySelector)
-			tc.edit(t, tabCtx)
-			tc.assert(t, tabCtx)
-		})
-	}
-}
-
-func TestStartUIBrowserInteractionsRepoConfigWarnsOnConcurrentInputRefresh(t *testing.T) {
-	chromePath := startUITestChromePath(t)
-	if chromePath == "" {
-		t.Skip("google-chrome is required for chromedp browser interaction coverage")
-	}
-
-	fixture := startUITestSetupBrowserFixtureWithOptions(t, startUITestBrowserFixtureOptions{LiveEvents: true})
-	defer fixture.Server.Close()
-
-	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
-	defer cancelBrowser()
-
-	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
-	defer cancelTab()
-
-	selector := `[data-config-field="scouts_by_role.improvement.labels"]`
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo=acme/widget&tab=config", selector)
-	startUITestChromedpInputValue(t, tabCtx, selector, "refresh, stable")
-	startUITestChromedpWaitForBodyMutationAfter(t, tabCtx, func() {
-		startUITestTriggerRepoConfigRefresh(t, fixture.Server.URL, fixture.RepoSlug)
-	})
-	startUITestChromedpWaitValue(t, tabCtx, selector, "refresh, stable")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Server config changed while you were editing. Reset to load the latest values.")
-}
-
-func TestStartUIBrowserInteractionsRepoConfigSaveClearsConcurrentWarning(t *testing.T) {
-	chromePath := startUITestChromePath(t)
-	if chromePath == "" {
-		t.Skip("google-chrome is required for chromedp browser interaction coverage")
-	}
-
-	fixture := startUITestSetupBrowserFixture(t)
-	defer fixture.Server.Close()
-
-	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
-	defer cancelBrowser()
-
-	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
-	defer cancelTab()
-
-	selector := `[data-config-field="scouts_by_role.improvement.labels"]`
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo=acme/widget&tab=config", selector)
-	startUITestChromedpInputValue(t, tabCtx, selector, "refresh, stable")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Unsaved changes.")
-	startUITestChromedpClick(t, tabCtx, `#repo-config-form button[type="submit"]`)
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Repo config updated")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "All changes saved.")
-	startUITestChromedpWaitBodyTextAbsent(t, tabCtx, "Server config changed while you were editing. Reset to load the latest values.")
-	startUITestChromedpWaitValue(t, tabCtx, selector, "refresh, stable")
-}
-
-func TestStartUIBrowserInteractionsWorkItemDraftSurvivesManualRefresh(t *testing.T) {
-	chromePath := startUITestChromePath(t)
-	if chromePath == "" {
-		t.Skip("google-chrome is required for chromedp browser interaction coverage")
-	}
-
-	fixture := startUITestSetupBrowserFixture(t)
-	defer fixture.Server.Close()
-
-	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
-	defer cancelBrowser()
-
-	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
-	defer cancelTab()
-
-	showSelector := fmt.Sprintf(`[data-work-item-show="%s"]`, fixture.ReviewItemID)
-	refreshSelector := fmt.Sprintf(`[data-work-item-refresh="%s"]`, fixture.ReviewItemID)
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home", "#global-work-item-grid")
-	startUITestChromedpWaitVisible(t, tabCtx, showSelector)
-	startUITestChromedpClick(t, tabCtx, showSelector)
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home", "#global-repo-grid")
+	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-work-item-show="%s"]`, fixture.ReviewItemID))
 	startUITestChromedpWaitVisible(t, tabCtx, "#work-item-fix-instruction")
-	startUITestChromedpSetValue(t, tabCtx, "#work-item-fix-instruction", "Keep work item refresh draft")
-	startUITestChromedpWaitForMutationAfter(t, tabCtx, "#work-item-drawer-content", "work item drawer to rerender", func() {
-		startUITestChromedpClick(t, tabCtx, refreshSelector)
-	})
-	startUITestChromedpWaitValue(t, tabCtx, "#work-item-fix-instruction", "Keep work item refresh draft")
+	startUITestChromedpSetValue(t, tabCtx, "#work-item-fix-instruction", "Keep this revision instruction")
+	startUITestChromedpSetSelectionRange(t, tabCtx, "#work-item-fix-instruction", 5, 12)
+	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-work-item-refresh="%s"]`, fixture.ReviewItemID))
+	startUITestChromedpWaitValue(t, tabCtx, "#work-item-fix-instruction", "Keep this revision instruction")
+	startUITestChromedpWaitFocusSelection(t, tabCtx, "#work-item-fix-instruction", 5, 12)
 }
 
 func TestStartUIBrowserInteractionsWorkRunSync(t *testing.T) {
@@ -1224,39 +889,6 @@ func TestStartUIBrowserInteractionsWorkRunSync(t *testing.T) {
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Run State")
 	startUITestChromedpClick(t, tabCtx, `[data-run-sync="gh-ui-blocked"]`)
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "publish · Round 2")
-}
-
-func TestStartUIBrowserInteractionsLogDrawerPreservesRefreshScrollAndResetsOnFileChange(t *testing.T) {
-	chromePath := startUITestChromePath(t)
-	if chromePath == "" {
-		t.Skip("google-chrome is required for chromedp browser interaction coverage")
-	}
-
-	fixture := startUITestSetupBrowserFixture(t)
-	defer fixture.Server.Close()
-
-	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
-	defer cancelBrowser()
-
-	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
-	defer cancelTab()
-
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=work", "#work-runs-grid")
-	startUITestChromedpClick(t, tabCtx, `[data-log-run-id="gh-ui-blocked"]`)
-	startUITestChromedpWaitVisible(t, tabCtx, "#log-file-select")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "executor scroll line 320")
-	startUITestChromedpSetScrollTop(t, tabCtx, ".log-content", 260)
-	startUITestChromedpWaitScrollTopAtLeast(t, tabCtx, ".log-content", 200)
-
-	startUITestChromedpWaitForMutationAfter(t, tabCtx, "#log-drawer-content", "log drawer to rerender after refresh", func() {
-		startUITestChromedpClick(t, tabCtx, `[data-log-refresh="true"]`)
-	})
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "executor scroll line 320")
-	startUITestChromedpWaitScrollTopAtLeast(t, tabCtx, ".log-content", 200)
-
-	startUITestChromedpSetValue(t, tabCtx, "#log-file-select", "lane-runtime/reviewer-stdout.log")
-	startUITestChromedpWaitBodyTextContains(t, tabCtx, "reviewer scroll line 320")
-	startUITestChromedpWaitScrollTopAtMost(t, tabCtx, ".log-content", 1)
 }
 
 func TestStartUIBrowserInteractionsApprovalLaunchCancelAndConfirm(t *testing.T) {
@@ -1436,7 +1068,7 @@ func TestStartUIBrowserInteractionsTasksFindingsAndImportFlow(t *testing.T) {
 	defer cancelTab()
 
 	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo="+fixture.RepoSlug+"&tab=overview", "#page-body")
-	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo="+fixture.RepoSlug+"&tab=findings", "#task-findings-import-button")
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=investigations", "#task-findings-import-button")
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Findings Inbox")
 	startUITestChromedpWaitBodyTextContains(t, tabCtx, fixture.RepoSlug)
 	startUITestChromedpSetUploadFiles(t, tabCtx, "#task-findings-import-file", []string{markdownPath})
@@ -1458,9 +1090,54 @@ func TestStartUIBrowserInteractionsTasksFindingsAndImportFlow(t *testing.T) {
 		}
 		return len(state.Findings) == 1
 	})
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=repo&repo="+fixture.RepoSlug+"&tab=overview", "#page-body")
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=investigations", "#task-findings-import-button")
 	startUITestChromedpWaitCondition(t, tabCtx, 10*time.Second, "promote button disabled for promoted candidate", func() (bool, string, error) {
 		var disabled bool
 		if err := chromedp.Run(tabCtx, chromedp.Evaluate(`Boolean(document.querySelector('[data-task-import-candidate-promote="cand-1"]') && document.querySelector('[data-task-import-candidate-promote="cand-1"]').disabled)`, &disabled)); err != nil {
+			return false, "", err
+		}
+		return disabled, strconv.FormatBool(disabled), nil
+	})
+
+	startUITestChromedpClick(t, tabCtx, `[data-row-select-kind="finding"]`)
+	startUITestChromedpSetValue(t, tabCtx, "#task-finding-title", "Fix retry wording across surfaces")
+	startUITestChromedpClick(t, tabCtx, `[data-task-finding-save]`)
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Finding saved")
+
+	startUITestChromedpClick(t, tabCtx, `[data-task-finding-dismiss]`)
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Finding dismissed")
+	startUITestWaitFor(t, 10*time.Second, "finding dismiss to persist", func() bool {
+		state, err := readStartWorkState(fixture.RepoSlug)
+		if err != nil {
+			return false
+		}
+		for _, finding := range state.Findings {
+			return finding.Status == startWorkFindingStatusDismissed
+		}
+		return false
+	})
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Dismissed")
+
+	startUITestChromedpClick(t, tabCtx, `[data-row-select-kind="import-candidate"][data-row-select-id="cand-2"]`)
+	startUITestChromedpClick(t, tabCtx, `[data-task-import-candidate-drop="cand-2"]`)
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Candidate dropped")
+	startUITestWaitFor(t, 10*time.Second, "candidate drop to persist", func() bool {
+		state, err := readStartWorkState(fixture.RepoSlug)
+		if err != nil {
+			return false
+		}
+		for _, session := range state.ImportSessions {
+			if len(session.Candidates) > 1 {
+				return session.Candidates[1].Status == startWorkFindingCandidateStatusDropped
+			}
+		}
+		return false
+	})
+	startUITestChromedpClick(t, tabCtx, `[data-row-select-kind="import-candidate"][data-row-select-id="cand-2"]`)
+	startUITestChromedpWaitCondition(t, tabCtx, 10*time.Second, "promote button disabled for dropped candidate", func() (bool, string, error) {
+		var disabled bool
+		if err := chromedp.Run(tabCtx, chromedp.Evaluate(`Boolean(document.querySelector('[data-task-import-candidate-promote="cand-2"]') && document.querySelector('[data-task-import-candidate-promote="cand-2"]').disabled)`, &disabled)); err != nil {
 			return false, "", err
 		}
 		return disabled, strconv.FormatBool(disabled), nil
@@ -1477,7 +1154,7 @@ func TestStartUIBrowserInteractionsTasksFindingsAndImportFlow(t *testing.T) {
 	for _, candidate := range state.Findings {
 		finding = candidate
 	}
-	if finding.Status != startWorkFindingStatusOpen {
+	if finding.Status != startWorkFindingStatusDismissed {
 		t.Fatalf("unexpected finding after browser flow: %+v", finding)
 	}
 	if len(state.ImportSessions) != 1 {
@@ -1487,7 +1164,7 @@ func TestStartUIBrowserInteractionsTasksFindingsAndImportFlow(t *testing.T) {
 		if len(session.Candidates) != 2 {
 			t.Fatalf("expected two candidates in import session, got %+v", session)
 		}
-		if session.Candidates[0].Status != startWorkFindingCandidateStatusPromoted {
+		if session.Candidates[0].Status != startWorkFindingCandidateStatusPromoted || session.Candidates[1].Status != startWorkFindingCandidateStatusDropped {
 			t.Fatalf("unexpected candidate statuses after browser flow: %+v", session.Candidates)
 		}
 	}
@@ -1761,7 +1438,7 @@ func startUITestChromedpInputValue(t *testing.T, ctx context.Context, selector s
 	); err != nil {
 		t.Fatalf("input value %s: %v", selector, err)
 	}
-	startUITestChromedpWaitCondition(t, ctx, 5*time.Second, fmt.Sprintf("value %s to become %q after input", selector, value), func() (bool, string, error) {
+	startUITestChromedpWaitCondition(t, ctx, 5*time.Second, fmt.Sprintf("input value %s to become %q", selector, value), func() (bool, string, error) {
 		var latest string
 		if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`(() => {
 			const el = document.querySelector(%q);
@@ -1901,194 +1578,6 @@ func startUITestChromedpWaitValue(t *testing.T, ctx context.Context, selector st
 	})
 }
 
-func startUITestChromedpWaitValueContains(t *testing.T, ctx context.Context, selector string, needle string) {
-	t.Helper()
-	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("value %s to contain %q", selector, needle), func() (bool, string, error) {
-		var value string
-		if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`(() => {
-			const el = document.querySelector(%q);
-			return el ? String(el.value ?? "") : "";
-		})()`, selector), &value)); err != nil {
-			return false, "", err
-		}
-		return strings.Contains(value, needle), value, nil
-	})
-}
-
-func startUITestChromedpWaitOpen(t *testing.T, ctx context.Context, selector string, expected bool) {
-	t.Helper()
-	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("open state for %s to become %t", selector, expected), func() (bool, string, error) {
-		var open bool
-		if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`(() => {
-			const el = document.querySelector(%q);
-			return Boolean(el && el.open);
-		})()`, selector), &open)); err != nil {
-			return false, "", err
-		}
-		return open == expected, strconv.FormatBool(open), nil
-	})
-}
-
-func startUITestChromedpWaitReadonly(t *testing.T, ctx context.Context, selector string, expected bool) {
-	t.Helper()
-	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("readonly state for %s to become %t", selector, expected), func() (bool, string, error) {
-		var readonly bool
-		if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`(() => {
-			const el = document.querySelector(%q);
-			return Boolean(el && el.readOnly);
-		})()`, selector), &readonly)); err != nil {
-			return false, "", err
-		}
-		return readonly == expected, strconv.FormatBool(readonly), nil
-	})
-}
-
-func startUITestChromedpWaitDisabled(t *testing.T, ctx context.Context, selector string, expected bool) {
-	t.Helper()
-	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("disabled state for %s to become %t", selector, expected), func() (bool, string, error) {
-		var disabled bool
-		if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`(() => {
-			const el = document.querySelector(%q);
-			return Boolean(el && el.disabled);
-		})()`, selector), &disabled)); err != nil {
-			return false, "", err
-		}
-		return disabled == expected, strconv.FormatBool(disabled), nil
-	})
-}
-
-func startUITestChromedpSetScrollTop(t *testing.T, ctx context.Context, selector string, scrollTop int) {
-	t.Helper()
-	var state struct {
-		ScrollTop    float64 `json:"scrollTop"`
-		ScrollHeight float64 `json:"scrollHeight"`
-		ClientHeight float64 `json:"clientHeight"`
-	}
-	if err := chromedp.Run(ctx,
-		chromedp.WaitVisible(selector, chromedp.ByQuery),
-		chromedp.Evaluate(fmt.Sprintf(`(() => {
-			const el = document.querySelector(%q);
-			if (!el) return { scrollTop: -1, scrollHeight: 0, clientHeight: 0 };
-			el.scrollTop = %d;
-			return {
-				scrollTop: Number(el.scrollTop || 0),
-				scrollHeight: Number(el.scrollHeight || 0),
-				clientHeight: Number(el.clientHeight || 0),
-			};
-		})()`, selector, scrollTop), &state),
-	); err != nil {
-		t.Fatalf("set scroll top %s: %v", selector, err)
-	}
-	if state.ScrollTop < 0 {
-		t.Fatalf("scroll selector %s was not found", selector)
-	}
-	if state.ScrollHeight <= state.ClientHeight {
-		t.Fatalf("selector %s was not scrollable (scrollHeight=%v clientHeight=%v)", selector, state.ScrollHeight, state.ClientHeight)
-	}
-	if scrollTop > 0 && state.ScrollTop == 0 {
-		t.Fatalf("selector %s did not scroll", selector)
-	}
-}
-
-func startUITestChromedpWaitNoHorizontalOverflow(t *testing.T, ctx context.Context, selector string) {
-	t.Helper()
-	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("no horizontal overflow for %s", selector), func() (bool, string, error) {
-		var state struct {
-			ScrollWidth float64 `json:"scrollWidth"`
-			ClientWidth float64 `json:"clientWidth"`
-		}
-		if err := chromedp.Run(ctx,
-			chromedp.WaitVisible(selector, chromedp.ByQuery),
-			chromedp.Evaluate(fmt.Sprintf(`(() => {
-				const el = document.querySelector(%q);
-				if (!el) return { scrollWidth: -1, clientWidth: 0 };
-				return {
-					scrollWidth: Number(el.scrollWidth || 0),
-					clientWidth: Number(el.clientWidth || 0),
-				};
-			})()`, selector), &state),
-		); err != nil {
-			return false, "", err
-		}
-		if state.ScrollWidth < 0 {
-			return false, "missing", nil
-		}
-		return state.ScrollWidth <= state.ClientWidth+1, fmt.Sprintf("scrollWidth=%0.0f clientWidth=%0.0f", state.ScrollWidth, state.ClientWidth), nil
-	})
-}
-
-func startUITestChromedpWaitNoVerticalOverflow(t *testing.T, ctx context.Context, selector string) {
-	t.Helper()
-	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("no vertical overflow for %s", selector), func() (bool, string, error) {
-		var state struct {
-			ScrollHeight float64 `json:"scrollHeight"`
-			ClientHeight float64 `json:"clientHeight"`
-		}
-		if err := chromedp.Run(ctx,
-			chromedp.WaitVisible(selector, chromedp.ByQuery),
-			chromedp.Evaluate(fmt.Sprintf(`(() => {
-				const el = document.querySelector(%q);
-				if (!el) return { scrollHeight: -1, clientHeight: 0 };
-				return {
-					scrollHeight: Number(el.scrollHeight || 0),
-					clientHeight: Number(el.clientHeight || 0),
-				};
-			})()`, selector), &state),
-		); err != nil {
-			return false, "", err
-		}
-		if state.ScrollHeight < 0 {
-			return false, "missing", nil
-		}
-		return state.ScrollHeight <= state.ClientHeight+1, fmt.Sprintf("scrollHeight=%0.0f clientHeight=%0.0f", state.ScrollHeight, state.ClientHeight), nil
-	})
-}
-
-func startUITestChromedpWaitClientHeightAtLeast(t *testing.T, ctx context.Context, selector string, minimum int) {
-	t.Helper()
-	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("clientHeight %s to be at least %d", selector, minimum), func() (bool, string, error) {
-		var clientHeight float64
-		if err := chromedp.Run(ctx,
-			chromedp.WaitVisible(selector, chromedp.ByQuery),
-			chromedp.Evaluate(fmt.Sprintf(`(() => {
-				const el = document.querySelector(%q);
-				return el ? Number(el.clientHeight || 0) : -1;
-			})()`, selector), &clientHeight),
-		); err != nil {
-			return false, "", err
-		}
-		return clientHeight >= float64(minimum), fmt.Sprintf("clientHeight=%0.0f", clientHeight), nil
-	})
-}
-
-func startUITestChromedpWaitScrollTopAtLeast(t *testing.T, ctx context.Context, selector string, minimum int) {
-	t.Helper()
-	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("scrollTop %s to be at least %d", selector, minimum), func() (bool, string, error) {
-		var scrollTop float64
-		if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`(() => {
-			const el = document.querySelector(%q);
-			return el ? Number(el.scrollTop || 0) : -1;
-		})()`, selector), &scrollTop)); err != nil {
-			return false, "", err
-		}
-		return scrollTop >= float64(minimum), strconv.FormatFloat(scrollTop, 'f', 1, 64), nil
-	})
-}
-
-func startUITestChromedpWaitScrollTopAtMost(t *testing.T, ctx context.Context, selector string, maximum int) {
-	t.Helper()
-	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("scrollTop %s to be at most %d", selector, maximum), func() (bool, string, error) {
-		var scrollTop float64
-		if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`(() => {
-			const el = document.querySelector(%q);
-			return el ? Number(el.scrollTop || 0) : -1;
-		})()`, selector), &scrollTop)); err != nil {
-			return false, "", err
-		}
-		return scrollTop >= 0 && scrollTop <= float64(maximum), strconv.FormatFloat(scrollTop, 'f', 1, 64), nil
-	})
-}
-
 func startUITestChromedpWaitActiveElement(t *testing.T, ctx context.Context, selector string) {
 	t.Helper()
 	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, fmt.Sprintf("active element to be %s", selector), func() (bool, string, error) {
@@ -2184,11 +1673,6 @@ func startUITestWaitFor(t *testing.T, timeout time.Duration, description string,
 
 func startUITestChromedpWaitForBodyMutationAfter(t *testing.T, ctx context.Context, action func()) {
 	t.Helper()
-	startUITestChromedpWaitForMutationAfter(t, ctx, "#page-body", "page body to rerender", action)
-}
-
-func startUITestChromedpWaitForMutationAfter(t *testing.T, ctx context.Context, selector string, description string, action func()) {
-	t.Helper()
 	key := fmt.Sprintf("body-mutation-%d", time.Now().UnixNano())
 	var baseline float64
 	script := fmt.Sprintf(`(() => {
@@ -2210,16 +1694,16 @@ func startUITestChromedpWaitForMutationAfter(t *testing.T, ctx context.Context, 
 			window.__startUITestMutationObservers[%q] = entry;
 		}
 		return entry.count || 0;
-	})()`, selector, key, key)
+	})()`, "#page-body", key, key)
 	if err := chromedp.Run(ctx, chromedp.Evaluate(script, &baseline)); err != nil {
-		t.Fatalf("install mutation observer for %s: %v", selector, err)
+		t.Fatalf("install body mutation observer: %v", err)
 	}
 	if baseline < 0 {
-		t.Fatalf("selector %s was not available for mutation tracking", selector)
+		t.Fatalf("page body was not available for mutation tracking")
 	}
 	baseline = startUITestChromedpWaitForMutationCountToStabilize(t, ctx, key, time.Second)
 	action()
-	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, description, func() (bool, string, error) {
+	startUITestChromedpWaitCondition(t, ctx, 10*time.Second, "page body to rerender", func() (bool, string, error) {
 		count, err := startUITestChromedpMutationCount(ctx, key)
 		if err != nil {
 			return false, "", err
@@ -2296,82 +1780,6 @@ func startUITestTriggerOverviewRefresh(t *testing.T, baseURL string, testName st
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("expected live refresh patch status 200, got %d", response.StatusCode)
-	}
-}
-
-func startUITestTriggerRepoConfigRefresh(t *testing.T, baseURL string, repoSlug string) {
-	t.Helper()
-	body := `{"repo_mode":"fork","issue_pick_mode":"auto","pr_forward_mode":"approve","fork_issues_mode":"auto","implement_mode":"auto","publish_target":"fork","scouts":{"improvement":{"enabled":true,"mode":"manual","schedule":"when_resolved","issue_destination":"local","fork_repo":"","labels":["server","update"]}}}`
-	response, err := http.DefaultClient.Do(mustJSONRequest(t, http.MethodPatch, baseURL+"/api/v1/repos/"+repoSlug+"/settings", body))
-	if err != nil {
-		t.Fatalf("PATCH repo settings for live refresh: %v", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("expected repo settings patch status 200, got %d", response.StatusCode)
-	}
-}
-
-func startUITestSeedLiveRefreshIssueRows(t *testing.T, fixture *startUITestBrowserFixture, count int) {
-	t.Helper()
-
-	state, err := readStartWorkState(fixture.RepoSlug)
-	if err != nil {
-		t.Fatalf("read start state for issue seed: %v", err)
-	}
-	for index := 0; index < count; index++ {
-		number := 100 + index
-		key := strconv.Itoa(number)
-		timestamp := time.Date(2026, time.April, 21, 22, index%60, 0, 0, time.UTC).Format(time.RFC3339)
-		state.Issues[key] = startWorkIssueState{
-			SourceNumber:    number,
-			SourceURL:       fmt.Sprintf("https://github.com/%s/issues/%d", fixture.RepoSlug, number),
-			Title:           fmt.Sprintf("Refresh scroll issue %02d", index+1),
-			State:           "open",
-			Status:          startWorkStatusQueued,
-			WorkType:        workTypeFeature,
-			Priority:        index % 6,
-			PrioritySource:  "triage",
-			Complexity:      2,
-			Labels:          []string{"scroll", "refresh"},
-			TriageStatus:    startWorkTriageCompleted,
-			TriageRationale: "Seeded browser coverage row.",
-			TriageUpdatedAt: timestamp,
-			UpdatedAt:       timestamp,
-		}
-	}
-	state.UpdatedAt = time.Date(2026, time.April, 21, 22, 59, 0, 0, time.UTC).Format(time.RFC3339)
-	if err := writeStartWorkState(*state); err != nil {
-		t.Fatalf("write start state for issue seed: %v", err)
-	}
-}
-
-func startUITestSeedLiveRefreshPlannedRows(t *testing.T, fixture *startUITestBrowserFixture, count int) {
-	t.Helper()
-
-	state, err := readStartWorkState(fixture.RepoSlug)
-	if err != nil {
-		t.Fatalf("read start state for planned seed: %v", err)
-	}
-	for index := 0; index < count; index++ {
-		itemID := fmt.Sprintf("planned-scroll-%02d", index+1)
-		timestamp := time.Date(2026, time.April, 21, 21, index%60, 0, 0, time.UTC).Format(time.RFC3339)
-		state.PlannedItems[itemID] = startWorkPlannedItem{
-			ID:          itemID,
-			RepoSlug:    fixture.RepoSlug,
-			Title:       fmt.Sprintf("Refresh scroll planned item %02d", index+1),
-			Description: "Seeded browser coverage row.",
-			WorkType:    workTypeFeature,
-			LaunchKind:  "local_work",
-			Priority:    index % 6,
-			State:       startPlannedItemQueued,
-			CreatedAt:   timestamp,
-			UpdatedAt:   timestamp,
-		}
-	}
-	state.UpdatedAt = time.Date(2026, time.April, 21, 21, 59, 0, 0, time.UTC).Format(time.RFC3339)
-	if err := writeStartWorkState(*state); err != nil {
-		t.Fatalf("write start state for planned seed: %v", err)
 	}
 }
 

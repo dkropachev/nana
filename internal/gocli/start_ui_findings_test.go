@@ -319,35 +319,30 @@ func TestStartUIAppPreservesDraftsForRefreshableForms(t *testing.T) {
 		"function captureDraftField(field)",
 		"function restoreDraftScope(scope, root = document)",
 		"function clearDraftScope(scope)",
+		"function clearDraftField(field)",
+		"function focusScopeForField(field)",
 		"function captureDraftFocusSnapshot(root = document)",
 		"function restoreDraftFocusSnapshot(snapshot, root = document)",
+		"function renderWithPreservedDraftFocus(renderFn, root = document)",
 		"function renderAppPreservingDraftFocus()",
 		"function usageFiltersDraftScope()",
 		"function issuesDetailDraftScope(issue)",
 		"function repoControlsIssueDraftScope()",
 		"function repoControlsPlannedDraftScope()",
-		"function repoConfigDraftScope(repo)",
-		"function repoConfigEditableFields(repo)",
-		"function pruneRepoConfigTransientDraftFields(repo)",
-		"function syncConfigEditorTransientDrafts(repo)",
-		"function repoConfigCompatibilityScouts(config)",
-		"function repoOnboardingDraftScope()",
 		"function repoSchedulerSearchDraftScope(repo)",
 		"function repoSchedulerDetailDraftScope(repo, item)",
 		"function taskFindingDraftScope(repo, finding)",
 		"function findingImportCandidateDraftScope(repo, session, candidate)",
-		"function replaceHostContentPreservingState(host, html, options = {})",
-		"function captureElementFocusSnapshot(root = document)",
-		"function restoreElementFocusSnapshot(snapshot, root = document)",
 		`<form id="usage-filters-form" class="usage-filter-form" data-draft-scope="${escapeHTML(draftScope)}">`,
-		`<form id="repo-onboard-form" class="config-form" data-draft-scope="${escapeHTML(draftScope)}">`,
-		`<form id="repo-config-form" class="config-form" data-draft-scope="${escapeHTML(draftScope)}">`,
+		`<form id="repo-onboard-form" class="config-form" data-focus-scope="${escapeHTML(repoOnboardingFocusScope())}">`,
+		`<form id="repo-config-form" class="config-form" data-focus-scope="${escapeHTML(draftScope)}" data-draft-scope="${escapeHTML(draftScope)}">`,
+		`<div class="surface" data-focus-scope="${escapeHTML(workItemFixInstructionFocusScope(item))}">`,
 		`state.issueForm.el.setAttribute("data-draft-scope", draftScope);`,
 		`state.plannedForm.el.setAttribute("data-draft-scope", draftScope);`,
+		`restoreDraftScope(draftScope, document.getElementById("repo-config-form"));`,
 		"captureDraftField(event.target);",
 		"clearDraftScope(usageFiltersDraftScope());",
 		"clearDraftScope(repoSchedulerSearchDraftScope(repo));",
-		"ensureConfigEditor(state.overview.repos[index]);",
 	} {
 		if !strings.Contains(content, needle) {
 			t.Fatalf("expected app asset to contain %q", needle)
@@ -355,20 +350,67 @@ func TestStartUIAppPreservesDraftsForRefreshableForms(t *testing.T) {
 	}
 }
 
-func TestStartUIAppIgnoresReadOnlyRepoConfigFieldsDuringDraftComparison(t *testing.T) {
+func TestStartUIAppSyncsRerenderSensitiveDraftsOnInput(t *testing.T) {
 	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
 	if err != nil {
 		t.Fatalf("read app asset: %v", err)
 	}
 	content := string(appBody)
+
 	for _, needle := range []string{
-		"function repoConfigComparableValue(value)",
-		`if (key === "policy_path" || key === "scout_catalog" || key === "scouts") return;`,
-		"return JSON.stringify(repoConfigComparableValue(config || {}));",
+		`if (configField && typeof event.target.matches === "function" && event.target.matches("input[data-config-field], textarea[data-config-field]")) {`,
+		`updateConfigDraft(configField, String(event.target.value || ""));`,
+		"clearDraftField(event.target);",
+		`document.body.addEventListener("change", (event) => {
+      if (event.target.id === "work-item-fix-instruction") {`,
+		`document.body.addEventListener("input", (event) => {
+      if (event.target.id !== "work-item-fix-instruction") return;`,
 	} {
 		if !strings.Contains(content, needle) {
 			t.Fatalf("expected app asset to contain %q", needle)
 		}
+	}
+}
+
+func TestStartUIAppAvoidsRedundantManualRefreshesAndPreservesWorkItemDrafts(t *testing.T) {
+	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
+	if err != nil {
+		t.Fatalf("read app asset: %v", err)
+	}
+	content := string(appBody)
+
+	refreshStart := strings.Index(content, `document.getElementById("refresh-button").addEventListener("click", () => {`)
+	if refreshStart == -1 {
+		t.Fatalf("refresh button handler missing from app asset")
+	}
+	refreshEnd := strings.Index(content[refreshStart:], `document.getElementById("repo-picker-host").addEventListener("change", (event) => {`)
+	if refreshEnd == -1 {
+		t.Fatalf("repo picker handler missing after refresh button handler")
+	}
+	refreshBlock := content[refreshStart : refreshStart+refreshEnd]
+	if strings.Contains(refreshBlock, `refreshCurrentView({ silent: true })`) {
+		t.Fatalf("refresh button should rely on load() for current-view refreshes, got block=%s", refreshBlock)
+	}
+
+	workItemStart := strings.Index(content, `function loadWorkItemDetail(itemID, options = {}) {`)
+	if workItemStart == -1 {
+		t.Fatalf("loadWorkItemDetail options signature missing from app asset")
+	}
+	workItemEnd := strings.Index(content[workItemStart:], `function refreshOpenWorkItemDrawerIfNeeded() {`)
+	if workItemEnd == -1 {
+		t.Fatalf("refreshOpenWorkItemDrawerIfNeeded missing after loadWorkItemDetail")
+	}
+	workItemBlock := content[workItemStart : workItemStart+workItemEnd]
+	for _, needle := range []string{
+		`if (options.resetFixInstruction) {`,
+		`loadWorkItemDetail(itemID, { resetFixInstruction: true });`,
+	} {
+		if !strings.Contains(content, needle) {
+			t.Fatalf("expected app asset to contain %q", needle)
+		}
+	}
+	if strings.Contains(workItemBlock, "state.workItemSelection.fixInstruction = \"\";\n      renderWorkItemDrawer();") {
+		t.Fatalf("work item detail refresh should not clear revision instructions unconditionally, got block=%s", workItemBlock)
 	}
 }
 

@@ -1184,11 +1184,31 @@ func TestBinaryIssueSyncRunsNativelyWithoutLegacyBridge(t *testing.T) {
 	sandboxPath := filepath.Join(managedRepoRoot, "sandboxes", "issue-42")
 	repoCheckoutPath := filepath.Join(sandboxPath, "repo")
 	runID := "gh-run-issue-sync-bin"
+	commandLogPath := filepath.Join(cwd, "codex-commands.log")
+	failOncePath := filepath.Join(cwd, "codex-fail-once")
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
 		t.Fatalf("mkdir fake bin: %v", err)
 	}
 	writeExecutable(t, filepath.Join(fakeBin, "node"), "#!/bin/sh\nprintf 'fake-node:%s\\n' \"$*\"\n")
-	writeExecutable(t, filepath.Join(fakeBin, "codex"), "#!/bin/sh\nprintf 'fake-codex:%s\\n' \"$*\"\n")
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`printf '%s\n' "$*" >> "${FAKE_CODEX_LOG_PATH}"`,
+		`mkdir -p "$CODEX_HOME/sessions/2026/04/23"`,
+		`printf '{"type":"session_meta","payload":{"id":"session-gh-sync","timestamp":"2099-01-01T00:00:00Z","cwd":"%s"}}\n' "$PWD" > "$CODEX_HOME/sessions/2026/04/23/rollout-session-gh-sync.jsonl"`,
+		`printf 'fake-codex:%s\n' "$*"`,
+		`if printf '%s' "$*" | grep -q "exec resume session-gh-sync"; then`,
+		`  exit 0`,
+		`fi`,
+		`if [ ! -f "${FAKE_CODEX_FAIL_ONCE_PATH}" ]; then`,
+		`  : > "${FAKE_CODEX_FAIL_ONCE_PATH}"`,
+		`  printf 'interrupted before feedback sync resume\n' >&2`,
+		`  exit 1`,
+		`fi`,
+		`printf 'unexpected fresh codex args: %s\n' "$*" >&2`,
+		`exit 1`,
+		"",
+	}, "\n"))
 	if err := os.MkdirAll(filepath.Join(managedRepoRoot, "runs", runID), 0o755); err != nil {
 		t.Fatalf("mkdir run dir: %v", err)
 	}
@@ -1222,23 +1242,50 @@ func TestBinaryIssueSyncRunsNativelyWithoutLegacyBridge(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cmd := runCommand(t, binaryPath, "issue", "sync", "https://github.com/acme/widget/issues/42", "--resume-last")
-	cmd.Dir = cwd
-	cmd.Env = appendNanaServiceBypassEnv(append(os.Environ(),
+	baseEnv := appendNanaServiceBypassEnv(append(os.Environ(),
 		"PATH="+fakeBin+":"+os.Getenv("PATH"),
 		"HOME="+filepath.Join(cwd, "home"),
 		"GH_TOKEN=test-token",
 		"GITHUB_API_URL="+server.URL,
+		"FAKE_CODEX_LOG_PATH="+commandLogPath,
+		"FAKE_CODEX_FAIL_ONCE_PATH="+failOncePath,
 	))
+	cmd := runCommand(t, binaryPath, "issue", "sync", "https://github.com/acme/widget/issues/42")
+	cmd.Dir = cwd
+	cmd.Env = baseEnv
 	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected initial issue sync to fail and leave resume state, got output %q", output)
+	}
+	if !strings.Contains(string(output), "interrupted before feedback sync resume") {
+		t.Fatalf("expected resumable sync failure, got %q", output)
+	}
+	if strings.Contains(string(output), "fake-node:") {
+		t.Fatalf("issue sync should not bridge through node, got %q", output)
+	}
+
+	cmd = runCommand(t, binaryPath, "issue", "sync", "https://github.com/acme/widget/issues/42", "--resume-last")
+	cmd.Dir = cwd
+	cmd.Env = baseEnv
+	output, err = cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("binary issue sync failed: %v\n%s", err, output)
 	}
 	if strings.Contains(string(output), "fake-node:") {
 		t.Fatalf("issue sync should not bridge through node, got %q", output)
 	}
-	if !strings.Contains(string(output), "Stored new feedback for run "+runID) || !strings.Contains(string(output), "fake-codex:exec -C "+repoCheckoutPath) {
+	commandLog, err := os.ReadFile(commandLogPath)
+	if err != nil {
+		t.Fatalf("read codex command log: %v", err)
+	}
+	if !strings.Contains(string(commandLog), "exec -C "+repoCheckoutPath) || !strings.Contains(string(commandLog), "exec resume session-gh-sync") {
+		t.Fatalf("expected fresh and resumed native codex runs, got %q", string(commandLog))
+	}
+	if !strings.Contains(string(output), "Stored new feedback for run "+runID) || !strings.Contains(string(output), "fake-codex:exec resume session-gh-sync") {
 		t.Fatalf("missing native issue sync output: %q", output)
+	}
+	if _, err := os.Stat(filepath.Join(managedRepoRoot, "runs", runID, "feedback-resume.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected feedback resume artifact to be cleared after successful resume, got err=%v", err)
 	}
 }
 

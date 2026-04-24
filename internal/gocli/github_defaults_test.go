@@ -719,13 +719,33 @@ func TestGithubIssueSyncExecutesNativelyFromTargetURL(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("GH_TOKEN", "test-token")
 	fakeBin := filepath.Join(home, "bin")
+	commandLogPath := filepath.Join(home, "codex-commands.log")
+	failOncePath := filepath.Join(home, "codex-fail-once")
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
 		t.Fatalf("mkdir fake bin: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(fakeBin, "codex"), []byte("#!/bin/sh\nprintf 'fake-codex:%s\\n' \"$*\"\n"), 0o755); err != nil {
-		t.Fatalf("write fake codex: %v", err)
-	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`printf '%s\n' "$*" >> "${FAKE_CODEX_LOG_PATH}"`,
+		`mkdir -p "$CODEX_HOME/sessions/2026/04/23"`,
+		`printf '{"type":"session_meta","payload":{"id":"session-gh-sync","timestamp":"2099-01-01T00:00:00Z","cwd":"%s"}}\n' "$PWD" > "$CODEX_HOME/sessions/2026/04/23/rollout-session-gh-sync.jsonl"`,
+		`printf 'fake-codex:%s\n' "$*"`,
+		`if printf '%s' "$*" | grep -q "exec resume session-gh-sync"; then`,
+		`  exit 0`,
+		`fi`,
+		`if [ ! -f "${FAKE_CODEX_FAIL_ONCE_PATH}" ]; then`,
+		`  : > "${FAKE_CODEX_FAIL_ONCE_PATH}"`,
+		`  printf 'interrupted before feedback sync resume\n' >&2`,
+		`  exit 1`,
+		`fi`,
+		`printf 'unexpected fresh codex args: %s\n' "$*" >&2`,
+		`exit 1`,
+		"",
+	}, "\n"))
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_LOG_PATH", commandLogPath)
+	t.Setenv("FAKE_CODEX_FAIL_ONCE_PATH", failOncePath)
 
 	runDir := filepath.Join(home, ".nana", "work", "repos", "acme", "widget", "runs", "gh-run-2")
 	repoCheckoutPath := filepath.Join(home, ".nana", "work", "repos", "acme", "widget", "sandboxes", "issue-42", "repo")
@@ -766,17 +786,34 @@ func TestGithubIssueSyncExecutesNativelyFromTargetURL(t *testing.T) {
 	t.Setenv("GITHUB_API_URL", server.URL)
 
 	output, err := captureStdout(t, func() error {
+		_, err := GithubIssue(".", []string{"sync", "https://github.com/acme/widget/issues/42"})
+		return err
+	})
+	if err == nil {
+		t.Fatalf("expected initial sync failure to leave a resumable feedback artifact, got output %q", output)
+	}
+	if !strings.Contains(output, "interrupted before feedback sync resume") {
+		t.Fatalf("expected resumable sync failure, got %q", output)
+	}
+	output, err = captureStdout(t, func() error {
 		_, err := GithubIssue(".", []string{"sync", "https://github.com/acme/widget/issues/42", "--resume-last"})
 		return err
 	})
 	if err != nil {
-		t.Fatalf("GithubIssue(sync): %v", err)
+		t.Fatalf("GithubIssue(sync): %v\n%s", err, output)
 	}
-	if !strings.Contains(output, "Stored new feedback for run gh-run-2") {
-		t.Fatalf("unexpected sync output: %q", output)
+	if !strings.Contains(output, "Stored new feedback for run gh-run-2") || !strings.Contains(output, "fake-codex:exec resume session-gh-sync") {
+		t.Fatalf("unexpected resumed sync output: %q", output)
 	}
-	if !strings.Contains(output, "fake-codex:exec -C "+repoCheckoutPath) {
-		t.Fatalf("expected fake codex execution output, got %q", output)
+	commandLog, err := os.ReadFile(commandLogPath)
+	if err != nil {
+		t.Fatalf("read codex command log: %v", err)
+	}
+	if !strings.Contains(string(commandLog), "exec -C "+repoCheckoutPath) || !strings.Contains(string(commandLog), "exec resume session-gh-sync") {
+		t.Fatalf("expected fresh and resumed codex commands, got %q", string(commandLog))
+	}
+	if _, err := os.Stat(filepath.Join(runDir, "feedback-resume.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected feedback resume artifact to be removed after successful resume, got err=%v", err)
 	}
 }
 
