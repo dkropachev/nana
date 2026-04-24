@@ -3186,6 +3186,140 @@ func TestStartUIAPIDropGithubWorkRunClearsPointers(t *testing.T) {
 	}
 }
 
+func TestStartUIAPIRerunLocalWorkRunStartsFreshDetachedRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	repo := createLocalWorkRepoAt(t, filepath.Join(home, "repo"))
+	repoID := localWorkRepoID(repo)
+	runID := "lw-ui-rerun-source"
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	inputPath := filepath.Join(runDir, "input-plan.md")
+	if err := os.WriteFile(inputPath, []byte("rerun local work from UI\n"), 0o644); err != nil {
+		t.Fatalf("write input plan: %v", err)
+	}
+
+	manifest := localWorkManifest{
+		Version:               5,
+		RunID:                 runID,
+		CreatedAt:             "2026-04-23T00:00:00Z",
+		UpdatedAt:             "2026-04-23T00:05:00Z",
+		Status:                "failed",
+		CurrentPhase:          "max-iterations",
+		CurrentSubphase:       "iteration-complete",
+		CurrentIteration:      8,
+		RepoRoot:              repo,
+		RepoName:              filepath.Base(repo),
+		RepoID:                repoID,
+		SourceBranch:          "main",
+		BaselineSHA:           strings.TrimSpace(runLocalWorkTestGitOutput(t, repo, "rev-parse", "HEAD")),
+		SandboxPath:           filepath.Join(localWorkSandboxesDir(), repoID, runID),
+		SandboxRepoPath:       filepath.Join(localWorkSandboxesDir(), repoID, runID, "repo"),
+		InputPath:             inputPath,
+		InputMode:             "task",
+		WorkType:              "feature",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+		LastError:             "work run lw-ui-rerun-source reached max iterations (8)",
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	originalDetachedRunner := localWorkStartDetachedRunner
+	detachedCalls := 0
+	detachedRunID := ""
+	localWorkStartDetachedRunner = func(repoRoot string, nextRunID string, codexArgs []string, logPath string) error {
+		detachedCalls++
+		detachedRunID = nextRunID
+		if repoRoot != repo {
+			t.Fatalf("unexpected rerun repo root: %s", repoRoot)
+		}
+		if strings.TrimSpace(nextRunID) == "" || nextRunID == runID {
+			t.Fatalf("expected fresh rerun id, got %q", nextRunID)
+		}
+		if len(codexArgs) != 0 {
+			t.Fatalf("unexpected rerun codex args: %#v", codexArgs)
+		}
+		if !strings.HasSuffix(logPath, filepath.Join("runs", nextRunID, "runtime.log")) {
+			t.Fatalf("unexpected rerun log path: %s", logPath)
+		}
+		return nil
+	}
+	defer func() {
+		localWorkStartDetachedRunner = originalDetachedRunner
+	}()
+
+	server := httptest.NewServer((&startUIAPI{cwd: cwd, allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
+	defer server.Close()
+
+	detailResponse, err := http.Get(server.URL + "/api/v1/work/runs/" + runID)
+	if err != nil {
+		t.Fatalf("GET work run detail before rerun: %v", err)
+	}
+	defer detailResponse.Body.Close()
+	var before startUIWorkRunDetail
+	if err := json.NewDecoder(detailResponse.Body).Decode(&before); err != nil {
+		t.Fatalf("decode work run detail before rerun: %v", err)
+	}
+	if !before.RerunAllowed || !before.Summary.RerunAllowed {
+		t.Fatalf("expected failed run to allow rerun, got %+v", before)
+	}
+
+	rerunRequest, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/work/runs/"+runID+"/rerun", nil)
+	if err != nil {
+		t.Fatalf("new rerun request: %v", err)
+	}
+	rerunResponse, err := http.DefaultClient.Do(rerunRequest)
+	if err != nil {
+		t.Fatalf("POST work run rerun: %v", err)
+	}
+	defer rerunResponse.Body.Close()
+	if rerunResponse.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected work run rerun status: %d", rerunResponse.StatusCode)
+	}
+	var rerunPayload struct {
+		RunID  string               `json:"run_id"`
+		Detail startUIWorkRunDetail `json:"detail"`
+	}
+	if err := json.NewDecoder(rerunResponse.Body).Decode(&rerunPayload); err != nil {
+		t.Fatalf("decode rerun payload: %v", err)
+	}
+	if rerunPayload.RunID == "" || rerunPayload.RunID == runID {
+		t.Fatalf("expected fresh rerun id, got %+v", rerunPayload)
+	}
+	if rerunPayload.RunID != detachedRunID {
+		t.Fatalf("expected rerun payload to return detached run id %q, got %+v", detachedRunID, rerunPayload)
+	}
+	if rerunPayload.Detail.Summary.RunID != rerunPayload.RunID || rerunPayload.Detail.Summary.Status != "running" {
+		t.Fatalf("expected rerun payload detail for fresh running run, got %+v", rerunPayload.Detail)
+	}
+	if rerunPayload.Detail.RerunAllowed || rerunPayload.Detail.Summary.RerunAllowed {
+		t.Fatalf("expected fresh running rerun to disable rerun affordance, got %+v", rerunPayload.Detail)
+	}
+	if detachedCalls != 1 {
+		t.Fatalf("expected one detached rerun launch, got %d", detachedCalls)
+	}
+
+	updated := mustLocalWorkManifestByRunID(t, rerunPayload.RunID)
+	if updated.Status != "running" || updated.CurrentPhase != "bootstrap" {
+		t.Fatalf("expected fresh running manifest, got %+v", updated)
+	}
+	content, err := os.ReadFile(updated.InputPath)
+	if err != nil {
+		t.Fatalf("read rerun input plan: %v", err)
+	}
+	if strings.TrimSpace(string(content)) != "rerun local work from UI" {
+		t.Fatalf("unexpected rerun input plan: %q", string(content))
+	}
+}
+
 func TestStartUIAPIAssistantWorkspaceRoutes(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -3821,6 +3955,39 @@ func TestStartUIAppTaskDetailSupportsReferenceAndDeepLinks(t *testing.T) {
 	} {
 		if !strings.Contains(content, needle) {
 			t.Fatalf("expected app asset to contain %q", needle)
+		}
+	}
+}
+
+func TestStartUIAppTaskDetailSupportsWorkRunActionMenu(t *testing.T) {
+	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
+	if err != nil {
+		t.Fatalf("read app asset: %v", err)
+	}
+	appContent := string(appBody)
+	for _, needle := range []string{
+		`function renderTaskDetailActionMenu(detail, summary) {`,
+		`data-run-rerun="${escapeHTML(runID)}"`,
+		`data-run-drop="${escapeHTML(runID)}"`,
+		`/api/v1/work/runs/${encodeURIComponent(runID)}/rerun`,
+	} {
+		if !strings.Contains(appContent, needle) {
+			t.Fatalf("expected app asset to contain %q", needle)
+		}
+	}
+
+	cssBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.css")
+	if err != nil {
+		t.Fatalf("read app stylesheet: %v", err)
+	}
+	cssContent := string(cssBody)
+	for _, needle := range []string{
+		`.drawer-action-menu {`,
+		`.drawer-action-menu-summary {`,
+		`.drawer-action-menu-body {`,
+	} {
+		if !strings.Contains(cssContent, needle) {
+			t.Fatalf("expected app stylesheet to contain %q", needle)
 		}
 	}
 }

@@ -318,6 +318,7 @@ type startUIWorkRun struct {
 	PauseReason      string `json:"pause_reason,omitempty"`
 	PauseUntil       string `json:"pause_until,omitempty"`
 	StopAllowed      bool   `json:"stop_allowed,omitempty"`
+	RerunAllowed     bool   `json:"rerun_allowed,omitempty"`
 	ResolveAllowed   bool   `json:"resolve_allowed,omitempty"`
 	Pending          bool   `json:"pending"`
 	AttentionState   string `json:"attention_state,omitempty"`
@@ -849,6 +850,7 @@ type startUIWorkRunDetail struct {
 	HumanGateReason   string                    `json:"human_gate_reason,omitempty"`
 	SyncAllowed       bool                      `json:"sync_allowed,omitempty"`
 	StopAllowed       bool                      `json:"stop_allowed,omitempty"`
+	RerunAllowed      bool                      `json:"rerun_allowed,omitempty"`
 	ResolveAllowed    bool                      `json:"resolve_allowed,omitempty"`
 	ExternalURL       string                    `json:"external_url,omitempty"`
 }
@@ -883,6 +885,10 @@ var startUIResolveWorkRun = func(runID string) error {
 
 var startUIStopWorkRun = func(runID string) error {
 	return stopLocalWork("", localWorkStopOptions{RunSelection: localWorkRunSelection{RunID: runID}})
+}
+
+var startUIRerunWorkRun = func(runID string) (string, error) {
+	return rerunLocalWork("", localWorkRunSelection{RunID: runID})
 }
 
 var startUIDropWorkRun = func(runID string) error {
@@ -1875,6 +1881,31 @@ func (h *startUIAPI) handleWorkRun(w http.ResponseWriter, r *http.Request) {
 		}
 		h.invalidateOverviewCache()
 		writeJSONResponse(w, map[string]any{"run_id": runID, "dropped": true})
+		return
+	}
+	if r.Method == http.MethodPost && tail == "rerun" {
+		detail, err := loadStartUIWorkRunDetail(runID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if detail.Backend != "local" || !detail.RerunAllowed {
+			http.Error(w, "rerun is only available for local work runs with replayable input", http.StatusBadRequest)
+			return
+		}
+		nextRunID, err := startUIRerunWorkRun(runID)
+		if err != nil {
+			h.invalidateOverviewCache()
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		h.invalidateOverviewCache()
+		updated, err := loadStartUIWorkRunDetail(nextRunID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSONResponse(w, map[string]any{"run_id": nextRunID, "detail": updated})
 		return
 	}
 	if r.Method == http.MethodPost && tail == "sync" {
@@ -5028,6 +5059,7 @@ func startUIWorkRunFromIndex(entry workRunIndexEntry, sourcePathIndex map[string
 			PublicationState: manifest.PublicationState,
 			PauseReason:      manifest.PauseReason,
 			PauseUntil:       manifest.PauseUntil,
+			RerunAllowed:     false,
 			Pending:          startUIWorkRunPending(status, blocked, phase),
 			AttentionState:   startUIWorkRunAttentionState(status, defaultString(manifest.LastError, defaultString(manifest.PublicationError, manifest.NeedsHumanReason)), blocked),
 		}, nil
@@ -5062,6 +5094,7 @@ func startUIWorkRunFromLocalManifest(entry workRunIndexEntry, manifest localWork
 		PauseReason:      manifest.PauseReason,
 		PauseUntil:       manifest.PauseUntil,
 		StopAllowed:      localWorkStopAllowed(manifest),
+		RerunAllowed:     localWorkRerunAllowed(manifest),
 		ResolveAllowed:   localWorkResolveAllowed(manifest),
 		Pending:          startUIWorkRunPending(status, blocked, manifest.CurrentPhase),
 		AttentionState:   attention,
@@ -5169,6 +5202,7 @@ func loadStartUIWorkRunDetail(runID string) (startUIWorkRunDetail, error) {
 			HasTokenUsage:     hasTokenUsage,
 			NextAction:        nextAction,
 			StopAllowed:       localWorkStopAllowed(manifest),
+			RerunAllowed:      localWorkRerunAllowed(manifest),
 			ResolveAllowed:    localWorkResolveAllowed(manifest),
 			ExternalURL:       summary.TargetURL,
 		}, nil
@@ -5201,6 +5235,7 @@ func loadStartUIWorkRunDetail(runID string) (startUIWorkRunDetail, error) {
 			NextAction:        defaultString(strings.TrimSpace(manifest.NextAction), "inspect GitHub feedback and publication state"),
 			HumanGateReason:   defaultString(strings.TrimSpace(manifest.NeedsHumanReason), defaultString(strings.TrimSpace(manifest.PublicationError), strings.TrimSpace(manifest.PublicationDetail))),
 			SyncAllowed:       true,
+			RerunAllowed:      false,
 			ExternalURL:       githubWorkRunExternalURL(manifest),
 		}, nil
 	default:

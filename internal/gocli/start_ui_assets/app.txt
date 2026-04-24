@@ -3292,6 +3292,7 @@
         updated_at: formatDateTime(run.updated_at),
         can_sync: run.backend === "github",
         can_stop: Boolean(run.stop_allowed),
+        can_rerun: Boolean(run.rerun_allowed),
         can_resolve: Boolean(run.resolve_allowed),
       };
       if (row.pause_until) {
@@ -3349,6 +3350,17 @@
             return '<span class="data-value-text">N/A</span>';
           }
           return `<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-run-resolve="${escapeHTML(row.run_id)}">Resolve</button>`;
+        },
+      },
+      {
+        field: "run_id",
+        label: "Re-run",
+        action: true,
+        render(row) {
+          if (!row.can_rerun) {
+            return '<span class="data-value-text">N/A</span>';
+          }
+          return `<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-run-rerun="${escapeHTML(row.run_id)}">Re-run</button>`;
         },
       },
       {
@@ -5062,6 +5074,28 @@
     loadInvestigationDetail(taskID, { silent: true });
   }
 
+  function renderTaskDetailActionMenu(detail, summary) {
+    if (!detail || !summary || summary.kind !== "work_run" || !detail.work_run || !detail.work_run.summary) {
+      return "";
+    }
+    const runID = defaultString(detail.work_run.summary.run_id, "");
+    if (!runID) return "";
+    const actions = [];
+    if (detail.work_run.rerun_allowed) {
+      actions.push(`<button class="tx-btn tx-btn-secondary" type="button" data-run-rerun="${escapeHTML(runID)}">Re-run</button>`);
+    }
+    actions.push(`<button class="tx-btn tx-btn-secondary" type="button" data-run-drop="${escapeHTML(runID)}">Drop Run</button>`);
+    if (!actions.length) return "";
+    return `
+      <details class="drawer-action-menu">
+        <summary class="tx-btn tx-btn-secondary drawer-action-menu-summary">Actions</summary>
+        <div class="drawer-action-menu-body">
+          ${actions.join("")}
+        </div>
+      </details>
+    `;
+  }
+
   function renderTaskDetailModal() {
     const host = document.getElementById("task-detail-modal-content");
     if (!host) return;
@@ -5090,6 +5124,7 @@
       ? `${formatTokenCompact(tokenUsage.total)}${tokenUsage.sessions > 0 ? ` · ${tokenUsage.sessions} session${tokenUsage.sessions === 1 ? "" : "s"}` : ""}`
       : "Not available";
     const actionButtons = [];
+    const actionMenuMarkup = renderTaskDetailActionMenu(detail, summary);
     if (detail.related_run && detail.related_run.summary && detail.related_run.summary.run_id) {
       actionButtons.push(`<button class="tx-btn tx-btn-secondary" type="button" data-task-open-job="${escapeHTML(detail.related_run.summary.run_id)}">Open Job</button>`);
     }
@@ -5146,7 +5181,7 @@
           </div>
         </div>
       </div>
-      ${actionButtons.length ? `<div class="drawer-toolbar">${actionButtons.join("")}</div>` : ""}
+      ${actionButtons.length || actionMenuMarkup ? `<div class="drawer-toolbar">${actionButtons.join("")}${actionMenuMarkup}</div>` : ""}
       <div class="surface">
         <div class="surface-head">
           <div>
@@ -5644,30 +5679,64 @@
     return '<span class="data-value-text">No action</span>';
   }
 
+  function rerunWorkRunFromUI(runID) {
+    requestConfirmation({
+      title: "Re-run work?",
+      message: `Start a fresh local work run from ${runID} using its stored task input and runtime settings.`,
+      confirmLabel: "Re-run",
+      onConfirm() {
+        api(`/api/v1/work/runs/${encodeURIComponent(runID)}/rerun`, {
+          method: "POST",
+        }).then((payload) => {
+          const nextRunID = defaultString(payload.run_id, defaultString(payload.detail && payload.detail.summary && payload.detail.summary.run_id, ""));
+          if (state.taskDetailModal && state.taskDetailModal.isOpen()) {
+            state.taskDetailModal.close();
+          }
+          load();
+          loadApprovals({ silent: true });
+          loadInvestigations({ silent: true });
+          if (nextRunID) {
+            openLogDrawer(nextRunID);
+          }
+          toast("success", "Run re-started", defaultString(nextRunID, runID));
+        }).catch((error) => {
+          toast("danger", "Run re-start failed", error.message);
+        });
+      },
+    });
+  }
+
+  function dropWorkRunFromUI(runID) {
+    requestConfirmation({
+      title: "Drop run?",
+      message: `Remove run ${runID} from the active workspace queue.`,
+      confirmLabel: "Drop Run",
+      tone: "danger",
+      onConfirm() {
+        api(`/api/v1/work/runs/${encodeURIComponent(runID)}/drop`, {
+          method: "POST",
+        }).then(() => {
+          if (state.logSelection.runID === runID && state.logDrawer) {
+            state.logDrawer.close();
+          }
+          if (state.taskDetailModal && state.taskDetailModal.isOpen()) {
+            state.taskDetailModal.close();
+          }
+          load();
+          loadApprovals({ silent: true });
+          toast("success", "Run dropped", runID);
+        }).catch((error) => {
+          toast("danger", "Run drop failed", error.message);
+        });
+      },
+    });
+  }
+
   function dropApprovalItem(kind, reference, repoSlug, subject) {
     const approvalLabel = defaultString(subject, reference);
     switch (kind) {
       case "work_run":
-        requestConfirmation({
-          title: "Drop approval item?",
-          message: `Remove run ${reference} from the active workspace queue.`,
-          confirmLabel: "Drop",
-          tone: "danger",
-          onConfirm() {
-            api(`/api/v1/work/runs/${encodeURIComponent(reference)}/drop`, {
-              method: "POST",
-            }).then(() => {
-              if (state.logSelection.runID === reference && state.logDrawer) {
-                state.logDrawer.close();
-              }
-              load();
-              loadApprovals({ silent: true });
-              toast("success", "Approval dropped", approvalLabel);
-            }).catch((error) => {
-              toast("danger", "Drop failed", error.message);
-            });
-          },
-        });
+        dropWorkRunFromUI(reference);
         return;
       case "work_item":
         requestConfirmation({
@@ -7425,6 +7494,7 @@
         </label>
         ${typedDetail.stop_allowed ? `<button class="tx-btn tx-btn-secondary" type="button" data-run-stop="${escapeHTML(summary.run_id)}">Stop Run</button>` : ""}
         ${typedDetail.resolve_allowed ? `<button class="tx-btn tx-btn-secondary" type="button" data-run-resolve="${escapeHTML(summary.run_id)}">Resolve Run</button>` : ""}
+        ${typedDetail.rerun_allowed ? `<button class="tx-btn tx-btn-secondary" type="button" data-run-rerun="${escapeHTML(summary.run_id)}">Re-run</button>` : ""}
         ${typedDetail.sync_allowed ? `<button class="tx-btn tx-btn-secondary" type="button" data-run-sync="${escapeHTML(summary.run_id)}">Sync Run</button>` : ""}
         <button class="tx-btn tx-btn-secondary" type="button" data-run-drop="${escapeHTML(summary.run_id)}">Drop Run</button>
         <button class="tx-btn tx-btn-secondary" type="button" data-log-refresh="true">Refresh</button>
@@ -8607,6 +8677,14 @@
         return;
       }
 
+      const runRerunButton = event.target.closest("[data-run-rerun]");
+      if (runRerunButton) {
+        const runID = runRerunButton.getAttribute("data-run-rerun");
+        if (!runID) return;
+        rerunWorkRunFromUI(runID);
+        return;
+      }
+
       const runSyncButton = event.target.closest("[data-run-sync]");
       if (runSyncButton) {
         const runID = runSyncButton.getAttribute("data-run-sync");
@@ -8679,26 +8757,7 @@
       if (runDropButton) {
         const runID = runDropButton.getAttribute("data-run-drop");
         if (!runID) return;
-        requestConfirmation({
-          title: "Drop run?",
-          message: `Remove run ${runID} from the active workspace queue.`,
-          confirmLabel: "Drop Run",
-          tone: "danger",
-          onConfirm() {
-            api(`/api/v1/work/runs/${encodeURIComponent(runID)}/drop`, {
-              method: "POST",
-            }).then(() => {
-              if (state.logSelection.runID === runID && state.logDrawer) {
-                state.logDrawer.close();
-              }
-              load();
-              loadApprovals({ silent: true });
-              toast("success", "Run dropped", runID);
-            }).catch((error) => {
-              toast("danger", "Run drop failed", error.message);
-            });
-          },
-        });
+        dropWorkRunFromUI(runID);
         return;
       }
 
@@ -8889,6 +8948,22 @@
         const runID = taskOpenJobButton.getAttribute("data-task-open-job") || "";
         if (runID) {
           openLogDrawer(runID);
+        }
+        return;
+      }
+      const runRerunButton = event.target.closest("[data-run-rerun]");
+      if (runRerunButton) {
+        const runID = runRerunButton.getAttribute("data-run-rerun") || "";
+        if (runID) {
+          rerunWorkRunFromUI(runID);
+        }
+        return;
+      }
+      const runDropButton = event.target.closest("[data-run-drop]");
+      if (runDropButton) {
+        const runID = runDropButton.getAttribute("data-run-drop") || "";
+        if (runID) {
+          dropWorkRunFromUI(runID);
         }
         return;
       }
