@@ -13,7 +13,7 @@ const StartHelp = `nana start - Run repo automation or scout startup
 
 Usage:
   Automation mode:
-    nana start [--repo <owner/repo>] [--parallel <n>] [--per-repo-workers <n>] [--max-open-prs <n>] [--once|--cycles <n>|--forever] [--interval <duration>] [--no-ui] [--ui-api-port <port>] [--ui-web-port <port>] [-- codex-args...]
+    nana start [--parallel <n>] [--per-repo-workers <n>] [--max-open-prs <n>] [--once|--cycles <n>|--forever] [--interval <duration>] [--no-ui] [--ui-api-port <port>] [--ui-web-port <port>] [-- codex-args...]
 
   Scout mode:
     nana start [owner/repo|github-url] [--repo <path>] [--focus <ux,perf>] [--from-file <proposals.json>] [--dry-run] [--local-only] [--once|--cycles <n>|--forever] [--interval <duration>] [-- codex-args...]
@@ -27,7 +27,8 @@ Mode selection:
   - each run prints the selected [start] Mode line before execution begins
 
 Examples:
-  nana start --once --repo owner/repo
+  nana start --once
+  nana start --parallel 4 --interval 10s
   nana start --repo . --from-file proposals.json --once
 
 Automation mode behavior:
@@ -60,7 +61,6 @@ Scout mode behavior:
 const startDefaultGlobalParallel = 10
 
 type startOptions struct {
-	RepoSlug       string
 	Parallel       int
 	PerRepoWorkers int
 	MaxOpenPR      int
@@ -140,7 +140,7 @@ func Start(cwd string, args []string) error {
 		options.Forever = runtime.Forever
 		options.Interval = runtime.Interval
 		runOnce = func() error {
-			repos, err := resolveStartRepos(options.RepoSlug)
+			repos, err := resolveStartRepos()
 			if err != nil {
 				return err
 			}
@@ -190,7 +190,7 @@ func startExecutionModeForArgs(cwd string, args []string) (startExecutionMode, e
 				return "", lockErr
 			}
 			if len(roles) > 0 {
-				if repos, err := resolveStartRepos(""); err == nil && len(repos) == 0 {
+				if repos, err := resolveStartRepos(); err == nil && len(repos) == 0 {
 					return startExecutionModeScout, nil
 				}
 			}
@@ -558,22 +558,6 @@ func parseStartArgs(args []string) (startOptions, error) {
 	for index := 0; index < len(parseArgs); index++ {
 		token := parseArgs[index]
 		switch {
-		case token == "--repo":
-			value, err := requireStartFlagValue(parseArgs, index, token)
-			if err != nil {
-				return startOptions{}, err
-			}
-			if err := validateStartWorkRepoSlug(value); err != nil {
-				return startOptions{}, err
-			}
-			options.RepoSlug = strings.TrimSpace(value)
-			index++
-		case strings.HasPrefix(token, "--repo="):
-			value := strings.TrimSpace(strings.TrimPrefix(token, "--repo="))
-			if err := validateStartWorkRepoSlug(value); err != nil {
-				return startOptions{}, err
-			}
-			options.RepoSlug = value
 		case token == "--parallel":
 			value, err := requireStartFlagValue(parseArgs, index, token)
 			if err != nil {
@@ -741,17 +725,7 @@ func parseStartUIOptions(args []string) (startOptions, error) {
 	return options, nil
 }
 
-func resolveStartRepos(repoSlug string) ([]string, error) {
-	if strings.TrimSpace(repoSlug) != "" {
-		settings, err := readGithubRepoSettings(githubRepoSettingsPath(repoSlug))
-		if err != nil {
-			return nil, fmt.Errorf("repo %s is not onboarded; run `nana repo onboard %s --repo-mode <disabled|local|fork|repo> --issue-pick <manual|label|auto> --pr-forward <approve|auto>`", repoSlug, repoSlug)
-		}
-		if !githubRepoAutomationEnabled(settings) {
-			return nil, nil
-		}
-		return []string{repoSlug}, nil
-	}
+func resolveStartRepos() ([]string, error) {
 	repos, err := listOnboardedGithubRepos()
 	if err != nil {
 		return nil, err

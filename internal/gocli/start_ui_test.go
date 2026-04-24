@@ -3905,6 +3905,51 @@ func TestStartUIAppMissionControlRepoCardsShowMetricsAndActions(t *testing.T) {
 	}
 }
 
+func TestStartUIAppInvestigationSchedulerRefreshesTemplatesForSelectedRepo(t *testing.T) {
+	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
+	if err != nil {
+		t.Fatalf("read app asset: %v", err)
+	}
+	content := string(appBody)
+	for _, needle := range []string{
+		`const composerRepoSlug = composerRepo ? composerRepo.repo_slug : "";`,
+		`if ((!state.investigations.templatesLoaded || state.investigations.templatesRepoSlug !== composerRepoSlug) && !state.investigations.templatesLoading) {`,
+		`loadTaskTemplates({ silent: true });`,
+	} {
+		if !strings.Contains(content, needle) {
+			t.Fatalf("expected app asset to contain %q", needle)
+		}
+	}
+}
+
+func TestStartUIAppHeaderIncludesSubtitleAndGuardsMissingNodes(t *testing.T) {
+	indexBody, err := startUIAssetsFS.ReadFile("start_ui_assets/index.html")
+	if err != nil {
+		t.Fatalf("read index asset: %v", err)
+	}
+	indexContent := string(indexBody)
+	if !strings.Contains(indexContent, `id="page-subtitle"`) {
+		t.Fatalf("expected index asset to include page subtitle node")
+	}
+
+	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
+	if err != nil {
+		t.Fatalf("read app asset: %v", err)
+	}
+	appContent := string(appBody)
+	for _, needle := range []string{
+		`const subtitle = document.getElementById("page-subtitle");`,
+		`if (!title || !updated) return;`,
+		`const setTitle = (value) => {`,
+		`const setUpdated = (value) => {`,
+		`setTitle("Nana Mission Control");`,
+	} {
+		if !strings.Contains(appContent, needle) {
+			t.Fatalf("expected app asset to contain %q", needle)
+		}
+	}
+}
+
 func TestStartUIAppInvestigationsWorkspaceShowsDirectDetailSurfaces(t *testing.T) {
 	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
 	if err != nil {
@@ -5944,7 +5989,10 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(body), "Assistant Workspace") || !strings.Contains(string(body), "All Repos") {
 		t.Fatalf("expected assistant workspace shell, got %s", string(body))
 	}
-	if strings.Contains(string(body), `<p class="eyebrow">Workspace</p>`) || strings.Contains(string(body), `id="page-subtitle"`) || strings.Contains(string(body), `id="page-breadcrumb"`) {
+	if !strings.Contains(string(body), `id="page-subtitle"`) {
+		t.Fatalf("expected compact workspace subtitle shell, got %s", string(body))
+	}
+	if strings.Contains(string(body), `<p class="eyebrow">Workspace</p>`) || strings.Contains(string(body), `id="page-breadcrumb"`) {
 		t.Fatalf("expected compact workspace header shell, got %s", string(body))
 	}
 

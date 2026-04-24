@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -45,7 +46,7 @@ func TestStartRunsEnabledOnboardedReposAndSkipsManual(t *testing.T) {
 	if len(runs) != 1 || !reflect.DeepEqual(runs[0].repos, []string{"acme/enabled"}) {
 		t.Fatalf("expected one enabled run, got %#v", runs)
 	}
-	if runs[0].options.RepoSlug != "" || runs[0].options.Parallel != 2 || runs[0].options.PerRepoWorkers != 2 || runs[0].options.MaxOpenPR != 7 || !reflect.DeepEqual(runs[0].options.CodexArgs, []string{"--model", "gpt-5.4"}) {
+	if runs[0].options.Parallel != 2 || runs[0].options.PerRepoWorkers != 2 || runs[0].options.MaxOpenPR != 7 || !reflect.DeepEqual(runs[0].options.CodexArgs, []string{"--model", "gpt-5.4"}) {
 		t.Fatalf("unexpected run options: %#v", runs[0])
 	}
 	if strings.Contains(output, "acme/manual") {
@@ -62,7 +63,8 @@ func TestStartHelpShowsExplicitModes(t *testing.T) {
 		"automation mode runs onboarded GitHub repo automation",
 		"blocks repo automation early when gh auth or managed-source SSH origin preflight fails",
 		"scout mode runs policy-backed improvement/enhancement/ui scout startup",
-		"nana start --once --repo owner/repo",
+		"nana start --once",
+		"nana start --parallel 4 --interval 10s",
 		"nana start --repo . --from-file proposals.json --once",
 	} {
 		if !strings.Contains(StartHelp, needle) {
@@ -331,44 +333,17 @@ func TestStartDoesNotAutoSelectScoutModeFromCwdPolicies(t *testing.T) {
 	}
 }
 
-func TestStartRunsScoutsBetweenIssuePickupPasses(t *testing.T) {
+func TestStartRejectsAutomationRepoSelector(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	if err := writeGithubJSON(githubRepoSettingsPath("acme/cycled"), githubRepoSettings{Version: 6, RepoMode: "fork", IssuePickMode: "auto", PRForwardMode: "approve", ForkIssuesMode: "auto", ImplementMode: "auto", PublishTarget: "fork"}); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
-	sourcePath := githubManagedPaths("acme/cycled").SourcePath
-	if err := os.MkdirAll(filepath.Join(sourcePath, ".nana"), 0o755); err != nil {
-		t.Fatalf("mkdir policy dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(sourcePath, ".nana", "improvement-policy.json"), []byte(`{"version":1,"issue_destination":"repo"}`), 0o644); err != nil {
-		t.Fatalf("write policy: %v", err)
-	}
-
-	oldRun := startRunRepoCyclesBatch
-	events := []string{}
-	startRunRepoCyclesBatch = func(cwd string, repos []string, options startOptions) error {
-		for _, repoSlug := range repos {
-			events = append(events, "repo:"+repoSlug)
-		}
-		if !reflect.DeepEqual(repos, []string{"acme/cycled"}) || options.Parallel != startDefaultGlobalParallel || options.PerRepoWorkers != startDefaultGlobalParallel {
-			t.Fatalf("unexpected repo cycle options: repos=%#v options=%#v", repos, options)
-		}
-		return nil
-	}
-	defer func() {
-		startRunRepoCyclesBatch = oldRun
-	}()
-
 	output, err := captureStdout(t, func() error {
 		return Start(".", []string{"--repo", "acme/cycled"})
 	})
-	if err != nil {
-		t.Fatalf("Start: %v\n%s", err, output)
-	}
-	expected := []string{"repo:acme/cycled"}
-	if !reflect.DeepEqual(events, expected) {
-		t.Fatalf("expected repo cycle dispatch, got %#v", events)
+	if err == nil || !strings.Contains(err.Error(), "Unknown start option: --repo") {
+		t.Fatalf("expected automation repo selector to be rejected, got err=%v output=%q", err, output)
 	}
 }
 
@@ -389,7 +364,7 @@ func TestStartCyclesRepeatRepoAutomationCycle(t *testing.T) {
 	}()
 
 	output, err := captureStdout(t, func() error {
-		return Start(".", []string{"--repo", "acme/repeat", "--cycles", "2"})
+		return Start(".", []string{"--cycles", "2"})
 	})
 	if err != nil {
 		t.Fatalf("Start: %v\n%s", err, output)
@@ -869,11 +844,11 @@ func TestRepoConfigDisabledObservationMode(t *testing.T) {
 	if settings.RepoMode != "disabled" || settings.IssuePickMode != "manual" || settings.PublishTarget != "" {
 		t.Fatalf("unexpected disabled settings: %+v", settings)
 	}
-	repos, err := resolveStartRepos("acme/observe")
+	repos, err := resolveStartRepos()
 	if err != nil {
 		t.Fatalf("resolveStartRepos: %v", err)
 	}
-	if len(repos) != 0 {
+	if slices.Contains(repos, "acme/observe") {
 		t.Fatalf("expected disabled repo to be skipped by start, got %#v", repos)
 	}
 	explain, err := captureStdout(t, func() error { return Repo(".", []string{"explain", "acme/observe"}) })

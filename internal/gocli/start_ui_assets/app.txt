@@ -3200,112 +3200,122 @@
     const title = document.getElementById("page-title");
     const subtitle = document.getElementById("page-subtitle");
     const updated = document.getElementById("overview-updated");
+    if (!title || !updated) return;
+    const setTitle = (value) => {
+      title.textContent = value;
+    };
+    const setUpdated = (value) => {
+      updated.textContent = value;
+    };
+    const setSubtitle = (value) => {
+      if (subtitle) subtitle.textContent = value;
+    };
 
     if (!state.overview) {
       if (state.currentView === "usage") {
-        title.textContent = "Usage";
+        setTitle("Usage");
         if (state.overviewError) {
-          subtitle.textContent = "Usage data can still load while the workspace overview is unavailable.";
-          updated.textContent = "Overview unavailable.";
+          setSubtitle("Usage data can still load while the workspace overview is unavailable.");
+          setUpdated("Overview unavailable.");
         } else if (state.usage.error) {
-          subtitle.textContent = "Usage data failed while the workspace overview is still loading.";
-          updated.textContent = "Overview still loading.";
+          setSubtitle("Usage data failed while the workspace overview is still loading.");
+          setUpdated("Overview still loading.");
         } else if (state.usage.loaded) {
-          subtitle.textContent = "Usage data is ready while the workspace overview is still loading.";
-          updated.textContent = "Overview still loading.";
+          setSubtitle("Usage data is ready while the workspace overview is still loading.");
+          setUpdated("Overview still loading.");
         } else {
-          subtitle.textContent = "Loading usage data and workspace overview.";
-          updated.textContent = "Waiting for state...";
+          setSubtitle("Loading usage data and workspace overview.");
+          setUpdated("Waiting for state...");
         }
       } else if (state.currentView === "issues") {
-        title.textContent = "Issues";
-        subtitle.textContent = "Tracked issues, triage evidence, scheduling, and direct launch actions.";
-        updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
+        setTitle("Issues");
+        setSubtitle("Tracked issues, triage evidence, scheduling, and direct launch actions.");
+        setUpdated(state.overviewError ? "Overview unavailable." : "Overview still loading.");
       } else if (state.currentView === "investigations") {
-        title.textContent = "Tasks";
-        subtitle.textContent = "Unified scheduling for investigations, coding work, manual scouts, and resulting findings.";
-        updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
+        setTitle("Nana Mission Control");
+        setSubtitle("");
+        setUpdated(state.overviewError ? "Overview unavailable." : "Overview still loading.");
       } else if (state.currentView === "feedback") {
-        title.textContent = "Feedback";
-        subtitle.textContent = state.feedbackTab === "reviews"
+        setTitle("Feedback");
+        setSubtitle(state.feedbackTab === "reviews"
           ? "Review requests and drafted PR feedback."
-          : "Drafted thread replies and comment follow-ups.";
-        updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
+          : "Drafted thread replies and comment follow-ups.");
+        setUpdated(state.overviewError ? "Overview unavailable." : "Overview still loading.");
       } else if (state.currentView === "approvals") {
-        title.textContent = "Approvals";
-        subtitle.textContent = "Human-gate queue across publication, feedback submission, and planned launches.";
-        updated.textContent = state.overviewError ? "Overview unavailable." : "Overview still loading.";
+        setTitle("Approvals");
+        setSubtitle("Human-gate queue across publication, feedback submission, and planned launches.");
+        setUpdated(state.overviewError ? "Overview unavailable." : "Overview still loading.");
       } else {
-        title.textContent = "All Repos";
-        subtitle.textContent = state.overviewError ? "Workspace overview is unavailable." : "Waiting for state...";
-        updated.textContent = state.overviewError ? "Overview unavailable." : "Waiting for state...";
+        setTitle("All Repos");
+        setSubtitle(state.overviewError ? "Workspace overview is unavailable." : "Waiting for state...");
+        setUpdated(state.overviewError ? "Overview unavailable." : "Waiting for state...");
       }
       return;
     }
 
-    updated.textContent = `Updated ${formatDateTime(state.overview.generated_at)}`;
+    setUpdated(`Updated ${formatDateTime(state.overview.generated_at)}`);
 
     if (state.currentView === "home") {
-      title.textContent = "All Repos";
-      subtitle.textContent = "Assistant queue across issues, runs, feedback, approvals, and repo automation.";
+      setTitle("All Repos");
+      setSubtitle("Assistant queue across issues, runs, feedback, approvals, and repo automation.");
       return;
     }
     if (state.currentView === "issues") {
-      title.textContent = "Issues";
-      subtitle.textContent = state.selectedRepo
+      setTitle("Issues");
+      setSubtitle(state.selectedRepo
         ? `Tracked issues, triage evidence, scheduling, and direct launch actions for ${state.selectedRepo}.`
-        : "Tracked issues, triage evidence, scheduling, and direct launch actions.";
+        : "Tracked issues, triage evidence, scheduling, and direct launch actions.");
       return;
     }
     if (state.currentView === "investigations") {
-      title.textContent = "Tasks";
-      subtitle.textContent = state.selectedRepo
-        ? `Unified scheduling, findings, and manual scout work for ${state.selectedRepo}.`
-        : "Unified scheduling for investigations, coding work, manual scouts, and resulting findings.";
+      setTitle("Nana Mission Control");
+      setSubtitle("");
       return;
     }
     if (state.currentView === "work") {
-      title.textContent = "Work";
-      subtitle.textContent = state.selectedRepo
+      setTitle("Work");
+      setSubtitle(state.selectedRepo
         ? `Local and GitHub-backed work runs for ${state.selectedRepo}.`
-        : "Local and GitHub-backed work runs with detail, state, and logs.";
+        : "Local and GitHub-backed work runs with detail, state, and logs.");
       return;
     }
     if (state.currentView === "usage") {
-      title.textContent = "Usage";
-      subtitle.textContent = "Token spend across NANA-managed sessions, lanes, phases, and activity buckets.";
+      setTitle("Usage");
+      setSubtitle("Token spend across NANA-managed sessions, lanes, phases, and activity buckets.");
       return;
     }
     if (state.currentView === "feedback") {
-      title.textContent = "Feedback";
-      subtitle.textContent = state.feedbackTab === "reviews"
+      setTitle("Feedback");
+      setSubtitle(state.feedbackTab === "reviews"
         ? (state.selectedRepo ? `Review requests and drafted PR feedback for ${state.selectedRepo}.` : "Review requests and drafted PR feedback.")
-        : (state.selectedRepo ? `Drafted thread replies and comment follow-ups for ${state.selectedRepo}.` : "Drafted thread replies and comment follow-ups.");
+        : (state.selectedRepo ? `Drafted thread replies and comment follow-ups for ${state.selectedRepo}.` : "Drafted thread replies and comment follow-ups."));
       return;
     }
     if (state.currentView === "approvals") {
-      title.textContent = "Approvals";
-      subtitle.textContent = state.selectedRepo
+      setTitle("Approvals");
+      setSubtitle(state.selectedRepo
         ? `Human-gate queue across publication, feedback submission, and planned launches for ${state.selectedRepo}.`
-        : "Human-gate queue across publication, feedback submission, and planned launches.";
+        : "Human-gate queue across publication, feedback submission, and planned launches.");
       return;
     }
 
     const repo = selectedRepoSummary();
     if (!repo) {
-      title.textContent = "All Repos";
-      subtitle.textContent = "Assistant queue across issues, runs, feedback, approvals, and repo automation.";
+      setTitle("All Repos");
+      setSubtitle("Assistant queue across issues, runs, feedback, approvals, and repo automation.");
       return;
     }
 
-    title.textContent = repo.repo_slug;
-    subtitle.textContent = state.repoTab === "controls"
+    setTitle(repo.repo_slug);
+    setSubtitle(state.repoTab === "controls"
       ? "GitHub issue search, tracked issue scheduling, and planned launch controls."
+      : state.repoTab === "findings"
+        ? "Persisted findings, markdown imports, and promotion into executable work."
       : state.repoTab === "scouts"
         ? "Scout-discovered items, proposal details, and repo-local management actions."
       : state.repoTab === "config"
         ? "Start-facing repo configuration and participation controls."
-        : "Repo queue posture, pending jobs, and tracked work.";
+        : "Repo queue posture, pending jobs, and tracked work.");
   }
 
   function renderRepoPicker() {
