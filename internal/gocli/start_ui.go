@@ -1125,7 +1125,7 @@ func (h *startUIAPI) applyCORS(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Vary", "Origin")
 	}
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Idempotency-Key")
 }
 
 func (h *startUIAPI) handleOverview(w http.ResponseWriter, r *http.Request) {

@@ -451,6 +451,41 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 	}
 }
 
+func TestStartUIAPIPreflightAllowsIdempotencyKey(t *testing.T) {
+	server := httptest.NewServer((&startUIAPI{
+		cwd:              t.TempDir(),
+		allowedWebOrigin: "http://127.0.0.1:17654",
+	}).routes())
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodOptions, server.URL+"/api/v1/tasks", nil)
+	if err != nil {
+		t.Fatalf("new preflight request: %v", err)
+	}
+	request.Header.Set("Origin", "http://127.0.0.1:17654")
+	request.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	request.Header.Set("Access-Control-Request-Headers", "content-type,idempotency-key")
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("OPTIONS preflight: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected preflight status 204, got %d", response.StatusCode)
+	}
+	if got := response.Header.Get("Access-Control-Allow-Origin"); got != "http://127.0.0.1:17654" {
+		t.Fatalf("expected Access-Control-Allow-Origin to echo web origin, got %q", got)
+	}
+	allowedHeaders := response.Header.Get("Access-Control-Allow-Headers")
+	for _, needle := range []string{"Content-Type", "Idempotency-Key"} {
+		if !strings.Contains(allowedHeaders, needle) {
+			t.Fatalf("expected Access-Control-Allow-Headers to contain %q, got %q", needle, allowedHeaders)
+		}
+	}
+}
+
 func TestStartUIAPIIssuePatchRouteReturnsJSON(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
