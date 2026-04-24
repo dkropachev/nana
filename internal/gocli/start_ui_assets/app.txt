@@ -5075,8 +5075,7 @@
       const item = detail.planned_item;
       return `
         <div class="queue-summary">
-          <article class="queue-item"><span class="queue-label">Launch Kind</span><p class="queue-copy">${escapeHTML(defaultString(item.launch_kind, "(none)"))}</p></article>
-          <article class="queue-item"><span class="queue-label">Description</span><p class="queue-copy">${escapeHTML(defaultString(item.description, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Findings Handling</span><p class="queue-copy">${escapeHTML(defaultString(item.findings_handling, "(none)"))}</p></article>
           ${item.investigation_query ? `<article class="queue-item"><span class="queue-label">Investigation Query</span><p class="queue-copy">${escapeHTML(item.investigation_query)}</p></article>` : ""}
           ${item.scout_role ? `<article class="queue-item"><span class="queue-label">Scout Role</span><p class="queue-copy">${escapeHTML(item.scout_role)}</p></article>` : ""}
           ${item.last_error ? `<article class="queue-item"><span class="queue-label">Last Error</span><p class="queue-copy">${escapeHTML(item.last_error)}</p></article>` : ""}
@@ -5117,6 +5116,101 @@
       `;
     }
     return '<div class="status-pill">No source detail is available for this task.</div>';
+  }
+
+  function renderMarkdownInline(text) {
+    let rendered = escapeHTML(defaultString(text, ""));
+    rendered = rendered.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    rendered = rendered.replace(/\*(.+?)\*/g, "<em>$1</em>");
+    rendered = rendered.replace(/`([^`]+)`/g, "<code>$1</code>");
+    return rendered;
+  }
+
+  function renderMarkdownDocument(markdown) {
+    const source = String(markdown || "").replace(/\r\n/g, "\n").trim();
+    if (!source) return '<div class="status-pill">No description provided.</div>';
+
+    const lines = source.split("\n");
+    const blocks = [];
+    let paragraph = [];
+    let listItems = [];
+
+    const flushParagraph = () => {
+      if (!paragraph.length) return;
+      const text = paragraph.join(" ").trim();
+      if (text) {
+        blocks.push(`<p>${renderMarkdownInline(text)}</p>`);
+      }
+      paragraph = [];
+    };
+
+    const flushList = () => {
+      if (!listItems.length) return;
+      blocks.push(`<ul>${listItems.map((item) => `<li>${renderMarkdownInline(item)}</li>`).join("")}</ul>`);
+      listItems = [];
+    };
+
+    for (const rawLine of lines) {
+      const line = rawLine.trimEnd();
+      const trimmed = line.trim();
+      if (!trimmed) {
+        flushParagraph();
+        flushList();
+        continue;
+      }
+
+      const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
+      if (heading) {
+        flushParagraph();
+        flushList();
+        const level = heading[1].length;
+        blocks.push(`<h${level}>${renderMarkdownInline(heading[2].trim())}</h${level}>`);
+        continue;
+      }
+
+      const bullet = trimmed.match(/^[-*]\s+(.*)$/);
+      if (bullet) {
+        flushParagraph();
+        listItems.push(bullet[1].trim());
+        continue;
+      }
+
+      flushList();
+      paragraph.push(trimmed);
+    }
+
+    flushParagraph();
+    flushList();
+    return blocks.join("");
+  }
+
+  function taskDetailContentMarkup(detail) {
+    if (!detail || !detail.summary) {
+      return '<div class="status-pill">Task detail is unavailable.</div>';
+    }
+    const summary = detail.summary;
+    if (summary.kind === "planned_item" && detail.planned_item) {
+      const item = detail.planned_item;
+      const sourceMarkup = taskDetailSourceMarkup(detail);
+      const descriptionMarkup = renderMarkdownDocument(defaultString(item.description, ""));
+      return `
+        ${sourceMarkup}
+        <div class="surface">
+          <div class="task-detail-markdown">${descriptionMarkup}</div>
+        </div>
+      `;
+    }
+    return `
+      <div class="surface">
+        <div class="surface-head">
+          <div>
+            <h3>Task Detail</h3>
+            <p>${escapeHTML(defaultString(summary.summary, summary.description || "No task summary recorded."))}</p>
+          </div>
+        </div>
+        ${taskDetailSourceMarkup(detail)}
+      </div>
+    `;
   }
 
   function taskDetailStartedAt(detail) {
@@ -5272,6 +5366,7 @@
       : "Not available";
     const actionButtons = taskDetailOpenButtons(detail, summary);
     const actionMenuMarkup = renderTaskDetailActionMenu(detail, summary);
+    const plannedItem = summary.kind === "planned_item" ? detail.planned_item : null;
     host.innerHTML = `
       <div class="drawer-summary">
         <div>
@@ -5308,18 +5403,22 @@
             <span class="drawer-label">Reference</span>
             <span class="drawer-value">${escapeHTML(taskReference)}</span>
           </div>
+          ${plannedItem ? `
+            <div class="drawer-summary-card">
+              <span class="drawer-label">Launch Kind</span>
+              <span class="drawer-value">${escapeHTML(defaultString(plannedItem.launch_kind, "(none)"))}</span>
+            </div>
+          ` : ""}
+          ${plannedItem && plannedItem.work_type ? `
+            <div class="drawer-summary-card">
+              <span class="drawer-label">Work Type</span>
+              <span class="drawer-value">${escapeHTML(workTypeLabel(plannedItem.work_type))}</span>
+            </div>
+          ` : ""}
         </div>
       </div>
       ${actionButtons.length || actionMenuMarkup ? `<div class="drawer-toolbar">${actionButtons.join("")}${actionMenuMarkup}</div>` : ""}
-      <div class="surface">
-        <div class="surface-head">
-          <div>
-            <h3>Task Detail</h3>
-            <p>${escapeHTML(defaultString(summary.summary, summary.description || "No task summary recorded."))}</p>
-          </div>
-        </div>
-        ${taskDetailSourceMarkup(detail)}
-      </div>
+      ${taskDetailContentMarkup(detail)}
     `;
   }
 

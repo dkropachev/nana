@@ -4051,6 +4051,42 @@ func TestStartUIBrowserInvestigationDeepLinkShowsSelectedDetail(t *testing.T) {
 	}
 }
 
+func TestStartUIAppTaskDetailFormatsPlannedItemContent(t *testing.T) {
+	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
+	if err != nil {
+		t.Fatalf("read app asset: %v", err)
+	}
+	content := string(appBody)
+	for _, needle := range []string{
+		`function renderMarkdownDocument(markdown) {`,
+		`<div class="task-detail-markdown">${descriptionMarkup}</div>`,
+		`<span class="drawer-label">Launch Kind</span>`,
+		`<span class="drawer-label">Work Type</span>`,
+	} {
+		if !strings.Contains(content, needle) {
+			t.Fatalf("expected app asset to contain %q", needle)
+		}
+	}
+	if strings.Contains(content, `<article class="queue-item"><span class="queue-label">Description</span><p class="queue-copy">${escapeHTML(defaultString(item.description, "(none)"))}</p></article>`) {
+		t.Fatalf("expected planned item detail to stop duplicating description in the queue summary")
+	}
+
+	cssBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.css")
+	if err != nil {
+		t.Fatalf("read app stylesheet: %v", err)
+	}
+	cssContent := string(cssBody)
+	for _, needle := range []string{
+		`.task-detail-markdown {`,
+		`.task-detail-markdown h1,`,
+		`.task-detail-markdown code {`,
+	} {
+		if !strings.Contains(cssContent, needle) {
+			t.Fatalf("expected app stylesheet to contain %q", needle)
+		}
+	}
+}
+
 func TestStartUITaskSummaryFromFailedWorkRunKeepsFailedStatus(t *testing.T) {
 	summary := startUITaskSummaryFromWorkRun(startUIWorkRun{
 		RunID:          "lw-failed",

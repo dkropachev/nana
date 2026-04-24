@@ -1056,6 +1056,49 @@ textarea {
   word-break: break-word;
 }
 
+.task-detail-markdown {
+  display: grid;
+  gap: 12px;
+}
+
+.task-detail-markdown > :first-child {
+  margin-top: 0;
+}
+
+.task-detail-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.task-detail-markdown h1,
+.task-detail-markdown h2,
+.task-detail-markdown h3,
+.task-detail-markdown h4,
+.task-detail-markdown h5,
+.task-detail-markdown h6 {
+  margin: 0;
+  color: #142033;
+  line-height: 1.35;
+}
+
+.task-detail-markdown p,
+.task-detail-markdown ul {
+  margin: 0;
+  color: #21324a;
+  line-height: 1.6;
+}
+
+.task-detail-markdown ul {
+  padding-left: 20px;
+}
+
+.task-detail-markdown code {
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: #eef2f8;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
 .drawer-toolbar {
   display: flex;
   align-items: flex-end;
