@@ -122,11 +122,39 @@ jobs:
           go-version-file: go.mod
       - run: go run ./cmd/nana-build build-go-cli
 
+  live-github-smoke:
+    name: Live GitHub Smoke
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [fmt, vet, test, docs, build]
+    env:
+      NANA_LIVE_GITHUB: "1"
+      GH_TOKEN: ${{ secrets.NANA_LIVE_GH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run live GitHub smoke
+        shell: bash
+        run: |
+          mkdir -p live-github-results
+          set -o pipefail
+          go test ./internal/gocli -run '^TestLiveGithub' -count=1 -v | tee live-github-results/go-test.txt
+      - name: Upload live GitHub log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-github-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: live-github-results/go-test.txt
+          if-no-files-found: warn
+
   ci-status:
     name: CI Status
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    needs: [fmt, vet, test, docs, build]
+    needs: [fmt, vet, test, docs, build, live-github-smoke]
     steps:
       - name: Check required job results
         run: |
@@ -134,13 +162,15 @@ jobs:
              [[ "${{ needs.vet.result }}" != "success" ]] ||
              [[ "${{ needs.test.result }}" != "success" ]] ||
              [[ "${{ needs.docs.result }}" != "success" ]] ||
-             [[ "${{ needs.build.result }}" != "success" ]]; then
+             [[ "${{ needs.build.result }}" != "success" ]] ||
+             [[ "${{ needs.live-github-smoke.result }}" != "success" && "${{ needs.live-github-smoke.result }}" != "skipped" ]]; then
             echo "::error::One or more required CI jobs failed"
             echo "  fmt: ${{ needs.fmt.result }}"
             echo "  vet: ${{ needs.vet.result }}"
             echo "  test: ${{ needs.test.result }}"
             echo "  docs: ${{ needs.docs.result }}"
             echo "  build: ${{ needs.build.result }}"
+            echo "  live-github-smoke: ${{ needs.live-github-smoke.result }}"
             exit 1
           fi
           echo "All required CI checks passed"
