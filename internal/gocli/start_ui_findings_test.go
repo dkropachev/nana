@@ -295,10 +295,10 @@ func TestStartUIAppTasksPageReferencesFindingsInboxAndMarkdownImport(t *testing.
 	}
 	content := string(appBody)
 	for _, needle := range []string{
+		"/api/v1/tasks",
 		"/api/v1/repos/${repoSlug}/findings",
 		"/api/v1/repos/${repoSlug}/finding-import-sessions",
-		"Import Findings from Markdown",
-		"Findings Inbox",
+		"Markdown import failed",
 		"data-task-finding-save",
 		"data-task-import-candidate-save",
 	} {

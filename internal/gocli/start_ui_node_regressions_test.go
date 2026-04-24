@@ -104,14 +104,16 @@ global.window = {
 global.document = { getElementById() { return null; } };
 global.fetch = (url) => {
   calls.push(url);
-  if (url === "/api/v1/investigations") {
-    return Promise.resolve(jsonResponse({ items: [{ run_id: "investigate-123", query: "fresh run" }] }));
+  if (url === "/api/v1/tasks") {
+    return Promise.resolve(jsonResponse({ items: [{ id: "investigation:investigate-123", kind: "investigation", title: "fresh run" }] }));
   }
-  if (url === "/api/v1/investigations/work-run%3Alegacy-run") {
+  if (url === "/api/v1/tasks/work-run%3Alegacy-run") {
     return Promise.resolve(jsonResponse({
       summary: {
+        id: "work-run:legacy-run",
+        kind: "work_run",
+        title: "legacy task alias",
         run_id: "work-run:legacy-run",
-        query: "legacy task alias",
         status: "completed",
         updated_at: "2026-04-24T00:00:00Z",
       },
@@ -160,8 +162,8 @@ hooks.loadInvestigations({ silent: true }).then(() => {
 		t.Fatalf("expected explicit legacy investigation selection to survive list refresh, got %+v", got)
 	}
 	if len(got.FetchCalls) != 2 ||
-		got.FetchCalls[0] != "/api/v1/investigations" ||
-		got.FetchCalls[1] != "/api/v1/investigations/work-run%3Alegacy-run" {
+		got.FetchCalls[0] != "/api/v1/tasks" ||
+		got.FetchCalls[1] != "/api/v1/tasks/work-run%3Alegacy-run" {
 		t.Fatalf("expected investigations refresh to request legacy detail after the list, got %+v", got.FetchCalls)
 	}
 	if len(got.ReplaceCalls) != 0 || got.LocationHash != "#view=investigations&task=work-run%3Alegacy-run" {
@@ -600,49 +602,38 @@ pending.then(() => {
 	if got.Final.Error != "detail failed" || !strings.Contains(got.Final.HTML, "detail failed") || strings.Contains(got.Final.HTML, "stale run") {
 		t.Fatalf("expected failed investigation switch to replace stale detail with the error state, got %+v", got.Final)
 	}
-	if len(got.FetchCalls) != 1 || got.FetchCalls[0] != "/api/v1/investigations/run-b" {
+	if len(got.FetchCalls) != 1 || got.FetchCalls[0] != "/api/v1/tasks/run-b" {
 		t.Fatalf("expected one investigation detail request for the new run, got %+v", got.FetchCalls)
 	}
 }
 
 func TestStartUIRenderInvestigationsPageHighlightsSelectedRunIDWhileDetailLags(t *testing.T) {
 	instrumentedPath := startUITestWriteInstrumentedApp(t, `
-  let investigationSelections = [];
   ensureTaskFindingsState = function() {};
   ensureFindingImportsState = function() {};
   ensureBodyStructure = function() {};
-  renderTaskInvestigationDetail = function() {};
-  renderTaskFindingDetail = function() {};
-  renderFindingImportDetail = function() {};
-  taskScheduledRows = function() { return []; };
-  taskFindingRows = function() { return []; };
-  findingImportSessionRows = function() { return []; };
-  findingImportCandidateRows = function() { return []; };
-  selectedTaskFinding = function() { return null; };
-  selectedFindingImportSession = function() { return null; };
-  selectedFindingImportCandidate = function() { return null; };
-  renderGrid = function(target, columns, data, options) {
-    if (target !== "investigations-grid") {
-      return;
-    }
-    investigationSelections = data.map((row) => options.rowSelect(row));
-  };
+  renderTaskScheduleModal = function() {};
+  loadTaskTemplates = function() { return Promise.resolve(); };
   globalThis.__NANA_TEST_HOOKS = {
     state,
     renderInvestigationsPage,
-    getInvestigationSelections() {
-      return investigationSelections;
-    },
   };
 })();
 `)
 
-	output := startUITestRunNodeHarness(t, instrumentedPath, `global.window = {
+	output := startUITestRunNodeHarness(t, instrumentedPath, `const hosts = {
+  "mission-toolbar-host": { innerHTML: "" },
+  "mission-status-strip": { innerHTML: "" },
+  "mission-feed": { innerHTML: "" },
+};
+global.window = {
   NANA_API_BASE: "",
   location: { hash: "", pathname: "/ui" },
   history: { replaceState() {} },
 };
-global.document = { getElementById() { return null; } };
+global.document = {
+  getElementById(id) { return hosts[id] || null; },
+};
 global.globalThis = global;
 require(process.argv[2]);
 
@@ -652,39 +643,37 @@ if (!hooks) {
 }
 
 hooks.state.investigations.items = [
-  { run_id: "run-a", repo_slug: "acme/ui", status: "completed", overall_status: "completed", query: "stale run", updated_at: "2026-04-24T00:00:00Z" },
-  { run_id: "run-b", repo_slug: "acme/ui", status: "running", overall_status: "active", query: "pending run", updated_at: "2026-04-24T00:00:01Z" },
+  { id: "run-a", kind: "investigation", repo_slug: "acme/ui", status: "completed", attention_state: "completed", raw_status: "completed", title: "stale run", summary: "stale detail", updated_at: "2026-04-24T00:00:00Z", priority_label: "P3" },
+  { id: "run-b", kind: "investigation", repo_slug: "acme/ui", status: "running", attention_state: "active", raw_status: "running", title: "pending run", summary: "pending detail", updated_at: "2026-04-24T00:00:01Z", priority_label: "P3" },
 ];
 hooks.state.investigations.selectedRunID = "run-b";
 hooks.state.investigations.detail = {
   summary: {
-    run_id: "run-a",
+    id: "run-a",
   },
 };
+hooks.state.investigations.templatesLoaded = true;
+hooks.state.investigations.templatesRepoSlug = "";
 
 hooks.renderInvestigationsPage();
-process.stdout.write(JSON.stringify({ selections: hooks.getInvestigationSelections() }));
+process.stdout.write(JSON.stringify({ html: hosts["mission-feed"].innerHTML }));
 `)
 
 	var got struct {
-		Selections []struct {
-			Kind     string `json:"kind"`
-			Value    string `json:"value"`
-			Selected bool   `json:"selected"`
-		} `json:"selections"`
+		HTML string `json:"html"`
 	}
 	if err := json.Unmarshal(output, &got); err != nil {
 		t.Fatalf("decode node harness output %q: %v", strings.TrimSpace(string(output)), err)
 	}
 
-	if len(got.Selections) != 2 {
-		t.Fatalf("expected two captured investigation selections, got %+v", got.Selections)
+	if !strings.Contains(got.HTML, `data-task-open="run-a"`) || !strings.Contains(got.HTML, `data-task-open="run-b"`) {
+		t.Fatalf("expected both task rows to render, got %q", got.HTML)
 	}
-	if got.Selections[0].Value != "run-a" || got.Selections[0].Selected {
-		t.Fatalf("expected stale detail run to be unselected, got %+v", got.Selections)
+	if strings.Contains(got.HTML, `data-task-open="run-a"><span class="mission-task-priority`) {
+		t.Fatalf("expected stale detail run to stay unselected, got %q", got.HTML)
 	}
-	if got.Selections[1].Value != "run-b" || !got.Selections[1].Selected {
-		t.Fatalf("expected selectedRunID to drive the highlighted investigation row, got %+v", got.Selections)
+	if !strings.Contains(got.HTML, `mission-task-row mission-task-row-selected`) || !strings.Contains(got.HTML, `data-task-open="run-b"`) {
+		t.Fatalf("expected selectedRunID to drive the highlighted task row, got %q", got.HTML)
 	}
 }
 

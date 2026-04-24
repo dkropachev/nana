@@ -1237,6 +1237,10 @@
       repoSlug: defaultString(repoSlug, ""),
       repoTab: defaultString(repoTab, "overview"),
     };
+    if (normalized.view === "repo" && normalized.repoTab === "findings") {
+      normalized.view = "investigations";
+      normalized.repoTab = "overview";
+    }
     if (normalized.view !== "repo") {
       normalized.repoTab = "overview";
     }
@@ -2248,9 +2252,19 @@
       state.investigations.loading = false;
       state.investigations.loaded = true;
       state.investigations.error = "";
-      if (state.investigations.selectedRunID && !state.investigations.items.some((item) => item.id === state.investigations.selectedRunID)) {
-        state.investigations.selectedRunID = "";
+      if (!state.investigations.selectedRunID || !state.investigations.items.some((item) => item.id === state.investigations.selectedRunID)) {
+        const explicitSelection = investigationSelectionFromHash();
+        if (explicitSelection) {
+          state.investigations.selectedRunID = explicitSelection;
+        } else {
+          state.investigations.selectedRunID = state.investigations.items[0] ? defaultString(state.investigations.items[0].id, "") : "";
+        }
       }
+      if (state.investigations.selectedRunID) {
+        return loadInvestigationDetail(state.investigations.selectedRunID, { silent: true });
+      }
+      state.investigations.detail = null;
+      state.investigations.detailLoading = false;
       if (state.currentView === "investigations") {
         renderInvestigationsPage();
       }
@@ -2275,7 +2289,14 @@
       }
       return Promise.resolve();
     }
+    const currentDetailID = defaultString(
+      state.investigations.detail && state.investigations.detail.summary && state.investigations.detail.summary.id,
+      defaultString(state.investigations.detail && state.investigations.detail.summary && state.investigations.detail.summary.run_id, "")
+    );
     state.investigations.selectedRunID = taskID;
+    if (currentDetailID !== taskID) {
+      state.investigations.detail = null;
+    }
     syncHashState();
     state.investigations.detailLoading = true;
     if (!options.silent) {
@@ -2294,6 +2315,7 @@
       }
     }).catch((error) => {
       if (state.investigations.selectedRunID !== taskID) return;
+      state.investigations.detail = null;
       state.investigations.detailLoading = false;
       state.investigations.error = error.message;
       renderTaskDetailModal();
