@@ -4165,26 +4165,7 @@ func normalizeLocalWorkCodexArgs(args []string) []string {
 }
 
 func normalizeLocalWorkCodexArgsWithFast(args []string) ([]string, bool) {
-	normalized, fastMode := NormalizeCodexLaunchArgsWithFast(args)
-	if !hasCodexExecutionPolicyArg(normalized) {
-		normalized = append([]string{CodexBypassFlag}, normalized...)
-	}
-	return normalized, fastMode
-}
-
-func hasCodexExecutionPolicyArg(args []string) bool {
-	for index := 0; index < len(args); index++ {
-		arg := args[index]
-		switch {
-		case arg == CodexBypassFlag, arg == "--full-auto":
-			return true
-		case arg == "--sandbox" || arg == "-s":
-			return true
-		case strings.HasPrefix(arg, "--sandbox="):
-			return true
-		}
-	}
-	return false
+	return NormalizeCodexBypassArgsWithFast(args)
 }
 
 func runLocalWorkReview(manifest localWorkManifest, codexArgs []string, prompt string, checkpointPath string) (localWorkExecutionResult, []githubPullReviewFinding, error) {

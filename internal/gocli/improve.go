@@ -631,6 +631,13 @@ func runScoutWithPolicyOverride(cwd string, options ImproveOptions, role string,
 		if err != nil {
 			return err
 		}
+		if guardErr := detectScoutSessionSandboxFailure(runtime, role); guardErr != nil {
+			rawPath, writeErr := writeScoutRawOutput(repoPath, rawOutput, role)
+			if writeErr == nil {
+				return fmt.Errorf("%w\nRaw %s output saved to %s", guardErr, role, rawPath)
+			}
+			return guardErr
+		}
 	}
 	report, err := parseScoutReport(rawOutput, role)
 	if err != nil {
@@ -1415,7 +1422,7 @@ func runScoutPrompt(runtime scoutExecutionRuntime, task string, codexArgs []stri
 	defer func() {
 		_ = repoLock.Release()
 	}()
-	normalizedCodexArgs, fastMode := NormalizeCodexLaunchArgsWithFast(codexArgs)
+	normalizedCodexArgs, fastMode := NormalizeCodexBypassArgsWithFast(codexArgs)
 	task = prefixCodexFastPrompt(task, fastMode)
 	result, err := runManagedCodexPrompt(codexManagedPromptOptions{
 		CommandDir:       runtime.RepoPath,

@@ -1,10 +1,12 @@
 package gocli
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -249,6 +251,27 @@ func TestLaunchStartPlannedItemScheduledManualScoutAutoPromoteUsesReviewArtifact
 	}
 	if gotPolicy.IssueDestination != improvementDestinationReview {
 		t.Fatalf("expected auto-promote scout to keep review artifacts, got %+v", gotPolicy)
+	}
+}
+
+func TestLaunchStartPlannedItemScheduledManualScoutPropagatesRunnerFailure(t *testing.T) {
+	oldRunner := startRunScheduledPlannedScout
+	defer func() { startRunScheduledPlannedScout = oldRunner }()
+
+	startRunScheduledPlannedScout = func(cwd string, options ImproveOptions, role string, policy scoutPolicy) error {
+		return fmt.Errorf("sandbox denied")
+	}
+
+	_, err := launchStartPlannedItemScheduled("", "acme/widget", startWorkOptions{}, startWorkPlannedItem{
+		ID:               "planned-scout-fail",
+		RepoSlug:         "acme/widget",
+		Title:            "Run backend scout",
+		LaunchKind:       "manual_scout",
+		ScoutRole:        backendPerformanceScoutRole,
+		ScoutDestination: improvementDestinationReview,
+	})
+	if err == nil || !strings.Contains(err.Error(), "sandbox denied") {
+		t.Fatalf("expected manual scout runner failure to propagate, got %v", err)
 	}
 }
 

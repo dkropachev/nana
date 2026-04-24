@@ -137,6 +137,14 @@ func NormalizeCodexLaunchArgs(args []string) []string {
 	return normalized
 }
 
+func NormalizeCodexBypassArgsWithFast(args []string) ([]string, bool) {
+	normalized, fastMode := NormalizeCodexLaunchArgsWithFast(args)
+	if !hasCodexExecutionPolicyArg(normalized) {
+		normalized = append([]string{CodexBypassFlag}, normalized...)
+	}
+	return normalized, fastMode
+}
+
 func NormalizeCodexLaunchArgsWithFast(args []string) ([]string, bool) {
 	normalized := make([]string, 0, len(args)+2)
 	wantsBypass := false
@@ -200,6 +208,21 @@ func NormalizeCodexLaunchArgsWithFast(args []string) ([]string, bool) {
 	}
 
 	return normalized, fastMode
+}
+
+func hasCodexExecutionPolicyArg(args []string) bool {
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == CodexBypassFlag, arg == "--full-auto":
+			return true
+		case arg == "--sandbox" || arg == "-s":
+			return true
+		case strings.HasPrefix(arg, "--sandbox="):
+			return true
+		}
+	}
+	return false
 }
 
 func Launch(cwd string, args []string) error {

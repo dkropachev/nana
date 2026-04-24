@@ -317,11 +317,61 @@ func TestImproveRunsScoutPromptAfterOptionSeparator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fake codex args: %v", err)
 	}
+	if !strings.Contains(string(args), "\n"+CodexBypassFlag+"\n") {
+		t.Fatalf("expected default scout launch to bypass Codex sandbox, got:\n%s", args)
+	}
 	if !strings.Contains(string(args), "\n--\n/fast\n\n---\n") {
 		t.Fatalf("expected option separator before frontmatter prompt, got:\n%s", args)
 	}
 	if !strings.Contains(string(args), "\n/fast\n\n---\n") {
 		t.Fatalf("expected --fast to inject /fast before prompt, got:\n%s", args)
+	}
+}
+
+func TestImproveFailsWhenScoutSessionShowsSandboxFailure(t *testing.T) {
+	repo := t.TempDir()
+	home := t.TempDir()
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "codex"), strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`mkdir -p "$CODEX_HOME/sessions/2026/04/24"`,
+		`session_path="$CODEX_HOME/sessions/2026/04/24/rollout-session-scout.jsonl"`,
+		`printf '{"type":"session_meta","payload":{"id":"session-scout","timestamp":"2099-01-01T00:00:00Z","cwd":"%s"}}\n' "$PWD" > "$session_path"`,
+		`printf 'exec_command failed for probe: bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n' >> "$session_path"`,
+		`printf '{"version":1,"repo":"widget","proposals":[]}\n'`,
+	}, "\n"))
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	output, err := captureStdout(t, func() error {
+		return Improve(repo, nil)
+	})
+	if err == nil {
+		t.Fatal("expected scout run to fail when the Codex session shows sandbox denial")
+	}
+	if !strings.Contains(err.Error(), "local Codex sandbox failure") {
+		t.Fatalf("expected sandbox failure error, got %v", err)
+	}
+	if strings.Contains(output, "No grounded proposal(s) found") {
+		t.Fatalf("scout run should not report success after sandbox failure, got %q", output)
+	}
+	matches, globErr := filepath.Glob(filepath.Join(repo, ".nana", "improvements", "improve-*", "manifest.json"))
+	if globErr != nil || len(matches) != 1 {
+		t.Fatalf("expected one scout manifest, matches=%#v err=%v", matches, globErr)
+	}
+	var manifest scoutRunManifest
+	if readErr := readGithubJSON(matches[0], &manifest); readErr != nil {
+		t.Fatalf("read manifest: %v", readErr)
+	}
+	if manifest.Status != "failed" {
+		t.Fatalf("expected failed manifest, got %+v", manifest)
+	}
+	if !strings.Contains(manifest.LastError, "local Codex sandbox failure") {
+		t.Fatalf("expected manifest to preserve sandbox failure, got %+v", manifest)
 	}
 }
 

@@ -1165,7 +1165,7 @@ func runInvestigateCodexPrompt(manifestPath string, manifest investigateManifest
 		return investigateExecutionResult{}, err
 	}
 
-	args, fastMode := normalizeLocalWorkCodexArgsWithFast(codexArgs)
+	args, fastMode := NormalizeCodexBypassArgsWithFast(codexArgs)
 	prompt = prefixCodexFastPrompt(prompt, fastMode)
 	result, err := runManagedCodexPrompt(codexManagedPromptOptions{
 		CommandDir:       manifest.WorkspaceRoot,
