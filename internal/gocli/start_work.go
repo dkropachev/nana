@@ -1672,6 +1672,9 @@ func startWorkPlannedItemDue(item startWorkPlannedItem, now time.Time) bool {
 	if strings.TrimSpace(item.State) != startPlannedItemQueued {
 		return false
 	}
+	if strings.TrimSpace(item.ScheduleAt) == "" {
+		return true
+	}
 	scheduled, ok := startWorkScheduleParsed(item.ScheduleAt)
 	if !ok {
 		return false

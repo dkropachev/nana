@@ -409,7 +409,7 @@ func TestStartRepoCoordinatorPrioritizesHigherPriorityPlannedLaunchTask(t *testi
 	}
 }
 
-func TestStartRepoCoordinatorDoesNotQueueUnscheduledPlannedLaunchTask(t *testing.T) {
+func TestStartRepoCoordinatorQueuesImmediatePlannedLaunchTaskWithoutSchedule(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -450,18 +450,19 @@ func TestStartRepoCoordinatorDoesNotQueueUnscheduledPlannedLaunchTask(t *testing
 	if err := coordinator.syncServiceTasks(); err != nil {
 		t.Fatalf("syncServiceTasks: %v", err)
 	}
-	if len(coordinator.buildServiceQueue()) != 0 {
-		t.Fatalf("expected no planned launch tasks for unscheduled item, got %#v", coordinator.buildServiceQueue())
+	queue := coordinator.buildServiceQueue()
+	if len(queue) != 1 || queue[0].Kind != startTaskKindPlannedLaunch || queue[0].PlannedItemID != "planned-1" {
+		t.Fatalf("expected immediate planned launch task, got %+v", queue)
 	}
 	if _, ok := coordinator.state.ServiceTasks[startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1")]; ok {
-		t.Fatalf("expected stale planned-launch task to be removed, got %+v", coordinator.state.ServiceTasks)
+		t.Fatalf("expected legacy planned-launch task to be removed, got %+v", coordinator.state.ServiceTasks)
 	}
 }
 
-func TestStartWorkPlannedItemDueRequiresExplicitSchedule(t *testing.T) {
+func TestStartWorkPlannedItemDueUsesExecuteAfterSemantics(t *testing.T) {
 	now := time.Now().UTC()
-	if startWorkPlannedItemDue(startWorkPlannedItem{State: startPlannedItemQueued}, now) {
-		t.Fatal("expected unscheduled planned item to stay queued until launched explicitly")
+	if !startWorkPlannedItemDue(startWorkPlannedItem{State: startPlannedItemQueued}, now) {
+		t.Fatal("expected task with empty execute-after to be due immediately")
 	}
 	if startWorkPlannedItemDue(startWorkPlannedItem{State: startPlannedItemQueued, ScheduleAt: "not-a-time"}, now) {
 		t.Fatal("expected invalid schedule to avoid auto-launch")
@@ -502,16 +503,12 @@ func TestStartRepoCoordinatorKeepsManualLaunchingPlannedItemsQueued(t *testing.T
 	if err := coordinator.syncServiceTasks(); err != nil {
 		t.Fatalf("syncServiceTasks: %v", err)
 	}
-	task, ok := coordinator.state.ServiceTasks[startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1")]
-	if !ok {
-		t.Fatalf("expected manual launch to persist a planned-launch task")
-	}
-	if task.Status != startWorkServiceTaskQueued || task.PlannedItemID != "planned-1" {
-		t.Fatalf("unexpected planned-launch task: %+v", task)
+	if _, ok := coordinator.state.ServiceTasks[startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1")]; ok {
+		t.Fatalf("expected launching task recovery to avoid planned-launch service tasks, got %+v", coordinator.state.ServiceTasks)
 	}
 	queue := coordinator.buildServiceQueue()
 	if len(queue) != 1 || queue[0].Key != startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1") {
-		t.Fatalf("expected queued planned-launch task, got %+v", queue)
+		t.Fatalf("expected launching task recovery to requeue the planned item directly, got %+v", queue)
 	}
 }
 
@@ -523,15 +520,7 @@ func TestStartRepoCoordinatorMarkTaskStartedMarksPlannedLaunchRunning(t *testing
 			SourceRepo: "acme/widget",
 			UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
 			Issues:     map[string]startWorkIssueState{},
-			ServiceTasks: map[string]startWorkServiceTask{
-				startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1"): {
-					ID:            startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1"),
-					Kind:          startTaskKindPlannedLaunch,
-					Queue:         startTaskQueueService,
-					Status:        startWorkServiceTaskQueued,
-					PlannedItemID: "planned-1",
-				},
-			},
+			ServiceTasks: map[string]startWorkServiceTask{},
 			PlannedItems: map[string]startWorkPlannedItem{
 				"planned-1": {
 					ID:        "planned-1",
@@ -554,9 +543,9 @@ func TestStartRepoCoordinatorMarkTaskStartedMarksPlannedLaunchRunning(t *testing
 	if err := coordinator.markTaskStarted(task); err != nil {
 		t.Fatalf("markTaskStarted: %v", err)
 	}
-	serviceTask := coordinator.state.ServiceTasks[task.Key]
-	if serviceTask.Status != startWorkServiceTaskRunning || serviceTask.Attempts != 1 {
-		t.Fatalf("expected planned-launch task to be marked running, got %+v", serviceTask)
+	item := coordinator.state.PlannedItems["planned-1"]
+	if item.State != startPlannedItemLaunching || item.ScheduleAt != "" || item.DeferredReason != "" {
+		t.Fatalf("expected planned item to be marked launching, got %+v", item)
 	}
 }
 

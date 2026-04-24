@@ -438,16 +438,15 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 		body, _ := io.ReadAll(launchResponse.Body)
 		t.Fatalf("decode launch payload: %v (status=%d body=%q)", err, launchResponse.StatusCode, body)
 	}
-	if launchPayload.PlannedItem.State != startPlannedItemLaunching || launchPayload.Launch.Status != "queued" {
+	if launchPayload.PlannedItem.State != startPlannedItemQueued || launchPayload.PlannedItem.ScheduleAt != "" || launchPayload.Launch.Status != "queued" {
 		t.Fatalf("unexpected launch payload: %+v", launchPayload)
 	}
 	updatedState, err := readStartWorkState(repoSlug)
 	if err != nil {
 		t.Fatalf("read updated state: %v", err)
 	}
-	task := updatedState.ServiceTasks[startServiceTaskKey(startTaskKindPlannedLaunch, createPayload.PlannedItem.ID)]
-	if task.Status != startWorkServiceTaskQueued || task.PlannedItemID != createPayload.PlannedItem.ID {
-		t.Fatalf("expected queued planned-launch task, got %+v", task)
+	if _, ok := updatedState.ServiceTasks[startServiceTaskKey(startTaskKindPlannedLaunch, createPayload.PlannedItem.ID)]; ok {
+		t.Fatalf("expected launch-now to queue the planned item directly, got %+v", updatedState.ServiceTasks)
 	}
 }
 
@@ -4434,6 +4433,61 @@ func TestWriteStartWorkStateSyncsCanonicalTasks(t *testing.T) {
 	}
 }
 
+func TestWriteStartWorkStateHidesLegacyPlannedLaunchServiceTask(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	now := time.Now().UTC().Format(time.RFC3339)
+	state := startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  now,
+		Issues:     map[string]startWorkIssueState{},
+		ServiceTasks: map[string]startWorkServiceTask{
+			startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1"): {
+				ID:            startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1"),
+				Kind:          startTaskKindPlannedLaunch,
+				Queue:         startTaskQueueService,
+				Status:        startWorkServiceTaskQueued,
+				PlannedItemID: "planned-1",
+				UpdatedAt:     now,
+			},
+		},
+		PlannedItems: map[string]startWorkPlannedItem{"planned-1": {
+			ID:        "planned-1",
+			RepoSlug:  repoSlug,
+			Title:     "One task only",
+			Priority:  2,
+			State:     startPlannedItemQueued,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}},
+		ScoutJobs:      map[string]startWorkScoutJob{},
+		Findings:       map[string]startWorkFinding{},
+		ImportSessions: map[string]startWorkFindingImportSession{},
+	}
+	if err := writeStartWorkState(state); err != nil {
+		t.Fatalf("writeStartWorkState: %v", err)
+	}
+	items, err := withLocalWorkReadStore(func(store *localWorkDBStore) ([]startUITaskSummary, error) {
+		return store.listCanonicalTasksForRepo(repoSlug)
+	})
+	if err != nil {
+		t.Fatalf("listCanonicalTasksForRepo: %v", err)
+	}
+	if !slices.ContainsFunc(items, func(item startUITaskSummary) bool {
+		return item.ID == "planned-item:planned-1" && item.Kind == "planned_item"
+	}) {
+		t.Fatalf("expected canonical planned task in %+v", items)
+	}
+	if slices.ContainsFunc(items, func(item startUITaskSummary) bool {
+		return item.ID == "service-task:" + repoSlug + ":" + startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1")
+	}) {
+		t.Fatalf("expected canonical task list to hide planned-launch service task, got %+v", items)
+	}
+}
+
 func TestEnqueueWorkItemSyncsCanonicalTask(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -6309,12 +6363,11 @@ func TestStartUIPlannedItemLaunchFailureInvalidatesOverviewCache(t *testing.T) {
 		t.Fatalf("read updated state: %v", err)
 	}
 	item := updated.PlannedItems["planned-fail"]
-	if item.State != startPlannedItemLaunching || item.LastError != "" {
+	if item.State != startPlannedItemQueued || item.LastError != "" || item.ScheduleAt != "" {
 		t.Fatalf("expected failed item to requeue for bounded launch, got %+v", item)
 	}
-	task := updated.ServiceTasks[startServiceTaskKey(startTaskKindPlannedLaunch, "planned-fail")]
-	if task.Status != startWorkServiceTaskQueued || task.PlannedItemID != "planned-fail" {
-		t.Fatalf("expected queued planned-launch task, got %+v", task)
+	if _, ok := updated.ServiceTasks[startServiceTaskKey(startTaskKindPlannedLaunch, "planned-fail")]; ok {
+		t.Fatalf("expected failed planned-item launch retry to queue the task directly, got %+v", updated.ServiceTasks)
 	}
 	if startUITestOverviewCacheValid(api) {
 		t.Fatalf("expected failed planned-item launch side effect to invalidate overview cache")

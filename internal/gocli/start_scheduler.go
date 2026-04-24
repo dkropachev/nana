@@ -495,6 +495,11 @@ func (c *startRepoCoordinator) syncServiceTasks() error {
 		dueScoutRoles[role] = true
 	}
 	for key, task := range c.state.ServiceTasks {
+		if task.Kind == startTaskKindPlannedLaunch {
+			delete(c.state.ServiceTasks, key)
+			mutated = true
+			continue
+		}
 		if task.Status == startWorkServiceTaskRunning {
 			if task.Kind == startTaskKindTriage {
 				if _, ok := activeTriageRecovery[startTriageRecoveryOwnerID(c.repoSlug, task.IssueKey)]; ok {
@@ -525,29 +530,6 @@ func (c *startRepoCoordinator) syncServiceTasks() error {
 			task.Generation = c.cycleID
 			c.state.ServiceTasks[key] = task
 			mutated = true
-		}
-		if task.Kind == startTaskKindPlannedLaunch {
-			item, ok := c.state.PlannedItems[task.PlannedItemID]
-			if !ok {
-				delete(c.state.ServiceTasks, key)
-				mutated = true
-				continue
-			}
-			if startWorkPlannedItemLooksScoutDerived(item) {
-				if strings.TrimSpace(item.State) == startPlannedItemLaunching {
-					continue
-				}
-				delete(c.state.ServiceTasks, key)
-				mutated = true
-				continue
-			}
-			if strings.TrimSpace(item.State) == startPlannedItemLaunching {
-				continue
-			}
-			if !startWorkPlannedItemDue(item, nowTime) {
-				delete(c.state.ServiceTasks, key)
-				mutated = true
-			}
 		}
 	}
 	syncTaskID := startServiceTaskKey(startTaskKindIssueSync, c.cycleID)
@@ -612,30 +594,6 @@ func (c *startRepoCoordinator) syncServiceTasks() error {
 			}
 		}
 	}
-	plannedIDs := make([]string, 0, len(c.state.PlannedItems))
-	for itemID := range c.state.PlannedItems {
-		plannedIDs = append(plannedIDs, itemID)
-	}
-	slices.Sort(plannedIDs)
-	for _, itemID := range plannedIDs {
-		item := c.state.PlannedItems[itemID]
-		if startWorkPlannedItemLooksScoutDerived(item) {
-			continue
-		}
-		if strings.TrimSpace(item.State) != startPlannedItemLaunching && !startWorkPlannedItemDue(item, nowTime) {
-			continue
-		}
-		if c.upsertServiceTask(startWorkServiceTask{
-			ID:            startServiceTaskKey(startTaskKindPlannedLaunch, itemID),
-			Kind:          startTaskKindPlannedLaunch,
-			Queue:         startTaskQueueService,
-			Status:        startWorkServiceTaskQueued,
-			PlannedItemID: itemID,
-			Fingerprint:   startWorkPlannedItemFingerprint(item),
-		}, now) {
-			mutated = true
-		}
-	}
 	if mutated {
 		return writeStartWorkStateUnlocked(*c.state)
 	}
@@ -679,7 +637,7 @@ func (c *startRepoCoordinator) upsertServiceTask(desired startWorkServiceTask, n
 }
 
 func (c *startRepoCoordinator) buildServiceQueue() []startRepoTask {
-	if c.state.ServiceTasks == nil {
+	if c.state == nil {
 		return nil
 	}
 	items, err := c.canonicalQueuedRepoTasks()
@@ -688,6 +646,32 @@ func (c *startRepoCoordinator) buildServiceQueue() []startRepoTask {
 	}
 	queue := make([]startRepoTask, 0, len(items))
 	now := time.Now().UTC()
+	recoveryItems := make([]startWorkPlannedItem, 0)
+	for _, item := range c.state.PlannedItems {
+		if startWorkPlannedItemLooksScoutDerived(item) {
+			continue
+		}
+		if strings.TrimSpace(item.State) != startPlannedItemLaunching || strings.TrimSpace(item.LaunchRunID) != "" {
+			continue
+		}
+		taskKey := startServiceTaskKey(startTaskKindPlannedLaunch, item.ID)
+		if c.running[taskKey].Key != "" {
+			continue
+		}
+		recoveryItems = append(recoveryItems, item)
+	}
+	slices.SortFunc(recoveryItems, func(left, right startWorkPlannedItem) int {
+		return compareStartUITaskSummary(startUITaskSummaryFromPlannedItem(left), startUITaskSummaryFromPlannedItem(right))
+	})
+	for _, item := range recoveryItems {
+		queue = append(queue, startRepoTask{
+			Key:           startServiceTaskKey(startTaskKindPlannedLaunch, item.ID),
+			Queue:         startTaskQueueService,
+			Kind:          startTaskKindPlannedLaunch,
+			PlannedItemID: item.ID,
+			PlannedItem:   item,
+		})
+	}
 	for _, item := range items {
 		switch item.Kind {
 		case "service_task":
@@ -730,10 +714,6 @@ func (c *startRepoCoordinator) buildServiceQueue() []startRepoTask {
 			if !ok || strings.TrimSpace(planned.State) != startPlannedItemQueued {
 				continue
 			}
-			taskKey := startServiceTaskKey(startTaskKindPlannedLaunch, itemID)
-			if task, exists := c.state.ServiceTasks[taskKey]; exists && strings.TrimSpace(task.Status) == startWorkServiceTaskQueued {
-				continue
-			}
 			if startWorkPlannedItemLooksScoutDerived(planned) {
 				continue
 			}
@@ -741,7 +721,7 @@ func (c *startRepoCoordinator) buildServiceQueue() []startRepoTask {
 				continue
 			}
 			queue = append(queue, startRepoTask{
-				Key:           taskKey,
+				Key:           startServiceTaskKey(startTaskKindPlannedLaunch, itemID),
 				Queue:         startTaskQueueService,
 				Kind:          startTaskKindPlannedLaunch,
 				PlannedItemID: itemID,
@@ -868,6 +848,11 @@ func (c *startRepoCoordinator) availableWorkerSlots() int {
 			available--
 		}
 	}
+	for _, item := range c.state.PlannedItems {
+		if strings.TrimSpace(item.State) == startPlannedItemLaunching {
+			available--
+		}
+	}
 	return available
 }
 
@@ -958,16 +943,6 @@ func (c *startRepoCoordinator) markTaskStarted(task startRepoTask) error {
 			item.DeferredReason = ""
 			item.UpdatedAt = now
 			c.state.PlannedItems[task.PlannedItemID] = item
-			serviceTask := c.state.ServiceTasks[task.Key]
-			serviceTask.Status = startWorkServiceTaskRunning
-			serviceTask.Attempts++
-			serviceTask.StartedAt = now
-			serviceTask.UpdatedAt = now
-			serviceTask.LastError = ""
-			serviceTask.WaitCycle = ""
-			serviceTask.WaitUntil = ""
-			serviceTask.WaitUntil = ""
-			c.state.ServiceTasks[task.Key] = serviceTask
 			c.serviceStartedCount++
 		default:
 			serviceTask := c.state.ServiceTasks[task.Key]
@@ -1220,19 +1195,9 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 			c.state.ServiceTasks[result.Task.Key] = serviceTask
 			c.refreshState = true
 		case startTaskKindPlannedLaunch:
-			serviceTask := c.state.ServiceTasks[result.Task.Key]
 			item := c.state.PlannedItems[result.Task.PlannedItemID]
 			scoutJobID, scoutJob, scoutJobOK := findScoutJobByLegacyPlannedItemID(c.state, result.Task.PlannedItemID)
 			if pauseErr, ok := isCodexRateLimitPauseError(result.Err); ok {
-				serviceTask.Status = startWorkServiceTaskQueued
-				serviceTask.LastError = codexPauseInfoMessage(pauseErr.Info)
-				serviceTask.ResultSummary = "paused_rate_limit"
-				serviceTask.WaitCycle = ""
-				serviceTask.WaitUntil = strings.TrimSpace(pauseErr.Info.RetryAfter)
-				serviceTask.StartedAt = ""
-				serviceTask.CompletedAt = ""
-				serviceTask.UpdatedAt = now
-				c.state.ServiceTasks[result.Task.Key] = serviceTask
 				item.State = startPlannedItemQueued
 				item.LaunchRunID = defaultString(item.LaunchRunID, result.PlannedLaunch.RunID)
 				item.LastError = codexPauseInfoMessage(pauseErr.Info)
@@ -1251,11 +1216,6 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 				return writeStartWorkStateUnlocked(*c.state)
 			}
 			if result.Err != nil {
-				serviceTask.Status = startWorkServiceTaskFailed
-				serviceTask.LastError = result.Err.Error()
-				serviceTask.CompletedAt = now
-				serviceTask.UpdatedAt = now
-				c.state.ServiceTasks[result.Task.Key] = serviceTask
 				item.State = startPlannedItemFailed
 				item.LastError = result.Err.Error()
 				item.UpdatedAt = now
@@ -1271,12 +1231,6 @@ func (c *startRepoCoordinator) applyTaskResult(result startRepoTaskResult) error
 				}
 				return fmt.Errorf("%s %s: %w", c.repoSlug, result.Task.Key, result.Err)
 			}
-			serviceTask.Status = startWorkServiceTaskCompleted
-			serviceTask.CompletedAt = now
-			serviceTask.UpdatedAt = now
-			serviceTask.ResultSummary = defaultString(result.PlannedLaunch.Status, "launched")
-			serviceTask.RunID = result.PlannedLaunch.RunID
-			c.state.ServiceTasks[result.Task.Key] = serviceTask
 			item.State = startPlannedItemLaunched
 			item.LaunchRunID = result.PlannedLaunch.RunID
 			item.LaunchIssueNumber = result.PlannedLaunch.IssueNumber

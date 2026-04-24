@@ -316,6 +316,9 @@ func collectCanonicalTaskRecordsForRepoState(repoSlug string, state *startWorkSt
 		if strings.TrimSpace(task.Status) == startWorkServiceTaskCompleted {
 			continue
 		}
+		if strings.TrimSpace(task.Kind) == startTaskKindPlannedLaunch {
+			continue
+		}
 		summary := startUITaskSummaryFromServiceTask(repoSlug, state, task)
 		records = append(records, canonicalTaskRecord{
 			Summary:      summary,

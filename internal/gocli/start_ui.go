@@ -7025,22 +7025,6 @@ func findStartUIPlannedItem(itemID string) (string, *startWorkState, startWorkPl
 	return "", nil, startWorkPlannedItem{}, fmt.Errorf("planned item %s was not found", itemID)
 }
 
-func queueStartUIPlannedItemLaunchUnlocked(state *startWorkState, item startWorkPlannedItem, now string) {
-	if state.ServiceTasks == nil {
-		state.ServiceTasks = map[string]startWorkServiceTask{}
-	}
-	taskID := startServiceTaskKey(startTaskKindPlannedLaunch, item.ID)
-	state.ServiceTasks[taskID] = startWorkServiceTask{
-		ID:            taskID,
-		Kind:          startTaskKindPlannedLaunch,
-		Queue:         startTaskQueueService,
-		Status:        startWorkServiceTaskQueued,
-		PlannedItemID: item.ID,
-		Fingerprint:   startWorkPlannedItemFingerprint(item),
-		UpdatedAt:     now,
-	}
-}
-
 func launchStartUIPlannedItemNow(repoSlug string, state *startWorkState, item startWorkPlannedItem) (*startWorkState, startWorkPlannedItem, startPlannedLaunchResult, error) {
 	startWorkStateFileMu.Lock()
 	defer startWorkStateFileMu.Unlock()
@@ -7053,8 +7037,10 @@ func launchStartUIPlannedItemNow(repoSlug string, state *startWorkState, item st
 		return nil, startWorkPlannedItem{}, startPlannedLaunchResult{}, fmt.Errorf("planned item %s is not launchable from state %s", item.ID, freshItem.State)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	freshItem.State = startPlannedItemLaunching
+	freshItem.State = startPlannedItemQueued
 	freshItem.LastError = ""
+	freshItem.ScheduleAt = ""
+	freshItem.DeferredReason = ""
 	freshItem.LaunchRunID = ""
 	freshItem.LaunchIssueURL = ""
 	freshItem.LaunchIssueNumber = 0
@@ -7062,7 +7048,6 @@ func launchStartUIPlannedItemNow(repoSlug string, state *startWorkState, item st
 	freshItem.UpdatedAt = now
 	freshState.PlannedItems[item.ID] = freshItem
 	freshState.UpdatedAt = now
-	queueStartUIPlannedItemLaunchUnlocked(freshState, freshItem, now)
 	if err := writeStartWorkStateUnlocked(*freshState); err != nil {
 		return nil, startWorkPlannedItem{}, startPlannedLaunchResult{}, err
 	}
