@@ -3871,7 +3871,7 @@ func TestStartUIAppInvestigationDeepLinksSupportLegacyTaskAlias(t *testing.T) {
 		`params.set("task", state.investigations.selectedRunID);`,
 		`const hasTaskSelection = params.has("task") || params.has("investigation");`,
 		`syncHashState();`,
-		`<h3>Investigation Detail</h3>`,
+		`<h3>Task Detail</h3>`,
 		`<h3>Detailed Explanation</h3>`,
 	} {
 		if !strings.Contains(content, needle) {
