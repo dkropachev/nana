@@ -36,6 +36,8 @@
     scoutItems: defaultScoutItemsState(),
     taskFindings: defaultTaskFindingsState(),
     findingImports: defaultFindingImportsState(),
+    taskDetailModal: null,
+    taskScheduleModal: null,
     workItemDrawer: null,
     workItemSelection: defaultWorkItemSelection(),
     issueQueue: defaultIssueQueueState(),
@@ -59,6 +61,14 @@
     { id: "tomorrow", title: "Tomorrow", copy: "Schedules the issue for tomorrow at 09:00 local time." },
     { id: "next-week", title: "Next Week", copy: "Schedules the issue for next Monday at 09:00 local time." },
     { id: "later", title: "Later", copy: "Schedules the issue two weeks out at 09:00 local time." },
+  ];
+
+  const TASK_STATUS_GROUPS = [
+    { id: "failed", title: "Failed", copy: "Runs and tasks that need intervention or a rerun." },
+    { id: "blocked", title: "Blocked", copy: "Work waiting on approvals, review, or external state." },
+    { id: "active", title: "Active", copy: "Currently running or actively being processed." },
+    { id: "queued", title: "Queued", copy: "Ready to run once capacity is available." },
+    { id: "completed", title: "Completed", copy: "Finished, dismissed, or otherwise out of the active lane." },
   ];
 
   function defaultLogSelection() {
@@ -224,6 +234,7 @@
       title: "",
       description: "",
       scheduleAt: "",
+      runMode: "now",
       templateID: "template:custom",
       idempotencyKey: nextTaskComposerIdempotencyKey(),
       creating: false,
@@ -1033,6 +1044,10 @@
     return String(template.scout_prompt_preview || "").trim();
   }
 
+  function taskComposerCanSavePreset(template) {
+    return !template || defaultString(template.id, "template:custom") === "template:custom";
+  }
+
   function taskTemplateHelpText(template) {
     if (!template) return "";
     return defaultString(taskTemplateScoutPromptPreview(template), String(template.description || "").trim());
@@ -1222,10 +1237,6 @@
       repoSlug: defaultString(repoSlug, ""),
       repoTab: defaultString(repoTab, "overview"),
     };
-    if (normalized.view === "repo" && normalized.repoTab === "findings") {
-      normalized.view = "investigations";
-      normalized.repoTab = "overview";
-    }
     if (normalized.view !== "repo") {
       normalized.repoTab = "overview";
     }
@@ -2232,24 +2243,14 @@
     if (state.currentView === "investigations") {
       renderInvestigationsPage();
     }
-    return api("/api/v1/investigations").then((payload) => {
+    return api("/api/v1/tasks").then((payload) => {
       state.investigations.items = payload.items || [];
       state.investigations.loading = false;
       state.investigations.loaded = true;
       state.investigations.error = "";
-      const explicitSelection = investigationSelectionFromHash();
-      if (!state.investigations.selectedRunID || !state.investigations.items.some((item) => item.run_id === state.investigations.selectedRunID)) {
-        if (explicitSelection) {
-          state.investigations.selectedRunID = explicitSelection;
-        } else {
-          state.investigations.selectedRunID = state.investigations.items[0] ? state.investigations.items[0].run_id : "";
-          syncHashState();
-        }
+      if (state.investigations.selectedRunID && !state.investigations.items.some((item) => item.id === state.investigations.selectedRunID)) {
+        state.investigations.selectedRunID = "";
       }
-      if (state.investigations.selectedRunID) {
-        return loadInvestigationDetail(state.investigations.selectedRunID, { silent: true });
-      }
-      state.investigations.detail = null;
       if (state.currentView === "investigations") {
         renderInvestigationsPage();
       }
@@ -2266,43 +2267,41 @@
   }
 
   function loadInvestigationDetail(runID, options = {}) {
-    if (!runID) {
-      state.investigations.selectedRunID = "";
+    const taskID = defaultString(runID, state.investigations.selectedRunID);
+    if (!taskID) {
       state.investigations.detail = null;
-      state.investigations.detailLoading = false;
-      state.investigations.error = "";
-      syncHashState();
       if (state.currentView === "investigations") {
         renderInvestigationsPage();
       }
       return Promise.resolve();
     }
-    state.investigations.selectedRunID = runID;
-    state.investigations.detail = null;
-    state.investigations.detailLoading = true;
-    state.investigations.error = "";
+    state.investigations.selectedRunID = taskID;
     syncHashState();
+    state.investigations.detailLoading = true;
+    if (!options.silent) {
+      state.investigations.error = "";
+    }
     if (state.currentView === "investigations") {
       renderInvestigationsPage();
     }
-    return api(`/api/v1/investigations/${encodeURIComponent(runID)}`).then((payload) => {
-      if (state.investigations.selectedRunID !== runID) return;
+    return api(`/api/v1/tasks/${encodeURIComponent(taskID)}`).then((payload) => {
+      if (state.investigations.selectedRunID !== taskID) return;
       state.investigations.detail = payload;
       state.investigations.detailLoading = false;
-      state.investigations.error = "";
+      renderTaskDetailModal();
       if (state.currentView === "investigations") {
         renderInvestigationsPage();
       }
     }).catch((error) => {
-      if (state.investigations.selectedRunID !== runID) return;
-      state.investigations.detail = null;
+      if (state.investigations.selectedRunID !== taskID) return;
       state.investigations.detailLoading = false;
       state.investigations.error = error.message;
+      renderTaskDetailModal();
       if (state.currentView === "investigations") {
         renderInvestigationsPage();
       }
       if (!options.silent) {
-        toast("danger", "Investigation detail failed", error.message);
+        toast("danger", "Task detail failed", error.message);
       }
     });
   }
@@ -4838,38 +4837,33 @@
     `;
   }
 
-  const MISSION_STATUS_GROUPS = [
-    { id: "failed", title: "Failed", copy: "Runs and tasks that need intervention or a rerun." },
-    { id: "blocked", title: "Blocked", copy: "Work waiting on approvals, review, or external state." },
-    { id: "active", title: "Active", copy: "Currently running or actively being processed." },
-    { id: "queued", title: "Queued", copy: "Ready to run once capacity is available." },
-    { id: "completed", title: "Completed", copy: "Finished, dismissed, or otherwise out of the active lane." },
-  ];
+  function taskStatusLabel(status) {
+    const value = defaultString(status, "");
+    if (!value) return "Queued";
+    return value.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
+  }
 
-  function missionTaskStatusTone(item) {
-    const attention = defaultString(item && item.attention_state, "");
-    switch (attention) {
-      case "failed":
-        return "failed";
-      case "blocked":
-        return "blocked";
-      case "completed":
-        return "completed";
+  function taskStatusTone(status) {
+    switch (defaultString(status, "")) {
+      case "running":
       case "active":
         return "active";
+      case "failed":
+        return "failed";
+      case "paused":
+      case "in_review":
+      case "blocked":
+        return "blocked";
+      case "dismissed":
+      case "completed":
+        return "completed";
       default:
         return "queued";
     }
   }
 
-  function missionTaskStatusLabel(item) {
-    const raw = defaultString(item && item.raw_status, defaultString(item && item.status, ""));
-    if (!raw) return "Queued";
-    return raw.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
-  }
-
-  function missionItemsForStatus(items, status) {
-    return (items || []).filter((item) => defaultString(item && item.attention_state, "") === status);
+  function taskItemsForStatus(items, status) {
+    return (items || []).filter((item) => defaultString(item && item.attention_state, defaultString(item && item.status, "")) === status);
   }
 
   function taskTypeLabel(value) {
@@ -4915,7 +4909,7 @@
   function renderTaskToolbar(items) {
     const filter = filterState("investigations");
     const activeCount = activeTaskFilterCount(filter);
-    const statusOptions = [{ id: "all", title: "All states" }, ...MISSION_STATUS_GROUPS].map((option) => {
+    const statusOptions = [{ id: "all", title: "All states" }, ...TASK_STATUS_GROUPS].map((option) => {
       const selected = filter.status === option.id ? "selected" : "";
       return `<option value="${escapeHTML(option.id)}" ${selected}>${escapeHTML(option.title)}</option>`;
     }).join("");
@@ -4927,7 +4921,7 @@
       .concat(taskRepoOptions(items).map((repo) => `<option value="${escapeHTML(repo)}" ${filter.repo === repo ? "selected" : ""}>${escapeHTML(repo)}</option>`))
       .join("");
     const chips = [
-      taskFilterChip("Status", MISSION_STATUS_GROUPS.find((item) => item.id === filter.status)?.title || "", "status"),
+      taskFilterChip("Status", TASK_STATUS_GROUPS.find((item) => item.id === filter.status)?.title || "", "status"),
       taskFilterChip("Type", filter.kind !== "all" ? taskTypeLabel(filter.kind) : "", "kind"),
       taskFilterChip("Repo", filter.repo, "repo"),
       taskFilterChip("", String(filter.query || "").trim(), "query"),
@@ -4953,7 +4947,7 @@
           </label>
           <span class="mission-filter-count">${activeCount ? `${activeCount} active` : "No filters"}</span>
           ${activeCount ? `<button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-task-filter-clear="all">Clear</button>` : ""}
-          <button class="tx-btn tx-btn-secondary mission-add-button" type="button" data-task-feed-jump="schedule">Schedule</button>
+          <button id="open-task-schedule-button" class="tx-btn tx-btn-primary mission-add-button" type="button">+ Task</button>
         </div>
         ${chips ? `<div class="mission-filter-chips">${chips}</div>` : ""}
       </section>
@@ -4961,8 +4955,8 @@
   }
 
   function taskStatusStrip(items) {
-    return MISSION_STATUS_GROUPS.map((group) => {
-      const count = missionItemsForStatus(items, group.id).length;
+    return TASK_STATUS_GROUPS.map((group) => {
+      const count = taskItemsForStatus(items, group.id).length;
       return `
         <button class="mission-status-chip ${filterState("investigations").status === group.id ? "mission-status-chip-active" : ""}" type="button" data-task-status-filter="${escapeHTML(group.id)}">
           <span>${escapeHTML(group.title)}</span>
@@ -4973,54 +4967,56 @@
   }
 
   function taskPrimaryActionLabel(item) {
-    if (item && item.can_open_job && item.run_id) return "Open Job";
-    switch (defaultString(item && item.kind, "")) {
-      case "work_item":
-        return "Open Draft";
-      case "scout_job":
-        return "Open Repo";
-      case "planned_item":
-        return "View Queue";
-      case "investigation":
-        return "View Detail";
+    if (item && item.can_open_job) return "Open Job";
+    switch (defaultString(item && item.status, "")) {
+      case "running":
+        return "Logs";
+      case "blocked":
+        return "Resolve";
+      case "queued":
+        return "Details";
+      case "in_review":
+        return "Review";
       default:
-        return "Open";
+        return "Details";
     }
   }
 
   function renderTaskFeedRow(item) {
-    const selected = defaultString(item.run_id, item.id) === state.investigations.selectedRunID;
+    const selected = item.id === state.investigations.selectedRunID;
     const repo = defaultString(item.repo_slug, "Workspace");
     const priority = defaultString(item.priority_label, "P3");
     const kind = taskTypeLabel(item.kind);
     const schedule = item.schedule_at ? `scheduled ${formatDateTime(item.schedule_at)}` : `updated ${formatDateTime(item.updated_at)}`;
     const summary = defaultString(item.summary, item.description || "No summary recorded.");
-    const reference = defaultString(item.run_id, item.id);
     return `
       <button class="mission-task-row ${selected ? "mission-task-row-selected" : ""}" type="button" data-task-open="${escapeHTML(item.id)}">
         <span class="mission-task-priority">${escapeHTML(priority)}</span>
         <span class="mission-task-type">${escapeHTML(kind)}</span>
         <span class="mission-task-copy">
           <strong>${escapeHTML(defaultString(item.title, item.id))}</strong>
-          <span class="mission-task-reference">${escapeHTML(reference)}</span>
+          <span>${escapeHTML(repo)} · ${escapeHTML(schedule)}</span>
           <em>${escapeHTML(summary)}</em>
         </span>
-        ${renderStatePill(missionTaskStatusTone(item), missionTaskStatusLabel(item))}
-        <span class="mission-task-meta">${escapeHTML(repo)} · ${escapeHTML(schedule)} · ${escapeHTML(taskPrimaryActionLabel(item))}</span>
+        <span class="mission-task-action">
+          <span>${escapeHTML(taskPrimaryActionLabel(item))} ›</span>
+          ${renderStatePill(taskStatusTone(defaultString(item.raw_status, item.status)), taskStatusLabel(defaultString(item.raw_status, item.status)))}
+          ${item.run_id ? `<small>${escapeHTML(item.run_id)}</small>` : ""}
+        </span>
       </button>
     `;
   }
 
   function renderTaskFeed(items) {
-    const groups = MISSION_STATUS_GROUPS.map((group) => ({
+    const groups = TASK_STATUS_GROUPS.map((group) => ({
       ...group,
-      items: missionItemsForStatus(items, group.id),
+      items: taskItemsForStatus(items, group.id),
     })).filter((group) => group.items.length);
     if (!groups.length) {
       return `
         <section class="mission-empty-state">
           <h3>No tasks match these filters.</h3>
-          <p>Clear filters or adjust the selected repo to widen the feed.</p>
+          <p>Clear filters or schedule a new task from the toolbar.</p>
         </section>
       `;
     }
@@ -5038,221 +5034,505 @@
     `).join("");
   }
 
+  function taskDetailSourceMarkup(detail) {
+    if (!detail || !detail.summary) {
+      return '<div class="status-pill">Task detail is unavailable.</div>';
+    }
+    if (detail.work_run) {
+      const run = detail.work_run;
+      return `
+        <div class="queue-summary">
+          <article class="queue-item"><span class="queue-label">Phase</span><p class="queue-copy">${escapeHTML(defaultString(run.summary.current_phase, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Backend</span><p class="queue-copy">${escapeHTML(defaultString(run.summary.backend, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Target</span><p class="queue-copy">${escapeHTML(defaultString(run.summary.target_url, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Next Action</span><p class="queue-copy">${escapeHTML(defaultString(run.next_action, "(none)"))}</p></article>
+        </div>
+      `;
+    }
+    if (detail.work_item && detail.work_item.item) {
+      const item = detail.work_item.item;
+      return `
+        <div class="queue-summary">
+          <article class="queue-item"><span class="queue-label">Source</span><p class="queue-copy">${escapeHTML(defaultString(item.source, "-"))}/${escapeHTML(defaultString(item.source_kind, "-"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Target</span><p class="queue-copy">${escapeHTML(defaultString(item.target_url, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Draft</span><p class="queue-copy">${escapeHTML(defaultString(item.latest_draft && item.latest_draft.summary, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Body</span><p class="queue-copy">${escapeHTML(defaultString(item.body, "(none)"))}</p></article>
+        </div>
+      `;
+    }
+    if (detail.investigation && detail.investigation.summary) {
+      const item = detail.investigation.summary;
+      return `
+        <div class="queue-summary">
+          <article class="queue-item"><span class="queue-label">Query</span><p class="queue-copy">${escapeHTML(defaultString(item.query, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Result</span><p class="queue-copy">${escapeHTML(defaultString(item.overall_status, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Proofs</span><p class="queue-copy">${escapeHTML(defaultString(item.proof_count, 0))}</p></article>
+          <article class="queue-item"><span class="queue-label">Validator</span><p class="queue-copy">${escapeHTML(defaultString(detail.investigation.latest_validator_result && detail.investigation.latest_validator_result.accepted ? "accepted" : "", detail.investigation.latest_validator_result ? "rejected" : "(none)"))}</p></article>
+        </div>
+      `;
+    }
+    if (detail.planned_item) {
+      const item = detail.planned_item;
+      return `
+        <div class="queue-summary">
+          <article class="queue-item"><span class="queue-label">Launch Kind</span><p class="queue-copy">${escapeHTML(defaultString(item.launch_kind, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Description</span><p class="queue-copy">${escapeHTML(defaultString(item.description, "(none)"))}</p></article>
+          ${item.investigation_query ? `<article class="queue-item"><span class="queue-label">Investigation Query</span><p class="queue-copy">${escapeHTML(item.investigation_query)}</p></article>` : ""}
+          ${item.scout_role ? `<article class="queue-item"><span class="queue-label">Scout Role</span><p class="queue-copy">${escapeHTML(item.scout_role)}</p></article>` : ""}
+          ${item.last_error ? `<article class="queue-item"><span class="queue-label">Last Error</span><p class="queue-copy">${escapeHTML(item.last_error)}</p></article>` : ""}
+        </div>
+      `;
+    }
+    if (detail.issue) {
+      const item = detail.issue;
+      return `
+        <div class="queue-summary">
+          <article class="queue-item"><span class="queue-label">Issue</span><p class="queue-copy">${escapeHTML(defaultString(item.source_url, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Triage</span><p class="queue-copy">${escapeHTML(defaultString(item.triage_rationale, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Blocked Reason</span><p class="queue-copy">${escapeHTML(defaultString(item.blocked_reason, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Priority Source</span><p class="queue-copy">${escapeHTML(defaultString(item.priority_source, "(none)"))}</p></article>
+        </div>
+      `;
+    }
+    if (detail.scout_job) {
+      const item = detail.scout_job;
+      return `
+        <div class="queue-summary">
+          <article class="queue-item"><span class="queue-label">Role</span><p class="queue-copy">${escapeHTML(defaultString(item.role, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Summary</span><p class="queue-copy">${escapeHTML(defaultString(item.summary, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Evidence</span><p class="queue-copy">${escapeHTML(defaultString(item.evidence, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Last Error</span><p class="queue-copy">${escapeHTML(defaultString(item.last_error, "(none)"))}</p></article>
+        </div>
+      `;
+    }
+    if (detail.service_task) {
+      const item = detail.service_task;
+      return `
+        <div class="queue-summary">
+          <article class="queue-item"><span class="queue-label">Kind</span><p class="queue-copy">${escapeHTML(defaultString(item.kind, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Queue</span><p class="queue-copy">${escapeHTML(defaultString(item.queue, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Last Error</span><p class="queue-copy">${escapeHTML(defaultString(item.last_error, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Result</span><p class="queue-copy">${escapeHTML(defaultString(item.result_summary, "(none)"))}</p></article>
+        </div>
+      `;
+    }
+    return '<div class="status-pill">No source detail is available for this task.</div>';
+  }
+
+  function taskDetailStartedAt(detail) {
+    if (detail && detail.related_run && detail.related_run.started_at) {
+      return detail.related_run.started_at;
+    }
+    if (detail && detail.work_run && detail.work_run.started_at) {
+      return detail.work_run.started_at;
+    }
+    if (detail && detail.summary && detail.summary.created_at) {
+      return detail.summary.created_at;
+    }
+    if (detail && detail.investigation && detail.investigation.summary && detail.investigation.summary.created_at) {
+      return detail.investigation.summary.created_at;
+    }
+    return "";
+  }
+
+  function taskDetailTokens(detail) {
+    if (detail && detail.related_run && detail.related_run.has_token_usage) {
+      return {
+        total: Number(detail.related_run.total_tokens || 0),
+        sessions: Number(detail.related_run.sessions_accounted || 0),
+      };
+    }
+    if (detail && detail.work_run && detail.work_run.has_token_usage) {
+      return {
+        total: Number(detail.work_run.total_tokens || 0),
+        sessions: Number(detail.work_run.sessions_accounted || 0),
+      };
+    }
+    return null;
+  }
+
+  function syncTaskDetailModalState() {
+    const taskID = defaultString(state.investigations.selectedRunID, "");
+    if (state.currentView !== "investigations" || !taskID) {
+      if (state.taskDetailModal && state.taskDetailModal.isOpen()) {
+        state.taskDetailModal.close();
+      }
+      return;
+    }
+    initTaskDetailModal();
+    renderTaskDetailModal();
+    if (!state.taskDetailModal.isOpen()) {
+      state.taskDetailModal.open();
+    }
+    const currentDetailID = defaultString(state.investigations.detail && state.investigations.detail.summary && state.investigations.detail.summary.id, "");
+    if (currentDetailID === taskID || state.investigations.detailLoading) {
+      return;
+    }
+    state.investigations.detail = null;
+    state.investigations.detailLoading = true;
+    renderTaskDetailModal();
+    loadInvestigationDetail(taskID, { silent: true });
+  }
+
+  function taskDetailOpenButtons(detail, summary) {
+    if (!detail || !summary) return [];
+    const buttons = [];
+    const runID = defaultString(summary.run_id, defaultString(detail.related_run && detail.related_run.summary && detail.related_run.summary.run_id, ""));
+    if (runID) {
+      buttons.push(`<button class="tx-btn tx-btn-secondary" type="button" data-task-open-job="${escapeHTML(runID)}">Open Job</button>`);
+    }
+    if (summary.kind === "work_item" && detail.work_item && detail.work_item.item) {
+      buttons.push(`<button class="tx-btn tx-btn-secondary" type="button" data-work-item-show="${escapeHTML(detail.work_item.item.id)}">Open Draft</button>`);
+    }
+    return buttons;
+  }
+
+  function taskDetailActionButtons(detail, summary) {
+    if (!detail || !summary) return [];
+    const actions = [];
+    if (summary.kind === "work_run" && detail.work_run && detail.work_run.summary) {
+      const runID = defaultString(detail.work_run.summary.run_id, "");
+      if (!runID) return actions;
+      if (detail.work_run.rerun_allowed) {
+        actions.push(`<button class="tx-btn tx-btn-secondary" type="button" data-run-rerun="${escapeHTML(runID)}">Re-run</button>`);
+      }
+      actions.push(`<button class="tx-btn tx-btn-secondary" type="button" data-run-drop="${escapeHTML(runID)}">Drop Run</button>`);
+      return actions;
+    }
+    if (summary.kind === "planned_item" && detail.planned_item && ["queued", "failed"].includes(defaultString(detail.planned_item.state, ""))) {
+      actions.push(`<button class="tx-btn tx-btn-primary" type="button" data-task-action="run-now" data-task-id="${escapeHTML(summary.id)}">Run Now</button>`);
+      actions.push(`<button class="tx-btn tx-btn-secondary" type="button" data-task-action="dismiss" data-task-id="${escapeHTML(summary.id)}">Dismiss</button>`);
+      return actions;
+    }
+    if (summary.kind === "work_item" && detail.work_item && detail.work_item.item) {
+      const item = detail.work_item.item;
+      const status = defaultString(item.status, "");
+      if (["queued", "failed", "needs_routing"].includes(status)) {
+        actions.push(`<button class="tx-btn tx-btn-primary" type="button" data-task-action="run-now" data-task-id="${escapeHTML(summary.id)}">Run Now</button>`);
+      }
+      if (status === "paused") {
+        actions.push(`<button class="tx-btn tx-btn-secondary" type="button" data-task-action="retry" data-task-id="${escapeHTML(summary.id)}">Retry</button>`);
+      }
+      if (!item.hidden && !["submitted", "dropped", "silenced"].includes(status)) {
+        actions.push(`<button class="tx-btn tx-btn-secondary" type="button" data-task-action="dismiss" data-task-id="${escapeHTML(summary.id)}">Dismiss</button>`);
+      }
+      return actions;
+    }
+    if (summary.kind === "scout_job" && detail.scout_job) {
+      if (detail.scout_job.status === "failed" || detail.scout_job.status === "dismissed") {
+        actions.push(`<button class="tx-btn tx-btn-secondary" type="button" data-task-action="retry" data-task-id="${escapeHTML(summary.id)}">Retry</button>`);
+      }
+      if (detail.scout_job.status === "queued" || detail.scout_job.status === "failed") {
+        actions.push(`<button class="tx-btn tx-btn-secondary" type="button" data-task-action="dismiss" data-task-id="${escapeHTML(summary.id)}">Dismiss</button>`);
+      }
+      return actions;
+    }
+    return actions;
+  }
+
+  function renderTaskDetailActionMenu(detail, summary) {
+    const actions = taskDetailActionButtons(detail, summary);
+    if (!actions.length) return "";
+    return `
+      <details class="drawer-action-menu">
+        <summary class="tx-btn tx-btn-secondary drawer-action-menu-summary">Actions</summary>
+        <div class="drawer-action-menu-body">
+          ${actions.join("")}
+        </div>
+      </details>
+    `;
+  }
+
+  function renderTaskDetailModal() {
+    const host = document.getElementById("task-detail-modal-content");
+    if (!host) return;
+    const detail = state.investigations.detail;
+    if (!state.investigations.selectedRunID) {
+      host.innerHTML = '<div class="log-empty">Choose a task to inspect it.</div>';
+      return;
+    }
+    if (state.investigations.detailLoading && !detail) {
+      host.innerHTML = '<div class="log-empty">Loading task detail...</div>';
+      return;
+    }
+    if (state.investigations.error && !detail) {
+      host.innerHTML = `<div class="log-empty">${escapeHTML(state.investigations.error)}</div>`;
+      return;
+    }
+    if (!detail || !detail.summary) {
+      host.innerHTML = '<div class="log-empty">Task detail is unavailable.</div>';
+      return;
+    }
+    const summary = detail.summary;
+    const startedAt = taskDetailStartedAt(detail);
+    const tokenUsage = taskDetailTokens(detail);
+    const taskReference = defaultString(summary.id, "Not available");
+    const tokenValue = tokenUsage
+      ? `${formatTokenCompact(tokenUsage.total)}${tokenUsage.sessions > 0 ? ` · ${tokenUsage.sessions} session${tokenUsage.sessions === 1 ? "" : "s"}` : ""}`
+      : "Not available";
+    const actionButtons = taskDetailOpenButtons(detail, summary);
+    const actionMenuMarkup = renderTaskDetailActionMenu(detail, summary);
+    host.innerHTML = `
+      <div class="drawer-summary">
+        <div>
+          <span class="drawer-label">${escapeHTML(defaultString(summary.kind, "task").replace(/_/g, " "))}</span>
+          <span class="drawer-value">${escapeHTML(defaultString(summary.title, summary.id))}</span>
+          <p class="drawer-copy">${escapeHTML(defaultString(summary.repo_slug, "Workspace"))}</p>
+        </div>
+        <div class="drawer-summary-grid">
+          <div class="drawer-summary-card">
+            <span class="drawer-label">Status</span>
+            <span class="drawer-value">${renderStatePill(taskStatusTone(summary.status), taskStatusLabel(defaultString(summary.status, "queued")))}</span>
+          </div>
+          <div class="drawer-summary-card">
+            <span class="drawer-label">Priority</span>
+            <span class="drawer-value">${escapeHTML(defaultString(summary.priority_label, "P3"))}</span>
+          </div>
+          <div class="drawer-summary-card">
+            <span class="drawer-label">Updated</span>
+            <span class="drawer-value">${escapeHTML(formatDateTime(summary.updated_at))}</span>
+          </div>
+          <div class="drawer-summary-card">
+            <span class="drawer-label">Task Start</span>
+            <span class="drawer-value">${escapeHTML(defaultString(startedAt ? formatDateTime(startedAt) : "", "Not started"))}</span>
+          </div>
+          <div class="drawer-summary-card">
+            <span class="drawer-label">Scheduled</span>
+            <span class="drawer-value">${escapeHTML(defaultString(summary.schedule_at ? formatDateTime(summary.schedule_at) : "", "Now"))}</span>
+          </div>
+          <div class="drawer-summary-card">
+            <span class="drawer-label">Token Spend</span>
+            <span class="drawer-value">${escapeHTML(tokenValue)}</span>
+          </div>
+          <div class="drawer-summary-card">
+            <span class="drawer-label">Reference</span>
+            <span class="drawer-value">${escapeHTML(taskReference)}</span>
+          </div>
+        </div>
+      </div>
+      ${actionButtons.length || actionMenuMarkup ? `<div class="drawer-toolbar">${actionButtons.join("")}${actionMenuMarkup}</div>` : ""}
+      <div class="surface">
+        <div class="surface-head">
+          <div>
+            <h3>Task Detail</h3>
+            <p>${escapeHTML(defaultString(summary.summary, summary.description || "No task summary recorded."))}</p>
+          </div>
+        </div>
+        ${taskDetailSourceMarkup(detail)}
+      </div>
+    `;
+  }
+
+  function initTaskDetailModal() {
+    if (state.taskDetailModal) return;
+    state.taskDetailModal = Teryx.modal({
+      title: "Task Detail",
+      size: "xl",
+      maximizable: true,
+      width: "min(1120px, 92vw)",
+      content: '<div id="task-detail-modal-content" class="drawer-shell"></div>',
+      onClose() {
+        state.investigations.selectedRunID = "";
+        state.investigations.detail = null;
+        state.investigations.detailLoading = false;
+        syncHashState();
+        if (state.currentView === "investigations") {
+          renderInvestigationsPage();
+        } else {
+          renderAppPreservingDraftFocus();
+        }
+        renderTaskDetailModal();
+      },
+    });
+  }
+
+  function openTaskDetailModal(taskID) {
+    state.investigations.selectedRunID = taskID;
+    syncHashState();
+    if (state.currentView === "investigations") {
+      renderInvestigationsPage();
+    }
+    syncTaskDetailModalState();
+  }
+
+  function renderTaskScheduleModal() {
+    const host = document.getElementById("task-schedule-modal-content");
+    if (!host) return;
+    const repos = sortedRepos();
+    const composerRepo = selectedTaskComposerRepoSummary();
+    const selectedTemplate = selectedTaskTemplate();
+    const runMode = defaultString(state.taskComposer.runMode, state.taskComposer.scheduleAt ? "later" : "now");
+    const scoutPromptPreview = taskTemplateScoutPromptPreview(selectedTemplate);
+    const descriptionValue = scoutPromptPreview || state.taskComposer.description;
+    const canSavePreset = taskComposerCanSavePreset(selectedTemplate);
+    host.innerHTML = `
+      <div class="mission-schedule-modal">
+        <div class="config-grid task-composer-controls">
+          <label class="config-field">
+            <span class="config-label">Repo</span>
+            <select id="task-composer-repo">
+              ${repos.map((entry) => `<option value="${escapeHTML(entry.repo_slug)}" ${composerRepo && composerRepo.repo_slug === entry.repo_slug ? "selected" : ""}>${escapeHTML(entry.repo_slug)}</option>`).join("")}
+            </select>
+          </label>
+          <label class="config-field">
+            <span class="config-label">Preset</span>
+            <select id="task-composer-template">
+              ${(state.investigations.templates || []).map((template) => `<option value="${escapeHTML(template.id)}" ${selectedTemplate && selectedTemplate.id === template.id ? "selected" : ""}>${escapeHTML(template.name)}</option>`).join("")}
+            </select>
+          </label>
+          <label class="config-field">
+            <span class="config-label">Priority</span>
+            <select id="task-composer-priority">
+              ${[0, 1, 2, 3, 4, 5].map((priority) => `<option value="${priority}" ${String(state.taskComposer.priority) === String(priority) ? "selected" : ""}>${escapeHTML(`P${priority}`)}</option>`).join("")}
+            </select>
+          </label>
+          <label class="config-field">
+            <span class="config-label">Run</span>
+            <select id="task-composer-run-mode">
+              <option value="now" ${runMode === "now" ? "selected" : ""}>Now</option>
+              <option value="later" ${runMode === "later" ? "selected" : ""}>Later</option>
+            </select>
+          </label>
+          <label class="config-field ${runMode === "later" ? "" : "task-run-at-hidden"}">
+            <span class="config-label">Run At</span>
+            <input id="task-composer-schedule" type="datetime-local" value="${escapeHTML(state.taskComposer.scheduleAt)}" />
+          </label>
+        </div>
+        <label class="config-field config-field-wide task-composer-description-field">
+          <span class="config-label">Description</span>
+          <textarea id="task-composer-description" rows="6" placeholder="Investigate why the task repo filter sometimes appears empty, then patch the UI if needed." ${scoutPromptPreview ? "readonly" : ""}>${escapeHTML(descriptionValue)}</textarea>
+        </label>
+        <div class="drawer-toolbar">
+          <button class="tx-btn tx-btn-secondary" type="button" data-task-schedule-close="true">Cancel</button>
+          <button id="task-save-template-button" class="tx-btn tx-btn-secondary" type="button" ${state.taskComposer.savingTemplate || !composerRepo || !canSavePreset ? "disabled" : ""}>${state.taskComposer.savingTemplate ? "Saving..." : "Save As Preset"}</button>
+          <button id="task-schedule-button" class="tx-btn tx-btn-primary" type="button" ${state.taskComposer.creating || !composerRepo ? "disabled" : ""}>${state.taskComposer.creating ? "Scheduling..." : "Schedule Task"}</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function initTaskScheduleModal() {
+    if (state.taskScheduleModal) return;
+    state.taskScheduleModal = Teryx.modal({
+      title: "Schedule Task",
+      size: "lg",
+      width: "min(760px, 92vw)",
+      bodyClass: "mission-schedule-modal-body",
+      content: '<div id="task-schedule-modal-content" class="drawer-shell"></div>',
+    });
+  }
+
+  function openTaskScheduleModal() {
+    initTaskScheduleModal();
+    selectedTaskComposerRepoSummary();
+    renderTaskScheduleModal();
+    state.taskScheduleModal.open();
+  }
+
+  function submitTaskSchedule() {
+    const repo = selectedTaskComposerRepoSummary();
+    if (!repo) {
+      toast("warning", "No repo selected", "Pick a repo before scheduling a task.");
+      return;
+    }
+    const selectedTemplate = selectedTaskTemplate();
+    const scoutPromptPreview = taskTemplateScoutPromptPreview(selectedTemplate);
+    const description = scoutPromptPreview ? "" : String(state.taskComposer.description || "").trim();
+    if (!description && !scoutPromptPreview) {
+      toast("warning", "Missing description", "Describe the task first.");
+      return;
+    }
+    const priority = Number.parseInt(String(state.taskComposer.priority || "3"), 10);
+    const scheduleAt = fromDateTimeLocal(state.taskComposer.scheduleAt);
+    const idempotencyKey = defaultString(state.taskComposer.idempotencyKey, nextTaskComposerIdempotencyKey());
+    state.taskComposer.idempotencyKey = idempotencyKey;
+    state.taskComposer.creating = true;
+    renderTaskScheduleModal();
+    renderInvestigationsPage();
+    api("/api/v1/tasks", {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({
+        repo_slug: repo.repo_slug,
+        description,
+        schedule_at: scheduleAt,
+        priority,
+        template_id: defaultString(state.taskComposer.templateID, "template:custom"),
+        idempotency_key: idempotencyKey,
+      }),
+    }).then((response) => {
+      state.taskComposer.creating = false;
+      state.taskComposer.description = "";
+      state.taskComposer.scheduleAt = "";
+      state.taskComposer.runMode = "now";
+      state.taskComposer.priority = "3";
+      state.taskComposer.idempotencyKey = nextTaskComposerIdempotencyKey();
+      if (state.taskScheduleModal && state.taskScheduleModal.isOpen()) {
+        state.taskScheduleModal.close();
+      }
+      if (response.state) {
+        mergeRepoState(response.state);
+      } else {
+        load();
+      }
+      loadApprovals({ silent: true });
+      loadInvestigations({ silent: true });
+      toast("success", "Task scheduled", response.planned_item && response.planned_item.title || (scoutPromptPreview ? defaultString(selectedTemplate && selectedTemplate.name, "Scout") : description));
+    }).catch((error) => {
+      state.taskComposer.creating = false;
+      renderTaskScheduleModal();
+      renderInvestigationsPage();
+      toast("danger", "Task scheduling failed", error.message);
+    });
+  }
+
+  function saveTaskTemplateFromComposer() {
+    const repo = selectedTaskComposerRepoSummary();
+    const description = String(state.taskComposer.description || "").trim();
+    const selectedTemplate = selectedTaskTemplate();
+    if (!taskComposerCanSavePreset(selectedTemplate)) {
+      toast("warning", "Preset selected", "Switch to Custom task before saving a new preset.");
+      return;
+    }
+    if (!repo || !description) {
+      toast("warning", "Missing preset description", "Write the preset description first.");
+      return;
+    }
+    state.taskComposer.savingTemplate = true;
+    renderTaskScheduleModal();
+    renderInvestigationsPage();
+    api("/api/v1/tasks/templates", {
+      method: "POST",
+      body: JSON.stringify({
+        repo_slug: repo.repo_slug,
+        description,
+        base_template_id: defaultString(state.taskComposer.templateID, "template:custom"),
+      }),
+    }).then((payload) => {
+      state.taskComposer.savingTemplate = false;
+      toast("success", "Preset saved", payload.template && payload.template.name || "Custom preset");
+      loadTaskTemplates({ silent: true });
+      renderTaskScheduleModal();
+    }).catch((error) => {
+      state.taskComposer.savingTemplate = false;
+      renderTaskScheduleModal();
+      renderInvestigationsPage();
+      toast("danger", "Preset save failed", error.message);
+    });
+  }
+
   function renderInvestigationsPage() {
     const items = filteredInvestigations();
-    const detail = state.investigations.detail;
-    const scopedRepo = selectedTaskScopeRepoSummary();
     const composerRepo = selectedTaskComposerRepoSummary();
     const composerRepoSlug = composerRepo ? composerRepo.repo_slug : "";
-    const scoutComposerSelection = reconcileTaskComposerScoutRole(composerRepo);
     if ((!state.investigations.templatesLoaded || state.investigations.templatesRepoSlug !== composerRepoSlug) && !state.investigations.templatesLoading) {
       loadTaskTemplates({ silent: true });
     }
-    ensureTaskFindingsState(scopedRepo);
-    ensureFindingImportsState(scopedRepo);
-    if (scopedRepo && (!state.taskFindings.loaded || state.taskFindings.repoSlug !== scopedRepo.repo_slug) && !state.taskFindings.loading) {
-      loadTaskFindings(scopedRepo.repo_slug, { silent: true });
-    }
-    if (scopedRepo && (!state.findingImports.loaded || state.findingImports.repoSlug !== scopedRepo.repo_slug) && !state.findingImports.loading) {
-      loadFindingImports(scopedRepo.repo_slug, { silent: true });
-    }
-    const selectedTemplate = selectedTaskTemplate();
-    const templateHelpText = taskTemplateHelpText(selectedTemplate);
-    const supportsSessionLimit = scoutComposerSelection.meta.supportsSessionLimit;
-    const scheduledRows = taskScheduledRows(scopedRepo);
-    const canSavePreset = Boolean(taskComposerPresetDescription());
-    ensureBodyStructure(`investigations:${defaultString(state.selectedRepo, "all")}`, `
+    ensureBodyStructure(`investigations:${defaultString(state.selectedRepo, "all")}:${sortedRepos().length}`, `
       <section class="mission-control-shell">
         <div id="mission-toolbar-host"></div>
         <div id="mission-status-strip" class="mission-status-strip"></div>
         <section id="mission-feed" class="mission-feed"></section>
-      </section>
-      <section class="layout-two-col">
-        <div class="surface">
-          <div class="surface-head">
-            <div>
-              <h3>Schedule Task</h3>
-              <p>Queue an investigation, coding task, or manual scout from one intake surface.</p>
-            </div>
-          </div>
-          <div class="config-grid">
-            ${state.selectedRepo ? `
-              <div class="config-field">
-                <span class="config-label">Repo</span>
-                <div class="scope-chip">${escapeHTML(state.selectedRepo)}</div>
-              </div>
-            ` : `
-              <label class="config-field">
-                <span class="config-label">Repo</span>
-                <select id="task-composer-repo">
-                  ${sortedRepos().map((entry) => `<option value="${escapeHTML(entry.repo_slug)}" ${state.taskComposer.repoSlug === entry.repo_slug ? "selected" : ""}>${escapeHTML(entry.repo_slug)}</option>`).join("")}
-                </select>
-              </label>
-            `}
-            <label class="config-field">
-              <span class="config-label">Preset</span>
-              <select id="task-composer-template" ${state.investigations.templatesLoading ? "disabled" : ""}>
-                ${(state.investigations.templates || []).length
-                  ? (state.investigations.templates || []).map((template) => `<option value="${escapeHTML(template.id)}" ${selectedTemplate && selectedTemplate.id === template.id ? "selected" : ""}>${escapeHTML(template.name)}</option>`).join("")
-                  : `<option value="template:custom">${escapeHTML(state.investigations.templatesLoading ? "Loading presets..." : "Custom task")}</option>`}
-              </select>
-            </label>
-            <label class="config-field">
-              <span class="config-label">Task Type</span>
-              <select id="task-composer-kind">
-                <option value="investigation" ${state.taskComposer.kind === "investigation" ? "selected" : ""}>Investigation</option>
-                <option value="coding" ${state.taskComposer.kind === "coding" ? "selected" : ""}>Coding</option>
-                <option value="manual_scout" ${state.taskComposer.kind === "manual_scout" ? "selected" : ""}>Manual Scout</option>
-              </select>
-            </label>
-            <label class="config-field">
-              <span class="config-label">Schedule</span>
-              <input id="task-composer-schedule" type="datetime-local" value="${escapeHTML(state.taskComposer.scheduleAt)}" />
-            </label>
-            <label class="config-field config-field-wide">
-              <span class="config-label">Task Title</span>
-              <input id="task-composer-title" type="text" value="${escapeHTML(state.taskComposer.title)}" placeholder="${state.taskComposer.kind === "coding" ? "Implement approval retry copy cleanup" : state.taskComposer.kind === "manual_scout" ? "Run a focused UI scout review" : "Label this investigation task"}" />
-            </label>
-            <label class="config-field config-field-wide">
-              <span class="config-label">Description</span>
-              <textarea id="task-composer-description" rows="3" placeholder="${state.taskComposer.kind === "coding" ? "Describe the work Nana should execute." : state.taskComposer.kind === "manual_scout" ? "Optional notes for why this scout run matters." : "Optional context that should stay attached to the scheduled task."}">${escapeHTML(state.taskComposer.description)}</textarea>
-            </label>
-            <div class="config-field config-field-wide">
-              <span class="config-label">${selectedTemplate && selectedTemplate.built_in ? "Preset Guidance" : "Preset Notes"}</span>
-              <p class="queue-copy">${escapeHTML(defaultString(templateHelpText, state.investigations.templatesLoading ? "Loading preset details..." : "Select a fixed scout or saved preset to seed this scheduler."))}</p>
-            </div>
-            ${state.investigations.templatesError ? `
-              <div class="config-field config-field-wide">
-                <span class="config-label">Preset Error</span>
-                <p class="queue-copy">${escapeHTML(state.investigations.templatesError)}</p>
-              </div>
-            ` : ""}
-            <label class="config-field">
-              <span class="config-label">Findings Handling</span>
-              <select id="task-findings-handling">
-                <option value="review" ${state.taskComposer.scoutDestination === "review" ? "selected" : ""}>Manual Review</option>
-                <option value="local" ${state.taskComposer.scoutDestination === "local" ? "selected" : ""}>Auto Promote</option>
-              </select>
-            </label>
-            ${state.taskComposer.kind === "investigation" ? `
-              <label class="config-field config-field-wide">
-                <span class="config-label">Investigation Query</span>
-                <textarea id="task-investigation-query" rows="4" placeholder="Investigate why approval retry timing drifts between the queue and the drawer.">${escapeHTML(state.taskComposer.investigationQuery)}</textarea>
-              </label>
-            ` : ""}
-            ${state.taskComposer.kind === "coding" ? `
-              <label class="config-field">
-                <span class="config-label">Work Type</span>
-                <select id="task-coding-work-type">
-                  ${["bug_fix", "refactor", "feature", "test_only"].map((value) => `<option value="${escapeHTML(value)}" ${state.taskComposer.codingWorkType === value ? "selected" : ""}>${escapeHTML(workTypeLabel(value))}</option>`).join("")}
-                </select>
-              </label>
-              <label class="config-field">
-                <span class="config-label">Priority</span>
-                <select id="task-coding-priority">
-                  ${[0, 1, 2, 3, 4, 5].map((priority) => `<option value="${priority}" ${String(state.taskComposer.codingPriority) === String(priority) ? "selected" : ""}>P${priority}</option>`).join("")}
-                </select>
-              </label>
-            ` : ""}
-            ${state.taskComposer.kind === "manual_scout" ? `
-              <label class="config-field">
-                <span class="config-label">Scout Role</span>
-                <select id="task-scout-role">
-                  ${repoScoutCatalog(composerRepo).map((entry) => `<option value="${escapeHTML(entry.role)}" ${state.taskComposer.scoutRole === entry.role ? "selected" : ""}>${escapeHTML(entry.display_label)}</option>`).join("")}
-                </select>
-              </label>
-              ${supportsSessionLimit ? `
-                <label class="config-field">
-                  <span class="config-label">Session Limit</span>
-                  <input id="task-scout-session-limit" type="number" min="1" max="6" value="${escapeHTML(state.taskComposer.scoutSessionLimit)}" />
-                </label>
-              ` : ""}
-              <label class="config-field config-field-wide">
-                <span class="config-label">Focus</span>
-                <input id="task-scout-focus" type="text" value="${escapeHTML(state.taskComposer.scoutFocus)}" placeholder="approvals, retry flow, queue wording" />
-              </label>
-            ` : ""}
-          </div>
-          <div class="config-actions">
-            <button id="task-save-template-button" class="tx-btn tx-btn-secondary" type="button" ${state.taskComposer.savingTemplate || state.taskComposer.creating || !composerRepo || !canSavePreset ? "disabled" : ""}>${state.taskComposer.savingTemplate ? "Saving..." : "Save As Preset"}</button>
-            <button id="task-schedule-button" class="tx-btn tx-btn-primary" type="button" ${state.taskComposer.creating || !composerRepo ? "disabled" : ""}>${state.taskComposer.creating ? "Scheduling..." : "Schedule Task"}</button>
-          </div>
-        </div>
-        <div class="surface">
-          <div class="surface-head">
-            <div>
-              <h3>Scheduled Tasks</h3>
-              <p>${scopedRepo ? `Queued task launches for ${escapeHTML(scopedRepo.repo_slug)}.` : "Select a repo from the header picker to inspect scheduled tasks."}</p>
-            </div>
-          </div>
-          <div id="task-planned-grid"></div>
-        </div>
-      </section>
-      <section class="layout-two-col">
-        <div class="surface">
-          <div class="surface-head">
-            <div>
-              <h3>Investigation Runs</h3>
-              <p>Accepted, running, paused, and failed investigation runs.</p>
-            </div>
-          </div>
-          ${buildFilterToolbar("investigations", { placeholder: "Search query, repo, summary, or run id" })}
-          <div id="investigations-grid"></div>
-        </div>
-        <div class="surface detail-surface">
-          <div class="surface-head">
-            <div>
-              <h3>Investigation Detail</h3>
-              <p>Proofs, validator output, and stored artifacts.</p>
-            </div>
-          </div>
-          <div id="investigation-detail"></div>
-        </div>
-      </section>
-      <section class="layout-two-col">
-        <div class="surface">
-          <div class="surface-head">
-            <div>
-              <h3>Findings Inbox</h3>
-              <p>${scopedRepo ? `Persisted findings for ${escapeHTML(scopedRepo.repo_slug)} with source lineage and promotion controls.` : "Select a repo from the header picker to inspect findings."}</p>
-            </div>
-            <div class="config-actions">
-              <input id="task-findings-import-file" type="file" accept=".md,text/markdown" ${scopedRepo ? "" : "disabled"} />
-              <button id="task-findings-import-button" class="tx-btn tx-btn-secondary tx-btn-sm" type="button" ${scopedRepo && !state.findingImports.importing ? "" : "disabled"}>${state.findingImports.importing ? "Importing..." : "Import Findings from Markdown"}</button>
-            </div>
-          </div>
-          <div id="task-findings-grid"></div>
-        </div>
-        <div class="surface detail-surface">
-          <div class="surface-head">
-            <div>
-              <h3>Finding Detail</h3>
-              <p>Edit persisted findings, dismiss them, or promote them into planned work.</p>
-            </div>
-          </div>
-          <div id="task-finding-detail"></div>
-        </div>
-      </section>
-      <section class="layout-two-col">
-        <div class="surface">
-          <div class="surface-head">
-            <div>
-              <h3>Import Sessions</h3>
-              <p>${scopedRepo ? `Markdown imports and candidate findings for ${escapeHTML(scopedRepo.repo_slug)}.` : "Select a repo from the header picker to inspect import sessions."}</p>
-            </div>
-          </div>
-          <div id="task-import-sessions-grid"></div>
-          <div id="task-import-candidates-grid"></div>
-        </div>
-        <div class="surface detail-surface">
-          <div class="surface-head">
-            <div>
-              <h3>Candidate Detail</h3>
-              <p>Review, edit, drop, or promote markdown-derived candidates.</p>
-            </div>
-          </div>
-          <div id="task-import-detail"></div>
-        </div>
       </section>
     `);
     const toolbarHost = document.getElementById("mission-toolbar-host");
@@ -5261,109 +5541,7 @@
     if (statusHost) statusHost.innerHTML = taskStatusStrip(state.investigations.items || []);
     const feedHost = document.getElementById("mission-feed");
     if (feedHost) feedHost.innerHTML = renderTaskFeed(items);
-    renderGrid("task-planned-grid", [
-      { field: "launch_kind", label: "Type" },
-      { field: "title", label: "Title" },
-      { field: "state", label: "Status", render: (row) => renderStatePill(row.state === "failed" ? "blocked" : row.state, row.state) },
-      { field: "schedule_at", label: "Scheduled" },
-      { field: "updated_at", label: "Updated" },
-      {
-        field: "id",
-        label: "Actions",
-        action: true,
-        render(row) {
-          const actions = [];
-          if (row.can_launch) {
-            actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-task-planned-launch="${escapeHTML(row.id)}">Launch Now</button>`);
-          }
-          if (row.can_remove) {
-            actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-task-planned-remove="${escapeHTML(row.id)}">Remove</button>`);
-          }
-          return actions.length ? `<div class="scout-actions">${actions.join("")}</div>` : '<span class="data-value-text">No actions</span>';
-        },
-      },
-    ], scheduledRows, {
-      maxHeight: "340px",
-      emptyMessage: scopedRepo ? "No scheduled tasks are queued for this repo." : "Select a repo from the header picker to inspect scheduled tasks.",
-    });
-    renderGrid("investigations-grid", [
-      { field: "repo_slug", label: "Repo", render: (row) => `<span class="data-value-text">${escapeHTML(defaultString(row.repo_slug, "Workspace"))}</span>` },
-      { field: "status", label: "Run", render: (row) => renderStatePillWithPause(row.attention_state, row.status, row.pause_until, row.pause_reason) },
-      { field: "overall_status", label: "Result" },
-      { field: "query", label: "Query" },
-      { field: "updated_at", label: "Updated", render: (row) => `<span class="data-value-text">${escapeHTML(formatDateTime(row.updated_at))}</span>` },
-    ], items, {
-      maxHeight: "520px",
-      emptyMessage: state.investigations.loading ? "Loading investigations..." : defaultString(state.investigations.error, "No investigations are available."),
-      rowSelect(row) {
-        return {
-          kind: "investigation",
-          value: row.run_id,
-          selected: state.investigations.selectedRunID === row.run_id,
-        };
-      },
-    });
-    renderTaskInvestigationDetail(detail);
-    renderGrid("task-findings-grid", [
-      { field: "title", label: "Title" },
-      { field: "source", label: "Source" },
-      { field: "parent_task", label: "Parent Task" },
-      { field: "status", label: "Status", render: (row) => renderStatePill(row.status_key, row.status) },
-      { field: "severity", label: "Severity" },
-      { field: "work_type", label: "Work Type" },
-      { field: "promoted_task", label: "Planned Task" },
-      { field: "updated_at", label: "Updated" },
-    ], taskFindingRows(state.taskFindings.items), {
-      maxHeight: "420px",
-      emptyMessage: scopedRepo
-        ? (state.taskFindings.loading ? "Loading findings..." : defaultString(state.taskFindings.error, "No findings are available for this repo."))
-        : "Select a repo from the header picker to inspect findings.",
-      rowSelect(row) {
-        return {
-          kind: "finding",
-          value: row.id,
-          selected: selectedTaskFinding() ? selectedTaskFinding().id === row.id : false,
-        };
-      },
-    });
-    renderTaskFindingDetail(scopedRepo, selectedTaskFinding());
-    renderGrid("task-import-sessions-grid", [
-      { field: "id", label: "Session" },
-      { field: "file_path", label: "Source File" },
-      { field: "parse_status", label: "Parse" },
-      { field: "candidate_count", label: "Candidates" },
-      { field: "updated_at", label: "Updated" },
-    ], findingImportSessionRows(state.findingImports.items), {
-      maxHeight: "220px",
-      emptyMessage: scopedRepo
-        ? (state.findingImports.loading ? "Loading import sessions..." : defaultString(state.findingImports.error, "No import sessions exist for this repo."))
-        : "Select a repo from the header picker to inspect import sessions.",
-      rowSelect(row) {
-        return {
-          kind: "import-session",
-          value: row.id,
-          selected: selectedFindingImportSession() ? selectedFindingImportSession().id === row.id : false,
-        };
-      },
-    });
-    renderGrid("task-import-candidates-grid", [
-      { field: "candidate_id", label: "Candidate" },
-      { field: "title", label: "Title" },
-      { field: "status", label: "Status" },
-      { field: "severity", label: "Severity" },
-      { field: "work_type", label: "Work Type" },
-    ], findingImportCandidateRows(selectedFindingImportSession()), {
-      maxHeight: "220px",
-      emptyMessage: "No candidates are available for the selected import session.",
-      rowSelect(row) {
-        return {
-          kind: "import-candidate",
-          value: row.candidate_id,
-          selected: selectedFindingImportCandidate() ? selectedFindingImportCandidate().candidate_id === row.candidate_id : false,
-        };
-      },
-    });
-    renderFindingImportDetail(scopedRepo, selectedFindingImportSession(), selectedFindingImportCandidate());
+    renderTaskScheduleModal();
   }
 
   function renderWorkPage() {
@@ -7667,6 +7845,7 @@
     syncUsageAutoRefresh();
     refreshOpenLogDrawerIfNeeded();
     refreshOpenWorkItemDrawerIfNeeded();
+    syncTaskDetailModalState();
   }
 
   function attachHandlers() {
@@ -8083,26 +8262,45 @@
       const taskOpenButton = event.target.closest("[data-task-open]");
       if (taskOpenButton) {
         const taskID = taskOpenButton.getAttribute("data-task-open") || "";
-        const item = (state.investigations.items || []).find((candidate) => candidate.id === taskID);
-        if (!item) return;
-        if (item.kind === "investigation" && item.run_id) {
-          loadInvestigationDetail(item.run_id);
-          return;
+        if (taskID) {
+          openTaskDetailModal(taskID);
         }
-        if (item.kind === "work_run" && item.run_id) {
-          openLogDrawer(item.run_id);
-          return;
+        return;
+      }
+
+      const openTaskScheduleButton = event.target.closest("#open-task-schedule-button");
+      if (openTaskScheduleButton) {
+        openTaskScheduleModal();
+        return;
+      }
+
+      const taskOpenJobButton = event.target.closest("[data-task-open-job]");
+      if (taskOpenJobButton) {
+        const runID = taskOpenJobButton.getAttribute("data-task-open-job") || "";
+        if (runID) {
+          openLogDrawer(runID);
         }
-        if (item.kind === "work_item") {
-          const itemID = item.id.replace(/^work-item:/, "");
-          if (itemID) {
-            openWorkItemDrawer(itemID);
+        return;
+      }
+
+      const taskActionButton = event.target.closest("[data-task-action]");
+      if (taskActionButton) {
+        const taskID = taskActionButton.getAttribute("data-task-id") || "";
+        const action = taskActionButton.getAttribute("data-task-action") || "";
+        if (!taskID || !action) return;
+        api(`/api/v1/tasks/${encodeURIComponent(taskID)}/${encodeURIComponent(action)}`, {
+          method: "POST",
+        }).then(() => {
+          load();
+          loadApprovals({ silent: true });
+          loadInvestigations({ silent: true });
+          if (state.taskDetailModal && state.taskDetailModal.isOpen()) {
+            state.taskDetailModal.close();
           }
-          return;
-        }
-        if (item.repo_slug) {
-          openRepoView(item.repo_slug, item.kind === "scout_job" ? "scouts" : "controls");
-        }
+          toast("success", "Task updated", taskID);
+        }).catch((error) => {
+          toast("danger", "Task action failed", error.message);
+        });
         return;
       }
 
@@ -8130,18 +8328,6 @@
           updateFilter("investigations", "repo", defaultString(state.selectedRepo, ""));
         }
         renderInvestigationsPage();
-        return;
-      }
-
-      const taskFeedJumpButton = event.target.closest("[data-task-feed-jump]");
-      if (taskFeedJumpButton) {
-        const target = taskFeedJumpButton.getAttribute("data-task-feed-jump") || "";
-        if (target === "schedule") {
-          const scheduleButton = document.getElementById("task-schedule-button");
-          if (scheduleButton) {
-            scheduleButton.scrollIntoView({ behavior: "smooth", block: "center" });
-          }
-        }
         return;
       }
 
@@ -9011,6 +9197,117 @@
         return;
       }
       syncUsageAutoRefresh();
+    });
+
+    document.body.addEventListener("click", (event) => {
+      if (event.target.closest("#page-body")) return;
+      if (event.target.closest("[data-task-schedule-close]")) {
+        if (state.taskScheduleModal) {
+          state.taskScheduleModal.close();
+        }
+        return;
+      }
+      if (event.target.id === "task-schedule-button") {
+        submitTaskSchedule();
+        return;
+      }
+      if (event.target.id === "task-save-template-button") {
+        saveTaskTemplateFromComposer();
+        return;
+      }
+      const taskOpenJobButton = event.target.closest("[data-task-open-job]");
+      if (taskOpenJobButton) {
+        const runID = taskOpenJobButton.getAttribute("data-task-open-job") || "";
+        if (runID) {
+          openLogDrawer(runID);
+        }
+        return;
+      }
+      const runRerunButton = event.target.closest("[data-run-rerun]");
+      if (runRerunButton) {
+        const runID = runRerunButton.getAttribute("data-run-rerun") || "";
+        if (runID) {
+          rerunWorkRunFromUI(runID);
+        }
+        return;
+      }
+      const runDropButton = event.target.closest("[data-run-drop]");
+      if (runDropButton) {
+        const runID = runDropButton.getAttribute("data-run-drop") || "";
+        if (runID) {
+          dropWorkRunFromUI(runID);
+        }
+        return;
+      }
+      const taskActionButton = event.target.closest("[data-task-action]");
+      if (taskActionButton) {
+        const taskID = taskActionButton.getAttribute("data-task-id") || "";
+        const action = taskActionButton.getAttribute("data-task-action") || "";
+        if (!taskID || !action) return;
+        api(`/api/v1/tasks/${encodeURIComponent(taskID)}/${encodeURIComponent(action)}`, {
+          method: "POST",
+        }).then(() => {
+          load();
+          loadApprovals({ silent: true });
+          loadInvestigations({ silent: true });
+          if (state.taskDetailModal && state.taskDetailModal.isOpen()) {
+            state.taskDetailModal.close();
+          }
+          toast("success", "Task updated", taskID);
+        }).catch((error) => {
+          toast("danger", "Task action failed", error.message);
+        });
+      }
+    });
+
+    document.body.addEventListener("change", (event) => {
+      if (event.target.closest("#page-body")) return;
+      if (event.target.id === "task-composer-repo") {
+        state.taskComposer.repoSlug = String(event.target.value || "");
+        resetTaskComposerIdempotencyKey();
+        state.investigations.templatesLoaded = false;
+        state.investigations.templatesRepoSlug = "";
+        loadTaskTemplates({ silent: true });
+        renderTaskScheduleModal();
+        return;
+      }
+      if (event.target.id === "task-composer-priority") {
+        state.taskComposer.priority = String(event.target.value || "3");
+        resetTaskComposerIdempotencyKey();
+        renderTaskScheduleModal();
+        return;
+      }
+      if (event.target.id === "task-composer-template") {
+        state.taskComposer.templateID = String(event.target.value || "template:custom");
+        resetTaskComposerIdempotencyKey();
+        renderTaskScheduleModal();
+        return;
+      }
+      if (event.target.id === "task-composer-run-mode") {
+        const runMode = String(event.target.value || "now");
+        state.taskComposer.runMode = runMode;
+        if (runMode === "now") {
+          state.taskComposer.scheduleAt = "";
+        }
+        resetTaskComposerIdempotencyKey();
+        renderTaskScheduleModal();
+      }
+    });
+
+    document.body.addEventListener("input", (event) => {
+      if (event.target.closest("#page-body")) return;
+      if (event.target.id === "task-composer-description") {
+        if (taskTemplateScoutPromptPreview(selectedTaskTemplate())) return;
+        state.taskComposer.description = String(event.target.value || "");
+        resetTaskComposerIdempotencyKey();
+        return;
+      }
+      if (event.target.id === "task-composer-schedule") {
+        state.taskComposer.scheduleAt = String(event.target.value || "");
+        state.taskComposer.runMode = state.taskComposer.scheduleAt ? "later" : defaultString(state.taskComposer.runMode, "now");
+        resetTaskComposerIdempotencyKey();
+        renderTaskScheduleModal();
+      }
     });
 
     document.body.addEventListener("change", (event) => {

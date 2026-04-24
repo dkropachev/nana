@@ -3985,22 +3985,31 @@ func TestStartUIAppHeaderIncludesSubtitleAndGuardsMissingNodes(t *testing.T) {
 	}
 }
 
-func TestStartUIAppInvestigationsWorkspaceShowsDirectDetailSurfaces(t *testing.T) {
+func TestStartUIAppInvestigationsWorkspaceUsesMissionControlModals(t *testing.T) {
 	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
 	if err != nil {
 		t.Fatalf("read app asset: %v", err)
 	}
 	content := string(appBody)
 	for _, needle := range []string{
-		`<h3>Scheduled Tasks</h3>`,
-		`<h3>Investigation Detail</h3>`,
-		`<h3>Findings Inbox</h3>`,
-		`<h3>Import Sessions</h3>`,
-		`data-task-planned-launch="${escapeHTML(row.id)}"`,
-		`data-task-planned-remove="${escapeHTML(row.id)}"`,
+		`<section class="mission-control-shell">`,
+		`id="open-task-schedule-button"`,
+		`function renderTaskDetailModal() {`,
+		`function renderTaskScheduleModal() {`,
+		`content: '<div id="task-detail-modal-content" class="drawer-shell"></div>'`,
+		`content: '<div id="task-schedule-modal-content" class="drawer-shell"></div>'`,
 	} {
 		if !strings.Contains(content, needle) {
 			t.Fatalf("expected app asset to contain %q", needle)
+		}
+	}
+	for _, needle := range []string{
+		`<h3>Scheduled Tasks</h3>`,
+		`<h3>Findings Inbox</h3>`,
+		`<h3>Import Sessions</h3>`,
+	} {
+		if strings.Contains(content, needle) {
+			t.Fatalf("expected investigations route to stop embedding %q directly", needle)
 		}
 	}
 
@@ -4010,10 +4019,10 @@ func TestStartUIAppInvestigationsWorkspaceShowsDirectDetailSurfaces(t *testing.T
 	}
 	cssContent := string(cssBody)
 	for _, needle := range []string{
-		`.detail-surface {`,
-		`.filter-disclosure {`,
-		`.filter-panel {`,
-		`.status-pill {`,
+		`.mission-control-shell {`,
+		`.mission-task-group {`,
+		`.mission-task-row {`,
+		`.mission-schedule-modal-body {`,
 	} {
 		if !strings.Contains(cssContent, needle) {
 			t.Fatalf("expected app stylesheet to contain %q", needle)
@@ -4033,9 +4042,9 @@ func TestStartUIBrowserInvestigationDeepLinkShowsSelectedDetail(t *testing.T) {
 	taskID := "work-run:lw-browser-active"
 	output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=investigations&task="+url.QueryEscape(taskID))
 	for _, needle := range []string{
-		"Investigation Detail",
-		"Detailed Explanation",
-		"Validator",
+		"Task Detail",
+		"Open Job",
+		"Drop Run",
 		taskID,
 	} {
 		startUITestRequireText(t, output, needle, "investigation-detail-deeplink")
@@ -6138,20 +6147,14 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `Schedule Task`) {
 		t.Fatalf("expected unified task scheduling copy in app.js, got %s", string(appBody))
 	}
-	if strings.Contains(string(appBody), `Describe the work. Nana infers the title and task type.`) {
-		t.Fatalf("expected schedule task helper copy to be removed, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `task-composer-kind`) || !strings.Contains(string(appBody), `task-investigation-query`) || !strings.Contains(string(appBody), `task-coding-work-type`) || !strings.Contains(string(appBody), `task-scout-role`) || !strings.Contains(string(appBody), `task-findings-handling`) {
-		t.Fatalf("expected direct schedule task form controls in app.js, got %s", string(appBody))
-	}
 	if !strings.Contains(string(appBody), `Idempotency-Key`) || !strings.Contains(string(appBody), `nextTaskComposerIdempotencyKey()`) {
 		t.Fatalf("expected task scheduling UI to send and rotate idempotency keys, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `task-planned-launch`) || !strings.Contains(string(appBody), `task-planned-remove`) || !strings.Contains(string(appBody), `renderStatePill(row.state === "failed" ? "blocked" : row.state, row.state)`) {
-		t.Fatalf("expected scheduled task actions and state pills in app.js, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `function renderTaskDetailModal() {`) || !strings.Contains(string(appBody), `function renderTaskScheduleModal() {`) || !strings.Contains(string(appBody), `task-composer-description-field`) || !strings.Contains(string(appBody), `data-task-open="${escapeHTML(item.id)}"`) {
+		t.Fatalf("expected modal-driven mission control task wiring in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `filter-disclosure`) || !strings.Contains(string(appBody), `data-view-filter-reset`) || !strings.Contains(string(appBody), `placeholder: "Search query, repo, summary, or run id"`) {
-		t.Fatalf("expected investigations filter disclosure wiring in app.js, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `data-task-status-filter`) || !strings.Contains(string(appBody), `data-task-filter-clear`) || !strings.Contains(string(appBody), `placeholder="Search tasks..."`) {
+		t.Fatalf("expected mission control feed filter wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `data-scout-action="promote"`) {
 		t.Fatalf("expected manual scout promote control wiring in app.js, got %s", string(appBody))
@@ -7899,22 +7902,19 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 				"Nana Mission Control",
 				"Search tasks...",
 				"Completed",
-				"Schedule Task",
-				"Scheduled Tasks",
-				"Investigation Runs",
-				"Investigation Detail",
-				"Findings Inbox",
-				"Import Sessions",
+				"+ Task",
 				"investigate-100",
 			},
 		},
 		"repo-findings": {
-			hash: "view=repo&repo=acme/widget&tab=findings",
+			hash: "view=repo&repo=acme/widget&tab=controls",
 			expect: []string{
-				"Findings Inbox",
-				"Finding Detail",
-				"Import Sessions",
-				"Candidate Detail",
+				"Search GitHub Issues",
+				"Tracked Issue Schedule",
+				"Selected Scheduled Issue",
+				"Manage Existing Tracked Issue",
+				"Create Planned Launch",
+				"Launch Existing",
 			},
 		},
 		"work": {

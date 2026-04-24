@@ -169,6 +169,27 @@ func TestStartUIBrowserInteractionsRepoControls(t *testing.T) {
 	}
 }
 
+func TestStartUIBrowserInteractionsInvestigationsOpenTaskScheduleModal(t *testing.T) {
+	chromePath := startUITestChromePath(t)
+	if chromePath == "" {
+		t.Skip("google-chrome is required for chromedp browser interaction coverage")
+	}
+
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
+	defer cancelBrowser()
+
+	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
+	defer cancelTab()
+
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=investigations", "#open-task-schedule-button")
+	startUITestChromedpClick(t, tabCtx, "#open-task-schedule-button")
+	startUITestChromedpWaitVisible(t, tabCtx, "#task-schedule-modal-content")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Schedule Task")
+}
+
 func TestStartUIBrowserInteractionsDraftsSurviveLiveRefresh(t *testing.T) {
 	chromePath := startUITestChromePath(t)
 	if chromePath == "" {

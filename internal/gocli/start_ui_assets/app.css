@@ -1642,11 +1642,8 @@ textarea {
 .mission-task-row {
   display: grid;
   grid-template-columns: 56px 140px minmax(0, 1fr) minmax(120px, max-content);
-  grid-template-areas:
-    "priority type copy state"
-    "priority type copy meta";
   gap: 12px;
-  align-items: start;
+  align-items: center;
   width: 100%;
   padding: 12px;
   border: 1px solid #d5deeb;
@@ -1670,11 +1667,9 @@ textarea {
 }
 
 .mission-task-priority {
-  grid-area: priority;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  align-self: center;
   width: 42px;
   height: 42px;
   border-radius: 12px;
@@ -1684,8 +1679,6 @@ textarea {
 }
 
 .mission-task-type {
-  grid-area: type;
-  align-self: center;
   color: #4f6787;
   font-size: 12px;
   font-weight: 900;
@@ -1693,11 +1686,9 @@ textarea {
 }
 
 .mission-task-copy {
-  grid-area: copy;
   display: grid;
   gap: 3px;
   min-width: 0;
-  align-self: center;
 }
 
 .mission-task-copy strong {
@@ -1709,7 +1700,8 @@ textarea {
 }
 
 .mission-task-copy span,
-.mission-task-copy em {
+.mission-task-copy em,
+.mission-task-action small {
   overflow: hidden;
   color: #5b718d;
   font-size: 12px;
@@ -1718,29 +1710,16 @@ textarea {
   white-space: nowrap;
 }
 
-.mission-task-reference {
-  color: #35506f;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
-  font-size: 11px;
-  font-weight: 700;
+.mission-task-action {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
 }
 
-.mission-task-meta {
-  grid-area: meta;
-  justify-self: end;
-  align-self: end;
-  overflow: hidden;
-  color: #5b718d;
-  font-size: 12px;
-  text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mission-task-row > .run-state-pill {
-  grid-area: state;
-  justify-self: end;
-  align-self: start;
+.mission-task-action > span {
+  color: #315f9a;
+  font-size: 13px;
+  font-weight: 900;
 }
 
 .mission-empty-state {
@@ -1830,16 +1809,10 @@ textarea {
   .mission-toolbar-main,
   .mission-task-row {
     grid-template-columns: 1fr;
-    grid-template-areas:
-      "priority"
-      "type"
-      "copy"
-      "state"
-      "meta";
   }
 
-  .mission-task-row > .run-state-pill {
-    justify-self: start;
+  .mission-task-action {
+    justify-items: start;
   }
 
   .config-json-grid {
