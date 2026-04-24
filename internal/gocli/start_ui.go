@@ -363,19 +363,32 @@ type startUIIssuePatchRequest struct {
 }
 
 type startUIPlannedItemRequest struct {
-	Title              string   `json:"title"`
-	Description        string   `json:"description,omitempty"`
-	WorkType           string   `json:"work_type,omitempty"`
-	Priority           *int     `json:"priority,omitempty"`
-	ScheduleAt         string   `json:"schedule_at,omitempty"`
-	LaunchKind         string   `json:"launch_kind,omitempty"`
-	FindingsHandling   string   `json:"findings_handling,omitempty"`
-	TargetURL          string   `json:"target_url,omitempty"`
-	InvestigationQuery string   `json:"investigation_query,omitempty"`
-	ScoutRole          string   `json:"scout_role,omitempty"`
-	ScoutDestination   string   `json:"scout_destination,omitempty"`
-	ScoutSessionLimit  int      `json:"scout_session_limit,omitempty"`
-	ScoutFocus         []string `json:"scout_focus,omitempty"`
+	Title                  string   `json:"title"`
+	Description            string   `json:"description,omitempty"`
+	WorkType               string   `json:"work_type,omitempty"`
+	Priority               *int     `json:"priority,omitempty"`
+	ScheduleAt             string   `json:"schedule_at,omitempty"`
+	LaunchKind             string   `json:"launch_kind,omitempty"`
+	FindingsHandling       string   `json:"findings_handling,omitempty"`
+	TargetURL              string   `json:"target_url,omitempty"`
+	InvestigationQuery     string   `json:"investigation_query,omitempty"`
+	ScoutRole              string   `json:"scout_role,omitempty"`
+	ScoutDestination       string   `json:"scout_destination,omitempty"`
+	ScoutSessionLimit      int      `json:"scout_session_limit,omitempty"`
+	ScoutFocus             []string `json:"scout_focus,omitempty"`
+	IdempotencyKey         string   `json:"idempotency_key,omitempty"`
+	IdempotencyFingerprint string   `json:"idempotency_fingerprint,omitempty"`
+}
+
+type startUIIdempotencyConflictError struct {
+	Key string
+}
+
+func (err startUIIdempotencyConflictError) Error() string {
+	if strings.TrimSpace(err.Key) == "" {
+		return "idempotency key is already used for a different task scheduling request"
+	}
+	return fmt.Sprintf("idempotency key %q is already used for a different task scheduling request", err.Key)
 }
 
 type startUIIssueSearchRequest struct {
@@ -822,20 +835,20 @@ type startUIApprovalQueueResponse struct {
 }
 
 type startUIWorkRunDetail struct {
-	Summary         startUIWorkRun            `json:"summary"`
-	Backend         string                    `json:"backend"`
-	LocalManifest   *localWorkManifest        `json:"local_manifest,omitempty"`
-	GithubManifest  *githubWorkManifest       `json:"github_manifest,omitempty"`
-	GithubStatus    *githubWorkStatusSnapshot `json:"github_status,omitempty"`
-	StartedAt       string                    `json:"started_at,omitempty"`
-	TotalTokens     int                       `json:"total_tokens,omitempty"`
-	SessionsAccounted int                     `json:"sessions_accounted,omitempty"`
-	HasTokenUsage   bool                      `json:"has_token_usage,omitempty"`
-	NextAction      string                    `json:"next_action,omitempty"`
-	HumanGateReason string                    `json:"human_gate_reason,omitempty"`
-	SyncAllowed     bool                      `json:"sync_allowed,omitempty"`
-	ResolveAllowed  bool                      `json:"resolve_allowed,omitempty"`
-	ExternalURL     string                    `json:"external_url,omitempty"`
+	Summary           startUIWorkRun            `json:"summary"`
+	Backend           string                    `json:"backend"`
+	LocalManifest     *localWorkManifest        `json:"local_manifest,omitempty"`
+	GithubManifest    *githubWorkManifest       `json:"github_manifest,omitempty"`
+	GithubStatus      *githubWorkStatusSnapshot `json:"github_status,omitempty"`
+	StartedAt         string                    `json:"started_at,omitempty"`
+	TotalTokens       int                       `json:"total_tokens,omitempty"`
+	SessionsAccounted int                       `json:"sessions_accounted,omitempty"`
+	HasTokenUsage     bool                      `json:"has_token_usage,omitempty"`
+	NextAction        string                    `json:"next_action,omitempty"`
+	HumanGateReason   string                    `json:"human_gate_reason,omitempty"`
+	SyncAllowed       bool                      `json:"sync_allowed,omitempty"`
+	ResolveAllowed    bool                      `json:"resolve_allowed,omitempty"`
+	ExternalURL       string                    `json:"external_url,omitempty"`
 }
 
 type startUIBackgroundLaunch struct {
@@ -1637,12 +1650,37 @@ func (h *startUIAPI) handleRepoRoute(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		state, item, err := createStartUIPlannedItem(repoSlug, payload)
-		h.invalidateOverviewCache()
+		bodyKey := strings.TrimSpace(payload.IdempotencyKey)
+		headerKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+		if bodyKey != "" && headerKey != "" && bodyKey != headerKey {
+			writeJSONResponseWithStatus(w, http.StatusBadRequest, map[string]any{
+				"code":    "invalid_idempotency_key",
+				"message": "idempotency key mismatch between request body and Idempotency-Key header",
+			})
+			return
+		}
+		idempotencyKey, err := normalizeStartUITaskIdempotencyKey(defaultString(headerKey, bodyKey))
 		if err != nil {
+			writeJSONResponseWithStatus(w, http.StatusBadRequest, map[string]any{
+				"code":    "invalid_idempotency_key",
+				"message": err.Error(),
+			})
+			return
+		}
+		payload.IdempotencyKey = idempotencyKey
+		state, item, err := createStartUIPlannedItem(repoSlug, payload)
+		if err != nil {
+			if conflict, ok := asStartUIIdempotencyConflictError(err); ok {
+				writeJSONResponseWithStatus(w, http.StatusConflict, map[string]any{
+					"code":    "idempotency_conflict",
+					"message": conflict.Error(),
+				})
+				return
+			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		h.invalidateOverviewCache()
 		writeJSONResponse(w, map[string]any{"state": state, "planned_item": item})
 	default:
 		http.NotFound(w, r)
@@ -6232,6 +6270,30 @@ func startUITrackedIssuePlannedItemForURL(state *startWorkState, targetURL strin
 	return best, found
 }
 
+func startUIPlannedItemForIdempotencyKey(state *startWorkState, idempotencyKey string, fingerprint string) (startWorkPlannedItem, bool, error) {
+	trimmedKey := strings.TrimSpace(idempotencyKey)
+	trimmedFingerprint := strings.TrimSpace(fingerprint)
+	if state == nil || trimmedKey == "" {
+		return startWorkPlannedItem{}, false, nil
+	}
+	var best startWorkPlannedItem
+	found := false
+	for _, item := range state.PlannedItems {
+		if strings.TrimSpace(item.IdempotencyKey) != trimmedKey {
+			continue
+		}
+		itemFingerprint := strings.TrimSpace(item.IdempotencyFingerprint)
+		if trimmedFingerprint != "" && itemFingerprint != "" && itemFingerprint != trimmedFingerprint {
+			return startWorkPlannedItem{}, false, startUIIdempotencyConflictError{Key: trimmedKey}
+		}
+		if !found || strings.TrimSpace(item.UpdatedAt) > strings.TrimSpace(best.UpdatedAt) {
+			best = item
+			found = true
+		}
+	}
+	return best, found, nil
+}
+
 func upsertStartUITrackedIssuePlannedItem(repoSlug string, payload startUITrackedIssueScheduleRequest) (*startWorkState, startWorkPlannedItem, error) {
 	targetURL, issueNumber, err := resolveStartUITrackedIssueTarget(repoSlug, payload.Number, payload.TargetURL)
 	if err != nil {
@@ -6366,6 +6428,8 @@ func createStartUIPlannedItem(repoSlug string, payload startUIPlannedItemRequest
 	if title == "" {
 		return nil, startWorkPlannedItem{}, fmt.Errorf("title is required")
 	}
+	idempotencyKey := strings.TrimSpace(payload.IdempotencyKey)
+	idempotencyFingerprint := strings.TrimSpace(payload.IdempotencyFingerprint)
 	scheduleAt := strings.TrimSpace(payload.ScheduleAt)
 	if scheduleAt != "" {
 		if _, err := time.Parse(time.RFC3339, scheduleAt); err != nil {
@@ -6385,6 +6449,11 @@ func createStartUIPlannedItem(repoSlug string, payload startUIPlannedItemRequest
 	state, err := ensureStartUIStateUnlocked(repoSlug)
 	if err != nil {
 		return nil, startWorkPlannedItem{}, err
+	}
+	if existing, found, err := startUIPlannedItemForIdempotencyKey(state, idempotencyKey, idempotencyFingerprint); err != nil {
+		return nil, startWorkPlannedItem{}, err
+	} else if found {
+		return state, existing, nil
 	}
 	launchKind := strings.TrimSpace(payload.LaunchKind)
 	if launchKind == "" {
@@ -6453,24 +6522,26 @@ func createStartUIPlannedItem(repoSlug string, payload startUIPlannedItemRequest
 	}
 	itemID := fmt.Sprintf("planned-%d", time.Now().UnixNano())
 	item := startWorkPlannedItem{
-		ID:                 itemID,
-		RepoSlug:           repoSlug,
-		Title:              title,
-		Description:        strings.TrimSpace(payload.Description),
-		WorkType:           workType,
-		LaunchKind:         launchKind,
-		FindingsHandling:   findingsHandling,
-		TargetURL:          strings.TrimSpace(payload.TargetURL),
-		InvestigationQuery: investigationQuery,
-		ScoutRole:          scoutRole,
-		ScoutDestination:   scoutDestination,
-		ScoutSessionLimit:  scoutSessionLimit,
-		ScoutFocus:         append([]string{}, scoutFocus...),
-		Priority:           priority,
-		ScheduleAt:         scheduleAt,
-		State:              startPlannedItemQueued,
-		CreatedAt:          now,
-		UpdatedAt:          now,
+		ID:                     itemID,
+		RepoSlug:               repoSlug,
+		Title:                  title,
+		Description:            strings.TrimSpace(payload.Description),
+		WorkType:               workType,
+		LaunchKind:             launchKind,
+		FindingsHandling:       findingsHandling,
+		TargetURL:              strings.TrimSpace(payload.TargetURL),
+		InvestigationQuery:     investigationQuery,
+		ScoutRole:              scoutRole,
+		ScoutDestination:       scoutDestination,
+		ScoutSessionLimit:      scoutSessionLimit,
+		ScoutFocus:             append([]string{}, scoutFocus...),
+		Priority:               priority,
+		ScheduleAt:             scheduleAt,
+		IdempotencyKey:         idempotencyKey,
+		IdempotencyFingerprint: idempotencyFingerprint,
+		State:                  startPlannedItemQueued,
+		CreatedAt:              now,
+		UpdatedAt:              now,
 	}
 	if state.PlannedItems == nil {
 		state.PlannedItems = map[string]startWorkPlannedItem{}

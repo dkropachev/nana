@@ -25,6 +25,8 @@
     selectedIssue: "",
     issueForm: null,
     plannedForm: null,
+    plannedFormRepoSlug: "",
+    plannedFormIdempotencyKey: "",
     widgets: {},
     widgetStateKeys: {},
     logDrawer: null,
@@ -235,9 +237,36 @@
       runMode: "now",
       priority: "3",
       templateID: "template:custom",
+      idempotencyKey: nextTaskComposerIdempotencyKey(),
       creating: false,
       savingTemplate: false,
     };
+  }
+
+  function nextTaskComposerIdempotencyKey() {
+    const secureUUID = window.crypto && typeof window.crypto.randomUUID === "function"
+      ? window.crypto.randomUUID()
+      : "";
+    if (secureUUID) return `task-${secureUUID}`;
+    return `task-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  function resetTaskComposerIdempotencyKey() {
+    state.taskComposer.idempotencyKey = nextTaskComposerIdempotencyKey();
+  }
+
+  function ensurePlannedFormIdempotencyKey(repoSlug) {
+    const normalizedRepo = defaultString(repoSlug, "");
+    if (state.plannedFormRepoSlug !== normalizedRepo || !String(state.plannedFormIdempotencyKey || "").trim()) {
+      state.plannedFormRepoSlug = normalizedRepo;
+      state.plannedFormIdempotencyKey = nextTaskComposerIdempotencyKey();
+    }
+    return state.plannedFormIdempotencyKey;
+  }
+
+  function resetPlannedFormIdempotencyKey(repoSlug) {
+    state.plannedFormRepoSlug = defaultString(repoSlug, "");
+    state.plannedFormIdempotencyKey = nextTaskComposerIdempotencyKey();
   }
 
   function defaultFeedbackState() {
@@ -5235,17 +5264,21 @@
     }
     const priority = Number.parseInt(String(state.taskComposer.priority || "3"), 10);
     const scheduleAt = fromDateTimeLocal(state.taskComposer.scheduleAt);
+    const idempotencyKey = defaultString(state.taskComposer.idempotencyKey, nextTaskComposerIdempotencyKey());
+    state.taskComposer.idempotencyKey = idempotencyKey;
     state.taskComposer.creating = true;
     renderTaskScheduleModal();
     renderInvestigationsPage();
     api("/api/v1/tasks", {
       method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
       body: JSON.stringify({
         repo_slug: repo.repo_slug,
         description,
         schedule_at: scheduleAt,
         priority,
         template_id: defaultString(state.taskComposer.templateID, "template:custom"),
+        idempotency_key: idempotencyKey,
       }),
     }).then((response) => {
       state.taskComposer.creating = false;
@@ -5253,6 +5286,7 @@
       state.taskComposer.scheduleAt = "";
       state.taskComposer.runMode = "now";
       state.taskComposer.priority = "3";
+      state.taskComposer.idempotencyKey = nextTaskComposerIdempotencyKey();
       if (state.taskScheduleModal && state.taskScheduleModal.isOpen()) {
         state.taskScheduleModal.close();
       }
@@ -6148,6 +6182,7 @@
       host.innerHTML = '<div class="status-pill">Select a repo first.</div>';
       return;
     }
+    ensurePlannedFormIdempotencyKey(repo.repo_slug);
     const launchDefault = repo.repo_mode === "local" ? "local_work" : "github_issue";
     const draftScope = repoControlsPlannedDraftScope();
     state.plannedForm = Teryx.form("#planned-form", {
@@ -6186,8 +6221,10 @@
         },
       ],
       onSubmit(data) {
+        const idempotencyKey = ensurePlannedFormIdempotencyKey(state.selectedRepo);
         api(`/api/v1/repos/${state.selectedRepo}/planned-items`, {
           method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
           body: JSON.stringify({
             title: data.title,
             description: data.description,
@@ -6195,10 +6232,12 @@
             priority: Number(data.priority),
             schedule_at: fromDateTimeLocal(data.schedule_at),
             launch_kind: data.launch_kind,
+            idempotency_key: idempotencyKey,
           }),
         }).then((payload) => {
           clearDraftScope(draftScope);
           mergeRepoState(payload.state);
+          resetPlannedFormIdempotencyKey(state.selectedRepo);
           if (state.plannedForm && typeof state.plannedForm.reset === "function") {
             state.plannedForm.reset();
           }
@@ -8260,6 +8299,7 @@
         const templateID = taskTemplateButton.getAttribute("data-task-template") || "template:custom";
         const template = (state.investigations.templates || []).find((item) => item.id === templateID);
         state.taskComposer.templateID = templateID;
+        resetTaskComposerIdempotencyKey();
         if (template && !taskTemplateScoutPromptPreview(template) && !String(state.taskComposer.description || "").trim()) {
           state.taskComposer.description = String(template.description || "");
         }
@@ -8844,6 +8884,7 @@
           repoTab: state.repoTab,
         });
         state.taskComposer.repoSlug = nextRepoSlug;
+        resetTaskComposerIdempotencyKey();
         state.scoutItems = defaultScoutItemsState();
         state.investigations.templatesLoaded = false;
         state.investigations.templatesRepoSlug = "";
@@ -8853,10 +8894,12 @@
       }
       if (event.target.id === "task-composer-priority") {
         state.taskComposer.priority = String(event.target.value || "3");
+        resetTaskComposerIdempotencyKey();
         return;
       }
       if (event.target.id === "task-composer-template") {
         state.taskComposer.templateID = String(event.target.value || "template:custom");
+        resetTaskComposerIdempotencyKey();
         renderTaskScheduleModal();
         return;
       }
@@ -8866,6 +8909,7 @@
         if (runMode === "now") {
           state.taskComposer.scheduleAt = "";
         }
+        resetTaskComposerIdempotencyKey();
         renderTaskScheduleModal();
         return;
       }
@@ -8877,6 +8921,9 @@
         state.selectedIssue = nextIssue;
         renderIssueForm(selectedIssueRecord());
         return;
+      }
+      if (event.target.closest("#repo-controls-planned-form")) {
+        resetPlannedFormIdempotencyKey(state.selectedRepo);
       }
       const taskMultiFilterField = event.target.getAttribute("data-task-multi-filter-field");
       if (taskMultiFilterField) {
@@ -8920,6 +8967,7 @@
       if (event.target.closest("#page-body")) return;
       if (event.target.id === "task-composer-repo") {
         state.taskComposer.repoSlug = String(event.target.value || "");
+        resetTaskComposerIdempotencyKey();
         state.investigations.templatesLoaded = false;
         state.investigations.templatesRepoSlug = "";
         loadTaskTemplates({ silent: true });
@@ -8928,11 +8976,13 @@
       }
       if (event.target.id === "task-composer-priority") {
         state.taskComposer.priority = String(event.target.value || "3");
+        resetTaskComposerIdempotencyKey();
         renderTaskScheduleModal();
         return;
       }
       if (event.target.id === "task-composer-template") {
         state.taskComposer.templateID = String(event.target.value || "template:custom");
+        resetTaskComposerIdempotencyKey();
         renderTaskScheduleModal();
         return;
       }
@@ -8942,6 +8992,7 @@
         if (runMode === "now") {
           state.taskComposer.scheduleAt = "";
         }
+        resetTaskComposerIdempotencyKey();
         renderTaskScheduleModal();
       }
     });
@@ -8995,13 +9046,18 @@
       if (event.target.id === "task-composer-description") {
         if (taskTemplateScoutPromptPreview(selectedTaskTemplate())) return;
         state.taskComposer.description = String(event.target.value || "");
+        resetTaskComposerIdempotencyKey();
         return;
       }
       if (event.target.id === "task-composer-schedule") {
         state.taskComposer.scheduleAt = String(event.target.value || "");
         state.taskComposer.runMode = state.taskComposer.scheduleAt ? "later" : defaultString(state.taskComposer.runMode, "now");
+        resetTaskComposerIdempotencyKey();
         renderTaskScheduleModal();
         return;
+      }
+      if (event.target.closest("#repo-controls-planned-form")) {
+        resetPlannedFormIdempotencyKey(state.selectedRepo);
       }
       if (event.target.id === "task-investigation-query") {
         state.taskComposer.investigationQuery = String(event.target.value || "");
@@ -9039,11 +9095,13 @@
       if (event.target.id === "task-composer-description") {
         if (taskTemplateScoutPromptPreview(selectedTaskTemplate())) return;
         state.taskComposer.description = String(event.target.value || "");
+        resetTaskComposerIdempotencyKey();
         return;
       }
       if (event.target.id === "task-composer-schedule") {
         state.taskComposer.scheduleAt = String(event.target.value || "");
         state.taskComposer.runMode = state.taskComposer.scheduleAt ? "later" : defaultString(state.taskComposer.runMode, "now");
+        resetTaskComposerIdempotencyKey();
         renderTaskScheduleModal();
       }
     });

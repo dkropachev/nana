@@ -3,8 +3,10 @@ package gocli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -70,11 +72,12 @@ type startUITaskTemplate struct {
 }
 
 type startUITaskCreateRequest struct {
-	RepoSlug    string `json:"repo_slug"`
-	Description string `json:"description"`
-	TemplateID  string `json:"template_id,omitempty"`
-	ScheduleAt  string `json:"schedule_at,omitempty"`
-	Priority    *int   `json:"priority,omitempty"`
+	RepoSlug       string `json:"repo_slug"`
+	Description    string `json:"description"`
+	TemplateID     string `json:"template_id,omitempty"`
+	ScheduleAt     string `json:"schedule_at,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	Priority       *int   `json:"priority,omitempty"`
 }
 
 type startUITaskTemplateCreateRequest struct {
@@ -116,12 +119,28 @@ func (h *startUIAPI) handleTasks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "repo_slug is required", http.StatusBadRequest)
 			return
 		}
-		state, item, inference, err := createStartUITask(repoSlug, payload)
-		h.invalidateOverviewCache()
+		idempotencyKey, err := resolveStartUITaskIdempotencyKey(r, payload)
 		if err != nil {
+			writeJSONResponseWithStatus(w, http.StatusBadRequest, map[string]any{
+				"code":    "invalid_idempotency_key",
+				"message": err.Error(),
+			})
+			return
+		}
+		payload.IdempotencyKey = idempotencyKey
+		state, item, inference, err := createStartUITask(repoSlug, payload)
+		if err != nil {
+			if conflict, ok := asStartUIIdempotencyConflictError(err); ok {
+				writeJSONResponseWithStatus(w, http.StatusConflict, map[string]any{
+					"code":    "idempotency_conflict",
+					"message": conflict.Error(),
+				})
+				return
+			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		h.invalidateOverviewCache()
 		writeJSONResponse(w, map[string]any{
 			"state":        state,
 			"planned_item": item,
@@ -467,6 +486,11 @@ func createStartUITaskTemplate(repoSlug string, payload startUITaskTemplateCreat
 }
 
 func createStartUITask(repoSlug string, payload startUITaskCreateRequest) (*startWorkState, startWorkPlannedItem, startUITaskInferenceResult, error) {
+	idempotencyKey, err := normalizeStartUITaskIdempotencyKey(payload.IdempotencyKey)
+	if err != nil {
+		return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, err
+	}
+	payload.IdempotencyKey = idempotencyKey
 	template, err := resolveStartUITaskTemplate(repoSlug, strings.TrimSpace(payload.TemplateID))
 	if err != nil {
 		return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, err
@@ -475,6 +499,20 @@ func createStartUITask(repoSlug string, payload startUITaskCreateRequest) (*star
 	fixedScoutTemplate := startUITaskTemplateIsFixedScout(template)
 	if description == "" && !fixedScoutTemplate {
 		return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, fmt.Errorf("description is required")
+	}
+	fingerprintDescription := description
+	if fixedScoutTemplate {
+		fingerprintDescription = ""
+	}
+	requestFingerprint := startUITaskCreateFingerprint(repoSlug, template, fingerprintDescription, payload.ScheduleAt, payload.Priority)
+	if idempotencyKey != "" {
+		state, item, inference, found, err := findStartUITaskIdempotentReplay(repoSlug, idempotencyKey, requestFingerprint)
+		if err != nil {
+			return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, err
+		}
+		if found {
+			return state, item, inference, nil
+		}
 	}
 	var inference startUITaskInferenceResult
 	if fixedScoutTemplate {
@@ -500,23 +538,95 @@ func createStartUITask(repoSlug string, payload startUITaskCreateRequest) (*star
 	}
 	priority = clampTaskPriority(priority)
 	request := startUIPlannedItemRequest{
-		Title:              inference.Title,
-		Description:        description,
-		WorkType:           inference.WorkType,
-		Priority:           &priority,
-		ScheduleAt:         scheduleAt,
-		LaunchKind:         inference.LaunchKind,
-		FindingsHandling:   inference.FindingsHandling,
-		InvestigationQuery: inference.InvestigationQuery,
-		ScoutRole:          inference.ScoutRole,
-		ScoutDestination:   improvementDestinationReview,
-		ScoutFocus:         append([]string{}, inference.ScoutFocus...),
+		Title:                  inference.Title,
+		Description:            description,
+		WorkType:               inference.WorkType,
+		Priority:               &priority,
+		ScheduleAt:             scheduleAt,
+		LaunchKind:             inference.LaunchKind,
+		FindingsHandling:       inference.FindingsHandling,
+		InvestigationQuery:     inference.InvestigationQuery,
+		ScoutRole:              inference.ScoutRole,
+		ScoutDestination:       improvementDestinationReview,
+		ScoutFocus:             append([]string{}, inference.ScoutFocus...),
+		IdempotencyKey:         idempotencyKey,
+		IdempotencyFingerprint: requestFingerprint,
 	}
 	state, item, err := createStartUIPlannedItem(repoSlug, request)
 	if err != nil {
 		return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, err
 	}
 	return state, item, inference, nil
+}
+
+func resolveStartUITaskIdempotencyKey(r *http.Request, payload startUITaskCreateRequest) (string, error) {
+	bodyKey := strings.TrimSpace(payload.IdempotencyKey)
+	headerKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if bodyKey != "" && headerKey != "" && bodyKey != headerKey {
+		return "", fmt.Errorf("idempotency key mismatch between request body and Idempotency-Key header")
+	}
+	return normalizeStartUITaskIdempotencyKey(defaultString(headerKey, bodyKey))
+}
+
+func normalizeStartUITaskIdempotencyKey(value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", nil
+	}
+	if len(trimmed) > 200 {
+		return "", fmt.Errorf("idempotency key must be between 1 and 200 characters")
+	}
+	return trimmed, nil
+}
+
+func startUITaskCreateFingerprint(repoSlug string, template startUITaskTemplate, description string, scheduleAt string, priority *int) string {
+	request := map[string]any{
+		"repo_slug":         strings.TrimSpace(repoSlug),
+		"template_id":       defaultString(strings.TrimSpace(template.ID), "template:custom"),
+		"description":       strings.TrimSpace(description),
+		"schedule_at":       strings.TrimSpace(scheduleAt),
+		"priority_explicit": priority != nil,
+	}
+	if priority != nil {
+		request["priority"] = clampTaskPriority(*priority)
+	}
+	return hashJSON(request)
+}
+
+func findStartUITaskIdempotentReplay(repoSlug string, idempotencyKey string, fingerprint string) (*startWorkState, startWorkPlannedItem, startUITaskInferenceResult, bool, error) {
+	state, err := readStartWorkState(repoSlug)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, false, nil
+		}
+		return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, false, err
+	}
+	item, found, err := startUIPlannedItemForIdempotencyKey(state, idempotencyKey, fingerprint)
+	if err != nil {
+		return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, false, err
+	}
+	if !found {
+		return nil, startWorkPlannedItem{}, startUITaskInferenceResult{}, false, nil
+	}
+	return state, item, startUITaskInferenceFromPlannedItem(item), true, nil
+}
+
+func startUITaskInferenceFromPlannedItem(item startWorkPlannedItem) startUITaskInferenceResult {
+	return startUITaskInferenceResult{
+		Title:              strings.TrimSpace(item.Title),
+		LaunchKind:         strings.TrimSpace(item.LaunchKind),
+		WorkType:           normalizeWorkType(item.WorkType),
+		InvestigationQuery: strings.TrimSpace(item.InvestigationQuery),
+		ScoutRole:          strings.TrimSpace(item.ScoutRole),
+		ScoutFocus:         append([]string{}, item.ScoutFocus...),
+		FindingsHandling:   normalizeFindingsHandling(item.FindingsHandling, item.ScoutDestination, item.LaunchKind),
+	}
+}
+
+func asStartUIIdempotencyConflictError(err error) (startUIIdempotencyConflictError, bool) {
+	var target startUIIdempotencyConflictError
+	ok := errors.As(err, &target)
+	return target, ok
 }
 
 func startUITaskTemplateIsFixedScout(template startUITaskTemplate) bool {

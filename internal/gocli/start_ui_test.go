@@ -360,8 +360,19 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 		t.Fatalf("unexpected patched issue: %+v", patchPayload.Issue)
 	}
 
-	createBody := strings.NewReader(`{"title":"Run smoke after deploy","description":"Schedule it after release","work_type":"feature","priority":2,"launch_kind":"github_issue"}`)
-	createResponse, err := http.Post(server.URL+"/api/v1/repos/"+repoSlug+"/planned-items", "application/json", createBody)
+	postPlannedItem := func(body string, idempotencyKey string) (*http.Response, error) {
+		request, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/repos/"+repoSlug+"/planned-items", strings.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("Content-Type", "application/json")
+		if strings.TrimSpace(idempotencyKey) != "" {
+			request.Header.Set("Idempotency-Key", idempotencyKey)
+		}
+		return http.DefaultClient.Do(request)
+	}
+	createBody := `{"title":"Run smoke after deploy","description":"Schedule it after release","work_type":"feature","priority":2,"launch_kind":"github_issue","idempotency_key":"repo-planned-item-1"}`
+	createResponse, err := postPlannedItem(createBody, "repo-planned-item-1")
 	if err != nil {
 		t.Fatalf("POST planned item: %v", err)
 	}
@@ -377,6 +388,31 @@ func TestStartUIAPIOverviewAndMutations(t *testing.T) {
 	}
 	if createPayload.PlannedItem.ID == "" || createPayload.PlannedItem.Title != "Run smoke after deploy" {
 		t.Fatalf("unexpected planned item payload: %+v", createPayload.PlannedItem)
+	}
+	replayResponse, err := postPlannedItem(createBody, "repo-planned-item-1")
+	if err != nil {
+		t.Fatalf("POST replay planned item: %v", err)
+	}
+	defer replayResponse.Body.Close()
+	if replayResponse.StatusCode != http.StatusOK {
+		t.Fatalf("expected replayed planned item status 200, got %d", replayResponse.StatusCode)
+	}
+	var replayPayload struct {
+		PlannedItem startWorkPlannedItem `json:"planned_item"`
+	}
+	if err := json.NewDecoder(replayResponse.Body).Decode(&replayPayload); err != nil {
+		t.Fatalf("decode replay planned payload: %v", err)
+	}
+	if replayPayload.PlannedItem.ID != createPayload.PlannedItem.ID {
+		t.Fatalf("expected replayed planned item to reuse %s, got %+v", createPayload.PlannedItem.ID, replayPayload.PlannedItem)
+	}
+	conflictResponse, err := postPlannedItem(`{"title":"Run a different smoke task","description":"different request","work_type":"feature","priority":0,"launch_kind":"github_issue","idempotency_key":"repo-planned-item-1"}`, "repo-planned-item-1")
+	if err != nil {
+		t.Fatalf("POST conflicting planned item: %v", err)
+	}
+	defer conflictResponse.Body.Close()
+	if conflictResponse.StatusCode != http.StatusConflict {
+		t.Fatalf("expected planned item idempotency conflict 409, got %d", conflictResponse.StatusCode)
 	}
 
 	launchRequest, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/planned-items/"+createPayload.PlannedItem.ID+"/launch-now", nil)
@@ -3916,15 +3952,27 @@ func TestStartUIAPITaskCreateAndTemplateSave(t *testing.T) {
 	}
 
 	taskBody, err := json.Marshal(startUITaskCreateRequest{
-		RepoSlug:    fixture.RepoSlug,
-		Description: "Audit the approvals surface and keep stale scout recovery details visible.",
-		TemplateID:  templatePayload.Template.ID,
-		Priority:    intPtr(1),
+		RepoSlug:       fixture.RepoSlug,
+		Description:    "Audit the approvals surface and keep stale scout recovery details visible.",
+		TemplateID:     templatePayload.Template.ID,
+		IdempotencyKey: "task-create-approval-audit",
+		Priority:       intPtr(1),
 	})
 	if err != nil {
 		t.Fatalf("marshal task body: %v", err)
 	}
-	taskResponse, err := http.Post(fixture.Server.URL+"/api/v1/tasks", "application/json", strings.NewReader(string(taskBody)))
+	postTask := func(body []byte, idempotencyKey string) (*http.Response, error) {
+		request, err := http.NewRequest(http.MethodPost, fixture.Server.URL+"/api/v1/tasks", strings.NewReader(string(body)))
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("Content-Type", "application/json")
+		if strings.TrimSpace(idempotencyKey) != "" {
+			request.Header.Set("Idempotency-Key", idempotencyKey)
+		}
+		return http.DefaultClient.Do(request)
+	}
+	taskResponse, err := postTask(taskBody, "task-create-approval-audit")
 	if err != nil {
 		t.Fatalf("POST task: %v", err)
 	}
@@ -3950,6 +3998,63 @@ func TestStartUIAPITaskCreateAndTemplateSave(t *testing.T) {
 	created, ok := state.PlannedItems[taskPayload.PlannedItem.ID]
 	if !ok || created.LaunchKind != "manual_scout" || created.Priority != 1 || created.ScheduleAt == "" {
 		t.Fatalf("expected persisted planned task, got %+v", state.PlannedItems)
+	}
+	plannedCount := len(state.PlannedItems)
+
+	replayResponse, err := postTask(taskBody, "task-create-approval-audit")
+	if err != nil {
+		t.Fatalf("POST replayed task: %v", err)
+	}
+	defer replayResponse.Body.Close()
+	if replayResponse.StatusCode != http.StatusOK {
+		t.Fatalf("expected idempotent replay status 200, got %d", replayResponse.StatusCode)
+	}
+	var replayPayload struct {
+		PlannedItem startWorkPlannedItem       `json:"planned_item"`
+		Inference   startUITaskInferenceResult `json:"inference"`
+	}
+	if err := json.NewDecoder(replayResponse.Body).Decode(&replayPayload); err != nil {
+		t.Fatalf("decode replay payload: %v", err)
+	}
+	if replayPayload.PlannedItem.ID != taskPayload.PlannedItem.ID || replayPayload.Inference.Title != taskPayload.Inference.Title {
+		t.Fatalf("expected replay to return the original task payload, got %+v %+v", replayPayload.PlannedItem, replayPayload.Inference)
+	}
+
+	replayedState, err := readStartWorkState(fixture.RepoSlug)
+	if err != nil {
+		t.Fatalf("read replayed start work state: %v", err)
+	}
+	if len(replayedState.PlannedItems) != plannedCount {
+		t.Fatalf("expected idempotent replay to avoid duplicate planned items, got %+v", replayedState.PlannedItems)
+	}
+
+	conflictBody, err := json.Marshal(startUITaskCreateRequest{
+		RepoSlug:       fixture.RepoSlug,
+		Description:    "Audit a different approvals surface request.",
+		TemplateID:     templatePayload.Template.ID,
+		IdempotencyKey: "task-create-approval-audit",
+		Priority:       intPtr(0),
+	})
+	if err != nil {
+		t.Fatalf("marshal conflicting task body: %v", err)
+	}
+	conflictResponse, err := postTask(conflictBody, "task-create-approval-audit")
+	if err != nil {
+		t.Fatalf("POST conflicting task: %v", err)
+	}
+	defer conflictResponse.Body.Close()
+	if conflictResponse.StatusCode != http.StatusConflict {
+		t.Fatalf("expected idempotency conflict status 409, got %d", conflictResponse.StatusCode)
+	}
+	var conflictPayload struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(conflictResponse.Body).Decode(&conflictPayload); err != nil {
+		t.Fatalf("decode conflicting payload: %v", err)
+	}
+	if conflictPayload.Code != "idempotency_conflict" || !strings.Contains(conflictPayload.Message, "idempotency key") {
+		t.Fatalf("unexpected idempotency conflict payload: %+v", conflictPayload)
 	}
 	dbTemplates, err := withLocalWorkReadStore(func(store *localWorkDBStore) ([]startWorkTaskTemplate, error) {
 		return store.listTaskTemplates(fixture.RepoSlug)
@@ -5744,6 +5849,9 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	}
 	if !strings.Contains(string(appBody), `taskTemplateScoutPromptPreview`) || !strings.Contains(string(appBody), `scout_prompt_preview`) || !strings.Contains(string(appBody), `scoutPromptPreview ? "" : String(state.taskComposer.description || "").trim()`) {
 		t.Fatalf("expected scout presets to render read-only prompt previews without submitting them as descriptions, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `Idempotency-Key`) || !strings.Contains(string(appBody), `nextTaskComposerIdempotencyKey()`) {
+		t.Fatalf("expected task scheduling UI to send and rotate idempotency keys, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `!composerRepo || !canSavePreset`) {
 		t.Fatalf("expected Save As Preset to be disabled when a preset is selected, got %s", string(appBody))

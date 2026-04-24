@@ -190,30 +190,32 @@ type startWorkServiceTask struct {
 }
 
 type startWorkPlannedItem struct {
-	ID                 string   `json:"id"`
-	RepoSlug           string   `json:"repo_slug"`
-	Title              string   `json:"title"`
-	Description        string   `json:"description,omitempty"`
-	WorkType           string   `json:"work_type,omitempty"`
-	LaunchKind         string   `json:"launch_kind,omitempty"`
-	FindingsHandling   string   `json:"findings_handling,omitempty"`
-	TargetURL          string   `json:"target_url,omitempty"`
-	InvestigationQuery string   `json:"investigation_query,omitempty"`
-	ScoutRole          string   `json:"scout_role,omitempty"`
-	ScoutDestination   string   `json:"scout_destination,omitempty"`
-	ScoutSessionLimit  int      `json:"scout_session_limit,omitempty"`
-	ScoutFocus         []string `json:"scout_focus,omitempty"`
-	Priority           int      `json:"priority"`
-	ScheduleAt         string   `json:"schedule_at,omitempty"`
-	DeferredReason     string   `json:"deferred_reason,omitempty"`
-	State              string   `json:"state"`
-	LaunchRunID        string   `json:"launch_run_id,omitempty"`
-	LaunchIssueURL     string   `json:"launch_issue_url,omitempty"`
-	LaunchIssueNumber  int      `json:"launch_issue_number,omitempty"`
-	LaunchResult       string   `json:"launch_result,omitempty"`
-	LastError          string   `json:"last_error,omitempty"`
-	CreatedAt          string   `json:"created_at"`
-	UpdatedAt          string   `json:"updated_at"`
+	ID                     string   `json:"id"`
+	RepoSlug               string   `json:"repo_slug"`
+	Title                  string   `json:"title"`
+	Description            string   `json:"description,omitempty"`
+	WorkType               string   `json:"work_type,omitempty"`
+	LaunchKind             string   `json:"launch_kind,omitempty"`
+	FindingsHandling       string   `json:"findings_handling,omitempty"`
+	TargetURL              string   `json:"target_url,omitempty"`
+	InvestigationQuery     string   `json:"investigation_query,omitempty"`
+	ScoutRole              string   `json:"scout_role,omitempty"`
+	ScoutDestination       string   `json:"scout_destination,omitempty"`
+	ScoutSessionLimit      int      `json:"scout_session_limit,omitempty"`
+	ScoutFocus             []string `json:"scout_focus,omitempty"`
+	Priority               int      `json:"priority"`
+	ScheduleAt             string   `json:"schedule_at,omitempty"`
+	DeferredReason         string   `json:"deferred_reason,omitempty"`
+	IdempotencyKey         string   `json:"idempotency_key,omitempty"`
+	IdempotencyFingerprint string   `json:"idempotency_fingerprint,omitempty"`
+	State                  string   `json:"state"`
+	LaunchRunID            string   `json:"launch_run_id,omitempty"`
+	LaunchIssueURL         string   `json:"launch_issue_url,omitempty"`
+	LaunchIssueNumber      int      `json:"launch_issue_number,omitempty"`
+	LaunchResult           string   `json:"launch_result,omitempty"`
+	LastError              string   `json:"last_error,omitempty"`
+	CreatedAt              string   `json:"created_at"`
+	UpdatedAt              string   `json:"updated_at"`
 }
 
 type startWorkTaskTemplate struct {
@@ -1804,6 +1806,8 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 	for key, item := range state.PlannedItems {
 		item.ID = defaultString(strings.TrimSpace(item.ID), key)
 		item.RepoSlug = defaultString(strings.TrimSpace(item.RepoSlug), state.SourceRepo)
+		item.IdempotencyKey = strings.TrimSpace(item.IdempotencyKey)
+		item.IdempotencyFingerprint = strings.TrimSpace(item.IdempotencyFingerprint)
 		if item.Priority < 0 || item.Priority > 5 {
 			item.Priority = 3
 		}
