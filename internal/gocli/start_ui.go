@@ -1233,10 +1233,35 @@ func (h *startUIAPI) handleInvestigation(w http.ResponseWriter, r *http.Request)
 	}
 	detail, err := loadStartUIInvestigationDetail(h.cwd, runID)
 	if err != nil {
+		if startUITaskIDLooksLikeLegacyInvestigationAlias(runID) {
+			taskDetail, taskErr := loadStartUITaskDetail(h.cwd, runID)
+			if taskErr == nil {
+				writeJSONResponse(w, taskDetail)
+				return
+			}
+		}
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
 	writeJSONResponse(w, detail)
+}
+
+func startUITaskIDLooksLikeLegacyInvestigationAlias(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	for _, prefix := range []string{
+		"issue:",
+		"planned-item:",
+		"scout-job:",
+		"investigation:",
+		"work-run:",
+		"work-item:",
+		"service-task:",
+	} {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *startUIAPI) handleReviews(w http.ResponseWriter, r *http.Request) {

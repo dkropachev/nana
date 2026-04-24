@@ -3599,6 +3599,19 @@ func TestStartUIAPIAssistantWorkspaceRoutes(t *testing.T) {
 		t.Fatalf("unexpected investigation detail: %+v", investigationDetail)
 	}
 
+	legacyTaskDetailResponse, err := http.Get(server.URL + "/api/v1/investigations/" + url.PathEscape("work-run:lw-browser-active"))
+	if err != nil {
+		t.Fatalf("GET legacy task detail alias: %v", err)
+	}
+	defer legacyTaskDetailResponse.Body.Close()
+	var legacyTaskDetail startUITaskDetail
+	if err := json.NewDecoder(legacyTaskDetailResponse.Body).Decode(&legacyTaskDetail); err != nil {
+		t.Fatalf("decode legacy task detail alias payload: %v", err)
+	}
+	if legacyTaskDetail.Summary.ID != "work-run:lw-browser-active" || legacyTaskDetail.WorkRun == nil {
+		t.Fatalf("unexpected legacy task detail alias payload: %+v", legacyTaskDetail)
+	}
+
 	reviewsResponse, err := http.Get(server.URL + "/api/v1/reviews")
 	if err != nil {
 		t.Fatalf("GET reviews: %v", err)
@@ -3922,6 +3935,20 @@ func TestStartUIAPITasksListAndDetail(t *testing.T) {
 		t.Fatalf("unexpected work-item task detail: %+v", detail)
 	}
 
+	scoutTaskID := "scout-job:" + fixture.RepoSlug + ":" + fixture.ScoutItemID
+	scoutTaskDetailResponse, err := http.Get(fixture.Server.URL + "/api/v1/tasks/" + url.PathEscape(scoutTaskID))
+	if err != nil {
+		t.Fatalf("GET scout-job task detail: %v", err)
+	}
+	defer scoutTaskDetailResponse.Body.Close()
+	var scoutTaskDetail startUITaskDetail
+	if err := json.NewDecoder(scoutTaskDetailResponse.Body).Decode(&scoutTaskDetail); err != nil {
+		t.Fatalf("decode scout-job task detail: %v", err)
+	}
+	if scoutTaskDetail.ScoutJob == nil || scoutTaskDetail.Summary.ID != scoutTaskID {
+		t.Fatalf("unexpected scout-job task detail: %+v", scoutTaskDetail)
+	}
+
 	runTaskDetailResponse, err := http.Get(fixture.Server.URL + "/api/v1/tasks/" + url.PathEscape("work-run:lw-browser-active"))
 	if err != nil {
 		t.Fatalf("GET work-run task detail: %v", err)
@@ -4084,6 +4111,26 @@ func TestStartUIBrowserTaskDetailDeepLinkOpensModal(t *testing.T) {
 		taskID,
 	} {
 		startUITestRequireText(t, output, needle, "task-detail-deeplink")
+	}
+}
+
+func TestStartUIBrowserLegacyInvestigationHashForScoutJobOpensTaskModal(t *testing.T) {
+	chromePath := startUITestChromePath(t)
+	if chromePath == "" {
+		t.Skip("google-chrome is required for browser UI coverage")
+	}
+
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	taskID := "scout-job:" + fixture.RepoSlug + ":" + fixture.ScoutItemID
+	output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=investigations&investigation="+url.QueryEscape(taskID))
+	for _, needle := range []string{
+		"Task Detail",
+		"Reference",
+		taskID,
+	} {
+		startUITestRequireText(t, output, needle, "legacy-investigation-task-deeplink")
 	}
 }
 

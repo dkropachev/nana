@@ -343,14 +343,23 @@ func parseStartUITaskRoute(path string) (string, string, bool) {
 	if trimmed == "" {
 		return "", "", false
 	}
-	parts := strings.Split(trimmed, "/")
-	if len(parts) == 1 {
-		return strings.TrimSpace(parts[0]), "", strings.TrimSpace(parts[0]) != ""
+	if lastSlash := strings.LastIndex(trimmed, "/"); lastSlash >= 0 {
+		taskID := strings.TrimSpace(trimmed[:lastSlash])
+		action := strings.TrimSpace(trimmed[lastSlash+1:])
+		if taskID != "" && startUITaskActionName(action) {
+			return taskID, action, true
+		}
 	}
-	if len(parts) == 2 && strings.TrimSpace(parts[0]) != "" && strings.TrimSpace(parts[1]) != "" {
-		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), true
+	return strings.TrimSpace(trimmed), "", strings.TrimSpace(trimmed) != ""
+}
+
+func startUITaskActionName(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "run-now", "dismiss", "retry":
+		return true
+	default:
+		return false
 	}
-	return "", "", false
 }
 
 func mutateStartUITask(cwd string, taskID string, action string) (map[string]any, error) {
