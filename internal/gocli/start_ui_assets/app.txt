@@ -3291,6 +3291,7 @@
         target_url: defaultString(run.target_url, "-"),
         updated_at: formatDateTime(run.updated_at),
         can_sync: run.backend === "github",
+        can_stop: Boolean(run.stop_allowed),
         can_resolve: Boolean(run.resolve_allowed),
       };
       if (row.pause_until) {
@@ -3326,6 +3327,17 @@
             return '<span class="data-value-text">N/A</span>';
           }
           return `<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-run-sync="${escapeHTML(row.run_id)}">Sync</button>`;
+        },
+      },
+      {
+        field: "run_id",
+        label: "Stop",
+        action: true,
+        render(row) {
+          if (!row.can_stop) {
+            return '<span class="data-value-text">N/A</span>';
+          }
+          return `<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-run-stop="${escapeHTML(row.run_id)}">Stop</button>`;
         },
       },
       {
@@ -7407,6 +7419,7 @@
           <span>File</span>
           <select id="log-file-select" ${files.length ? "" : "disabled"}>${options || '<option value="">No log files</option>'}</select>
         </label>
+        ${typedDetail.stop_allowed ? `<button class="tx-btn tx-btn-secondary" type="button" data-run-stop="${escapeHTML(summary.run_id)}">Stop Run</button>` : ""}
         ${typedDetail.resolve_allowed ? `<button class="tx-btn tx-btn-secondary" type="button" data-run-resolve="${escapeHTML(summary.run_id)}">Resolve Run</button>` : ""}
         ${typedDetail.sync_allowed ? `<button class="tx-btn tx-btn-secondary" type="button" data-run-sync="${escapeHTML(summary.run_id)}">Sync Run</button>` : ""}
         <button class="tx-btn tx-btn-secondary" type="button" data-run-drop="${escapeHTML(summary.run_id)}">Drop Run</button>
@@ -8626,6 +8639,34 @@
           toast("success", "Run resolved", runID);
         }).catch((error) => {
           toast("danger", "Run resolve failed", error.message);
+        });
+        return;
+      }
+
+      const runStopButton = event.target.closest("[data-run-stop]");
+      if (runStopButton) {
+        const runID = runStopButton.getAttribute("data-run-stop");
+        if (!runID) return;
+        requestConfirmation({
+          title: "Stop run?",
+          message: `Stop run ${runID} and keep its history so it can be inspected or resumed later.`,
+          confirmLabel: "Stop Run",
+          tone: "danger",
+          onConfirm() {
+            api(`/api/v1/work/runs/${encodeURIComponent(runID)}/stop`, {
+              method: "POST",
+            }).then((payload) => {
+              if (payload.detail && state.logSelection.runID === runID) {
+                state.logSelection.detail = payload.detail;
+                renderLogDrawer();
+              }
+              load();
+              loadApprovals({ silent: true });
+              toast("success", "Run stopped", runID);
+            }).catch((error) => {
+              toast("danger", "Run stop failed", error.message);
+            });
+          },
         });
         return;
       }

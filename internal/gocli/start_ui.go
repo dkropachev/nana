@@ -317,6 +317,7 @@ type startUIWorkRun struct {
 	PublicationState string `json:"publication_state,omitempty"`
 	PauseReason      string `json:"pause_reason,omitempty"`
 	PauseUntil       string `json:"pause_until,omitempty"`
+	StopAllowed      bool   `json:"stop_allowed,omitempty"`
 	ResolveAllowed   bool   `json:"resolve_allowed,omitempty"`
 	Pending          bool   `json:"pending"`
 	AttentionState   string `json:"attention_state,omitempty"`
@@ -847,6 +848,7 @@ type startUIWorkRunDetail struct {
 	NextAction        string                    `json:"next_action,omitempty"`
 	HumanGateReason   string                    `json:"human_gate_reason,omitempty"`
 	SyncAllowed       bool                      `json:"sync_allowed,omitempty"`
+	StopAllowed       bool                      `json:"stop_allowed,omitempty"`
 	ResolveAllowed    bool                      `json:"resolve_allowed,omitempty"`
 	ExternalURL       string                    `json:"external_url,omitempty"`
 }
@@ -877,6 +879,10 @@ var startUISyncGithubRun = func(options githubWorkSyncOptions) error {
 
 var startUIResolveWorkRun = func(runID string) error {
 	return resolveLocalWork("", localWorkResolveOptions{RunSelection: localWorkRunSelection{RunID: runID}})
+}
+
+var startUIStopWorkRun = func(runID string) error {
+	return stopLocalWork("", localWorkStopOptions{RunSelection: localWorkRunSelection{RunID: runID}})
 }
 
 var startUIDropWorkRun = func(runID string) error {
@@ -1882,6 +1888,30 @@ func (h *startUIAPI) handleWorkRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := startUISyncGithubRun(githubWorkSyncOptions{RunID: runID}); err != nil {
+			h.invalidateOverviewCache()
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		h.invalidateOverviewCache()
+		updated, err := loadStartUIWorkRunDetail(runID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSONResponse(w, map[string]any{"detail": updated})
+		return
+	}
+	if r.Method == http.MethodPost && tail == "stop" {
+		detail, err := loadStartUIWorkRunDetail(runID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if detail.Backend != "local" {
+			http.Error(w, "stop is only available for local work runs", http.StatusBadRequest)
+			return
+		}
+		if err := startUIStopWorkRun(runID); err != nil {
 			h.invalidateOverviewCache()
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -5031,6 +5061,7 @@ func startUIWorkRunFromLocalManifest(entry workRunIndexEntry, manifest localWork
 		ArtifactPath:     localWorkRunDirByID(manifest.RepoID, manifest.RunID),
 		PauseReason:      manifest.PauseReason,
 		PauseUntil:       manifest.PauseUntil,
+		StopAllowed:      localWorkStopAllowed(manifest),
 		ResolveAllowed:   localWorkResolveAllowed(manifest),
 		Pending:          startUIWorkRunPending(status, blocked, manifest.CurrentPhase),
 		AttentionState:   attention,
@@ -5109,6 +5140,9 @@ func loadStartUIWorkRunDetail(runID string) (startUIWorkRunDetail, error) {
 			manifest.SupersededReason = supersededReason
 		}
 		nextAction := defaultString(localWorkBlockedNextAction(manifest), defaultString(strings.TrimSpace(manifest.CurrentPhase), "inspect local work state"))
+		if strings.EqualFold(strings.TrimSpace(manifest.Status), "stopped") {
+			nextAction = fmt.Sprintf("Run nana work resume --run-id %s to continue this stopped run.", manifest.RunID)
+		}
 		totalTokens := 0
 		sessionsAccounted := 0
 		hasTokenUsage := false
@@ -5134,6 +5168,7 @@ func loadStartUIWorkRunDetail(runID string) (startUIWorkRunDetail, error) {
 			SessionsAccounted: sessionsAccounted,
 			HasTokenUsage:     hasTokenUsage,
 			NextAction:        nextAction,
+			StopAllowed:       localWorkStopAllowed(manifest),
 			ResolveAllowed:    localWorkResolveAllowed(manifest),
 			ExternalURL:       summary.TargetURL,
 		}, nil
@@ -6067,7 +6102,7 @@ func startUIWorkRunPending(status string, blocked bool, phase string) bool {
 		return true
 	}
 	switch normalizedStatus {
-	case "completed", "success", "succeeded", "merged", "closed", "done", "no-op":
+	case "completed", "success", "succeeded", "merged", "closed", "done", "no-op", "stopped", "cancelled", "canceled":
 		return false
 	}
 	normalizedPhase := strings.ToLower(strings.TrimSpace(phase))

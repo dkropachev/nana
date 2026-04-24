@@ -2897,6 +2897,156 @@ func TestStartUIAPIDropLocalWorkRun(t *testing.T) {
 	}
 }
 
+func TestStartUIAPIStopLocalWorkRunPreservesArtifacts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	repo := githubManagedPaths("acme/widget").SourcePath
+	createLocalWorkRepoAt(t, repo)
+	repoID := localWorkRepoID(repo)
+	runID := "lw-ui-stop"
+	runDir := localWorkRunDirByID(repoID, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	inputPath := filepath.Join(runDir, "input-plan.md")
+	if err := os.WriteFile(inputPath, []byte("stop local run from UI\n"), 0o644); err != nil {
+		t.Fatalf("write input plan: %v", err)
+	}
+	sandboxPath := filepath.Join(localWorkSandboxesDir(), repoID, runID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := cloneGithubSourceToSandbox(repo, sandboxRepoPath); err != nil {
+		t.Fatalf("clone sandbox: %v", err)
+	}
+
+	manifest := localWorkManifest{
+		Version:               5,
+		RunID:                 runID,
+		CreatedAt:             ISOTimeNow(),
+		UpdatedAt:             ISOTimeNow(),
+		Status:                "running",
+		CurrentPhase:          "review",
+		CurrentSubphase:       "review",
+		CurrentIteration:      3,
+		RepoRoot:              repo,
+		RepoName:              filepath.Base(repo),
+		RepoID:                repoID,
+		SandboxPath:           sandboxPath,
+		SandboxRepoPath:       sandboxRepoPath,
+		InputPath:             inputPath,
+		InputMode:             "task",
+		WorkType:              "feature",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	originalSnapshot := localWorkProcessSnapshot
+	originalTerminate := localWorkTerminateProcess
+	originalForceKill := localWorkForceKillProcess
+	originalSleep := localWorkStopSleep
+	defer func() {
+		localWorkProcessSnapshot = originalSnapshot
+		localWorkTerminateProcess = originalTerminate
+		localWorkForceKillProcess = originalForceKill
+		localWorkStopSleep = originalSleep
+	}()
+
+	live := map[int]string{
+		111: fmt.Sprintf("111 nana work resume --run-id %s --repo %s", runID, repo),
+		222: fmt.Sprintf("222 codex exec -C %s", sandboxRepoPath),
+	}
+	localWorkProcessSnapshot = func() (string, error) {
+		lines := []string{"PID COMMAND"}
+		for pid, command := range live {
+			lines = append(lines, fmt.Sprintf("%d %s", pid, command))
+		}
+		return strings.Join(lines, "\n"), nil
+	}
+	localWorkTerminateProcess = func(pid int) error {
+		delete(live, pid)
+		return nil
+	}
+	localWorkForceKillProcess = func(pid int) error {
+		delete(live, pid)
+		return nil
+	}
+	localWorkStopSleep = func(time.Duration) {}
+
+	server := httptest.NewServer((&startUIAPI{cwd: cwd, allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
+	defer server.Close()
+
+	detailResponse, err := http.Get(server.URL + "/api/v1/work/runs/" + runID)
+	if err != nil {
+		t.Fatalf("GET work run detail: %v", err)
+	}
+	defer detailResponse.Body.Close()
+	var before startUIWorkRunDetail
+	if err := json.NewDecoder(detailResponse.Body).Decode(&before); err != nil {
+		t.Fatalf("decode work run detail before stop: %v", err)
+	}
+	if !before.StopAllowed || before.ResolveAllowed || before.SyncAllowed {
+		t.Fatalf("expected running local run detail to allow stop only, got %+v", before)
+	}
+
+	stopRequest, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/work/runs/"+runID+"/stop", nil)
+	if err != nil {
+		t.Fatalf("new stop run request: %v", err)
+	}
+	stopResponse, err := http.DefaultClient.Do(stopRequest)
+	if err != nil {
+		t.Fatalf("POST work run stop: %v", err)
+	}
+	defer stopResponse.Body.Close()
+	if stopResponse.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected work run stop status: %d", stopResponse.StatusCode)
+	}
+	var stopPayload struct {
+		Detail startUIWorkRunDetail `json:"detail"`
+	}
+	if err := json.NewDecoder(stopResponse.Body).Decode(&stopPayload); err != nil {
+		t.Fatalf("decode work run stop payload: %v", err)
+	}
+	if stopPayload.Detail.Summary.Status != "stopped" || stopPayload.Detail.StopAllowed {
+		t.Fatalf("expected stopped detail payload, got %+v", stopPayload.Detail)
+	}
+
+	updated, err := readLocalWorkManifestByRunID(runID)
+	if err != nil {
+		t.Fatalf("read stopped manifest: %v", err)
+	}
+	if updated.Status != "stopped" || updated.PauseReason != localWorkStoppedByUserReason {
+		t.Fatalf("expected stopped manifest, got %+v", updated)
+	}
+	if _, err := os.Stat(runDir); err != nil {
+		t.Fatalf("expected run dir to remain after stop: %v", err)
+	}
+	if _, err := os.Stat(sandboxPath); err != nil {
+		t.Fatalf("expected sandbox to remain after stop: %v", err)
+	}
+
+	overviewResponse, err := http.Get(server.URL + "/api/v1/overview")
+	if err != nil {
+		t.Fatalf("GET overview after stop: %v", err)
+	}
+	defer overviewResponse.Body.Close()
+	var overview startUIOverview
+	if err := json.NewDecoder(overviewResponse.Body).Decode(&overview); err != nil {
+		t.Fatalf("decode overview after stop: %v", err)
+	}
+	if len(overview.WorkRuns) != 1 {
+		t.Fatalf("expected stopped run to remain in overview history, got %+v", overview.WorkRuns)
+	}
+	if overview.WorkRuns[0].Status != "stopped" || overview.WorkRuns[0].Pending || overview.WorkRuns[0].StopAllowed {
+		t.Fatalf("expected overview to show non-pending stopped run, got %+v", overview.WorkRuns[0])
+	}
+}
+
 func TestStartUIAPIDropGithubWorkRunClearsPointers(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -5882,6 +6032,9 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	}
 	if !strings.Contains(string(appBody), `data-run-sync="`) {
 		t.Fatalf("expected run sync control wiring in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `data-run-stop="`) {
+		t.Fatalf("expected run stop control wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `function canRenderWithoutOverview(view)`) {
 		t.Fatalf("expected overview-optional view helper in app.js, got %s", string(appBody))

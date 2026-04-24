@@ -25,6 +25,7 @@ const LocalWorkHelp = `nana work - Local implementation runtime for git-backed r
 Usage:
   nana work start [--detach] [--repo <path>] [--task <text> | --plan-file <path>] --work-type <bug_fix|refactor|feature|test_only> [--max-iterations <n>] [--integration <final|always|never>] [--grouping-policy <ai|path|singleton>] [--validation-parallelism <1-8>] [-- codex-args...]
   nana work resume [--run-id <id> | --last | --global-last] [--repo <path>] [-- codex-args...]
+  nana work stop [--run-id <id> | --last | --global-last] [--repo <path>]
   nana work resolve [--run-id <id> | --last | --global-last] [--repo <path>]
   nana work status [--run-id <id> | --last | --global-last] [--repo <path>] [--json]
   nana work logs [--run-id <id> | --last | --global-last] [--repo <path>] [--tail <n>] [--json]
@@ -36,6 +37,7 @@ Behavior:
   - infers a task from the current branch when --task and --plan-file are omitted
   - requires an explicit --work-type for all local launches
   - refreshes managed source checkouts before sandbox start, syncs the local source branch before final apply, commits verified sandbox changes after completion, and pushes to the tracked remote when one exists
+  - stop halts the active local runner while preserving run history so it can be inspected or resumed later
   - resolve retries blocked final-apply runs after Nana refreshes the managed source checkout or completes a pending commit/push
   - never submits, publishes, opens PRs, or calls GitHub APIs
   - loops through implement -> verify -> self-review -> harden -> re-verify with capped hardening rounds
@@ -74,6 +76,9 @@ var localWorkRetrySleep = time.Sleep
 var localWorkOpenReadStore = openLocalWorkReadDB
 var localWorkProcessSnapshot = captureLocalWorkProcessSnapshot
 var localWorkStartDetachedRunner = launchLocalWorkDetachedRunner
+var localWorkTerminateProcess = terminateProcess
+var localWorkForceKillProcess = forceKillProcess
+var localWorkStopSleep = time.Sleep
 var localWorkExecuteLoop = executeLocalWorkLoop
 var localWorkTokenUsagePersistMu sync.Mutex
 
@@ -111,6 +116,10 @@ type localWorkResumeOptions struct {
 }
 
 type localWorkResolveOptions struct {
+	RunSelection localWorkRunSelection
+}
+
+type localWorkStopOptions struct {
 	RunSelection localWorkRunSelection
 }
 
@@ -485,6 +494,12 @@ func runLocalWorkCommandWithOptions(cwd string, args []string, rateLimitPolicy c
 		}
 		options.RateLimitPolicy = rateLimitPolicy
 		return "", resumeLocalWork(cwd, options)
+	case "stop":
+		options, err := parseLocalWorkStopArgs(args[1:])
+		if err != nil {
+			return "", err
+		}
+		return "", stopLocalWork(cwd, options)
 	case "resolve":
 		options, err := parseLocalWorkResolveArgs(args[1:])
 		if err != nil {
@@ -1860,6 +1875,14 @@ func parseLocalWorkResolveArgs(args []string) (localWorkResolveOptions, error) {
 		return localWorkResolveOptions{}, err
 	}
 	return localWorkResolveOptions{RunSelection: selection}, nil
+}
+
+func parseLocalWorkStopArgs(args []string) (localWorkStopOptions, error) {
+	selection, err := parseLocalWorkRunSelection(args, true)
+	if err != nil {
+		return localWorkStopOptions{}, err
+	}
+	return localWorkStopOptions{RunSelection: selection}, nil
 }
 
 func parseLocalWorkLogsArgs(args []string) (localWorkLogsOptions, error) {

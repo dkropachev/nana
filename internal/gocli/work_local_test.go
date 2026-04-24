@@ -132,6 +132,108 @@ func TestDetectGithubVerificationPlanWarnsWhenUnitAndIntegrationAreMixed(t *test
 	}
 }
 
+func TestStopLocalWorkManifestMarksRunStopped(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot := t.TempDir()
+	repoID := localWorkRepoID(repoRoot)
+	runID := "lw-stop-test"
+	sandboxPath := filepath.Join(localWorkSandboxesDir(), repoID, runID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	if err := os.MkdirAll(sandboxRepoPath, 0o755); err != nil {
+		t.Fatalf("mkdir sandbox repo: %v", err)
+	}
+
+	manifest := localWorkManifest{
+		Version:               5,
+		RunID:                 runID,
+		CreatedAt:             ISOTimeNow(),
+		UpdatedAt:             ISOTimeNow(),
+		Status:                "running",
+		CurrentPhase:          "review",
+		CurrentSubphase:       "review",
+		CurrentIteration:      2,
+		RepoRoot:              repoRoot,
+		RepoName:              filepath.Base(repoRoot),
+		RepoID:                repoID,
+		SandboxPath:           sandboxPath,
+		SandboxRepoPath:       sandboxRepoPath,
+		InputPath:             filepath.Join(localWorkRunDirByID(repoID, runID), "input-plan.md"),
+		InputMode:             "task",
+		WorkType:              "feature",
+		IntegrationPolicy:     "final",
+		GroupingPolicy:        localWorkDefaultGroupingPolicy,
+		ValidationParallelism: localWorkValidationParallelism,
+		MaxIterations:         8,
+	}
+	if err := os.MkdirAll(filepath.Dir(manifest.InputPath), 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	if err := os.WriteFile(manifest.InputPath, []byte("stop test\n"), 0o644); err != nil {
+		t.Fatalf("write input plan: %v", err)
+	}
+	if err := writeLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	originalSnapshot := localWorkProcessSnapshot
+	originalTerminate := localWorkTerminateProcess
+	originalForceKill := localWorkForceKillProcess
+	originalSleep := localWorkStopSleep
+	defer func() {
+		localWorkProcessSnapshot = originalSnapshot
+		localWorkTerminateProcess = originalTerminate
+		localWorkForceKillProcess = originalForceKill
+		localWorkStopSleep = originalSleep
+	}()
+
+	live := map[int]string{
+		101: fmt.Sprintf("101 nana work resume --run-id %s --repo %s", runID, repoRoot),
+		202: fmt.Sprintf("202 codex exec -C %s", sandboxRepoPath),
+	}
+	localWorkProcessSnapshot = func() (string, error) {
+		lines := []string{"PID COMMAND"}
+		for pid, command := range live {
+			lines = append(lines, fmt.Sprintf("%d %s", pid, command))
+		}
+		return strings.Join(lines, "\n"), nil
+	}
+	signalled := []int{}
+	forced := []int{}
+	localWorkTerminateProcess = func(pid int) error {
+		signalled = append(signalled, pid)
+		delete(live, pid)
+		return nil
+	}
+	localWorkForceKillProcess = func(pid int) error {
+		forced = append(forced, pid)
+		delete(live, pid)
+		return nil
+	}
+	localWorkStopSleep = func(time.Duration) {}
+
+	if err := stopLocalWorkManifest(manifest); err != nil {
+		t.Fatalf("stopLocalWorkManifest: %v", err)
+	}
+	if len(signalled) != 2 {
+		t.Fatalf("expected two TERM signals, got %v", signalled)
+	}
+	if len(forced) != 0 {
+		t.Fatalf("expected no force-kill signals, got %v", forced)
+	}
+	updated, err := readLocalWorkManifestByRunID(runID)
+	if err != nil {
+		t.Fatalf("read stopped manifest: %v", err)
+	}
+	if updated.Status != "stopped" || updated.CurrentPhase != "stopped" || updated.CurrentSubphase != "stopped" {
+		t.Fatalf("expected stopped manifest state, got %+v", updated)
+	}
+	if updated.PauseReason != localWorkStoppedByUserReason || updated.LastError != localWorkStoppedByUserReason || strings.TrimSpace(updated.PausedAt) == "" {
+		t.Fatalf("expected stop metadata to be recorded, got %+v", updated)
+	}
+}
+
 func TestBuildLocalWorkImplementPromptCapsReviewTitlesAndPlan(t *testing.T) {
 	repo := t.TempDir()
 	inputPath := filepath.Join(repo, "plan.md")
