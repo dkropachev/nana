@@ -516,10 +516,10 @@ func TestStartRepoCoordinatorMarkTaskStartedMarksPlannedLaunchRunning(t *testing
 	coordinator := &startRepoCoordinator{
 		repoSlug: "acme/widget",
 		state: &startWorkState{
-			Version:    startWorkStateVersion,
-			SourceRepo: "acme/widget",
-			UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
-			Issues:     map[string]startWorkIssueState{},
+			Version:      startWorkStateVersion,
+			SourceRepo:   "acme/widget",
+			UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+			Issues:       map[string]startWorkIssueState{},
 			ServiceTasks: map[string]startWorkServiceTask{},
 			PlannedItems: map[string]startWorkPlannedItem{
 				"planned-1": {

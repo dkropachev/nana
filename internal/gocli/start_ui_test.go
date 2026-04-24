@@ -4482,7 +4482,7 @@ func TestWriteStartWorkStateHidesLegacyPlannedLaunchServiceTask(t *testing.T) {
 		t.Fatalf("expected canonical planned task in %+v", items)
 	}
 	if slices.ContainsFunc(items, func(item startUITaskSummary) bool {
-		return item.ID == "service-task:" + repoSlug + ":" + startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1")
+		return item.ID == "service-task:"+repoSlug+":"+startServiceTaskKey(startTaskKindPlannedLaunch, "planned-1")
 	}) {
 		t.Fatalf("expected canonical task list to hide planned-launch service task, got %+v", items)
 	}
