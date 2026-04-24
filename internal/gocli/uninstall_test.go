@@ -12,6 +12,7 @@ func buildTestNanaConfig() string {
 		"# nana top-level settings (must be before any [table])",
 		`notify = ["node", "/path/to/notify-hook.js"]`,
 		`model_reasoning_effort = "high"`,
+		`nana_account_load_balance_policy = "usage"`,
 		`developer_instructions = "You have nana installed."`,
 		"",
 		"[features]",

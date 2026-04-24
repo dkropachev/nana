@@ -449,6 +449,7 @@ func writeBytesIfMissing(path string, content []byte, options SetupOptions) erro
 func writeSetupConfig(configPath string, options SetupOptions) error {
 	content := strings.Join([]string{
 		fmt.Sprintf(`model_reasoning_effort = "%s"`, defaultNanaReasoningMode()),
+		fmt.Sprintf(`nana_account_load_balance_policy = "%s"`, defaultNanaAccountLoadBalancePolicy()),
 		"",
 		"[agents]",
 		"max_threads = 6",

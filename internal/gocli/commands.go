@@ -15,16 +15,18 @@ var reasoningModes = map[string]bool{
 }
 
 const ReasoningKey = "model_reasoning_effort"
+const AccountLoadBalanceKey = "account_load_balance_policy"
 const ReasoningUsage = "Usage: nana reasoning [low|medium|high|xhigh]\nSets the current Codex config and NANA user-level default used by future `nana setup` runs."
 const ConfigUsage = `Usage:
   nana config show
-  nana config set --effort <low|medium|high|xhigh>
-  nana config --effort <low|medium|high|xhigh>`
+  nana config set [--effort <low|medium|high|xhigh>] [--account-load-balance <preferred|usage>]
+  nana config [--effort <low|medium|high|xhigh>] [--account-load-balance <preferred|usage>]`
 
 type nanaUserConfig struct {
-	Version                int    `json:"version"`
-	DefaultReasoningEffort string `json:"default_reasoning_effort,omitempty"`
-	UpdatedAt              string `json:"updated_at,omitempty"`
+	Version                         int    `json:"version"`
+	DefaultReasoningEffort          string `json:"default_reasoning_effort,omitempty"`
+	DefaultAccountLoadBalancePolicy string `json:"default_account_load_balance_policy,omitempty"`
+	UpdatedAt                       string `json:"updated_at,omitempty"`
 }
 
 func Status(cwd string) error {
@@ -250,6 +252,7 @@ func Config(args []string) error {
 		config, _ := readNanaUserConfig()
 		fmt.Fprintf(os.Stdout, "NANA config: %s\n", nanaUserConfigPath())
 		fmt.Fprintf(os.Stdout, "default %s: %s\n", ReasoningKey, defaultString(config.DefaultReasoningEffort, defaultNanaReasoningMode()))
+		fmt.Fprintf(os.Stdout, "default %s: %s\n", AccountLoadBalanceKey, defaultString(normalizeManagedAuthLoadBalancePolicy(config.DefaultAccountLoadBalancePolicy), defaultNanaAccountLoadBalancePolicy()))
 		return nil
 	}
 	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
@@ -260,15 +263,83 @@ func Config(args []string) error {
 	if args[0] == "set" {
 		setArgs = args[1:]
 	}
-	mode, err := parseReasoningModeArg(setArgs, ConfigUsage)
+	mode, policy, err := parseNanaConfigSetArgs(setArgs)
 	if err != nil {
 		return err
 	}
-	if err := writeNanaReasoningDefault(mode); err != nil {
+	config, _ := readNanaUserConfig()
+	config.Version = 1
+	if mode != "" {
+		config.DefaultReasoningEffort = mode
+	}
+	if policy != "" {
+		config.DefaultAccountLoadBalancePolicy = policy
+	}
+	config.UpdatedAt = ISOTimeNow()
+	if err := writeGithubJSON(nanaUserConfigPath(), config); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "Set NANA default %s=%q in %s\n", ReasoningKey, mode, nanaUserConfigPath())
+	if mode != "" {
+		fmt.Fprintf(os.Stdout, "Set NANA default %s=%q in %s\n", ReasoningKey, mode, nanaUserConfigPath())
+	}
+	if policy != "" {
+		fmt.Fprintf(os.Stdout, "Set NANA default %s=%q in %s\n", AccountLoadBalanceKey, policy, nanaUserConfigPath())
+	}
 	return nil
+}
+
+func parseNanaConfigSetArgs(args []string) (string, string, error) {
+	effort := ""
+	policy := ""
+	for index := 0; index < len(args); index++ {
+		token := strings.TrimSpace(args[index])
+		switch {
+		case token == "":
+			continue
+		case token == "--effort":
+			if index+1 >= len(args) {
+				return "", "", fmt.Errorf("missing value after --effort\n%s", ConfigUsage)
+			}
+			mode := strings.TrimSpace(args[index+1])
+			if !reasoningModes[mode] {
+				return "", "", fmt.Errorf("invalid effort %q. expected one of: low, medium, high, xhigh.\n%s", mode, ConfigUsage)
+			}
+			effort = mode
+			index++
+		case strings.HasPrefix(token, "--effort="):
+			mode := strings.TrimSpace(strings.TrimPrefix(token, "--effort="))
+			if !reasoningModes[mode] {
+				return "", "", fmt.Errorf("invalid effort %q. expected one of: low, medium, high, xhigh.\n%s", mode, ConfigUsage)
+			}
+			effort = mode
+		case token == "--account-load-balance":
+			if index+1 >= len(args) {
+				return "", "", fmt.Errorf("missing value after --account-load-balance\n%s", ConfigUsage)
+			}
+			value := normalizeManagedAuthLoadBalancePolicy(args[index+1])
+			if value == "" {
+				return "", "", fmt.Errorf("invalid account load balance policy %q. expected one of: preferred, usage.\n%s", args[index+1], ConfigUsage)
+			}
+			policy = value
+			index++
+		case strings.HasPrefix(token, "--account-load-balance="):
+			value := normalizeManagedAuthLoadBalancePolicy(strings.TrimPrefix(token, "--account-load-balance="))
+			if value == "" {
+				return "", "", fmt.Errorf("invalid account load balance policy %q. expected one of: preferred, usage.\n%s", strings.TrimPrefix(token, "--account-load-balance="), ConfigUsage)
+			}
+			policy = value
+		default:
+			if reasoningModes[token] && effort == "" {
+				effort = token
+				continue
+			}
+			return "", "", fmt.Errorf("invalid config arguments %q\n%s", strings.Join(args, " "), ConfigUsage)
+		}
+	}
+	if effort == "" && policy == "" {
+		return "", "", fmt.Errorf("missing config values\n%s", ConfigUsage)
+	}
+	return effort, policy, nil
 }
 
 func parseReasoningModeArg(args []string, usage string) (string, error) {
@@ -311,6 +382,16 @@ func defaultNanaReasoningMode() string {
 		return config.DefaultReasoningEffort
 	}
 	return "xhigh"
+}
+
+func defaultNanaAccountLoadBalancePolicy() string {
+	config, err := readNanaUserConfig()
+	if err == nil {
+		if policy := normalizeManagedAuthLoadBalancePolicy(config.DefaultAccountLoadBalancePolicy); policy != "" {
+			return policy
+		}
+	}
+	return authLoadBalancePolicyUsage
 }
 
 func writeNanaReasoningDefault(mode string) error {

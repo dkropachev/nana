@@ -37,7 +37,7 @@ type uninstallSummary struct {
 var nanaMcpServers = []string{"nana_state", "nana_memory", "nana_code_intel", "nana_trace"}
 
 var (
-	uninstallTopLevelSettingPattern = regexp.MustCompile(`^\s*(notify|model_reasoning_effort|developer_instructions)\s*=`)
+	uninstallTopLevelSettingPattern = regexp.MustCompile(`^\s*(notify|model_reasoning_effort|nana_account_load_balance_policy|developer_instructions)\s*=`)
 	uninstallFeatureFlagPattern     = regexp.MustCompile(`^\s*(multi_agent|child_agents_md)\s*=`)
 )
 
@@ -222,7 +222,7 @@ func detectNanaConfigArtifacts(config string) uninstallSummary {
 	}
 	summary.AgentEntriesRemoved = strings.Count(config, "[agents.")
 	summary.TuiSectionRemoved = strings.Contains(config, "[tui]") && strings.Contains(config, "nana (NANA) Configuration")
-	summary.TopLevelKeysRemoved = regexp.MustCompile(`(?m)^\s*(notify|model_reasoning_effort|developer_instructions)\s*=`).FindString(config) != ""
+	summary.TopLevelKeysRemoved = regexp.MustCompile(`(?m)^\s*(notify|model_reasoning_effort|nana_account_load_balance_policy|developer_instructions)\s*=`).FindString(config) != ""
 	summary.FeatureFlagsRemoved = regexp.MustCompile(`(?m)^\s*(multi_agent|child_agents_md)\s*=`).FindString(config) != ""
 	return summary
 }
@@ -490,7 +490,7 @@ func printUninstallSummary(summary uninstallSummary, options UninstallOptions) {
 			fmt.Fprintln(os.Stdout, "    TUI status line section")
 		}
 		if summary.TopLevelKeysRemoved {
-			fmt.Fprintln(os.Stdout, "    Top-level keys (notify, model_reasoning_effort, developer_instructions)")
+			fmt.Fprintln(os.Stdout, "    Top-level keys (notify, model_reasoning_effort, nana_account_load_balance_policy, developer_instructions)")
 		}
 		if summary.FeatureFlagsRemoved {
 			fmt.Fprintln(os.Stdout, "    Feature flags (multi_agent, child_agents_md)")

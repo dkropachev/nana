@@ -456,6 +456,7 @@ func TestAccountStatusShowsUsageState(t *testing.T) {
 	}
 	for _, needle := range []string{
 		"Usage threshold: 95%",
+		"Load balance policy: usage",
 		"Preferred: primary",
 		"Active: primary",
 		"Pending: secondary",
@@ -609,6 +610,7 @@ func TestResolveManagedAuthSettingsPrefersEnvOverConfig(t *testing.T) {
 	config := strings.Join([]string{
 		authConfigUsageThresholdKey + " = 80",
 		authConfigUsagePollSecondsKey + " = 120",
+		authConfigLoadBalancePolicyKey + ` = "` + authLoadBalancePolicyPreferred + `"`,
 		authConfigUsageRetryAttemptsKey + " = 5",
 		authConfigUsageRetryDelayMsKey + " = 900",
 		"",
@@ -618,6 +620,7 @@ func TestResolveManagedAuthSettingsPrefersEnvOverConfig(t *testing.T) {
 	}
 	t.Setenv(authEnvUsageThresholdPct, "91")
 	t.Setenv(authEnvUsagePollIntervalSeconds, "15")
+	t.Setenv(authEnvLoadBalancePolicy, authLoadBalancePolicyUsage)
 	t.Setenv(authEnvUsageRetryMaxAttempts, "2")
 
 	settings := resolveManagedAuthSettings(codexHome)
@@ -626,6 +629,9 @@ func TestResolveManagedAuthSettingsPrefersEnvOverConfig(t *testing.T) {
 	}
 	if settings.pollInterval != 15*time.Second {
 		t.Fatalf("poll interval = %s", settings.pollInterval)
+	}
+	if settings.loadBalancePolicy != authLoadBalancePolicyUsage {
+		t.Fatalf("load balance policy = %q", settings.loadBalancePolicy)
 	}
 	if settings.retryMaxAttempts != 2 {
 		t.Fatalf("retry max attempts = %d", settings.retryMaxAttempts)
@@ -681,6 +687,12 @@ func TestPrepareManagedAuthManagerUsesUsageAPIOnStartup(t *testing.T) {
 
 	cwd := t.TempDir()
 	codexHome := filepath.Join(t.TempDir(), ".codex")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatalf("mkdir codexHome: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(authConfigLoadBalancePolicyKey+` = "`+authLoadBalancePolicyPreferred+`"`+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
 		Preferred: "primary",
 		Accounts: map[string]managedAccountFixtureEntry{
@@ -706,6 +718,92 @@ func TestPrepareManagedAuthManagerUsesUsageAPIOnStartup(t *testing.T) {
 	}
 	if state.Accounts["primary"].FiveHourUsedPct == nil || *state.Accounts["primary"].FiveHourUsedPct != 96 {
 		t.Fatalf("expected primary usage data, got %#v", state.Accounts["primary"])
+	}
+}
+
+func TestPrepareManagedAuthManagerUsesLeastUsedAccountByDefault(t *testing.T) {
+	server := newManagedAccountTestServer(t, managedAccountTestResponses{
+		usage: map[string]managedAccountUsageReply{
+			"primary-token": {
+				statusCode: http.StatusOK,
+				body:       `{"plan_type":"pro","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":44,"limit_window_seconds":18000,"reset_after_seconds":100,"reset_at":1775813275},"secondary_window":{"used_percent":18,"limit_window_seconds":604800,"reset_after_seconds":100,"reset_at":1776358512}},"credits":{"has_credits":false,"unlimited":false,"overage_limit_reached":false,"balance":"0"},"spend_control":{"reached":false}}`,
+			},
+			"secondary-token": healthyUsageReply(),
+		},
+	})
+	withManagedAccountEndpoints(t, server)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+	codexHome := filepath.Join(t.TempDir(), ".codex")
+	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
+		Preferred: "primary",
+		Accounts: map[string]managedAccountFixtureEntry{
+			"primary":   {Profile: chatgptProfileJSON("primary-token", "primary-refresh", "primary-acct")},
+			"secondary": {Profile: chatgptProfileJSON("secondary-token", "secondary-refresh", "secondary-acct")},
+		},
+		Active: "primary",
+	})
+
+	if _, err := captureStdout(t, func() error {
+		_, prepareErr := prepareManagedAuthManager(cwd, codexHome)
+		return prepareErr
+	}); err != nil {
+		t.Fatalf("prepareManagedAuthManager(): %v", err)
+	}
+
+	state, err := loadManagedAuthRuntimeState(codexHome)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if state.Active != "secondary" {
+		t.Fatalf("expected least-used account to become active, got %#v", state)
+	}
+}
+
+func TestPrepareManagedAuthManagerCanPreferPreferredPolicy(t *testing.T) {
+	server := newManagedAccountTestServer(t, managedAccountTestResponses{
+		usage: map[string]managedAccountUsageReply{
+			"primary-token": {
+				statusCode: http.StatusOK,
+				body:       `{"plan_type":"pro","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":44,"limit_window_seconds":18000,"reset_after_seconds":100,"reset_at":1775813275},"secondary_window":{"used_percent":18,"limit_window_seconds":604800,"reset_after_seconds":100,"reset_at":1776358512}},"credits":{"has_credits":false,"unlimited":false,"overage_limit_reached":false,"balance":"0"},"spend_control":{"reached":false}}`,
+			},
+			"secondary-token": healthyUsageReply(),
+		},
+	})
+	withManagedAccountEndpoints(t, server)
+
+	cwd := t.TempDir()
+	codexHome := filepath.Join(t.TempDir(), ".codex")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatalf("mkdir codexHome: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(authConfigLoadBalancePolicyKey+` = "`+authLoadBalancePolicyPreferred+`"`+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
+		Preferred: "primary",
+		Accounts: map[string]managedAccountFixtureEntry{
+			"primary":   {Profile: chatgptProfileJSON("primary-token", "primary-refresh", "primary-acct")},
+			"secondary": {Profile: chatgptProfileJSON("secondary-token", "secondary-refresh", "secondary-acct")},
+		},
+		Active: "primary",
+	})
+
+	if _, err := captureStdout(t, func() error {
+		_, prepareErr := prepareManagedAuthManager(cwd, codexHome)
+		return prepareErr
+	}); err != nil {
+		t.Fatalf("prepareManagedAuthManager(): %v", err)
+	}
+
+	state, err := loadManagedAuthRuntimeState(codexHome)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if state.Active != "primary" {
+		t.Fatalf("expected preferred-policy account to stay active, got %#v", state)
 	}
 }
 
@@ -768,6 +866,12 @@ func TestManagedAuthManagerQueuesPreferredReturnFromUsageAPI(t *testing.T) {
 
 	cwd := t.TempDir()
 	codexHome := filepath.Join(t.TempDir(), ".codex")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatalf("mkdir codexHome: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(authConfigLoadBalancePolicyKey+` = "`+authLoadBalancePolicyPreferred+`"`+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 	writeManagedAccountFixture(t, codexHome, managedAccountFixture{
 		Preferred: "primary",
 		Accounts: map[string]managedAccountFixtureEntry{

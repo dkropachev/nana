@@ -283,6 +283,33 @@ func TestConfigEffort(t *testing.T) {
 	}
 }
 
+func TestConfigAccountLoadBalancePolicy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	output, err := captureStdout(t, func() error { return Config([]string{"set", "--account-load-balance", "preferred"}) })
+	if err != nil {
+		t.Fatalf("Config(set policy): %v", err)
+	}
+	if !strings.Contains(output, `Set NANA default account_load_balance_policy="preferred"`) {
+		t.Fatalf("unexpected set output: %q", output)
+	}
+	var config nanaUserConfig
+	if err := readGithubJSON(filepath.Join(home, ".nana", "config.json"), &config); err != nil {
+		t.Fatalf("read nana config: %v", err)
+	}
+	if config.DefaultAccountLoadBalancePolicy != authLoadBalancePolicyPreferred {
+		t.Fatalf("unexpected config: %#v", config)
+	}
+	show, err := captureStdout(t, func() error { return Config([]string{"show"}) })
+	if err != nil {
+		t.Fatalf("Config(show): %v", err)
+	}
+	if !strings.Contains(show, "default account_load_balance_policy: preferred") {
+		t.Fatalf("unexpected show output: %q", show)
+	}
+}
+
 func TestRouteExplainImplicitKeyword(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

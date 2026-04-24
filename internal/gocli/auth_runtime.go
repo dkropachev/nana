@@ -251,6 +251,9 @@ func (m *managedAuthManager) refreshQueuedSwitchesLocked(now time.Time) error {
 }
 
 func (m *managedAuthManager) chooseLaunchAccountLocked(now time.Time) string {
+	if m.loadBalancePolicyLocked() == authLoadBalancePolicyUsage {
+		return m.chooseLaunchAccountByUsageLocked(now)
+	}
 	pending := normalizeManagedAuthName(m.state.PendingActive)
 	if pending != "" && m.freshEligibleLocked(pending, now) {
 		return pending
@@ -281,6 +284,9 @@ func (m *managedAuthManager) chooseLaunchAccountLocked(now time.Time) string {
 }
 
 func (m *managedAuthManager) chooseFreshFallbackTargetLocked(active string, now time.Time) string {
+	if m.loadBalancePolicyLocked() == authLoadBalancePolicyUsage {
+		return m.chooseLeastUsedEligibleAccountLocked(active, "", now, m.freshEligibleLocked)
+	}
 	preferred := normalizeManagedAuthName(m.registry.Preferred)
 	if preferred != "" && preferred != active && m.freshEligibleLocked(preferred, now) {
 		return preferred
@@ -337,6 +343,9 @@ func (m *managedAuthManager) activeShouldQueueFallbackLocked(active string, now 
 }
 
 func (m *managedAuthManager) shouldQueuePreferredReturnLocked(preferred string, active string, now time.Time) bool {
+	if m.loadBalancePolicyLocked() != authLoadBalancePolicyPreferred {
+		return false
+	}
 	if !m.freshEligibleLocked(preferred, now) {
 		return false
 	}
@@ -437,6 +446,9 @@ func (m *managedAuthManager) handleExecutionRateLimitLocked(now time.Time, summa
 }
 
 func (m *managedAuthManager) chooseExecutionFallbackTargetLocked(active string, now time.Time) string {
+	if m.loadBalancePolicyLocked() == authLoadBalancePolicyUsage {
+		return m.chooseLeastUsedEligibleAccountLocked(active, "", now, m.executionEligibleLocked)
+	}
 	preferred := normalizeManagedAuthName(m.registry.Preferred)
 	if preferred != "" && preferred != active && m.executionEligibleLocked(preferred, now) {
 		return preferred
@@ -450,6 +462,122 @@ func (m *managedAuthManager) chooseExecutionFallbackTargetLocked(active string, 
 		}
 	}
 	return ""
+}
+
+func (m *managedAuthManager) chooseLaunchAccountByUsageLocked(now time.Time) string {
+	active := normalizeManagedAuthName(m.state.Active)
+	if candidate := m.chooseLeastUsedEligibleAccountLocked("", active, now, m.freshEligibleLocked); candidate != "" {
+		return candidate
+	}
+	if active != "" && m.activeUsableLocked(active, now) {
+		return active
+	}
+	preferred := normalizeManagedAuthName(m.registry.Preferred)
+	if preferred != "" && m.accountEnabledLocked(preferred) {
+		return preferred
+	}
+	return active
+}
+
+func (m *managedAuthManager) chooseLeastUsedEligibleAccountLocked(exclude string, active string, now time.Time, eligible func(string, time.Time) bool) string {
+	exclude = normalizeManagedAuthName(exclude)
+	active = normalizeManagedAuthName(active)
+	best := ""
+	bestRank := managedAuthUsageRank{}
+	bestSet := false
+	for _, account := range m.registry.orderedAccounts() {
+		if account.Name == exclude {
+			continue
+		}
+		if !eligible(account.Name, now) {
+			continue
+		}
+		rank := managedAuthUsageRankForState(m.state.Accounts[account.Name])
+		if !bestSet || managedAuthUsageRankLess(rank, bestRank) || (managedAuthUsageRankEqual(rank, bestRank) && m.managedAuthTieBreakLessLocked(account.Name, best, active)) {
+			best = account.Name
+			bestRank = rank
+			bestSet = true
+		}
+	}
+	return best
+}
+
+func (m *managedAuthManager) loadBalancePolicyLocked() string {
+	policy := normalizeManagedAuthLoadBalancePolicy(m.settings.loadBalancePolicy)
+	if policy == "" {
+		return authLoadBalancePolicyUsage
+	}
+	return policy
+}
+
+type managedAuthUsageRank struct {
+	maxUsed    int
+	fiveHour   int
+	weeklyUsed int
+}
+
+func managedAuthUsageRankForState(state ManagedAuthAccountState) managedAuthUsageRank {
+	fiveHour := 101
+	weekly := 101
+	if state.FiveHourUsedPct != nil {
+		fiveHour = *state.FiveHourUsedPct
+	}
+	if state.WeeklyUsedPct != nil {
+		weekly = *state.WeeklyUsedPct
+	}
+	maxUsed := fiveHour
+	if weekly > maxUsed {
+		maxUsed = weekly
+	}
+	return managedAuthUsageRank{
+		maxUsed:    maxUsed,
+		fiveHour:   fiveHour,
+		weeklyUsed: weekly,
+	}
+}
+
+func managedAuthUsageRankLess(left managedAuthUsageRank, right managedAuthUsageRank) bool {
+	if left.maxUsed != right.maxUsed {
+		return left.maxUsed < right.maxUsed
+	}
+	if left.fiveHour != right.fiveHour {
+		return left.fiveHour < right.fiveHour
+	}
+	if left.weeklyUsed != right.weeklyUsed {
+		return left.weeklyUsed < right.weeklyUsed
+	}
+	return false
+}
+
+func managedAuthUsageRankEqual(left managedAuthUsageRank, right managedAuthUsageRank) bool {
+	return left.maxUsed == right.maxUsed && left.fiveHour == right.fiveHour && left.weeklyUsed == right.weeklyUsed
+}
+
+func (m *managedAuthManager) managedAuthTieBreakLessLocked(left string, right string, active string) bool {
+	if normalizeManagedAuthName(left) == normalizeManagedAuthName(active) {
+		return true
+	}
+	if normalizeManagedAuthName(right) == normalizeManagedAuthName(active) {
+		return false
+	}
+	preferred := normalizeManagedAuthName(m.registry.Preferred)
+	if normalizeManagedAuthName(left) == preferred {
+		return true
+	}
+	if normalizeManagedAuthName(right) == preferred {
+		return false
+	}
+	return m.managedAuthOrderIndexLocked(left) < m.managedAuthOrderIndexLocked(right)
+}
+
+func (m *managedAuthManager) managedAuthOrderIndexLocked(name string) int {
+	name = normalizeManagedAuthName(name)
+	for index, account := range m.registry.orderedAccounts() {
+		if normalizeManagedAuthName(account.Name) == name {
+			return index
+		}
+	}
+	return len(m.registry.Accounts) + 1
 }
 
 func (m *managedAuthManager) executionEligibleLocked(name string, now time.Time) bool {

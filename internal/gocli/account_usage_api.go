@@ -30,6 +30,7 @@ const (
 
 	authConfigUsageThresholdKey     = "nana_account_usage_threshold_pct"
 	authConfigUsagePollSecondsKey   = "nana_account_usage_poll_interval_seconds"
+	authConfigLoadBalancePolicyKey  = "nana_account_load_balance_policy"
 	authConfigUsageEndpointKey      = "nana_account_usage_endpoint_url"
 	authConfigRefreshURLKey         = "nana_account_refresh_url"
 	authConfigRefreshClientIDKey    = "nana_account_refresh_client_id"
@@ -41,6 +42,7 @@ const (
 
 	authEnvUsageThresholdPct         = "NANA_ACCOUNT_USAGE_THRESHOLD_PCT"
 	authEnvUsagePollIntervalSeconds  = "NANA_ACCOUNT_USAGE_POLL_INTERVAL_SECONDS"
+	authEnvLoadBalancePolicy         = "NANA_ACCOUNT_LOAD_BALANCE_POLICY"
 	authEnvUsageEndpointURL          = "NANA_ACCOUNT_USAGE_ENDPOINT_URL"
 	authEnvRefreshURL                = "NANA_ACCOUNT_REFRESH_URL"
 	authEnvRefreshClientID           = "NANA_ACCOUNT_REFRESH_CLIENT_ID"
@@ -65,6 +67,7 @@ var (
 type managedAuthSettings struct {
 	usageThresholdPct    int
 	pollInterval         time.Duration
+	loadBalancePolicy    string
 	httpTimeout          time.Duration
 	usageEndpointURL     string
 	refreshURL           string
@@ -167,6 +170,7 @@ func resolveManagedAuthSettings(codexHome string) managedAuthSettings {
 	settings := managedAuthSettings{
 		usageThresholdPct:    defaultAuthUsageSwitchThresholdPct,
 		pollInterval:         defaultAuthUsagePollInterval,
+		loadBalancePolicy:    defaultNanaAccountLoadBalancePolicy(),
 		httpTimeout:          defaultAuthHTTPTimeout,
 		usageEndpointURL:     "https://chatgpt.com/backend-api/wham/usage",
 		refreshURL:           "https://auth.openai.com/oauth/token",
@@ -186,6 +190,9 @@ func resolveManagedAuthSettings(codexHome string) managedAuthSettings {
 		}
 		if value, ok := ReadTopLevelTomlInt(text, authConfigUsagePollSecondsKey); ok {
 			settings.pollInterval = clampDurationSeconds(value, time.Second, 24*time.Hour, settings.pollInterval)
+		}
+		if value := normalizeManagedAuthLoadBalancePolicy(ReadTopLevelTomlString(text, authConfigLoadBalancePolicyKey)); value != "" {
+			settings.loadBalancePolicy = value
 		}
 		if value := ReadTopLevelTomlString(text, authConfigUsageEndpointKey); strings.TrimSpace(value) != "" {
 			settings.usageEndpointURL = strings.TrimSpace(value)
@@ -227,6 +234,9 @@ func resolveManagedAuthSettings(codexHome string) managedAuthSettings {
 	}
 	if value, ok := readEnvInt(authEnvUsagePollIntervalSeconds); ok {
 		settings.pollInterval = clampDurationSeconds(value, time.Second, 24*time.Hour, settings.pollInterval)
+	}
+	if value := normalizeManagedAuthLoadBalancePolicy(os.Getenv(authEnvLoadBalancePolicy)); value != "" {
+		settings.loadBalancePolicy = value
 	}
 	if value, ok := readEnvInt(authEnvUsageRetryMaxAttempts); ok {
 		settings.retryMaxAttempts = clampSettingInt(value, 1, 10, settings.retryMaxAttempts)

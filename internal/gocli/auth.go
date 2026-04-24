@@ -12,13 +12,20 @@ import (
 )
 
 const (
-	authRegistryVersion      = 1
-	authRegistryFileName     = "auth-profiles.json"
-	authRuntimeStateFileName = "auth-state.json"
-	authAccountsDirName      = "auth-accounts"
-	defaultAuthAccountName   = "primary"
-	autoAuthAccountPrefix    = "account"
+	authRegistryVersion            = 1
+	authRegistryFileName           = "auth-profiles.json"
+	authRuntimeStateFileName       = "auth-state.json"
+	authAccountsDirName            = "auth-accounts"
+	defaultAuthAccountName         = "primary"
+	autoAuthAccountPrefix          = "account"
+	authLoadBalancePolicyPreferred = "preferred"
+	authLoadBalancePolicyUsage     = "usage"
 )
+
+var managedAuthLoadBalancePolicies = map[string]bool{
+	authLoadBalancePolicyPreferred: true,
+	authLoadBalancePolicyUsage:     true,
+}
 
 var (
 	authDefaultRetryWindow  = time.Hour
@@ -232,7 +239,7 @@ Notes:
   - nana account export copies a managed profile to an explicit auth.json path.
   - nana account limits fetches the live usage windows for each managed account.
   - When no account name is provided, NANA picks one automatically.
-  - The preferred profile is tried first. When it is cooling down, NANA falls back to the next enabled profile.
+  - Account routing follows the configured load-balance policy (` + authLoadBalancePolicyUsage + ` by default).
   - Live sessions only queue account changes; fallback and switch-back apply on the next NANA-managed restart boundary.`
 }
 
@@ -635,6 +642,7 @@ func statusManagedAccounts(codexHome string) error {
 	fmt.Fprintf(os.Stdout, "Managed account status (%s)\n", codexHome)
 	fmt.Fprintf(os.Stdout, "Usage threshold: %d%%\n", settings.usageThresholdPct)
 	fmt.Fprintf(os.Stdout, "Poll interval: %s\n", settings.pollInterval)
+	fmt.Fprintf(os.Stdout, "Load balance policy: %s\n", defaultString(settings.loadBalancePolicy, authLoadBalancePolicyUsage))
 	fmt.Fprintf(os.Stdout, "Preferred: %s\n", displayOrFallback(registry.Preferred, "(none)"))
 	fmt.Fprintf(os.Stdout, "Active: %s\n", displayOrFallback(state.Active, "(none)"))
 	if strings.TrimSpace(state.PendingActive) != "" {
@@ -940,6 +948,14 @@ func firstEnabledAccountName(registry ManagedAuthRegistry, skip string) string {
 			continue
 		}
 		return account.Name
+	}
+	return ""
+}
+
+func normalizeManagedAuthLoadBalancePolicy(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if managedAuthLoadBalancePolicies[value] {
+		return value
 	}
 	return ""
 }
