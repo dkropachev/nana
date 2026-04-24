@@ -6021,11 +6021,25 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(body), `window.NANA_API_BASE = "http://127.0.0.1:17653"`) {
 		t.Fatalf("expected injected API base, got %s", string(body))
 	}
+	if got := response.Header.Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("expected html shell to revalidate, got %q", got)
+	}
 	if !strings.Contains(string(body), "Assistant Workspace") || !strings.Contains(string(body), "All Repos") {
 		t.Fatalf("expected assistant workspace shell, got %s", string(body))
 	}
 	if !strings.Contains(string(body), `id="page-subtitle"`) {
 		t.Fatalf("expected compact workspace subtitle shell, got %s", string(body))
+	}
+	for _, needle := range []string{
+		`/vendor/teryx.css?v=`,
+		`/app.css?v=`,
+		`/vendor/xhtmlx.js?v=`,
+		`/vendor/teryx.js?v=`,
+		`/app.js?v=`,
+	} {
+		if !strings.Contains(string(body), needle) {
+			t.Fatalf("expected cache-busted asset reference %q, got %s", needle, string(body))
+		}
 	}
 	if strings.Contains(string(body), `<p class="eyebrow">Workspace</p>`) || strings.Contains(string(body), `id="page-breadcrumb"`) {
 		t.Fatalf("expected compact workspace header shell, got %s", string(body))
@@ -6039,6 +6053,9 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	appBody, err := io.ReadAll(appResponse.Body)
 	if err != nil {
 		t.Fatalf("read app.js body: %v", err)
+	}
+	if got := appResponse.Header.Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		t.Fatalf("expected versioned app.js to stay cacheable, got %q", got)
 	}
 	if !strings.Contains(string(appBody), `data-repo-tab="config"`) {
 		t.Fatalf("expected config tab wiring in app.js, got %s", string(appBody))
@@ -6163,6 +6180,9 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	cssBody, err := io.ReadAll(cssResponse.Body)
 	if err != nil {
 		t.Fatalf("read app.css body: %v", err)
+	}
+	if got := cssResponse.Header.Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		t.Fatalf("expected versioned app.css to stay cacheable, got %q", got)
 	}
 	if !strings.Contains(string(cssBody), `.mission-schedule-modal-body`) || !strings.Contains(string(cssBody), `#task-schedule-modal-content`) || !strings.Contains(string(cssBody), `.task-composer-description-field textarea`) || !strings.Contains(string(cssBody), `height: min(560px, calc(100vh - 220px));`) || !strings.Contains(string(cssBody), `resize: none;`) || !strings.Contains(string(cssBody), `.task-composer-description-field textarea[readonly]`) {
 		t.Fatalf("expected bounded task composer description layout in app.css, got %s", string(cssBody))
@@ -7876,14 +7896,16 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 		"investigations": {
 			hash: "view=investigations",
 			expect: []string{
+				"Nana Mission Control",
+				"Search tasks...",
+				"Completed",
 				"Schedule Task",
 				"Scheduled Tasks",
 				"Investigation Runs",
 				"Investigation Detail",
 				"Findings Inbox",
 				"Import Sessions",
-				"Fix flaky test",
-				"work run",
+				"investigate-100",
 			},
 		},
 		"repo-findings": {

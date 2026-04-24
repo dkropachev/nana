@@ -306,6 +306,7 @@
       query: "",
       repo: "",
       attention: "all",
+      status: "all",
       kind: "all",
     };
   }
@@ -1319,6 +1320,11 @@
   function matchesKindFilter(item, value) {
     if (!value || value === "all") return true;
     return defaultString(item && item.kind, defaultString(item && item.backend, "")) === value;
+  }
+
+  function matchesTaskStatusFilter(item, value) {
+    if (!value || value === "all") return true;
+    return defaultString(item && item.attention_state, "") === value;
   }
 
   function matchesQuery(item, fields, query) {
@@ -4291,8 +4297,10 @@
     const filter = filterState("investigations");
     return (state.investigations.items || []).filter((item) => {
       return matchesRepoFilter(item, filter.repo) &&
+        matchesTaskStatusFilter(item, filter.status) &&
         matchesAttentionFilter(item, filter.attention) &&
-        matchesQuery(item, ["query", "repo_slug", "overall_short_explanation", "run_id", "pause_reason", "pause_until"], filter.query);
+        matchesKindFilter(item, filter.kind) &&
+        matchesQuery(item, ["id", "kind", "title", "summary", "description", "repo_slug", "run_id", "status", "raw_status", "attention_state", "work_type"], filter.query);
     });
   }
 
@@ -4830,6 +4838,206 @@
     `;
   }
 
+  const MISSION_STATUS_GROUPS = [
+    { id: "failed", title: "Failed", copy: "Runs and tasks that need intervention or a rerun." },
+    { id: "blocked", title: "Blocked", copy: "Work waiting on approvals, review, or external state." },
+    { id: "active", title: "Active", copy: "Currently running or actively being processed." },
+    { id: "queued", title: "Queued", copy: "Ready to run once capacity is available." },
+    { id: "completed", title: "Completed", copy: "Finished, dismissed, or otherwise out of the active lane." },
+  ];
+
+  function missionTaskStatusTone(item) {
+    const attention = defaultString(item && item.attention_state, "");
+    switch (attention) {
+      case "failed":
+        return "failed";
+      case "blocked":
+        return "blocked";
+      case "completed":
+        return "completed";
+      case "active":
+        return "active";
+      default:
+        return "queued";
+    }
+  }
+
+  function missionTaskStatusLabel(item) {
+    const raw = defaultString(item && item.raw_status, defaultString(item && item.status, ""));
+    if (!raw) return "Queued";
+    return raw.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
+  }
+
+  function missionItemsForStatus(items, status) {
+    return (items || []).filter((item) => defaultString(item && item.attention_state, "") === status);
+  }
+
+  function taskTypeLabel(value) {
+    return defaultString(String(value || "").replace(/_/g, " "), "task");
+  }
+
+  function taskKindOptions(items) {
+    const values = new Set(["all"]);
+    (items || []).forEach((item) => {
+      const kind = defaultString(item && item.kind, "");
+      if (kind) values.add(kind);
+    });
+    return Array.from(values).sort().map((kind) => ({
+      value: kind,
+      label: kind === "all" ? "All types" : taskTypeLabel(kind),
+    }));
+  }
+
+  function taskRepoOptions(items) {
+    const values = new Set();
+    sortedRepos().forEach((repo) => values.add(repo.repo_slug));
+    (items || []).forEach((item) => {
+      const repo = defaultString(item && item.repo_slug, "");
+      if (repo) values.add(repo);
+    });
+    return Array.from(values).sort();
+  }
+
+  function activeTaskFilterCount(filter) {
+    if (!filter) return 0;
+    return (String(filter.query || "").trim() ? 1 : 0) +
+      (filter.status && filter.status !== "all" ? 1 : 0) +
+      (filter.kind && filter.kind !== "all" ? 1 : 0) +
+      (filter.repo ? 1 : 0);
+  }
+
+  function taskFilterChip(label, value, field) {
+    if (!value || value === "all") return "";
+    const text = field === "query" ? `"${value}"` : `${label}: ${value}`;
+    return `<button class="mission-filter-chip" type="button" data-task-filter-clear="${escapeHTML(field)}">${escapeHTML(text)} ×</button>`;
+  }
+
+  function renderTaskToolbar(items) {
+    const filter = filterState("investigations");
+    const activeCount = activeTaskFilterCount(filter);
+    const statusOptions = [{ id: "all", title: "All states" }, ...MISSION_STATUS_GROUPS].map((option) => {
+      const selected = filter.status === option.id ? "selected" : "";
+      return `<option value="${escapeHTML(option.id)}" ${selected}>${escapeHTML(option.title)}</option>`;
+    }).join("");
+    const kindOptions = taskKindOptions(items).map((option) => {
+      const selected = filter.kind === option.value ? "selected" : "";
+      return `<option value="${escapeHTML(option.value)}" ${selected}>${escapeHTML(option.label)}</option>`;
+    }).join("");
+    const repoOptions = [`<option value="" ${filter.repo ? "" : "selected"}>All repos</option>`]
+      .concat(taskRepoOptions(items).map((repo) => `<option value="${escapeHTML(repo)}" ${filter.repo === repo ? "selected" : ""}>${escapeHTML(repo)}</option>`))
+      .join("");
+    const chips = [
+      taskFilterChip("Status", MISSION_STATUS_GROUPS.find((item) => item.id === filter.status)?.title || "", "status"),
+      taskFilterChip("Type", filter.kind !== "all" ? taskTypeLabel(filter.kind) : "", "kind"),
+      taskFilterChip("Repo", filter.repo, "repo"),
+      taskFilterChip("", String(filter.query || "").trim(), "query"),
+    ].filter(Boolean).join("");
+    return `
+      <section class="mission-toolbar surface">
+        <div class="mission-toolbar-main">
+          <label class="mission-search">
+            <span class="sr-only">Search tasks</span>
+            <input type="search" value="${escapeHTML(filter.query)}" placeholder="Search tasks..." data-view-filter="investigations" data-view-filter-name="query" />
+          </label>
+          <label class="mission-select">
+            <span>Status</span>
+            <select data-view-filter="investigations" data-view-filter-name="status">${statusOptions}</select>
+          </label>
+          <label class="mission-select">
+            <span>Type</span>
+            <select data-view-filter="investigations" data-view-filter-name="kind">${kindOptions}</select>
+          </label>
+          <label class="mission-select mission-select-repo">
+            <span>Repo</span>
+            <select data-view-filter="investigations" data-view-filter-name="repo">${repoOptions}</select>
+          </label>
+          <span class="mission-filter-count">${activeCount ? `${activeCount} active` : "No filters"}</span>
+          ${activeCount ? `<button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-task-filter-clear="all">Clear</button>` : ""}
+          <button class="tx-btn tx-btn-secondary mission-add-button" type="button" data-task-feed-jump="schedule">Schedule</button>
+        </div>
+        ${chips ? `<div class="mission-filter-chips">${chips}</div>` : ""}
+      </section>
+    `;
+  }
+
+  function taskStatusStrip(items) {
+    return MISSION_STATUS_GROUPS.map((group) => {
+      const count = missionItemsForStatus(items, group.id).length;
+      return `
+        <button class="mission-status-chip ${filterState("investigations").status === group.id ? "mission-status-chip-active" : ""}" type="button" data-task-status-filter="${escapeHTML(group.id)}">
+          <span>${escapeHTML(group.title)}</span>
+          <strong>${count}</strong>
+        </button>
+      `;
+    }).join("");
+  }
+
+  function taskPrimaryActionLabel(item) {
+    if (item && item.can_open_job && item.run_id) return "Open Job";
+    switch (defaultString(item && item.kind, "")) {
+      case "work_item":
+        return "Open Draft";
+      case "scout_job":
+        return "Open Repo";
+      case "planned_item":
+        return "View Queue";
+      case "investigation":
+        return "View Detail";
+      default:
+        return "Open";
+    }
+  }
+
+  function renderTaskFeedRow(item) {
+    const selected = defaultString(item.run_id, item.id) === state.investigations.selectedRunID;
+    const repo = defaultString(item.repo_slug, "Workspace");
+    const priority = defaultString(item.priority_label, "P3");
+    const kind = taskTypeLabel(item.kind);
+    const schedule = item.schedule_at ? `scheduled ${formatDateTime(item.schedule_at)}` : `updated ${formatDateTime(item.updated_at)}`;
+    const summary = defaultString(item.summary, item.description || "No summary recorded.");
+    const reference = defaultString(item.run_id, item.id);
+    return `
+      <button class="mission-task-row ${selected ? "mission-task-row-selected" : ""}" type="button" data-task-open="${escapeHTML(item.id)}">
+        <span class="mission-task-priority">${escapeHTML(priority)}</span>
+        <span class="mission-task-type">${escapeHTML(kind)}</span>
+        <span class="mission-task-copy">
+          <strong>${escapeHTML(defaultString(item.title, item.id))}</strong>
+          <span class="mission-task-reference">${escapeHTML(reference)}</span>
+          <em>${escapeHTML(summary)}</em>
+        </span>
+        ${renderStatePill(missionTaskStatusTone(item), missionTaskStatusLabel(item))}
+        <span class="mission-task-meta">${escapeHTML(repo)} · ${escapeHTML(schedule)} · ${escapeHTML(taskPrimaryActionLabel(item))}</span>
+      </button>
+    `;
+  }
+
+  function renderTaskFeed(items) {
+    const groups = MISSION_STATUS_GROUPS.map((group) => ({
+      ...group,
+      items: missionItemsForStatus(items, group.id),
+    })).filter((group) => group.items.length);
+    if (!groups.length) {
+      return `
+        <section class="mission-empty-state">
+          <h3>No tasks match these filters.</h3>
+          <p>Clear filters or adjust the selected repo to widen the feed.</p>
+        </section>
+      `;
+    }
+    return groups.map((group) => `
+      <section class="mission-task-group">
+        <div class="mission-task-group-head">
+          <div>
+            <h3>${escapeHTML(group.title)}</h3>
+            <p>${escapeHTML(group.copy)}</p>
+          </div>
+          <span>${group.items.length}</span>
+        </div>
+        <div class="mission-task-rows">${group.items.map(renderTaskFeedRow).join("")}</div>
+      </section>
+    `).join("");
+  }
+
   function renderInvestigationsPage() {
     const items = filteredInvestigations();
     const detail = state.investigations.detail;
@@ -4854,6 +5062,11 @@
     const scheduledRows = taskScheduledRows(scopedRepo);
     const canSavePreset = Boolean(taskComposerPresetDescription());
     ensureBodyStructure(`investigations:${defaultString(state.selectedRepo, "all")}`, `
+      <section class="mission-control-shell">
+        <div id="mission-toolbar-host"></div>
+        <div id="mission-status-strip" class="mission-status-strip"></div>
+        <section id="mission-feed" class="mission-feed"></section>
+      </section>
       <section class="layout-two-col">
         <div class="surface">
           <div class="surface-head">
@@ -5042,6 +5255,12 @@
         </div>
       </section>
     `);
+    const toolbarHost = document.getElementById("mission-toolbar-host");
+    if (toolbarHost) toolbarHost.innerHTML = renderTaskToolbar(state.investigations.items || []);
+    const statusHost = document.getElementById("mission-status-strip");
+    if (statusHost) statusHost.innerHTML = taskStatusStrip(state.investigations.items || []);
+    const feedHost = document.getElementById("mission-feed");
+    if (feedHost) feedHost.innerHTML = renderTaskFeed(items);
     renderGrid("task-planned-grid", [
       { field: "launch_kind", label: "Type" },
       { field: "title", label: "Title" },
@@ -7858,6 +8077,71 @@
         }).catch((error) => {
           toast("danger", "Clear schedule failed", error.message);
         });
+        return;
+      }
+
+      const taskOpenButton = event.target.closest("[data-task-open]");
+      if (taskOpenButton) {
+        const taskID = taskOpenButton.getAttribute("data-task-open") || "";
+        const item = (state.investigations.items || []).find((candidate) => candidate.id === taskID);
+        if (!item) return;
+        if (item.kind === "investigation" && item.run_id) {
+          loadInvestigationDetail(item.run_id);
+          return;
+        }
+        if (item.kind === "work_run" && item.run_id) {
+          openLogDrawer(item.run_id);
+          return;
+        }
+        if (item.kind === "work_item") {
+          const itemID = item.id.replace(/^work-item:/, "");
+          if (itemID) {
+            openWorkItemDrawer(itemID);
+          }
+          return;
+        }
+        if (item.repo_slug) {
+          openRepoView(item.repo_slug, item.kind === "scout_job" ? "scouts" : "controls");
+        }
+        return;
+      }
+
+      const taskStatusFilterButton = event.target.closest("[data-task-status-filter]");
+      if (taskStatusFilterButton) {
+        const status = taskStatusFilterButton.getAttribute("data-task-status-filter") || "all";
+        const current = filterState("investigations").status;
+        updateFilter("investigations", "status", current === status ? "all" : status);
+        renderInvestigationsPage();
+        return;
+      }
+
+      const taskFilterClearButton = event.target.closest("[data-task-filter-clear]");
+      if (taskFilterClearButton) {
+        const field = taskFilterClearButton.getAttribute("data-task-filter-clear") || "";
+        if (field === "all") {
+          state.filters.investigations = defaultScopedViewFilter(state.selectedRepo);
+        } else if (field === "query") {
+          updateFilter("investigations", "query", "");
+        } else if (field === "status") {
+          updateFilter("investigations", "status", "all");
+        } else if (field === "kind") {
+          updateFilter("investigations", "kind", "all");
+        } else if (field === "repo") {
+          updateFilter("investigations", "repo", defaultString(state.selectedRepo, ""));
+        }
+        renderInvestigationsPage();
+        return;
+      }
+
+      const taskFeedJumpButton = event.target.closest("[data-task-feed-jump]");
+      if (taskFeedJumpButton) {
+        const target = taskFeedJumpButton.getAttribute("data-task-feed-jump") || "";
+        if (target === "schedule") {
+          const scheduleButton = document.getElementById("task-schedule-button");
+          if (scheduleButton) {
+            scheduleButton.scrollIntoView({ behavior: "smooth", block: "center" });
+          }
+        }
         return;
       }
 

@@ -1545,6 +1545,49 @@ textarea {
   cursor: pointer;
 }
 
+.mission-filter-count {
+  color: #4e627a;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.mission-status-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.mission-status-chip {
+  display: inline-grid;
+  grid-auto-flow: column;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid #d6deea;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #35506f;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.mission-status-chip strong {
+  color: #142033;
+}
+
+.mission-status-chip-active {
+  border-color: #315f9a;
+  background: #17324f;
+  color: #ffffff;
+}
+
+.mission-status-chip-active strong {
+  color: #ffffff;
+}
+
 .mission-feed {
   display: grid;
   gap: 16px;
