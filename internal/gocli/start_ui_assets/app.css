@@ -6,7 +6,7 @@
 
 body {
   margin: 0;
-  background: #eef2f7;
+  background: #f6f7f9;
   color: #142033;
   font-family: var(--tx-font, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
 }
@@ -141,7 +141,7 @@ textarea {
 }
 
 .nav-item-active {
-  background: #e9f0f9;
+  background: #eef3f8;
   border-color: #c7d5e8;
 }
 
@@ -279,7 +279,7 @@ textarea {
 }
 
 .page-tab-active {
-  background: #dce8f6;
+  background: #eef3f8;
   border-color: #acc2df;
 }
 
@@ -287,6 +287,44 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 18px;
+}
+
+.queue-page {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.queue-page-chrome {
+  display: grid;
+  gap: 10px;
+}
+
+.queue-page-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(360px, 0.72fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.queue-list-surface,
+.queue-item-detail {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid #d6deea;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.queue-item-detail {
+  position: sticky;
+  top: 18px;
+  max-height: calc(100vh - 124px);
+  overflow: auto;
+}
+
+.queue-status-strip {
+  padding-bottom: 0;
 }
 
 .layout-two-col,
@@ -761,33 +799,6 @@ textarea {
   margin-top: 14px;
 }
 
-.scheduler-search-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: end;
-  margin-bottom: 14px;
-}
-
-.scheduler-search-form .selector {
-  margin: 0;
-}
-
-.scheduler-search-form .tx-btn {
-  min-height: 40px;
-}
-
-.scheduler-detail-form {
-  display: grid;
-  gap: 12px;
-}
-
-.scheduler-detail-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
 .usage-filter-form,
 .usage-insights {
   display: grid;
@@ -1251,7 +1262,7 @@ textarea {
   padding: 14px;
   border: 1px solid #d6deea;
   border-radius: 12px;
-  background: linear-gradient(180deg, #f8fbff 0%, #eef4fb 100%);
+  background: #ffffff;
 }
 
 .task-summary-value {
@@ -1428,6 +1439,30 @@ textarea {
   background: #ffffff;
 }
 
+.task-workbench-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.task-workbench-chip {
+  max-width: 100%;
+  padding: 7px 10px;
+  border: 1px solid #c7d5e8;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #21324a;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.task-workbench-chip-selected {
+  border-color: #8da2bf;
+  background: #eef3f8;
+}
+
 .mission-control-shell {
   display: grid;
   gap: 14px;
@@ -1439,9 +1474,7 @@ textarea {
   z-index: 5;
   padding: 10px;
   border-color: #c9d5e5;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.96), rgba(245, 249, 253, 0.96)),
-    repeating-linear-gradient(90deg, rgba(20, 32, 51, 0.04) 0 1px, transparent 1px 22px);
+  background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 12px 30px rgba(25, 45, 73, 0.08);
   backdrop-filter: blur(8px);
 }
@@ -1560,7 +1593,7 @@ textarea {
 }
 
 .mission-multi-option:hover {
-  background: #edf5ff;
+  background: #f3f6fa;
 }
 
 .mission-add-button {
@@ -1583,7 +1616,7 @@ textarea {
   padding: 0 10px;
   border: 1px solid #b8cbe4;
   border-radius: 999px;
-  background: #edf5ff;
+  background: #f3f6fa;
   color: #223d5f;
   cursor: pointer;
 }
@@ -1623,7 +1656,7 @@ textarea {
 
 .mission-status-chip-active {
   border-color: #315f9a;
-  background: #17324f;
+  background: #21324a;
   color: #ffffff;
 }
 
@@ -1716,7 +1749,7 @@ textarea {
   width: 42px;
   height: 42px;
   border-radius: 12px;
-  background: #132338;
+  background: #21324a;
   color: #ffffff;
   font-weight: 900;
 }
@@ -1831,10 +1864,6 @@ textarea {
   display: none;
 }
 
-#repo-scheduler-board .tx-kanban-column-body {
-  min-height: 260px;
-}
-
 @media (max-width: 1160px) {
   .layout-two-col,
   .layout-three-col,
@@ -1850,6 +1879,7 @@ textarea {
   }
 
   .mission-toolbar-main,
+  .queue-page-main,
   .mission-task-row {
     grid-template-columns: 1fr;
   }
@@ -1895,8 +1925,7 @@ textarea {
   .drawer-toolbar,
   .config-actions,
   .config-footer,
-  .confirm-actions,
-  .scheduler-detail-actions {
+  .confirm-actions {
     flex-direction: column;
     align-items: stretch;
   }
@@ -1924,16 +1953,17 @@ textarea {
     border-radius: 14px;
   }
 
-  .scheduler-search-form {
-    grid-template-columns: 1fr;
-  }
-
   .drawer-summary-grid {
     grid-template-columns: 1fr;
   }
 
   .detail-surface {
     position: static;
+  }
+
+  .queue-item-detail {
+    position: static;
+    max-height: none;
   }
 
   .data-table-wrap {

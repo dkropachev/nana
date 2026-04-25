@@ -46,9 +46,6 @@ func TestStartUIAppWorkRunSurfacesKeepStopControlsWired(t *testing.T) {
 	}
 	content := string(appBody)
 	for _, needle := range []string{
-		`can_stop: Boolean(run.stop_allowed),`,
-		`label: "Stop",`,
-		`data-run-stop="${escapeHTML(row.run_id)}"`,
 		`data-run-stop="${escapeHTML(summary.run_id)}">Stop Run</button>`,
 		`const runStopButton = event.target.closest("[data-run-stop]");`,
 		"`/api/v1/work/runs/${encodeURIComponent(runID)}/stop`",
@@ -67,9 +64,6 @@ func TestStartUIAppWorkRunSurfacesKeepRerunControlsWired(t *testing.T) {
 	}
 	content := string(appBody)
 	for _, needle := range []string{
-		`can_rerun: Boolean(run.rerun_allowed),`,
-		`label: "Re-run",`,
-		`data-run-rerun="${escapeHTML(row.run_id)}"`,
 		`data-run-rerun="${escapeHTML(summary.run_id)}">Re-run</button>`,
 		`function rerunWorkRunFromUI(runID) {`,
 		`const runRerunButton = event.target.closest("[data-run-rerun]");`,

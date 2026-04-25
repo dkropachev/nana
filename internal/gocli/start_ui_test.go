@@ -4086,15 +4086,13 @@ func TestStartUIAppPlannedItemSubmitPathsSendAndRotateIdempotencyKeys(t *testing
 		t.Fatalf("read app asset: %v", err)
 	}
 	content := string(appBody)
-	if got := strings.Count(content, `headers: { "Idempotency-Key": idempotencyKey },`); got < 2 {
-		t.Fatalf("expected both planned-item submit flows to send Idempotency-Key headers, got %d matches", got)
+	if got := strings.Count(content, `headers: { "Idempotency-Key": idempotencyKey },`); got < 1 {
+		t.Fatalf("expected planned-item submit flow to send Idempotency-Key headers, got %d matches", got)
 	}
-	if got := strings.Count(content, `idempotency_key: idempotencyKey,`); got < 2 {
-		t.Fatalf("expected both planned-item submit flows to send matching idempotency_key bodies, got %d matches", got)
+	if got := strings.Count(content, `idempotency_key: idempotencyKey,`); got < 1 {
+		t.Fatalf("expected planned-item submit flow to send matching idempotency_key body, got %d matches", got)
 	}
 	for _, needle := range []string{
-		`function ensurePlannedFormIdempotencyKey(repoSlug) {`,
-		`resetPlannedFormIdempotencyKey(state.selectedRepo);`,
 		`const idempotencyKey = defaultString(state.taskComposer.idempotencyKey, nextTaskComposerIdempotencyKey());`,
 		`state.taskComposer.idempotencyKey = idempotencyKey;`,
 		`resetTaskComposerIdempotencyKey();`,
@@ -4184,40 +4182,34 @@ func TestStartUIAppHeaderIncludesSubtitleAndGuardsMissingNodes(t *testing.T) {
 	}
 }
 
-func TestStartUIAppInvestigationsWorkspaceUsesMissionControlModals(t *testing.T) {
+func TestStartUIAppInvestigationsWorkspaceUsesQueueItemDetail(t *testing.T) {
 	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
 	if err != nil {
 		t.Fatalf("read app asset: %v", err)
 	}
 	content := string(appBody)
 	for _, needle := range []string{
-		`<section class="mission-control-shell">`,
+		`function renderQueuePageMarkup(options = {}) {`,
+		`className: "mission-control-shell"`,
+		`class="queue-item-detail"`,
 		`id="open-task-schedule-button"`,
-		`function renderTaskDetailModal() {`,
+		`function renderTaskQueueItemDetail() {`,
 		`function renderTaskScheduleModal() {`,
-		`content: '<div id="task-detail-modal-content" class="drawer-shell"></div>'`,
 		`content: '<div id="task-schedule-modal-content" class="drawer-shell"></div>'`,
 	} {
 		if !strings.Contains(content, needle) {
 			t.Fatalf("expected app asset to contain %q", needle)
 		}
 	}
-	for _, needle := range []string{
-		`<h3>Scheduled Tasks</h3>`,
-		`<h3>Findings Inbox</h3>`,
-		`<h3>Import Sessions</h3>`,
-	} {
-		if strings.Contains(content, needle) {
-			t.Fatalf("expected investigations route to stop embedding %q directly", needle)
-		}
-	}
-
 	cssBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.css")
 	if err != nil {
 		t.Fatalf("read app stylesheet: %v", err)
 	}
 	cssContent := string(cssBody)
 	for _, needle := range []string{
+		`.queue-page {`,
+		`.queue-page-main {`,
+		`.queue-item-detail {`,
 		`.mission-control-shell {`,
 		`.mission-task-group {`,
 		`.mission-task-row {`,
@@ -6522,7 +6514,7 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if got := response.Header.Get("Cache-Control"); got != "no-cache" {
 		t.Fatalf("expected html shell to revalidate, got %q", got)
 	}
-	if !strings.Contains(string(body), "Assistant Workspace") || !strings.Contains(string(body), "All Repos") {
+	if !strings.Contains(string(body), "Assistant Workspace") || !strings.Contains(string(body), "Overview") {
 		t.Fatalf("expected assistant workspace shell, got %s", string(body))
 	}
 	if !strings.Contains(string(body), `id="page-subtitle"`) {
@@ -6636,17 +6628,14 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `Idempotency-Key`) || !strings.Contains(string(appBody), `nextTaskComposerIdempotencyKey()`) {
 		t.Fatalf("expected task scheduling UI to send and rotate idempotency keys, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `function renderTaskDetailModal() {`) || !strings.Contains(string(appBody), `function renderTaskScheduleModal() {`) || !strings.Contains(string(appBody), `task-composer-description-field`) || !strings.Contains(string(appBody), `data-task-open="${escapeHTML(item.id)}"`) {
-		t.Fatalf("expected modal-driven mission control task wiring in app.js, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `function renderTaskQueueItemDetail() {`) || !strings.Contains(string(appBody), `function renderTaskScheduleModal() {`) || !strings.Contains(string(appBody), `task-composer-description-field`) || !strings.Contains(string(appBody), `data-task-open="${escapeHTML(item.id)}"`) || !strings.Contains(string(appBody), `class="queue-item-detail"`) {
+		t.Fatalf("expected queue-detail mission control task wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `data-task-status-filter`) || !strings.Contains(string(appBody), `data-task-filter-clear`) || !strings.Contains(string(appBody), `placeholder="Search tasks..."`) {
 		t.Fatalf("expected mission control feed filter wiring in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `data-scout-action="promote"`) {
-		t.Fatalf("expected manual scout promote control wiring in app.js, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `data-scout-action="restore"`) {
-		t.Fatalf("expected scout restore control wiring in app.js, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `data-approval-retry-scout`) {
+		t.Fatalf("expected approval scout retry wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `data-work-item-submit="`) {
 		t.Fatalf("expected work-item submit control wiring in app.js, got %s", string(appBody))
@@ -8495,7 +8484,7 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 		"home": {
 			hash: "view=home",
 			expect: []string{
-				"All Repos",
+				"Overview",
 				"Pending Jobs Chart",
 				"Repo Overview",
 				"Work Items",
@@ -8533,14 +8522,13 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 				"Drop Repo",
 			},
 		},
-		"work": {
+		"work-legacy-alias": {
 			hash: "view=work",
 			expect: []string{
-				"Work Runs",
+				"Nana Mission Control",
+				"Search tasks...",
 				"gh-ui-blocked",
 				"lw-browser-active",
-				"completion-harden",
-				"ci_waiting",
 			},
 		},
 		"feedback-reviews": {
@@ -8601,12 +8589,14 @@ func TestStartUIBrowserNavigationShowsTaskWorkspaceViews(t *testing.T) {
 		`data-nav-view="usage"`,
 		`data-nav-view="feedback"`,
 		`data-nav-view="approvals"`,
-		`<span class="nav-label">All Repos</span>`,
+		`data-nav-view="repos"`,
+		`<span class="nav-label">Overview</span>`,
 		`<span class="nav-label">Issues</span>`,
 		`<span class="nav-label">Tasks</span>`,
 		`<span class="nav-label">Usage</span>`,
 		`<span class="nav-label">Feedback</span>`,
 		`<span class="nav-label">Approvals</span>`,
+		`<span class="nav-label">Repos</span>`,
 	} {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("expected %q in task workspace navigation output, got:\n%s", needle, output)
@@ -8713,7 +8703,7 @@ func TestStartUIBrowserActions(t *testing.T) {
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("expected issue patch status 200, got %d", response.StatusCode)
 		}
-		output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=home&kind=issue")
+		output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=issues&issue="+url.QueryEscape("acme/widget#7"))
 		startUITestRequireText(t, output, updatedReason, "issue-save-result")
 	})
 

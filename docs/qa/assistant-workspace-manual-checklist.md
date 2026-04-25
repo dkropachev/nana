@@ -5,7 +5,7 @@ Use this checklist when validating the `nana start` assistant workspace in a bro
 ## Startup
 
 - Run `nana start` and open the printed `[start-ui] Web` URL.
-- Confirm the sidebar shows `All Repos`, `Issues`, `Tasks`, `Work`, `Usage`, `Feedback`, and `Approvals`.
+- Confirm the sidebar shows `Overview`, `Tasks`, `Issues`, `Feedback`, `Approvals`, `Usage`, and `Repos`.
 - Confirm the header repo picker defaults to `All repos`.
 - Confirm the page loads without console syntax errors.
 
@@ -17,7 +17,7 @@ Use this checklist when validating the `nana start` assistant workspace in a bro
 - Leave the workspace open on `Usage` for at least 30 seconds and confirm it refreshes only while the Usage view is visible.
 - Switch away from `Usage` or hide the tab and confirm Usage polling stops while overview SSE updates continue.
 
-## Home
+## Overview
 
 - Confirm totals update after refresh.
 - Confirm pending jobs and work items render.
@@ -46,10 +46,10 @@ Use this checklist when validating the `nana start` assistant workspace in a bro
 - Confirm the run appears in the list.
 - Open detail and confirm proofs, findings, and validator sections render without raw JSON dumps as the primary UI.
 
-## Work
+## Tasks Detail
 
-- Scope the page from the header repo picker and filter by status and backend.
-- Open a run and confirm typed detail renders for phase, publication state, next action, and lane status.
+- Scope `Tasks` from the header repo picker and filter by status and backend.
+- Open a queue item and confirm inline QueueItem detail renders phase, publication state, next action, and lane status.
 - Use `Sync Run` on a GitHub-backed run and confirm the workspace refreshes.
 
 ## Feedback
@@ -67,9 +67,9 @@ Use this checklist when validating the `nana start` assistant workspace in a bro
 - Launch a planned-item approval from the workspace.
 - Confirm a scout job in one-shot stale-startup recovery does not appear in `Approvals`; only a repeated stale cleanup should surface there as a failed scout approval.
 
-## Repo Tabs
+## Repo Pages
 
 - Open a repo from the header repo picker or a repo card.
-- Confirm `Overview`, `Scouts`, `Config`, and `Controls` still work.
-- Confirm settings save and scout actions still update the workspace state.
-- Confirm an auto-recovered scout item in `Scouts` shows recovery count, recovered run id, recovery timestamp, and cooldown metadata in the detail pane.
+- Confirm `Overview` and `Config` work.
+- Confirm settings save and update the workspace state.
+- Confirm legacy `tab=scouts` and `tab=controls` links normalize back to repo `Overview`.

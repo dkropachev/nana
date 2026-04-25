@@ -467,22 +467,16 @@ func TestStartUIAppPreservesDraftsForRefreshableForms(t *testing.T) {
 		"function renderAppPreservingDraftFocus()",
 		"function usageFiltersDraftScope()",
 		"function issuesDetailDraftScope(issue)",
-		"function repoControlsIssueDraftScope()",
-		"function repoControlsPlannedDraftScope()",
-		"function repoSchedulerSearchDraftScope(repo)",
-		"function repoSchedulerDetailDraftScope(repo, item)",
 		"function taskFindingDraftScope(repo, finding)",
 		"function findingImportCandidateDraftScope(repo, session, candidate)",
 		`<form id="usage-filters-form" class="usage-filter-form" data-draft-scope="${escapeHTML(draftScope)}">`,
 		`<form id="repo-onboard-form" class="config-form" data-focus-scope="${escapeHTML(repoOnboardingFocusScope())}">`,
 		`<form id="repo-config-form" class="config-form" data-focus-scope="${escapeHTML(draftScope)}" data-draft-scope="${escapeHTML(draftScope)}">`,
 		`<div class="surface" data-focus-scope="${escapeHTML(workItemFixInstructionFocusScope(item))}">`,
-		`state.issueForm.el.setAttribute("data-draft-scope", draftScope);`,
-		`state.plannedForm.el.setAttribute("data-draft-scope", draftScope);`,
+		`<div class="config-grid" data-draft-scope="${escapeHTML(draftScope)}">`,
 		`restoreDraftScope(draftScope, document.getElementById("repo-config-form"));`,
 		"captureDraftField(event.target);",
 		"clearDraftScope(usageFiltersDraftScope());",
-		"clearDraftScope(repoSchedulerSearchDraftScope(repo));",
 	} {
 		if !strings.Contains(content, needle) {
 			t.Fatalf("expected app asset to contain %q", needle)

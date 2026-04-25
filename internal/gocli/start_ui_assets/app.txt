@@ -22,18 +22,12 @@
     feedbackTab: "reviews",
     pageSignature: "",
     selectedRepo: "",
-    selectedIssue: "",
-    issueForm: null,
-    plannedForm: null,
-    plannedFormRepoSlug: "",
-    plannedFormIdempotencyKey: "",
     widgets: {},
     widgetStateKeys: {},
     logDrawer: null,
     logSelection: defaultLogSelection(),
     repoOnboardingDrawer: null,
     configEditor: defaultConfigEditor(),
-    scoutItems: defaultScoutItemsState(),
     taskFindings: defaultTaskFindingsState(),
     findingImports: defaultFindingImportsState(),
     taskDetailModal: null,
@@ -41,7 +35,6 @@
     workItemDrawer: null,
     workItemSelection: defaultWorkItemSelection(),
     issueQueue: defaultIssueQueueState(),
-    repoScheduler: defaultRepoSchedulerState(),
     repoOnboarding: defaultRepoOnboardingState(),
     investigations: defaultInvestigationsState(),
     taskComposer: defaultTaskComposerState(),
@@ -55,13 +48,6 @@
     hashReady: false,
     liveRegionMessage: "",
   };
-
-  const SCHEDULER_BUCKETS = [
-    { id: "ready-now", title: "Ready Now", copy: "Clears the schedule and makes the issue due immediately." },
-    { id: "tomorrow", title: "Tomorrow", copy: "Schedules the issue for tomorrow at 09:00 local time." },
-    { id: "next-week", title: "Next Week", copy: "Schedules the issue for next Monday at 09:00 local time." },
-    { id: "later", title: "Later", copy: "Schedules the issue two weeks out at 09:00 local time." },
-  ];
 
   const TASK_STATUS_GROUPS = [
     { id: "failed", title: "Failed", copy: "Runs and tasks that need intervention or a rerun." },
@@ -111,20 +97,6 @@
       overridePublish: false,
       overrideForkIssues: false,
       overrideImplement: false,
-    };
-  }
-
-  function defaultScoutItemsState() {
-    return {
-      repoSlug: "",
-      items: [],
-      selectedItemID: "",
-      selectedItemIDs: [],
-      includeDeleted: false,
-      loading: false,
-      loaded: false,
-      error: "",
-      lastRepoScoutRefreshKey: "",
     };
   }
 
@@ -183,18 +155,6 @@
       loading: false,
       loaded: false,
       error: "",
-    };
-  }
-
-  function defaultRepoSchedulerState() {
-    return {
-      repoSlug: "",
-      query: "",
-      searching: false,
-      error: "",
-      effectiveQuery: "",
-      results: [],
-      selectedPlannedItemID: "",
     };
   }
 
@@ -263,20 +223,6 @@
 
   function resetTaskComposerIdempotencyKey() {
     state.taskComposer.idempotencyKey = nextTaskComposerIdempotencyKey();
-  }
-
-  function ensurePlannedFormIdempotencyKey(repoSlug) {
-    const normalizedRepo = defaultString(repoSlug, "");
-    if (state.plannedFormRepoSlug !== normalizedRepo || !String(state.plannedFormIdempotencyKey || "").trim()) {
-      state.plannedFormRepoSlug = normalizedRepo;
-      state.plannedFormIdempotencyKey = nextTaskComposerIdempotencyKey();
-    }
-    return state.plannedFormIdempotencyKey;
-  }
-
-  function resetPlannedFormIdempotencyKey(repoSlug) {
-    state.plannedFormRepoSlug = defaultString(repoSlug, "");
-    state.plannedFormIdempotencyKey = nextTaskComposerIdempotencyKey();
   }
 
   function defaultFeedbackState() {
@@ -593,24 +539,6 @@
     return issue ? `issues:detail:${issue.id}` : "";
   }
 
-  function repoControlsIssueDraftScope() {
-    return state.selectedRepo && state.selectedIssue
-      ? `repo:${state.selectedRepo}:tracked-issue:${state.selectedIssue}`
-      : "";
-  }
-
-  function repoControlsPlannedDraftScope() {
-    return state.selectedRepo ? `repo:${state.selectedRepo}:planned-create` : "";
-  }
-
-  function repoSchedulerSearchDraftScope(repo) {
-    return repo ? `repo:${repo.repo_slug}:scheduler-search` : "";
-  }
-
-  function repoSchedulerDetailDraftScope(repo, item) {
-    return repo && item ? `repo:${repo.repo_slug}:planned-detail:${item.id}` : "";
-  }
-
   function taskFindingDraftScope(repo, finding) {
     return repo && finding ? `investigations:finding:${repo.repo_slug}:${finding.id}` : "";
   }
@@ -635,15 +563,6 @@
 
   function clearIssuesDetailDrafts() {
     clearDraftScopesByPrefix("issues:detail:");
-  }
-
-  function clearRepoControlsDrafts(repoSlug = state.selectedRepo) {
-    const repo = String(repoSlug || "").trim();
-    if (!repo) return;
-    clearDraftScope(`repo:${repo}:planned-create`);
-    clearDraftScope(`repo:${repo}:scheduler-search`);
-    clearDraftScopesByPrefix(`repo:${repo}:tracked-issue:`);
-    clearDraftScopesByPrefix(`repo:${repo}:planned-detail:`);
   }
 
   function clearInvestigationsDrafts(repoSlug = "") {
@@ -819,94 +738,6 @@
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return "";
     return date.toISOString();
-  }
-
-  function sameLocalDate(left, right) {
-    return left.getFullYear() === right.getFullYear()
-      && left.getMonth() === right.getMonth()
-      && left.getDate() === right.getDate();
-  }
-
-  function schedulerTomorrowAnchor() {
-    const date = new Date();
-    date.setDate(date.getDate() + 1);
-    date.setHours(9, 0, 0, 0);
-    return date;
-  }
-
-  function schedulerNextMondayAnchor() {
-    const date = new Date();
-    const day = date.getDay();
-    let delta = (8 - day) % 7;
-    if (delta === 0) delta = 7;
-    date.setDate(date.getDate() + delta);
-    date.setHours(9, 0, 0, 0);
-    return date;
-  }
-
-  function schedulerLaterAnchor() {
-    const date = new Date();
-    date.setDate(date.getDate() + 14);
-    date.setHours(9, 0, 0, 0);
-    return date;
-  }
-
-  function schedulerScheduleAtForBucket(bucketID) {
-    switch (bucketID) {
-      case "tomorrow":
-        return schedulerTomorrowAnchor().toISOString();
-      case "next-week":
-        return schedulerNextMondayAnchor().toISOString();
-      case "later":
-        return schedulerLaterAnchor().toISOString();
-      default:
-        return "";
-    }
-  }
-
-  function schedulerBucketForItem(item) {
-    const value = defaultString(item && item.schedule_at, "");
-    if (!value) return "ready-now";
-    const scheduled = new Date(value);
-    if (Number.isNaN(scheduled.getTime())) return "ready-now";
-    const now = new Date();
-    if (scheduled.getTime() <= now.getTime()) return "ready-now";
-    const tomorrow = schedulerTomorrowAnchor();
-    if (sameLocalDate(scheduled, tomorrow)) return "tomorrow";
-    const nextWeek = schedulerNextMondayAnchor();
-    if (scheduled.getTime() <= nextWeek.getTime()) return "next-week";
-    return "later";
-  }
-
-  function schedulerBucketSortKey(bucketID) {
-    const index = SCHEDULER_BUCKETS.findIndex((bucket) => bucket.id === bucketID);
-    return index === -1 ? SCHEDULER_BUCKETS.length : index;
-  }
-
-  function schedulerIssueNumber(targetURL) {
-    const match = String(targetURL || "").match(/\/issues\/(\d+)(?:\/)?$/);
-    return match ? Number.parseInt(match[1], 10) : 0;
-  }
-
-  function schedulerPriorityTone(priority) {
-    const value = Number(priority);
-    if (value <= 1) return "high";
-    if (value <= 3) return "medium";
-    return "low";
-  }
-
-  function schedulerCardLabels(item) {
-    const labels = [`P${Number(item.priority ?? 5)}`];
-    if (item.state === "failed") labels.push("Failed");
-    return labels;
-  }
-
-  function schedulerCardDescription(item) {
-    const issueNumber = schedulerIssueNumber(item.target_url);
-    const scheduleText = defaultString(item.schedule_at ? formatDateTime(item.schedule_at) : "", "Ready now");
-    return issueNumber > 0
-      ? `#${issueNumber} · ${scheduleText}`
-      : scheduleText;
   }
 
   function issuePickModeToAutomationMode(value) {
@@ -1121,71 +952,7 @@
   }
 
   function selectedTaskScopeRepoSummary() {
-    if (!state.selectedRepo) return null;
-    return selectedRepoSummary();
-  }
-
-  function selectedIssueRecord() {
-    const repo = selectedRepoSummary();
-    if (!repo || !repo.state) return null;
-    return (repo.state.issues || {})[state.selectedIssue] || null;
-  }
-
-  function ensureRepoScheduler(repo) {
-    const repoSlug = repo ? repo.repo_slug : "";
-    if (state.repoScheduler.repoSlug !== repoSlug) {
-      state.repoScheduler = {
-        ...defaultRepoSchedulerState(),
-        repoSlug,
-      };
-    }
-    reconcileRepoScheduler(repo);
-  }
-
-  function reconcileRepoScheduler(repo) {
-    if (!repo) {
-      state.repoScheduler = defaultRepoSchedulerState();
-      return;
-    }
-    const scheduled = trackedIssuePlannedItems(repo);
-    if (!state.repoScheduler.selectedPlannedItemID || !scheduled.some((item) => item.id === state.repoScheduler.selectedPlannedItemID)) {
-      state.repoScheduler.selectedPlannedItemID = scheduled[0] ? scheduled[0].id : "";
-    }
-    state.repoScheduler.results = (state.repoScheduler.results || []).map((item) => {
-      const planned = trackedIssuePlannedItemForURL(repo, item.target_url);
-      return {
-        ...item,
-        scheduled: Boolean(planned),
-        planned_item_id: planned ? planned.id : "",
-        planned_state: planned ? planned.state : "",
-        schedule_at: planned ? planned.schedule_at : "",
-      };
-    });
-  }
-
-  function trackedIssuePlannedItems(repo) {
-    if (!repo || !repo.state) return [];
-    return Object.values(repo.state.planned_items || {})
-      .filter((item) => item.launch_kind === "tracked_issue" && (item.state === "queued" || item.state === "failed"))
-      .sort((left, right) => {
-        const leftBucket = schedulerBucketSortKey(schedulerBucketForItem(left));
-        const rightBucket = schedulerBucketSortKey(schedulerBucketForItem(right));
-        if (leftBucket !== rightBucket) return leftBucket - rightBucket;
-        if ((left.priority ?? 5) !== (right.priority ?? 5)) return (left.priority ?? 5) - (right.priority ?? 5);
-        return timestamp(right.updated_at) - timestamp(left.updated_at);
-      });
-  }
-
-  function trackedIssuePlannedItemForURL(repo, targetURL) {
-    if (!repo || !repo.state || !targetURL) return null;
-    return trackedIssuePlannedItems(repo).find((item) => defaultString(item.target_url, "") === defaultString(targetURL, "")) || null;
-  }
-
-  function selectedTrackedIssuePlannedItem(repo) {
-    const items = trackedIssuePlannedItems(repo);
-    if (!items.length) return null;
-    if (!state.repoScheduler.selectedPlannedItemID) return items[0];
-    return items.find((item) => item.id === state.repoScheduler.selectedPlannedItemID) || items[0];
+    return selectedRepoSummary() || selectedTaskComposerRepoSummary();
   }
 
   function selectedIssueQueueItem() {
@@ -1237,6 +1004,12 @@
       repoSlug: defaultString(repoSlug, ""),
       repoTab: defaultString(repoTab, "overview"),
     };
+    if (normalized.view === "work") {
+      normalized.view = "investigations";
+    }
+    if (normalized.view === "all-repos") {
+      normalized.view = "home";
+    }
     if (normalized.view === "repo" && normalized.repoTab === "findings") {
       normalized.view = "investigations";
       normalized.repoTab = "overview";
@@ -1800,180 +1573,19 @@
     return repoConfigSnapshotKey(left) === repoConfigSnapshotKey(right);
   }
 
-  function resetScoutItemsState(repo) {
-    state.scoutItems = {
-      ...defaultScoutItemsState(),
-      repoSlug: repo ? repo.repo_slug : "",
-      lastRepoScoutRefreshKey: repoScoutItemsRefreshKey(repo),
-    };
-  }
-
-  function ensureScoutItemsState(repo) {
-    if (!repo) {
-      state.scoutItems = defaultScoutItemsState();
-      return;
-    }
-    if (state.scoutItems.repoSlug !== repo.repo_slug) {
-      resetScoutItemsState(repo);
-      return;
-    }
-    if (state.scoutItems.loaded && repoScoutItemsRefreshKey(repo) !== state.scoutItems.lastRepoScoutRefreshKey && !state.scoutItems.loading) {
-      loadScoutItems(repo.repo_slug, { silent: true });
-    }
-  }
-
-  function selectedScoutItem() {
-    if (!state.scoutItems.selectedItemID) return state.scoutItems.items[0] || null;
-    return state.scoutItems.items.find((item) => item.id === state.scoutItems.selectedItemID) || state.scoutItems.items[0] || null;
-  }
-
-  function selectedScoutItemIDs() {
-    return (state.scoutItems.selectedItemIDs || []).filter((itemID) => state.scoutItems.items.some((item) => item.id === itemID));
-  }
-
-  function allScoutItemIDs() {
-    return state.scoutItems.items
-      .map((item) => String(item.id || ""))
-      .filter(Boolean);
-  }
-
-  function setSelectedScoutItemIDs(itemIDs) {
-    const allowed = new Set(state.scoutItems.items.map((item) => item.id));
-    const seen = new Set();
-    state.scoutItems.selectedItemIDs = (itemIDs || []).filter((itemID) => {
-      const id = String(itemID || "");
-      if (!allowed.has(id) || seen.has(id)) return false;
-      seen.add(id);
-      return true;
-    });
-  }
-
-  function selectAllScoutItems() {
-    const itemIDs = allScoutItemIDs();
-    setSelectedScoutItemIDs(itemIDs);
-    if (itemIDs.length && !itemIDs.includes(state.scoutItems.selectedItemID)) {
-      state.scoutItems.selectedItemID = itemIDs[0];
-    }
-  }
-
-  function clearScoutItemSelection() {
-    setSelectedScoutItemIDs([]);
-  }
-
-  function repoScoutItemsRefreshKey(repo) {
-    if (!repo) return "";
-    return JSON.stringify({
-      scout_jobs: (repo.state && repo.state.scout_jobs) || {},
-      planned_items: (repo.state && repo.state.planned_items) || {},
-      scout_job_counts: repo.scout_job_counts || {},
-      planned_item_counts: repo.planned_item_counts || {},
-    });
-  }
-
-  function toggleScoutItemSelection(itemID, checked) {
-    const current = new Set(selectedScoutItemIDs());
-    if (checked) {
-      current.add(itemID);
-    } else {
-      current.delete(itemID);
-    }
-    setSelectedScoutItemIDs(Array.from(current));
-  }
-
-  function scoutActionableSelection(action) {
-    return selectedScoutItemIDs().filter((itemID) => {
-      const item = state.scoutItems.items.find((entry) => entry.id === itemID);
-      return item && (item.available_actions || []).includes(action);
-    });
-  }
-
-  function applyScoutItemsPayload(repoSlug, payload) {
-    if (payload.repo) {
-      mergeRepoSummary(payload.repo, { rerender: false, resetScouts: false });
-    }
-    state.scoutItems.repoSlug = repoSlug;
-    state.scoutItems.items = payload.items || [];
-    state.scoutItems.loading = false;
-    state.scoutItems.loaded = true;
-    state.scoutItems.error = "";
-    state.scoutItems.lastRepoScoutRefreshKey = payload.repo ? repoScoutItemsRefreshKey(payload.repo) : state.scoutItems.lastRepoScoutRefreshKey;
-    if (!state.scoutItems.selectedItemID || !state.scoutItems.items.some((item) => item.id === state.scoutItems.selectedItemID)) {
-      state.scoutItems.selectedItemID = state.scoutItems.items[0] ? state.scoutItems.items[0].id : "";
-    }
-    setSelectedScoutItemIDs(state.scoutItems.selectedItemIDs || []);
-  }
-
-  function loadScoutItems(repoSlug, options = {}) {
-    if (!repoSlug) return Promise.resolve();
-    const includeDeleted = options.includeDeleted !== undefined ? Boolean(options.includeDeleted) : Boolean(state.scoutItems.includeDeleted);
-    state.scoutItems.repoSlug = repoSlug;
-    state.scoutItems.includeDeleted = includeDeleted;
-    state.scoutItems.loading = true;
-    if (!options.silent) {
-      state.scoutItems.error = "";
-    }
-    if (!options.silent || !state.scoutItems.items.length) {
-      rerenderScoutSurface();
-    }
-    const query = includeDeleted ? "?deleted=1" : "";
-    return api(`/api/v1/repos/${repoSlug}/scout-items${query}`).then((payload) => {
-      if (state.scoutItems.repoSlug !== repoSlug) return;
-      applyScoutItemsPayload(repoSlug, payload);
-      rerenderScoutSurface();
-    }).catch((error) => {
-      if (state.scoutItems.repoSlug !== repoSlug) return;
-      state.scoutItems.loading = false;
-      state.scoutItems.error = error.message;
-      rerenderScoutSurface();
-      if (!options.silent) {
-        toast("danger", "Scout items failed", error.message);
-      }
-    });
-  }
-
   function mutateScoutItem(repoSlug, itemID, action) {
     return api(`/api/v1/repos/${repoSlug}/scout-items/${encodeURIComponent(itemID)}/${action}`, {
       method: "POST",
     }).then((payload) => {
-      if (state.scoutItems.includeDeleted) {
-        return loadScoutItems(repoSlug, { silent: true, includeDeleted: true }).then(() => payload);
+      if (payload.repo) {
+        mergeRepoSummary(payload.repo, { rerender: false });
       }
-      applyScoutItemsPayload(repoSlug, payload);
-      rerenderScoutSurface();
+      if (payload.state) {
+        mergeRepoState(payload.state);
+      }
       return payload;
     }).catch((error) => {
       toast("danger", "Scout item action failed", error.message);
-      throw error;
-    });
-  }
-
-  function mutateScoutItemsBulk(repoSlug, itemIDs, action) {
-    const selectedBefore = new Set(selectedScoutItemIDs());
-    return api(`/api/v1/repos/${repoSlug}/scout-items/batch`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action,
-        item_ids: itemIDs,
-      }),
-    }).then((payload) => {
-      const successfulIDs = new Set((payload.results || [])
-        .filter((result) => result.status === "ok")
-        .map((result) => result.item_id));
-      const nextSelection = Array.from(selectedBefore).filter((itemID) => !successfulIDs.has(itemID));
-      if (state.scoutItems.includeDeleted) {
-        return loadScoutItems(repoSlug, { silent: true, includeDeleted: true }).then(() => {
-          setSelectedScoutItemIDs(nextSelection);
-          rerenderScoutSurface();
-          return payload;
-        });
-      }
-      applyScoutItemsPayload(repoSlug, payload);
-      setSelectedScoutItemIDs(nextSelection);
-      rerenderScoutSurface();
-      return payload;
-    }).catch((error) => {
-      toast("danger", "Scout bulk action failed", error.message);
       throw error;
     });
   }
@@ -2221,12 +1833,6 @@
     });
   }
 
-  function rerenderScoutSurface() {
-    if (state.currentView === "investigations") {
-      renderInvestigationsPage();
-    }
-  }
-
   function loadIssueQueue(options = {}) {
     state.issueQueue.loading = true;
     if (!options.silent) {
@@ -2332,7 +1938,7 @@
       if (options.resetWorkType) {
         state.investigations.detailWorkType = "";
       }
-      renderTaskDetailModal();
+      renderTaskDetailSurfaces();
       if (state.currentView === "investigations") {
         renderInvestigationsPage();
       }
@@ -2344,7 +1950,7 @@
         state.investigations.detailWorkType = "";
       }
       state.investigations.error = error.message;
-      renderTaskDetailModal();
+      renderTaskDetailSurfaces();
       if (state.currentView === "investigations") {
         renderInvestigationsPage();
       }
@@ -2759,6 +2365,11 @@
           }
         }
         break;
+      case "repos":
+        if (!state.repoList.loaded && !state.repoList.loading) {
+          loadRepos({ silent: true });
+        }
+        break;
       default:
         break;
     }
@@ -2776,6 +2387,8 @@
         return loadApprovals(options);
       case "usage":
         return loadUsage(options);
+      case "repos":
+        return loadRepos(options);
       case "repo":
         return loadSelectedRepoSummary(options);
       default:
@@ -2860,7 +2473,7 @@
   }
 
   function syncWorkspaceRepoFilters(repoSlug) {
-    ["issues", "investigations", "work", "feedback", "approvals"].forEach((view) => {
+    ["issues", "investigations", "feedback", "approvals"].forEach((view) => {
       filterState(view).repo = defaultString(repoSlug, "");
     });
   }
@@ -2882,7 +2495,7 @@
       ? normalized
       : "";
     const nextView = nextRepo
-      ? ((state.currentView === "home" || state.currentView === "repo") ? "repo" : state.currentView)
+      ? ((state.currentView === "home" || state.currentView === "repos" || state.currentView === "repo") ? "repo" : state.currentView)
       : (state.currentView === "repo" ? "home" : state.currentView);
     const nextRepoTab = nextRepo ? defaultString(state.repoTab, "overview") : "overview";
     clearDraftsForRouteTransition({
@@ -2891,7 +2504,6 @@
       repoTab: nextRepoTab,
     });
     state.selectedRepo = nextRepo;
-    state.selectedIssue = "";
     if (nextRepo) {
       state.taskComposer.repoSlug = nextRepo;
     }
@@ -2931,7 +2543,6 @@
     state.currentView = route.view;
     state.repoTab = route.repoTab;
     state.selectedRepo = route.repoSlug;
-    state.selectedIssue = "";
     renderApp();
     refreshCurrentView({ silent: true }).catch(() => {});
   }
@@ -2942,8 +2553,6 @@
     });
     state.widgets = {};
     state.widgetStateKeys = {};
-    destroyForm("issueForm");
-    destroyForm("plannedForm");
   }
 
   function replaceWidget(key, widget) {
@@ -3014,7 +2623,7 @@
   function buildBreadcrumbs() {
     const items = [{ label: "Workspace" }];
     if (state.currentView === "home") {
-      items.push({ label: "All Repos", current: true });
+      items.push({ label: "Overview", current: true });
       return items;
     }
     if (state.currentView === "repo") {
@@ -3225,20 +2834,16 @@
       <div class="sidebar-nav-shell">
         <div class="nav-main-links" role="navigation" aria-label="Workspace views">
           <button class="nav-item ${homeActive ? "nav-item-active" : ""}" type="button" data-nav-view="home" aria-current="${homeActive ? "page" : "false"}">
-            <span class="nav-label">All Repos</span>
+            <span class="nav-label">Overview</span>
             <span class="nav-count">${homeCount}</span>
-          </button>
-          <button class="nav-item ${state.currentView === "issues" ? "nav-item-active" : ""}" type="button" data-nav-view="issues" aria-current="${state.currentView === "issues" ? "page" : "false"}">
-            <span class="nav-label">Issues</span>
-            <span class="nav-count">${Number(totals.issues_queued || 0) + Number(totals.blocked_issues || 0) + Number(totals.issues_in_progress || 0)}</span>
           </button>
           <button class="nav-item ${state.currentView === "investigations" ? "nav-item-active" : ""}" type="button" data-nav-view="investigations" aria-current="${state.currentView === "investigations" ? "page" : "false"}">
             <span class="nav-label">Tasks</span>
             <span class="nav-count">${taskCount}</span>
           </button>
-          <button class="nav-item ${state.currentView === "usage" ? "nav-item-active" : ""}" type="button" data-nav-view="usage" aria-current="${state.currentView === "usage" ? "page" : "false"}">
-            <span class="nav-label">Usage</span>
-            <span class="nav-count">${usageNavCount()}</span>
+          <button class="nav-item ${state.currentView === "issues" ? "nav-item-active" : ""}" type="button" data-nav-view="issues" aria-current="${state.currentView === "issues" ? "page" : "false"}">
+            <span class="nav-label">Issues</span>
+            <span class="nav-count">${Number(totals.issues_queued || 0) + Number(totals.blocked_issues || 0) + Number(totals.issues_in_progress || 0)}</span>
           </button>
           <button class="nav-item ${state.currentView === "feedback" ? "nav-item-active" : ""}" type="button" data-nav-view="feedback" aria-current="${state.currentView === "feedback" ? "page" : "false"}">
             <span class="nav-label">Feedback</span>
@@ -3247,6 +2852,14 @@
           <button class="nav-item ${state.currentView === "approvals" ? "nav-item-active" : ""}" type="button" data-nav-view="approvals" aria-current="${state.currentView === "approvals" ? "page" : "false"}">
             <span class="nav-label">Approvals</span>
             <span class="nav-count">${Number(totals.approval_items || 0)}</span>
+          </button>
+          <button class="nav-item ${state.currentView === "usage" ? "nav-item-active" : ""}" type="button" data-nav-view="usage" aria-current="${state.currentView === "usage" ? "page" : "false"}">
+            <span class="nav-label">Usage</span>
+            <span class="nav-count">${usageNavCount()}</span>
+          </button>
+          <button class="nav-item ${state.currentView === "repos" || state.currentView === "repo" ? "nav-item-active" : ""}" type="button" data-nav-view="repos" aria-current="${state.currentView === "repos" || state.currentView === "repo" ? "page" : "false"}">
+            <span class="nav-label">Repos</span>
+            <span class="nav-count">${sortedRepos().length}</span>
           </button>
         </div>
       </div>
@@ -3302,8 +2915,12 @@
         setTitle("Approvals");
         setSubtitle("Human-gate queue across publication, feedback submission, and planned launches.");
         setUpdated(state.overviewError ? "Overview unavailable." : "Overview still loading.");
+      } else if (state.currentView === "repos") {
+        setTitle("Repos");
+        setSubtitle("Onboarded repositories and their current automation posture.");
+        setUpdated(state.overviewError ? "Overview unavailable." : "Overview still loading.");
       } else {
-        setTitle("All Repos");
+        setTitle("Overview");
         setSubtitle(state.overviewError ? "Workspace overview is unavailable." : "Waiting for state...");
         setUpdated(state.overviewError ? "Overview unavailable." : "Waiting for state...");
       }
@@ -3313,8 +2930,13 @@
     setUpdated(`Updated ${formatDateTime(state.overview.generated_at)}`);
 
     if (state.currentView === "home") {
-      setTitle("All Repos");
+      setTitle("Overview");
       setSubtitle("Assistant queue across issues, runs, feedback, approvals, and repo automation.");
+      return;
+    }
+    if (state.currentView === "repos") {
+      setTitle("Repos");
+      setSubtitle("Onboarded repositories and their current automation posture.");
       return;
     }
     if (state.currentView === "issues") {
@@ -3327,13 +2949,6 @@
     if (state.currentView === "investigations") {
       setTitle("Nana Mission Control");
       setSubtitle("");
-      return;
-    }
-    if (state.currentView === "work") {
-      setTitle("Work");
-      setSubtitle(state.selectedRepo
-        ? `Local and GitHub-backed work runs for ${state.selectedRepo}.`
-        : "Local and GitHub-backed work runs with detail, state, and logs.");
       return;
     }
     if (state.currentView === "usage") {
@@ -3358,7 +2973,7 @@
 
     const repo = selectedRepoSummary();
     if (!repo) {
-      setTitle("All Repos");
+      setTitle("Overview");
       setSubtitle("Assistant queue across issues, runs, feedback, approvals, and repo automation.");
       return;
     }
@@ -3487,105 +3102,6 @@
       { field: "current_phase", label: "Phase" },
       { field: "updated_at", label: "Updated" },
       { field: "run_id", label: "Logs", action: true, template: '<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-log-run-id="{{run_id}}">Logs</button>' },
-    );
-    return columns;
-  }
-
-  function workRunRows(runs, includeRepo) {
-    return runs.map((run) => {
-      const row = {
-        run_id: run.run_id,
-        backend: defaultString(run.backend, "-"),
-        kind: defaultString(run.backend, "-"),
-        status: defaultString(run.status, "active"),
-        attention_state: defaultString(run.attention_state, "active"),
-        pause_reason: defaultString(run.pause_reason, ""),
-        pause_until: defaultString(run.pause_until, ""),
-        current_phase: defaultString(run.current_phase, "Awaiting phase"),
-        current_round: run.current_round || 0,
-        target_url: defaultString(run.target_url, "-"),
-        updated_at: formatDateTime(run.updated_at),
-        can_stop: Boolean(run.stop_allowed),
-        can_sync: run.backend === "github",
-        can_rerun: Boolean(run.rerun_allowed),
-        can_resolve: Boolean(run.resolve_allowed),
-      };
-      if (row.pause_until) {
-        row.current_phase = `Retry ${formatDateTime(row.pause_until)}`;
-      } else if (row.current_round > 0) {
-        row.current_phase = `${row.current_phase} · Round ${row.current_round}`;
-      }
-      if (includeRepo) {
-        row.repo_slug = runRepoDisplay(run);
-      }
-      return row;
-    });
-  }
-
-  function workRunColumns(includeRepo) {
-    const columns = [];
-    if (includeRepo) {
-      columns.push({ field: "repo_slug", label: "Repo" });
-    }
-    columns.push(
-      { field: "backend", label: "Backend" },
-      { field: "status", label: "Status", render: (row) => renderStatePillWithPause(row.attention_state, row.status, row.pause_until, row.pause_reason) },
-      { field: "current_phase", label: "Phase" },
-      { field: "target_url", label: "Target" },
-      { field: "updated_at", label: "Updated" },
-      { field: "run_id", label: "Open", action: true, template: '<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-log-run-id="{{run_id}}">Open</button>' },
-      {
-        field: "run_id",
-        label: "Sync",
-        action: true,
-        render(row) {
-          if (!row.can_sync) {
-            return '<span class="data-value-text">N/A</span>';
-          }
-          return `<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-run-sync="${escapeHTML(row.run_id)}">Sync</button>`;
-        },
-      },
-      {
-        field: "run_id",
-        label: "Stop",
-        action: true,
-        render(row) {
-          if (!row.can_stop) {
-            return '<span class="data-value-text">N/A</span>';
-          }
-          return `<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-run-stop="${escapeHTML(row.run_id)}">Stop</button>`;
-        },
-      },
-      {
-        field: "run_id",
-        label: "Resolve",
-        action: true,
-        render(row) {
-          if (!row.can_resolve) {
-            return '<span class="data-value-text">N/A</span>';
-          }
-          return `<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-run-resolve="${escapeHTML(row.run_id)}">Resolve</button>`;
-        },
-      },
-      {
-        field: "run_id",
-        label: "Re-run",
-        action: true,
-        render(row) {
-          if (!row.can_rerun) {
-            return '<span class="data-value-text">N/A</span>';
-          }
-          return `<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-run-rerun="${escapeHTML(row.run_id)}">Re-run</button>`;
-        },
-      },
-      {
-        field: "run_id",
-        label: "Drop",
-        action: true,
-        render(row) {
-          return `<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-run-drop="${escapeHTML(row.run_id)}">Drop</button>`;
-        },
-      },
     );
     return columns;
   }
@@ -4062,7 +3578,7 @@
       { label: "Repos", value: state.overview.totals.repos, note: "Onboarded and visible in the console." },
       { label: "Queued Issues", value: state.overview.totals.issues_queued, note: "Tracked issues waiting for work." },
       { label: "Scout Queue", value: (state.overview.totals.scout_queued || 0) + (state.overview.totals.scout_running || 0) + (state.overview.totals.scout_failed || 0), note: "Local scout jobs waiting, paused, active, or failed." },
-      { label: "Dismissed Scouts", value: state.overview.totals.scout_dismissed || 0, note: "Saved scout proposals that can be revived from each repo's Scouts tab." },
+      { label: "Dismissed Scouts", value: state.overview.totals.scout_dismissed || 0, note: "Saved scout proposals retained for metrics and approval retry flows." },
       { label: "Pending Jobs", value: runs.length, note: "Work runs still in flight or blocked." },
       { label: "Approvals", value: state.overview.totals.approval_items || 0, note: "Human-gate work waiting for review or launch." },
       { label: "Service Queue", value: state.overview.totals.service_queued + state.overview.totals.service_running, note: "Scouts, triage, sync, and reconcile tasks." },
@@ -4084,6 +3600,7 @@
       emptyMessage: "No work runs have been indexed yet.",
     });
     if (showWorkItems) {
+      const workItemGridRows = workItemRows(workItems, true);
       renderGrid("global-work-item-grid", [
         { field: "source", label: "Source" },
         { field: "repo_slug", label: "Repo" },
@@ -4093,12 +3610,43 @@
         { field: "draft_kind", label: "Kind" },
         { field: "updated_at", label: "Updated" },
         { field: "id", label: "Review", action: true, template: '<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-work-item-show="{{id}}">Open</button>' },
-      ], workItemRows(workItems, true), {
+      ], workItemGridRows, {
         maxHeight: "360px",
         emptyMessage: "No queued or paused work items are waiting.",
       });
+      renderWorkItemOpenChips("global-work-item-grid", workItemGridRows);
     }
     document.getElementById("hud-json").textContent = JSON.stringify(state.overview.hud || {}, null, 2);
+  }
+
+  function renderReposPage() {
+    const repos = sortedRepos();
+    ensureBodyStructure(`repos:${repos.length}`, `
+      <section class="surface">
+        <div class="surface-head">
+          <div>
+            <h3>Repos</h3>
+            <p>Dense overview of onboarded repos, routing mode, and queue pressure.</p>
+          </div>
+          <button class="tx-btn tx-btn-primary" type="button" data-open-repo-onboarding="true">Onboard Repo</button>
+        </div>
+        <div id="repos-grid"></div>
+      </section>
+    `);
+    renderGrid("repos-grid", [
+      { field: "repo_slug", label: "Repo" },
+      { field: "mode", label: "Mode" },
+      { field: "queued_issues", label: "Queued" },
+      { field: "blocked_issues", label: "Blocked" },
+      { field: "service_queue", label: "Service" },
+      { field: "scout_queue", label: "Scouts" },
+      { field: "planned_queue", label: "Planned" },
+      { field: "pending_runs", label: "Runs" },
+      { field: "repo_slug", label: "Open", action: true, template: '<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-open-repo="{{repo_slug}}">Open</button>' },
+    ], repoOverviewRows(), {
+      maxHeight: "680px",
+      emptyMessage: state.repoList.loading ? "Loading repos..." : defaultString(state.repoList.error, "No repos are onboarded yet."),
+    });
   }
 
   function renderUsagePage() {
@@ -4345,16 +3893,6 @@
         matchesAttentionFilter(item, filter.attention) &&
         matchesKindFilter(item, filter.kind) &&
         matchesQuery(item, ["id", "kind", "title", "summary", "description", "repo_slug", "run_id", "status", "raw_status", "attention_state", "work_type"], filter.query);
-    });
-  }
-
-  function filteredWorkRuns() {
-    const filter = filterState("work");
-    return sortRuns(state.overview ? state.overview.work_runs || [] : []).filter((item) => {
-      return matchesRepoFilter(item, filter.repo) &&
-        matchesAttentionFilter(item, filter.attention) &&
-        matchesKindFilter(item, filter.kind) &&
-        matchesQuery(item, ["repo_slug", "run_id", "target_url", "current_phase", "status", "backend", "pause_reason", "pause_until"], filter.query);
     });
   }
 
@@ -4785,6 +4323,158 @@
     }, host);
   }
 
+  function renderTaskWorkbenchShell(repo) {
+    const repoLabel = repo ? repo.repo_slug : "Pick a repo to review findings.";
+    return `
+      <section class="layout-two-col task-workbench">
+        <div class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Findings Inbox</h3>
+              <p>${escapeHTML(repoLabel)}</p>
+            </div>
+          </div>
+          <div id="task-findings-grid"></div>
+        </div>
+        <div class="surface detail-surface">
+          <div class="surface-head">
+            <div>
+              <h3>Finding Detail</h3>
+              <p>Review, edit, dismiss, or promote a saved finding.</p>
+            </div>
+          </div>
+          <div id="task-finding-detail"></div>
+        </div>
+      </section>
+      <section class="layout-two-col task-workbench">
+        <div class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Import Sessions</h3>
+              <p>Parse markdown findings and promote candidates into the inbox.</p>
+            </div>
+          </div>
+          <div class="drawer-toolbar">
+            <input id="task-findings-import-file" type="file" accept=".md,.markdown,text/markdown,text/plain" ${repo ? "" : "disabled"} />
+            <button id="task-findings-import-button" class="tx-btn tx-btn-secondary" type="button" ${repo && !state.findingImports.importing ? "" : "disabled"}>${escapeHTML(state.findingImports.importing ? "Importing..." : "Import Markdown")}</button>
+          </div>
+          <div id="task-import-sessions-grid"></div>
+          <div class="section-divider"></div>
+          <div id="task-import-candidates-grid"></div>
+        </div>
+        <div class="surface detail-surface">
+          <div class="surface-head">
+            <div>
+              <h3>Import Candidate</h3>
+              <p>Normalize parsed candidates before promoting them.</p>
+            </div>
+          </div>
+          <div id="task-import-detail"></div>
+        </div>
+      </section>
+    `;
+  }
+
+  function renderTaskWorkbenchSelectionChips(target, rows, kind, idField, labelField, selectedID) {
+    const host = document.getElementById(target);
+    if (!host || !rows.length) return;
+    const chips = rows.map((row) => {
+      const id = defaultString(row[idField], "");
+      const selected = id && id === selectedID;
+      return `
+        <div class="task-workbench-chip ${selected ? "task-workbench-chip-selected" : ""}" tabindex="0" role="button" data-row-select-kind="${escapeHTML(kind)}" data-row-select-id="${escapeHTML(id)}" aria-pressed="${selected ? "true" : "false"}">
+          ${escapeHTML(defaultString(row[labelField], id))}
+        </div>
+      `;
+    }).join("");
+    host.insertAdjacentHTML("afterbegin", `<div class="task-workbench-chips">${chips}</div>`);
+  }
+
+  function renderWorkItemOpenChips(target, rows) {
+    const host = document.getElementById(target);
+    if (!host || !rows.length) return;
+    const chips = rows.map((row) => {
+      const id = defaultString(row.id, "");
+      return `
+        <div class="task-workbench-chip" tabindex="0" role="button" data-work-item-show="${escapeHTML(id)}">
+          ${escapeHTML(defaultString(row.subject, id))}
+        </div>
+      `;
+    }).join("");
+    host.insertAdjacentHTML("afterbegin", `<div class="task-workbench-chips">${chips}</div>`);
+  }
+
+  function renderTaskWorkbench(repo) {
+    const findings = repo ? (state.taskFindings.items || []) : [];
+    const selectedFinding = repo ? selectedTaskFinding() : null;
+    const findingRows = taskFindingRows(findings);
+    renderGrid("task-findings-grid", [
+      { field: "title", label: "Title" },
+      { field: "source", label: "Source" },
+      { field: "status", label: "Status", render: (row) => renderStatePill(row.status_key, row.status) },
+      { field: "severity", label: "Severity" },
+      { field: "work_type", label: "Work Type" },
+      { field: "updated_at", label: "Updated" },
+    ], findingRows, {
+      maxHeight: "360px",
+      emptyMessage: repo
+        ? (state.taskFindings.loading ? "Loading findings..." : defaultString(state.taskFindings.error, "No findings are available."))
+        : "Pick a repo before reviewing findings.",
+      rowSelect(row) {
+        return {
+          kind: "finding",
+          value: row.id,
+          selected: selectedFinding ? selectedFinding.id === row.id : false,
+        };
+      },
+    });
+    renderTaskWorkbenchSelectionChips("task-findings-grid", findingRows, "finding", "id", "title", defaultString(selectedFinding && selectedFinding.id, ""));
+    renderTaskFindingDetail(repo, selectedFinding);
+
+    const sessions = repo ? (state.findingImports.items || []) : [];
+    const selectedSession = repo ? selectedFindingImportSession() : null;
+    const selectedCandidate = repo ? selectedFindingImportCandidate() : null;
+    const sessionRows = findingImportSessionRows(sessions);
+    renderGrid("task-import-sessions-grid", [
+      { field: "file_path", label: "File" },
+      { field: "parse_status", label: "Status" },
+      { field: "candidate_count", label: "Candidates" },
+      { field: "updated_at", label: "Updated" },
+    ], sessionRows, {
+      maxHeight: "260px",
+      emptyMessage: repo
+        ? (state.findingImports.loading ? "Loading import sessions..." : defaultString(state.findingImports.error, "No import sessions are available."))
+        : "Pick a repo before importing findings.",
+      rowSelect(row) {
+        return {
+          kind: "import-session",
+          value: row.id,
+          selected: selectedSession ? selectedSession.id === row.id : false,
+        };
+      },
+    });
+    renderTaskWorkbenchSelectionChips("task-import-sessions-grid", sessionRows, "import-session", "id", "file_path", defaultString(selectedSession && selectedSession.id, ""));
+    const candidateRows = findingImportCandidateRows(selectedSession);
+    renderGrid("task-import-candidates-grid", [
+      { field: "title", label: "Candidate" },
+      { field: "status", label: "Status" },
+      { field: "severity", label: "Severity" },
+      { field: "work_type", label: "Work Type" },
+    ], candidateRows, {
+      maxHeight: "260px",
+      emptyMessage: selectedSession ? "No candidates were parsed for this session." : "Select an import session.",
+      rowSelect(row) {
+        return {
+          kind: "import-candidate",
+          value: row.candidate_id,
+          selected: selectedCandidate ? selectedCandidate.candidate_id === row.candidate_id : false,
+        };
+      },
+    });
+    renderTaskWorkbenchSelectionChips("task-import-candidates-grid", candidateRows, "import-candidate", "candidate_id", "title", defaultString(selectedCandidate && selectedCandidate.candidate_id, ""));
+    renderFindingImportDetail(repo, selectedSession, selectedCandidate);
+  }
+
   function renderTaskInvestigationDetail(detail) {
     const host = document.getElementById("investigation-detail");
     if (!host) return;
@@ -5087,6 +4777,31 @@
     `).join("");
   }
 
+  function renderQueuePageMarkup(options = {}) {
+    return `
+      <section class="queue-page ${escapeHTML(defaultString(options.className, ""))}">
+        ${options.chromeHTML ? `<div class="queue-page-chrome">${options.chromeHTML}</div>` : ""}
+        <div class="queue-page-main">
+          <section class="queue-list-surface ${escapeHTML(defaultString(options.listClassName, ""))}">
+            ${options.listHTML || ""}
+          </section>
+          <aside id="${escapeHTML(defaultString(options.detailID, "queue-item-detail"))}" class="queue-item-detail" aria-label="${escapeHTML(defaultString(options.detailLabel, "Queue item detail"))}"></aside>
+        </div>
+      </section>
+    `;
+  }
+
+  function workRunPhaseLabel(summary) {
+    if (!summary) return "(none)";
+    if (summary.pause_until) {
+      return `Retry ${formatDateTime(summary.pause_until)}`;
+    }
+    if (summary.current_round) {
+      return `${defaultString(summary.current_phase, "Awaiting phase")} · Round ${summary.current_round}`;
+    }
+    return defaultString(summary.current_phase, "(none)");
+  }
+
   function taskDetailSourceMarkup(detail) {
     if (!detail || !detail.summary) {
       return '<div class="status-pill">Task detail is unavailable.</div>';
@@ -5095,7 +4810,7 @@
       const run = detail.work_run;
       return `
         <div class="queue-summary">
-          <article class="queue-item"><span class="queue-label">Phase</span><p class="queue-copy">${escapeHTML(defaultString(run.summary.current_phase, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Phase</span><p class="queue-copy">${escapeHTML(workRunPhaseLabel(run.summary))}</p></article>
           <article class="queue-item"><span class="queue-label">Backend</span><p class="queue-copy">${escapeHTML(defaultString(run.summary.backend, "(none)"))}</p></article>
           <article class="queue-item"><span class="queue-label">Target</span><p class="queue-copy">${escapeHTML(defaultString(run.summary.target_url, "(none)"))}</p></article>
           <article class="queue-item"><span class="queue-label">Next Action</span><p class="queue-copy">${escapeHTML(defaultString(run.next_action, "(none)"))}</p></article>
@@ -5209,7 +4924,7 @@
         state.investigations.detail = nextDetail;
       }
       state.investigations.detailWorkType = "";
-      renderTaskDetailModal();
+      renderTaskDetailSurfaces();
       loadInvestigations({ silent: true });
       return nextDetail && nextDetail.summary
         ? nextDetail
@@ -5409,20 +5124,17 @@
       if (state.taskDetailModal && state.taskDetailModal.isOpen()) {
         state.taskDetailModal.close();
       }
+      renderTaskQueueItemDetail();
       return;
     }
-    initTaskDetailModal();
-    renderTaskDetailModal();
-    if (!state.taskDetailModal.isOpen()) {
-      state.taskDetailModal.open();
-    }
+    renderTaskDetailSurfaces();
     const currentDetailID = defaultString(state.investigations.detail && state.investigations.detail.summary && state.investigations.detail.summary.id, "");
     if (currentDetailID === taskID || state.investigations.detailLoading) {
       return;
     }
     state.investigations.detail = null;
     state.investigations.detailLoading = true;
-    renderTaskDetailModal();
+    renderTaskDetailSurfaces();
     loadInvestigationDetail(taskID, { silent: true });
   }
 
@@ -5432,6 +5144,9 @@
     const runID = defaultString(summary.run_id, defaultString(detail.related_run && detail.related_run.summary && detail.related_run.summary.run_id, ""));
     if (runID) {
       buttons.push(`<button class="tx-btn tx-btn-secondary" type="button" data-task-open-job="${escapeHTML(runID)}">Open Job</button>`);
+    }
+    if (runID && detail.work_run && detail.work_run.sync_allowed) {
+      buttons.push(`<button class="tx-btn tx-btn-secondary" type="button" data-run-sync="${escapeHTML(runID)}">Sync Run</button>`);
     }
     if (summary.kind === "work_item" && detail.work_item && detail.work_item.item) {
       buttons.push(`<button class="tx-btn tx-btn-secondary" type="button" data-work-item-show="${escapeHTML(detail.work_item.item.id)}">Open Draft</button>`);
@@ -5491,25 +5206,19 @@
     `;
   }
 
-  function renderTaskDetailModal() {
-    const host = document.getElementById("task-detail-modal-content");
-    if (!host) return;
+  function taskQueueItemDetailMarkup() {
     const detail = state.investigations.detail;
     if (!state.investigations.selectedRunID) {
-      host.innerHTML = '<div class="log-empty">Choose a task to inspect it.</div>';
-      return;
+      return '<div class="log-empty">Choose a task to inspect it.</div>';
     }
     if (state.investigations.detailLoading && !detail) {
-      host.innerHTML = '<div class="log-empty">Loading task detail...</div>';
-      return;
+      return '<div class="log-empty">Loading task detail...</div>';
     }
     if (state.investigations.error && !detail) {
-      host.innerHTML = `<div class="log-empty">${escapeHTML(state.investigations.error)}</div>`;
-      return;
+      return `<div class="log-empty">${escapeHTML(state.investigations.error)}</div>`;
     }
     if (!detail || !detail.summary) {
-      host.innerHTML = '<div class="log-empty">Task detail is unavailable.</div>';
-      return;
+      return '<div class="log-empty">Task detail is unavailable.</div>';
     }
     const summary = detail.summary;
     const startedAt = taskDetailStartedAt(detail);
@@ -5521,7 +5230,7 @@
     const actionButtons = taskDetailOpenButtons(detail, summary);
     const actionMenuMarkup = renderTaskDetailActionMenu(detail, summary);
     const plannedItem = summary.kind === "planned_item" ? detail.planned_item : null;
-    host.innerHTML = `
+    return `
       <div class="drawer-summary">
         <div>
           <span class="drawer-label">${escapeHTML(defaultString(summary.kind, "task").replace(/_/g, " "))}</span>
@@ -5576,6 +5285,23 @@
     `;
   }
 
+  function renderTaskDetailModal() {
+    const host = document.getElementById("task-detail-modal-content");
+    if (!host) return;
+    host.innerHTML = taskQueueItemDetailMarkup();
+  }
+
+  function renderTaskQueueItemDetail() {
+    const host = document.getElementById("task-detail-panel") || document.getElementById("investigation-detail");
+    if (!host) return;
+    host.innerHTML = taskQueueItemDetailMarkup();
+  }
+
+  function renderTaskDetailSurfaces() {
+    renderTaskQueueItemDetail();
+    renderTaskDetailModal();
+  }
+
   function initTaskDetailModal() {
     if (state.taskDetailModal) return;
     state.taskDetailModal = Teryx.modal({
@@ -5595,18 +5321,22 @@
         } else {
           renderAppPreservingDraftFocus();
         }
-        renderTaskDetailModal();
+        renderTaskDetailSurfaces();
       },
     });
   }
 
-  function openTaskDetailModal(taskID) {
+  function openTaskQueueItemDetail(taskID) {
     state.investigations.selectedRunID = taskID;
     syncHashState();
     if (state.currentView === "investigations") {
       renderInvestigationsPage();
     }
     syncTaskDetailModalState();
+  }
+
+  function openTaskDetailModal(taskID) {
+    openTaskQueueItemDetail(taskID);
   }
 
   function renderTaskScheduleModal() {
@@ -5782,12 +5512,20 @@
     if ((!state.investigations.templatesLoaded || state.investigations.templatesRepoSlug !== composerRepoSlug) && !state.investigations.templatesLoading) {
       loadTaskTemplates({ silent: true });
     }
+    const workbenchRepo = selectedTaskScopeRepoSummary();
     ensureBodyStructure(`investigations:${defaultString(state.selectedRepo, "all")}:${sortedRepos().length}`, `
-      <section class="mission-control-shell">
+      ${renderQueuePageMarkup({
+      className: "mission-control-shell",
+      detailID: "task-detail-panel",
+      detailLabel: "Task detail",
+      chromeHTML: `
         <div id="mission-toolbar-host"></div>
-        <div id="mission-status-strip" class="mission-status-strip"></div>
-        <section id="mission-feed" class="mission-feed"></section>
-      </section>
+        <div id="mission-status-strip" class="mission-status-strip queue-status-strip"></div>
+      `,
+      listClassName: "mission-feed-surface",
+      listHTML: '<section id="mission-feed" class="mission-feed queue-list"></section>',
+      })}
+      ${renderTaskWorkbenchShell(workbenchRepo)}
     `);
     const toolbarHost = document.getElementById("mission-toolbar-host");
     if (toolbarHost) toolbarHost.innerHTML = renderTaskToolbar(state.investigations.items || []);
@@ -5795,41 +5533,9 @@
     if (statusHost) statusHost.innerHTML = taskStatusStrip(state.investigations.items || []);
     const feedHost = document.getElementById("mission-feed");
     if (feedHost) feedHost.innerHTML = renderTaskFeed(items);
+    renderTaskQueueItemDetail();
+    renderTaskWorkbench(workbenchRepo);
     renderTaskScheduleModal();
-  }
-
-  function renderWorkPage() {
-    const runs = filteredWorkRuns();
-    ensureBodyStructure(`work:${defaultString(state.selectedRepo, "all")}`, `
-      <section class="surface">
-        <div class="surface-head">
-          <div>
-            <h3>Work Runs</h3>
-            <p>Active and recent runs across local and GitHub-backed workflows.</p>
-          </div>
-        </div>
-        ${buildFilterToolbar("work", {
-          placeholder: "Search run id, repo, target URL, phase, or backend",
-          kindOptions: [
-            { value: "all", label: "All kinds" },
-            { value: "github", label: "GitHub" },
-            { value: "local", label: "Local" },
-          ],
-        })}
-        <div id="work-runs-grid"></div>
-      </section>
-    `);
-    renderGrid("work-runs-grid", workRunColumns(true), workRunRows(runs, true), {
-      maxHeight: "620px",
-      emptyMessage: "No work runs have been indexed yet.",
-      rowSelect(row) {
-        return {
-          kind: "run",
-          value: row.run_id,
-          selected: state.logSelection.runID === row.run_id,
-        };
-      },
-    });
   }
 
   function renderFeedbackPage() {
@@ -5891,6 +5597,7 @@
               { value: "all", label: "All kinds" },
               { value: "work_run", label: "Work runs" },
               { value: "work_item", label: "Drafts" },
+              { value: "scout_job", label: "Scout jobs" },
               { value: "planned_item", label: "Planned launches" },
             ],
           })}
@@ -6237,203 +5944,6 @@
     }));
   }
 
-  function repoSchedulerSearchRows(repo) {
-    ensureRepoScheduler(repo);
-    return (state.repoScheduler.results || []).map((item) => ({
-      id: item.id,
-      number: item.number,
-      title: item.title,
-      labels: Array.isArray(item.labels) && item.labels.length ? item.labels.join(", ") : "-",
-      work_type: workTypeLabel(item.work_type),
-      priority_label: defaultString(item.priority_label, `P${item.priority ?? 3}`),
-      updated_at: item.updated_at ? formatDateTime(item.updated_at) : "No update yet",
-      target_url: defaultString(item.target_url, ""),
-      action_label: item.scheduled ? "Open" : "Add",
-      planned_item_id: defaultString(item.planned_item_id, ""),
-      scheduled: Boolean(item.scheduled),
-      schedule_at: defaultString(item.schedule_at, ""),
-    }));
-  }
-
-  function renderRepoSchedulerSearchResults(repo) {
-    const host = document.getElementById("repo-scheduler-search-results");
-    if (!host) return;
-    host.innerHTML = '<div id="repo-scheduler-search-grid"></div>';
-    if (state.repoScheduler.searching) {
-      host.innerHTML = '<div class="status-pill">Searching GitHub issues...</div>';
-      return;
-    }
-    if (state.repoScheduler.error) {
-      host.innerHTML = `<div class="config-notice">${escapeHTML(state.repoScheduler.error)}</div>`;
-      return;
-    }
-    const rows = repoSchedulerSearchRows(repo);
-    renderGrid("repo-scheduler-search-grid", [
-      { field: "number", label: "#" },
-      { field: "title", label: "Title" },
-      { field: "labels", label: "Labels" },
-      { field: "work_type", label: "Work Type" },
-      { field: "priority_label", label: "Priority" },
-      { field: "updated_at", label: "Updated" },
-      {
-        field: "action_label",
-        label: "Action",
-        render: (row) => row.scheduled
-          ? `<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-scheduler-open="${escapeHTML(row.planned_item_id)}">Open</button>`
-          : `<button class="tx-btn tx-btn-primary tx-btn-sm grid-action-button" type="button" data-scheduler-add="${escapeHTML(row.id)}">Add</button>`,
-      },
-    ], rows, {
-      maxHeight: "420px",
-      emptyMessage: state.repoScheduler.effectiveQuery
-        ? "No open GitHub issues matched this query."
-        : "Search the current repo with GitHub issue qualifiers like label:, assignee:, author:, milestone:, or sort:updated-desc.",
-    });
-  }
-
-  function renderRepoSchedulerSearchPanel(repo) {
-    const host = document.getElementById("repo-scheduler-search-panel");
-    if (!host) return;
-    renderWithPreservedDraftFocus(() => {
-      const draftScope = repoSchedulerSearchDraftScope(repo);
-      host.innerHTML = `
-      <div class="surface-head">
-        <div>
-          <h3>Search GitHub Issues</h3>
-          <p>Scoped to ${escapeHTML(repo.repo_slug)}. Use GitHub issue qualifiers like label:, assignee:, author:, milestone:, or sort:updated-desc.</p>
-        </div>
-        <span class="status-pill">${escapeHTML(defaultString(repo.issue_pick_mode, "manual"))}</span>
-      </div>
-      <form id="repo-scheduler-search-form" class="scheduler-search-form" data-draft-scope="${escapeHTML(draftScope)}">
-        <label class="selector config-field-wide">
-          <span>GitHub Issue Search</span>
-          <input id="repo-scheduler-search-query" type="text" value="${escapeHTML(state.repoScheduler.query)}" placeholder="label:bug assignee:octocat sort:updated-desc" />
-        </label>
-        <button class="tx-btn tx-btn-primary" type="submit" ${state.repoScheduler.searching ? "disabled" : ""}>${escapeHTML(state.repoScheduler.searching ? "Searching..." : "Search")}</button>
-      </form>
-      ${state.repoScheduler.effectiveQuery ? `<p class="queue-copy">Effective query: ${escapeHTML(state.repoScheduler.effectiveQuery)}</p>` : ""}
-      <div id="repo-scheduler-search-results"></div>
-    `;
-      renderRepoSchedulerSearchResults(repo);
-      restoreDraftScope(draftScope, document.getElementById("repo-scheduler-search-form"));
-    }, host);
-  }
-
-  function renderRepoSchedulerBoard(repo) {
-    const host = document.getElementById("repo-scheduler-board");
-    if (!host) return;
-    const items = trackedIssuePlannedItems(repo);
-    const widgetKey = "repo-scheduler-board";
-    if (!items.length) {
-      destroyWidget(state.widgets[widgetKey]);
-      delete state.widgets[widgetKey];
-      host.innerHTML = buildInlineNotice("No tracked issues are scheduled yet.");
-      return;
-    }
-    const columns = SCHEDULER_BUCKETS.map((bucket) => ({
-      id: bucket.id,
-      title: bucket.title,
-      items: items.filter((item) => schedulerBucketForItem(item) === bucket.id).map((item) => ({
-        id: item.id,
-        title: item.title,
-        description: schedulerCardDescription(item),
-        labels: schedulerCardLabels(item),
-        priority: schedulerPriorityTone(item.priority),
-      })),
-    }));
-    replaceWidget(widgetKey, Teryx.kanban("#repo-scheduler-board", {
-      columns,
-      draggable: true,
-      onMove(cardId, _fromCol, toCol) {
-        api(`/api/v1/planned-items/${encodeURIComponent(cardId)}`, {
-          method: "PATCH",
-          body: JSON.stringify({
-            schedule_at: schedulerScheduleAtForBucket(toCol),
-            clear_schedule: toCol === "ready-now",
-          }),
-        }).then((payload) => {
-          state.repoScheduler.selectedPlannedItemID = payload.planned_item.id;
-          mergeRepoState(payload.state);
-          toast("success", "Schedule updated", payload.planned_item.title);
-        }).catch((error) => {
-          toast("danger", "Schedule update failed", error.message);
-          renderRepoControlsPage(selectedRepoSummary());
-        });
-      },
-      onCardClick(card) {
-        if (defaultString(selectedTrackedIssuePlannedItem(selectedRepoSummary()) && selectedTrackedIssuePlannedItem(selectedRepoSummary()).id, "") !== defaultString(card && card.id, "")) {
-          clearDraftScope(repoSchedulerDetailDraftScope(selectedRepoSummary(), selectedTrackedIssuePlannedItem(selectedRepoSummary())));
-        }
-        state.repoScheduler.selectedPlannedItemID = card.id;
-        renderRepoControlsPage(selectedRepoSummary());
-      },
-    }));
-  }
-
-  function renderRepoSchedulerDetail(repo) {
-    const host = document.getElementById("repo-scheduler-detail");
-    if (!host) return;
-    renderWithPreservedDraftFocus(() => {
-      const item = selectedTrackedIssuePlannedItem(repo);
-      if (!item) {
-        host.innerHTML = '<div class="status-pill">Select or add a scheduled tracked issue.</div>';
-        return;
-      }
-      const issueNumber = schedulerIssueNumber(item.target_url);
-      const draftScope = repoSchedulerDetailDraftScope(repo, item);
-      host.innerHTML = `
-      <div class="drawer-summary">
-        <div>
-          <span class="drawer-label">${escapeHTML(defaultString(repo && repo.repo_slug, "Repo"))}${issueNumber ? ` #${escapeHTML(issueNumber)}` : ""}</span>
-          <span class="drawer-value">${escapeHTML(item.title)}</span>
-          <p class="drawer-copy">${escapeHTML(defaultString(item.target_url, "No GitHub issue URL recorded."))}</p>
-        </div>
-        <div class="drawer-summary-grid">
-          <div class="drawer-summary-card"><span class="drawer-label">State</span><span class="drawer-value">${renderStatePill(item.state === "failed" ? "failed" : "queued", item.state)}</span></div>
-          <div class="drawer-summary-card"><span class="drawer-label">Work Type</span><span class="drawer-value">${escapeHTML(workTypeLabel(item.work_type))}</span></div>
-          <div class="drawer-summary-card"><span class="drawer-label">Priority</span><span class="drawer-value">${escapeHTML(`P${Number(item.priority ?? 5)}`)}</span></div>
-          <div class="drawer-summary-card"><span class="drawer-label">Schedule</span><span class="drawer-value">${escapeHTML(defaultString(item.schedule_at ? formatDateTime(item.schedule_at) : "", "Ready now"))}</span></div>
-          <div class="drawer-summary-card"><span class="drawer-label">Updated</span><span class="drawer-value">${escapeHTML(formatDateTime(item.updated_at))}</span></div>
-        </div>
-      </div>
-      ${item.last_error ? `<div class="config-notice">${escapeHTML(item.last_error)}</div>` : ""}
-      <div class="scheduler-detail-form" data-draft-scope="${escapeHTML(draftScope)}">
-        <label class="selector">
-          <span>Title</span>
-          <input id="repo-scheduler-detail-title" type="text" value="${escapeHTML(item.title)}" />
-        </label>
-        <div class="config-grid">
-          <label class="selector">
-            <span>Priority</span>
-            <select id="repo-scheduler-detail-priority">
-              ${[0, 1, 2, 3, 4, 5].map((priority) => `<option value="${priority}" ${Number(item.priority ?? 5) === priority ? "selected" : ""}>P${priority}</option>`).join("")}
-            </select>
-          </label>
-          <label class="selector">
-            <span>Work Type</span>
-            <select id="repo-scheduler-detail-work-type">
-              ${["bug_fix", "refactor", "feature", "test_only"].map((value) => `<option value="${value}" ${defaultString(item.work_type, "feature") === value ? "selected" : ""}>${escapeHTML(workTypeLabel(value))}</option>`).join("")}
-            </select>
-          </label>
-          <label class="selector">
-            <span>Exact Schedule</span>
-            <input id="repo-scheduler-detail-schedule" type="datetime-local" value="${escapeHTML(toDateTimeLocal(item.schedule_at))}" />
-          </label>
-        </div>
-        <label class="selector">
-          <span>Description</span>
-          <textarea id="repo-scheduler-detail-description" rows="5">${escapeHTML(defaultString(item.description, ""))}</textarea>
-        </label>
-        <div class="scheduler-detail-actions">
-          <button class="tx-btn tx-btn-primary" type="button" data-scheduler-save="${escapeHTML(item.id)}">Save</button>
-          <button class="tx-btn tx-btn-secondary" type="button" data-scheduler-launch="${escapeHTML(item.id)}">Launch Now</button>
-          <button class="tx-btn tx-btn-secondary" type="button" data-scheduler-delete="${escapeHTML(item.id)}">Remove</button>
-        </div>
-      </div>
-    `;
-      restoreDraftScope(draftScope, host);
-    }, host);
-  }
-
   function renderRepoOverviewPage(repo) {
     const repoRuns = pendingRunsForRepo(repo.repo_slug);
     const repoIssues = issueRows(repo);
@@ -6471,7 +5981,7 @@
       { label: "Blocked Issues", value: repo.issue_counts.blocked || 0, note: "Issues blocked on policy, timing, or feedback." },
       { label: "Service Queue", value: (repo.service_task_counts.queued || 0) + (repo.service_task_counts.running || 0), note: "Service tasks still executing or waiting." },
       { label: "Scout Queue", value: repoScoutQueueCount(repo), note: "Local scout jobs waiting, paused, active, or failed." },
-      { label: "Dismissed Scouts", value: repoDismissedScoutCount(repo), note: "Saved scout proposals available to retry from the Scouts tab." },
+      { label: "Dismissed Scouts", value: repoDismissedScoutCount(repo), note: "Saved scout proposals retained for metrics and approval retry flows." },
       { label: "Planned Queue", value: repoManualPlannedQueueCount(repo), note: "Manual planned launches that still need action." },
       { label: "Pending Jobs", value: repoRuns.length, note: "Work runs currently mapped to this repo." },
       { label: "Work Items", value: repoWorkItems.length, note: "Inbound items linked to this repo." },
@@ -6490,7 +6000,7 @@
         <article class="queue-item">
           <span class="queue-label">Dismissed Scout Actions</span>
           <strong class="queue-value">${escapeHTML(String(repoDismissedScoutCount(repo)))}</strong>
-          <p class="queue-copy">Dismissed scout proposals are tracked in repo metrics, but the dedicated Scouts tab has been removed.</p>
+          <p class="queue-copy">Dismissed scout proposals are tracked in repo metrics, but the dedicated scout page has been removed.</p>
         </article>
       `);
     }
@@ -6556,213 +6066,6 @@
     }
   }
 
-  function populateIssueSelector(issues) {
-    const select = document.getElementById("issue-select");
-    if (!select) return;
-    if (!issues.length) {
-      state.selectedIssue = "";
-      select.innerHTML = '<option value="">No tracked issues</option>';
-      return;
-    }
-    if (!state.selectedIssue || !issues.some((issue) => String(issue.source_number) === state.selectedIssue)) {
-      state.selectedIssue = String(issues[0].source_number);
-    }
-    select.innerHTML = issues.map((issue) => {
-      const selected = String(issue.source_number) === state.selectedIssue ? "selected" : "";
-      return `<option value="${issue.source_number}" ${selected}>#${issue.source_number} ${escapeHTML(issue.title)}</option>`;
-    }).join("");
-  }
-
-  function populatePlannedSelector(items) {
-    const select = document.getElementById("planned-select");
-    if (!select) return;
-    const launchable = items.filter((item) => item.state === "queued" || item.state === "failed");
-    if (!launchable.length) {
-      select.innerHTML = '<option value="">No launchable items</option>';
-      return;
-    }
-    select.innerHTML = launchable.map((item) => {
-      return `<option value="${escapeHTML(item.id)}">${escapeHTML(item.title)} · ${escapeHTML(item.priority)}</option>`;
-    }).join("");
-  }
-
-  function renderIssueForm(issue) {
-    const host = document.getElementById("issue-form");
-    if (!host) return;
-    renderWithPreservedDraftFocus(() => {
-      destroyForm("issueForm");
-      host.innerHTML = "";
-      if (!issue) {
-        host.innerHTML = '<div class="status-pill">Select a tracked issue to edit.</div>';
-        return;
-      }
-      const draftScope = repoControlsIssueDraftScope();
-      state.issueForm = Teryx.form("#issue-form", {
-      id: "repo-controls-issue-form",
-      action: "#",
-      method: "post",
-      layout: "vertical",
-      submitLabel: "Save Issue",
-      fields: [
-        {
-          name: "priority",
-          label: "Priority",
-          type: "select",
-          required: true,
-          value: String(issue.manual_priority_updated_at ? issue.manual_priority : (issue.priority ?? 5)),
-          options: [0, 1, 2, 3, 4, 5].map((priority) => ({ label: `P${priority}`, value: String(priority) })),
-        },
-        {
-          name: "schedule_at",
-          label: "Schedule At",
-          type: "datetime-local",
-          value: toDateTimeLocal(issue.schedule_at),
-        },
-        {
-          name: "deferred_reason",
-          label: "Deferred Reason",
-          type: "textarea",
-          rows: 3,
-          value: issue.deferred_reason || "",
-        },
-      ],
-      onSubmit(data) {
-        api(`/api/v1/repos/${state.selectedRepo}/issues/${state.selectedIssue}`, {
-          method: "PATCH",
-          body: JSON.stringify({
-            priority: Number(data.priority),
-            schedule_at: fromDateTimeLocal(data.schedule_at),
-            deferred_reason: data.deferred_reason,
-            clear_schedule: !data.schedule_at,
-          }),
-        }).then((payload) => {
-          clearDraftScope(draftScope);
-          mergeRepoState(payload.state);
-          toast("success", "Issue updated", `Issue #${state.selectedIssue} saved.`);
-        }).catch((error) => {
-          toast("danger", "Issue update failed", error.message);
-        });
-        return false;
-      },
-    });
-      state.issueForm.el.setAttribute("data-draft-scope", draftScope);
-      restoreDraftScope(draftScope, state.issueForm.el);
-    }, host);
-  }
-
-  function renderPlannedForm() {
-    const host = document.getElementById("planned-form");
-    if (!host) return;
-    renderWithPreservedDraftFocus(() => {
-      destroyForm("plannedForm");
-      host.innerHTML = "";
-      const repo = selectedRepoSummary();
-      if (!repo) {
-        host.innerHTML = '<div class="status-pill">Select a repo first.</div>';
-        return;
-      }
-      const launchDefault = repo.repo_mode === "local" ? "local_work" : "github_issue";
-      const draftScope = repoControlsPlannedDraftScope();
-      state.plannedForm = Teryx.form("#planned-form", {
-      id: "repo-controls-planned-form",
-      action: "#",
-      method: "post",
-      layout: "vertical",
-      submitLabel: "Create Planned Item",
-      fields: [
-        { name: "title", label: "Title", required: true, placeholder: "Schedule a maintenance task" },
-        { name: "description", label: "Description", type: "textarea", rows: 4, placeholder: "Describe what Nana should do." },
-        {
-          name: "work_type",
-          label: "Work Type",
-          type: "select",
-          value: "feature",
-          options: ["bug_fix", "refactor", "feature", "test_only"].map((value) => ({ label: workTypeLabel(value), value })),
-        },
-        {
-          name: "priority",
-          label: "Priority",
-          type: "select",
-          value: "3",
-          options: [0, 1, 2, 3, 4, 5].map((priority) => ({ label: `P${priority}`, value: String(priority) })),
-        },
-        { name: "schedule_at", label: "Schedule At", type: "datetime-local" },
-        {
-          name: "launch_kind",
-          label: "Launch Kind",
-          type: "select",
-          value: launchDefault,
-          options: [
-            { label: "Local Work", value: "local_work" },
-            { label: "GitHub Issue", value: "github_issue" },
-          ],
-        },
-      ],
-      onSubmit(data) {
-        const idempotencyKey = ensurePlannedFormIdempotencyKey(state.selectedRepo);
-        api(`/api/v1/repos/${state.selectedRepo}/planned-items`, {
-          method: "POST",
-          headers: { "Idempotency-Key": idempotencyKey },
-          body: JSON.stringify({
-            title: data.title,
-            description: data.description,
-            work_type: data.work_type,
-            priority: Number(data.priority),
-            schedule_at: fromDateTimeLocal(data.schedule_at),
-            launch_kind: data.launch_kind,
-            idempotency_key: idempotencyKey,
-          }),
-        }).then((payload) => {
-          clearDraftScope(draftScope);
-          mergeRepoState(payload.state);
-          resetPlannedFormIdempotencyKey(state.selectedRepo);
-          if (state.plannedForm && typeof state.plannedForm.reset === "function") {
-            state.plannedForm.reset();
-          }
-          toast("success", "Planned item added", payload.planned_item.title);
-        }).catch((error) => {
-          toast("danger", "Planned item failed", error.message);
-        });
-        return false;
-      },
-    });
-      state.plannedForm.el.setAttribute("data-draft-scope", draftScope);
-      restoreDraftScope(draftScope, state.plannedForm.el);
-    }, host);
-  }
-
-  function scoutStatusLabel(status) {
-    switch (String(status || "").trim()) {
-      case "external":
-        return "External";
-      case "planned":
-        return "Planned";
-      case "dismissed":
-        return "Dismissed";
-      case "deleted":
-        return "Deleted";
-      default:
-        return defaultString(status, "pending").replace(/_/g, " ");
-    }
-  }
-
-  function scoutActionLabel(action) {
-    switch (action) {
-      case "promote":
-        return "Promote";
-      case "retry":
-        return "Retry";
-      case "dismiss":
-        return "Dismiss";
-      case "open-run":
-        return "Open Run";
-      case "reset":
-        return "Reset";
-      default:
-        return action;
-    }
-  }
-
   function scoutRoleLabel(roleKey) {
     return repoScoutMeta(String(roleKey || "").replace("-scout", "")).label;
   }
@@ -6784,277 +6087,6 @@
       default:
         return "Auto Promote";
     }
-  }
-
-  function scoutItemRows(items) {
-    return items.map((item) => ({
-      id: item.id,
-      title: item.title,
-      role: scoutRoleLabel(item.role),
-      work_type: workTypeLabel(item.work_type),
-      page: defaultString(item.page || item.route, ""),
-      severity: defaultString(item.severity, ""),
-      audit_mode: defaultString(item.audit_mode, ""),
-      destination: scoutDestinationLabel(item.destination),
-      status: scoutStatusLabel(item.status),
-      status_key: defaultString(item.status === "paused" ? "blocked" : item.status, "pending"),
-      pause_reason: defaultString(item.pause_reason, ""),
-      pause_until: defaultString(item.pause_until, ""),
-      updated_at: formatDateTime(item.updated_at || item.generated_at),
-      can_promote: (item.available_actions || []).includes("promote"),
-      can_retry: (item.available_actions || []).includes("retry"),
-      can_dismiss: (item.available_actions || []).includes("dismiss"),
-      can_restore: (item.available_actions || []).includes("restore"),
-      can_open_run: (item.available_actions || []).includes("open-run"),
-    }));
-  }
-
-  function renderScoutDetail(item, hostID = "repo-scout-detail") {
-    const host = document.getElementById(hostID);
-    if (!host) return;
-    if (state.scoutItems.error) {
-      host.innerHTML = `<div class="config-notice">${escapeHTML(state.scoutItems.error)}</div>`;
-      return;
-    }
-    if (state.scoutItems.loading && !item) {
-      host.innerHTML = '<div class="status-pill">Loading scout items...</div>';
-      return;
-    }
-    if (!item) {
-      host.innerHTML = "";
-      return;
-    }
-    const availableActions = item.available_actions || [];
-    const actionButtons = [];
-    if (availableActions.includes("promote")) {
-      actionButtons.push(`<button class="tx-btn tx-btn-primary" type="button" data-scout-action="promote" data-scout-id="${escapeHTML(item.id)}">Promote</button>`);
-    }
-    if (availableActions.includes("retry")) {
-      actionButtons.push(`<button class="tx-btn tx-btn-secondary" type="button" data-scout-action="retry" data-scout-id="${escapeHTML(item.id)}">Retry</button>`);
-    }
-    if (availableActions.includes("dismiss")) {
-      actionButtons.push(`<button class="tx-btn tx-btn-secondary" type="button" data-scout-action="dismiss" data-scout-id="${escapeHTML(item.id)}">Dismiss</button>`);
-    }
-    if (availableActions.includes("restore")) {
-      actionButtons.push(`<button class="tx-btn tx-btn-secondary" type="button" data-scout-action="restore" data-scout-id="${escapeHTML(item.id)}">Restore</button>`);
-    }
-    if (availableActions.includes("open-run")) {
-      actionButtons.push(`<button class="tx-btn tx-btn-secondary" type="button" data-scout-action="open-run" data-scout-id="${escapeHTML(item.id)}">Open Run</button>`);
-    }
-    host.innerHTML = `
-      <div class="section-divider"></div>
-      <div class="surface-head">
-        <div>
-          <h3>${escapeHTML(item.title)}</h3>
-          <p>${escapeHTML(scoutRoleLabel(item.role))} · ${escapeHTML(scoutDestinationLabel(defaultString(item.destination, "local")))}</p>
-        </div>
-        ${renderStatePillWithPause(defaultString(item.status === "paused" ? "blocked" : item.status, "pending"), scoutStatusLabel(item.status), item.pause_until, item.pause_reason)}
-      </div>
-      ${actionButtons.length ? `<div class="drawer-toolbar">${actionButtons.join("")}</div>` : ""}
-      <div class="config-meta">
-        <span><strong>Artifact:</strong> ${escapeHTML(defaultString(item.artifact_path, "Unavailable"))}</span>
-        <span><strong>Generated:</strong> ${escapeHTML(formatDateTime(item.generated_at))}</span>
-        <span><strong>Updated:</strong> ${escapeHTML(formatDateTime(item.updated_at || item.generated_at))}</span>
-        <span><strong>Area:</strong> ${escapeHTML(defaultString(item.area, "Unknown"))}</span>
-        <span><strong>Audit mode:</strong> ${escapeHTML(defaultString(item.audit_mode, "unknown"))}</span>
-        <span><strong>Surface:</strong> ${escapeHTML(defaultString(item.surface_kind, "unknown"))}</span>
-        <span><strong>Target:</strong> ${escapeHTML(defaultString(item.surface_target, "(none)"))}</span>
-        <span><strong>Page:</strong> ${escapeHTML(defaultString(item.page, "(none)"))}</span>
-        <span><strong>Route:</strong> ${escapeHTML(defaultString(item.route, "(none)"))}</span>
-        <span><strong>Work type:</strong> ${escapeHTML(workTypeLabel(item.work_type))}</span>
-        <span><strong>Severity:</strong> ${escapeHTML(defaultString(item.severity, "unknown"))}</span>
-        <span><strong>Target kind:</strong> ${escapeHTML(defaultString(item.target_kind, "unknown"))}</span>
-      </div>
-      <div class="queue-summary">
-        <article class="queue-item">
-          <span class="queue-label">Summary</span>
-          <p class="queue-copy">${escapeHTML(defaultString(item.summary, "(none)"))}</p>
-        </article>
-        <article class="queue-item">
-          <span class="queue-label">Suggested Next Step</span>
-          <p class="queue-copy">${escapeHTML(defaultString(item.suggested_next_step, "(none)"))}</p>
-        </article>
-        <article class="queue-item">
-          <span class="queue-label">Evidence</span>
-          <p class="queue-copy">${escapeHTML(defaultString(item.evidence, "(none)"))}</p>
-        </article>
-        <article class="queue-item">
-          <span class="queue-label">Impact</span>
-          <p class="queue-copy">${escapeHTML(defaultString(item.impact, "(none)"))}</p>
-        </article>
-        <article class="queue-item">
-          <span class="queue-label">Rationale</span>
-          <p class="queue-copy">${escapeHTML(defaultString(item.rationale, "(none)"))}</p>
-        </article>
-        <article class="queue-item">
-          <span class="queue-label">Files</span>
-          <p class="queue-copy">${escapeHTML(item.files && item.files.length ? item.files.join(", ") : "(none)")}</p>
-        </article>
-        <article class="queue-item">
-          <span class="queue-label">Screenshots</span>
-          <p class="queue-copy">${escapeHTML(item.screenshots && item.screenshots.length ? item.screenshots.join(", ") : "(none)")}</p>
-        </article>
-      </div>
-      <div class="config-meta">
-        <span><strong>Proposal:</strong> ${escapeHTML(defaultString(item.proposal_path, "Unavailable"))}</span>
-        <span><strong>Policy:</strong> ${escapeHTML(defaultString(item.policy_path, "Unavailable"))}</span>
-        <span><strong>Preflight:</strong> ${escapeHTML(defaultString(item.preflight_path, "Unavailable"))}</span>
-        <span><strong>Issue Drafts:</strong> ${escapeHTML(defaultString(item.issue_draft_path, "Unavailable"))}</span>
-        <span><strong>Raw Output:</strong> ${escapeHTML(defaultString(item.raw_output_path, "Unavailable"))}</span>
-        <span><strong>Confidence:</strong> ${escapeHTML(defaultString(item.confidence, "unknown"))}</span>
-        <span><strong>Labels:</strong> ${escapeHTML(item.labels && item.labels.length ? item.labels.join(", ") : "(none)")}</span>
-      </div>
-      <div class="config-meta">
-        <span><strong>Browser ready:</strong> ${escapeHTML(String(Boolean(item.browser_ready)))}</span>
-        <span><strong>Preflight reason:</strong> ${escapeHTML(defaultString(item.preflight_reason, "(none)"))}</span>
-      </div>
-      ${(item.recovery_count || item.last_recovery_at || item.last_recovered_run_id) ? `
-      <div class="queue-summary">
-        <article class="queue-item">
-          <span class="queue-label">Recovery</span>
-          <p class="queue-copy">Auto-retry scheduled after stale startup cleanup. Nana keeps the interrupted run in work history and retries this scout proposal once after the cooldown expires.</p>
-        </article>
-      </div>
-      <div class="config-meta">
-        <span><strong>Recovery Count:</strong> ${escapeHTML(String(Number(item.recovery_count || 0)))}</span>
-        <span><strong>Recovered Run:</strong> ${escapeHTML(defaultString(item.last_recovered_run_id, "(none)"))}</span>
-        <span><strong>Recovery At:</strong> ${escapeHTML(defaultString(item.last_recovery_at ? formatDateTime(item.last_recovery_at) : "", "(none)"))}</span>
-        <span><strong>Recovery Reason:</strong> ${escapeHTML(defaultString(item.last_recovery_reason, "(none)"))}</span>
-      </div>` : ""}
-      <div class="config-meta">
-        <span><strong>Run ID:</strong> ${escapeHTML(defaultString(item.run_id, "(none)"))}</span>
-        <span><strong>Planned Item:</strong> ${escapeHTML(defaultString(item.planned_item_id, "(none)"))}</span>
-        <span><strong>Error:</strong> ${escapeHTML(defaultString(item.error, "(none)"))}</span>
-        <span><strong>Pause Until:</strong> ${escapeHTML(defaultString(item.pause_until ? formatDateTime(item.pause_until) : "", "(none)"))}</span>
-        <span><strong>Pause Reason:</strong> ${escapeHTML(defaultString(item.pause_reason, "(none)"))}</span>
-      </div>
-    `;
-  }
-
-  function syncRepoScoutsChrome(selectedCount, allSelected, retryableCount, dismissibleCount) {
-    const count = state.scoutItems.items.length || 0;
-    const countPill = document.getElementById("repo-scout-count");
-    if (countPill) {
-      countPill.textContent = `${count} items`;
-    }
-    const selectAllButton = document.getElementById("repo-scout-select-all");
-    if (selectAllButton) {
-      selectAllButton.disabled = !count;
-    }
-    const clearButton = document.getElementById("repo-scout-clear-selection");
-    if (clearButton) {
-      clearButton.disabled = !selectedCount;
-    }
-    const retryButton = document.getElementById("repo-scout-bulk-retry");
-    if (retryButton) {
-      retryButton.disabled = !retryableCount;
-      retryButton.textContent = `Retry Selected (${retryableCount})`;
-    }
-    const dismissButton = document.getElementById("repo-scout-bulk-dismiss");
-    if (dismissButton) {
-      dismissButton.disabled = !dismissibleCount;
-      dismissButton.textContent = `Dismiss Selected (${dismissibleCount})`;
-    }
-    const selectionCopy = document.getElementById("repo-scout-selection-copy");
-    if (selectionCopy) {
-      selectionCopy.textContent = allSelected ? `All ${selectedCount} selected` : `${selectedCount} selected`;
-    }
-  }
-
-  function renderRepoScoutsPage(repo) {
-    ensureScoutItemsState(repo);
-    const selectedIDs = selectedScoutItemIDs();
-    const selectedSet = new Set(selectedIDs);
-    const selectedCount = selectedIDs.length;
-    const totalCount = allScoutItemIDs().length;
-    const allSelected = totalCount > 0 && selectedCount === totalCount;
-    const retryableCount = scoutActionableSelection("retry").length;
-    const dismissibleCount = scoutActionableSelection("dismiss").length;
-    const gridRows = scoutItemRows(state.scoutItems.items).map((row) => ({
-      ...row,
-      selected: selectedSet.has(row.id),
-    }));
-    const gridRenderKey = JSON.stringify({
-      loading: Boolean(state.scoutItems.loading),
-      error: defaultString(state.scoutItems.error, ""),
-      rows: gridRows,
-    });
-    ensureBodyStructure(`repo:${repo.repo_slug}:scouts:${state.scoutItems.includeDeleted ? "deleted" : "default"}`, `
-      <section class="surface scout-surface">
-        <div class="surface-head">
-          <div>
-            <h3>Scout Items</h3>
-            <p>Scout findings and proposals saved under the repo checkout.</p>
-          </div>
-          <div class="surface-head-actions">
-            <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-toggle-deleted="true">${state.scoutItems.includeDeleted ? "Hide Deleted" : "Show Deleted"}</button>
-            <span id="repo-scout-count" class="status-pill">${escapeHTML(String(state.scoutItems.items.length || 0))} items</span>
-          </div>
-        </div>
-        <div class="scout-bulk-bar">
-          <button id="repo-scout-select-all" class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-select-all="true" ${state.scoutItems.items.length ? "" : "disabled"}>Select All</button>
-          <button id="repo-scout-clear-selection" class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-clear-selection="true" ${selectedCount ? "" : "disabled"}>Clear</button>
-          <button id="repo-scout-bulk-retry" class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-bulk-action="retry" ${retryableCount ? "" : "disabled"}>Retry Selected (${escapeHTML(String(retryableCount))})</button>
-          <button id="repo-scout-bulk-dismiss" class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-scout-bulk-action="dismiss" ${dismissibleCount ? "" : "disabled"}>Dismiss Selected (${escapeHTML(String(dismissibleCount))})</button>
-          <p id="repo-scout-selection-copy" class="scout-bulk-copy">${escapeHTML(allSelected ? `All ${selectedCount} selected` : `${selectedCount} selected`)}</p>
-        </div>
-        <div id="repo-scout-grid"></div>
-        <div id="repo-scout-detail" class="scout-detail"></div>
-      </section>
-    `);
-    syncRepoScoutsChrome(selectedCount, allSelected, retryableCount, dismissibleCount);
-    if (!state.scoutItems.loading && !state.scoutItems.loaded && !state.scoutItems.error) {
-      loadScoutItems(repo.repo_slug, { silent: true });
-    }
-    renderGrid("repo-scout-grid", [
-      {
-        field: "id",
-        label: "Select",
-        render(row) {
-          return `<label class="scout-select-cell"><input type="checkbox" class="tx-checkbox" data-scout-toggle="${escapeHTML(row.id)}" ${row.selected ? "checked" : ""} aria-label="Select ${escapeHTML(row.title)}"></label>`;
-        },
-      },
-      { field: "title", label: "Title" },
-      { field: "work_type", label: "Work Type" },
-      { field: "role", label: "Role" },
-      { field: "page", label: "Page" },
-      { field: "severity", label: "Severity" },
-      { field: "audit_mode", label: "Audit" },
-      { field: "destination", label: "Destination" },
-      { field: "status", label: "Status", render: (row) => renderStatePillWithPause(row.status_key, row.status, row.pause_until, row.pause_reason) },
-      { field: "updated_at", label: "Updated" },
-      { field: "id", label: "Details", action: true, template: '<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-scout-select="{{id}}">Details</button>' },
-      {
-        field: "id",
-        label: "Actions",
-        action: true,
-        render(row) {
-          const actions = [];
-          if (row.can_promote) {
-            actions.push(`<button class="tx-btn tx-btn-primary tx-btn-sm grid-action-button" type="button" data-scout-action="promote" data-scout-id="${escapeHTML(row.id)}">Promote</button>`);
-          }
-          if (row.can_retry) {
-            actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-scout-action="retry" data-scout-id="${escapeHTML(row.id)}">Retry</button>`);
-          }
-          if (row.can_dismiss) {
-            actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-scout-action="dismiss" data-scout-id="${escapeHTML(row.id)}">Dismiss</button>`);
-          }
-          if (row.can_restore) {
-            actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-scout-action="restore" data-scout-id="${escapeHTML(row.id)}">Restore</button>`);
-          }
-          if (row.can_open_run) {
-            actions.push(`<button class="tx-btn tx-btn-secondary tx-btn-sm grid-action-button" type="button" data-scout-action="open-run" data-scout-id="${escapeHTML(row.id)}">Open Run</button>`);
-          }
-          return actions.length ? `<div class="scout-actions">${actions.join("")}</div>` : '<span class="data-value-text">No actions</span>';
-        },
-      },
-    ], gridRows, {
-      maxHeight: "460px",
-      emptyMessage: state.scoutItems.loading ? "Loading scout items..." : "No scout-discovered items found for this repo.",
-      preserveScroll: true,
-      renderKey: gridRenderKey,
-    });
-    renderScoutDetail(selectedScoutItem());
   }
 
   function configStatusPill(enabled) {
@@ -7414,86 +6446,14 @@
     }, host);
   }
 
-  function renderRepoControlsPage(repo) {
-    ensureRepoScheduler(repo);
-    const issues = issueRows(repo);
-    const planned = plannedItemRows(repo);
-    const launchablePlanned = planned.filter((item) => item.state === "queued" || item.state === "failed");
-    ensureBodyStructure(`repo:${repo.repo_slug}:controls`, `
-      <section class="layout-two-col">
-        <div class="surface">
-          <div id="repo-scheduler-search-panel"></div>
-        </div>
-        <div class="surface">
-          <div class="surface-head">
-            <div>
-              <h3>Tracked Issue Schedule</h3>
-              <p>Drag scheduled tracked issues between buckets. Clicking a card opens exact edit controls.</p>
-            </div>
-          </div>
-          <div id="repo-scheduler-board"></div>
-        </div>
-      </section>
-      <section class="layout-two-col">
-        <div class="surface">
-          <div class="surface-head">
-            <div>
-              <h3>Selected Scheduled Issue</h3>
-              <p>Override the exact launch time or remove the issue from the manual schedule.</p>
-            </div>
-          </div>
-          <div id="repo-scheduler-detail"></div>
-        </div>
-        <div class="surface-stack">
-          <section class="surface">
-            <div class="surface-head">
-              <div>
-                <h3>Manage Existing Tracked Issue</h3>
-                <p>Fallback controls for mirrored start-state issues.</p>
-              </div>
-            </div>
-            <label class="selector inline-selector">
-              <span>Issue</span>
-              <select id="issue-select" ${issues.length ? "" : "disabled"}></select>
-            </label>
-            <div id="issue-form"></div>
-          </section>
-          <section class="surface">
-            <div class="surface-head">
-              <div>
-                <h3>Create Planned Launch</h3>
-                <p>Queue repo-local work or create new GitHub issues.</p>
-              </div>
-            </div>
-            <div id="planned-form"></div>
-            <div class="launch-controls">
-              <div class="section-divider"></div>
-              <div class="stack-section-head">
-                <h4>Launch Existing</h4>
-                <p>Run a queued planned item immediately.</p>
-              </div>
-              <label class="selector">
-                <span>Launch Existing</span>
-                <select id="planned-select" ${launchablePlanned.length ? "" : "disabled"}></select>
-              </label>
-              <button id="launch-planned-button" class="tx-btn tx-btn-primary" type="button" ${launchablePlanned.length ? "" : "disabled"}>Launch Now</button>
-            </div>
-          </section>
-        </div>
-      </section>
-    `);
-    populateIssueSelector(issues);
-    populatePlannedSelector(planned);
-    renderIssueForm(selectedIssueRecord());
-    renderPlannedForm();
-    renderRepoSchedulerSearchPanel(repo);
-    renderRepoSchedulerBoard(repo);
-    renderRepoSchedulerDetail(repo);
-  }
-
   function renderBody() {
     if (state.currentView === "home") {
       renderGlobalPage();
+      return;
+    }
+    if (state.currentView === "repos") {
+      ensureViewData("repos");
+      renderReposPage();
       return;
     }
     if (state.currentView === "issues") {
@@ -7504,10 +6464,6 @@
     if (state.currentView === "investigations") {
       ensureViewData("investigations");
       renderInvestigationsPage();
-      return;
-    }
-    if (state.currentView === "work") {
-      renderWorkPage();
       return;
     }
     if (state.currentView === "usage") {
@@ -7532,7 +6488,6 @@
         destroyWidgets();
         state.pageSignature = "repo-empty";
       }
-      resetScoutItemsState(null);
       body.innerHTML = '<section class="surface empty-surface"><div class="status-pill">No repo is selected.</div></section>';
       return;
     }
@@ -7583,9 +6538,6 @@
         ensureConfigEditor(state.overview.repos[index]);
       }
     }
-    if (options.resetScouts && state.scoutItems.repoSlug === updatedRepo.repo_slug) {
-      resetScoutItemsState(state.overview.repos[index]);
-    }
     if (options.rerender !== false) {
       renderAppPreservingDraftFocus();
     }
@@ -7598,7 +6550,6 @@
     repo.state = updatedState;
     repo.updated_at = updatedState.updated_at;
     refreshCounts(repo, updatedState);
-    reconcileRepoScheduler(repo);
     renderAppPreservingDraftFocus();
   }
 
@@ -8201,9 +7152,6 @@
   function attachHandlers() {
     document.getElementById("refresh-button").addEventListener("click", () => {
       load();
-      if (state.currentView === "investigations" && state.selectedRepo) {
-        loadScoutItems(state.selectedRepo, { silent: true });
-      }
       if (state.logSelection.runID) {
         loadRunDetail(state.logSelection.runID);
         loadLogMetadata(state.logSelection.runID, { preserveFile: true });
@@ -8255,7 +7203,7 @@
       if (!button) return;
       const nextView = button.getAttribute("data-nav-view");
       if (nextView && nextView !== "repo") {
-        const nextRepo = nextView === "home" ? "" : state.selectedRepo;
+        const nextRepo = (nextView === "home" || nextView === "repos") ? "" : state.selectedRepo;
         clearDraftsForRouteTransition({ view: nextView, repoSlug: nextRepo, repoTab: state.repoTab });
         state.currentView = nextView;
         state.selectedRepo = nextRepo;
@@ -8316,6 +7264,11 @@
           repoButton.getAttribute("data-open-repo") || "",
           repoButton.getAttribute("data-open-repo-tab") || "overview",
         );
+        return;
+      }
+
+      if (event.target.closest("[data-open-repo-onboarding]")) {
+        openRepoOnboardingFlow();
         return;
       }
 
@@ -8453,105 +7406,6 @@
         return;
       }
 
-      const schedulerOpenButton = event.target.closest("[data-scheduler-open]");
-      if (schedulerOpenButton) {
-        const nextPlannedItemID = schedulerOpenButton.getAttribute("data-scheduler-open") || "";
-        if (defaultString(selectedTrackedIssuePlannedItem(selectedRepoSummary()) && selectedTrackedIssuePlannedItem(selectedRepoSummary()).id, "") !== nextPlannedItemID) {
-          clearDraftScope(repoSchedulerDetailDraftScope(selectedRepoSummary(), selectedTrackedIssuePlannedItem(selectedRepoSummary())));
-        }
-        state.repoScheduler.selectedPlannedItemID = nextPlannedItemID;
-        renderRepoControlsPage(selectedRepoSummary());
-        return;
-      }
-
-      const schedulerAddButton = event.target.closest("[data-scheduler-add]");
-      if (schedulerAddButton) {
-        const resultID = schedulerAddButton.getAttribute("data-scheduler-add") || "";
-        const repo = selectedRepoSummary();
-        const result = (state.repoScheduler.results || []).find((item) => item.id === resultID);
-        if (!repo || !result) return;
-        api(`/api/v1/repos/${repo.repo_slug}/tracked-issues/schedule`, {
-          method: "POST",
-          body: JSON.stringify({
-            number: result.number,
-            title: result.title,
-            target_url: result.target_url,
-            labels: result.labels || [],
-            work_type: result.work_type || "",
-            priority: result.priority,
-          }),
-        }).then((payload) => {
-          clearDraftScope(repoSchedulerDetailDraftScope(repo, selectedTrackedIssuePlannedItem(repo)));
-          state.repoScheduler.selectedPlannedItemID = payload.planned_item.id;
-          mergeRepoState(payload.state);
-          toast("success", "Tracked issue scheduled", payload.planned_item.title);
-        }).catch((error) => {
-          toast("danger", "Schedule failed", error.message);
-        });
-        return;
-      }
-
-      const schedulerSaveButton = event.target.closest("[data-scheduler-save]");
-      if (schedulerSaveButton) {
-        const itemID = schedulerSaveButton.getAttribute("data-scheduler-save") || "";
-        const draftScope = repoSchedulerDetailDraftScope(selectedRepoSummary(), selectedTrackedIssuePlannedItem(selectedRepoSummary()));
-        const titleInput = document.getElementById("repo-scheduler-detail-title");
-        const priorityInput = document.getElementById("repo-scheduler-detail-priority");
-        const workTypeInput = document.getElementById("repo-scheduler-detail-work-type");
-        const scheduleInput = document.getElementById("repo-scheduler-detail-schedule");
-        const descriptionInput = document.getElementById("repo-scheduler-detail-description");
-        api(`/api/v1/planned-items/${encodeURIComponent(itemID)}`, {
-          method: "PATCH",
-          body: JSON.stringify({
-            title: titleInput ? String(titleInput.value || "").trim() : "",
-            description: descriptionInput ? String(descriptionInput.value || "") : "",
-            work_type: workTypeInput ? String(workTypeInput.value || "").trim() : "",
-            priority: priorityInput ? Number.parseInt(String(priorityInput.value || "3"), 10) : 3,
-            schedule_at: fromDateTimeLocal(scheduleInput ? String(scheduleInput.value || "") : ""),
-            clear_schedule: !(scheduleInput && String(scheduleInput.value || "").trim()),
-          }),
-        }).then((payload) => {
-          clearDraftScope(draftScope);
-          state.repoScheduler.selectedPlannedItemID = payload.planned_item.id;
-          mergeRepoState(payload.state);
-          toast("success", "Scheduled issue updated", payload.planned_item.title);
-        }).catch((error) => {
-          toast("danger", "Save failed", error.message);
-        });
-        return;
-      }
-
-      const schedulerDeleteButton = event.target.closest("[data-scheduler-delete]");
-      if (schedulerDeleteButton) {
-        const itemID = schedulerDeleteButton.getAttribute("data-scheduler-delete") || "";
-        clearDraftScope(repoSchedulerDetailDraftScope(selectedRepoSummary(), selectedTrackedIssuePlannedItem(selectedRepoSummary())));
-        api(`/api/v1/planned-items/${encodeURIComponent(itemID)}`, {
-          method: "DELETE",
-        }).then((payload) => {
-          state.repoScheduler.selectedPlannedItemID = "";
-          mergeRepoState(payload.state);
-          toast("success", "Scheduled issue removed", payload.removed_item.title);
-        }).catch((error) => {
-          toast("danger", "Remove failed", error.message);
-        });
-        return;
-      }
-
-      const schedulerLaunchButton = event.target.closest("[data-scheduler-launch]");
-      if (schedulerLaunchButton) {
-        const itemID = schedulerLaunchButton.getAttribute("data-scheduler-launch") || "";
-        clearDraftScope(repoSchedulerDetailDraftScope(selectedRepoSummary(), selectedTrackedIssuePlannedItem(selectedRepoSummary())));
-        api(`/api/v1/planned-items/${encodeURIComponent(itemID)}/launch-now`, {
-          method: "POST",
-        }).then((payload) => {
-          mergeRepoState(payload.state);
-          toast("success", "Tracked issue launched", payload.launch.result || payload.planned_item.title);
-        }).catch((error) => {
-          toast("danger", "Launch failed", error.message);
-        });
-        return;
-      }
-
       const issueSaveButton = event.target.closest("[data-issue-save]");
       if (issueSaveButton) {
         const issueID = issueSaveButton.getAttribute("data-issue-save") || "";
@@ -8613,7 +7467,7 @@
       if (taskOpenButton) {
         const taskID = taskOpenButton.getAttribute("data-task-open") || "";
         if (taskID) {
-          openTaskDetailModal(taskID);
+          openTaskQueueItemDetail(taskID);
         }
         return;
       }
@@ -9173,74 +8027,6 @@
         return;
       }
 
-      const scoutSelectButton = event.target.closest("[data-scout-select]");
-      if (scoutSelectButton) {
-        state.scoutItems.selectedItemID = scoutSelectButton.getAttribute("data-scout-select") || "";
-        rerenderScoutSurface();
-        return;
-      }
-
-      const scoutToggleDeletedButton = event.target.closest("[data-scout-toggle-deleted]");
-      if (scoutToggleDeletedButton) {
-        const repo = selectedRepoSummary();
-        if (!repo) return;
-        loadScoutItems(repo.repo_slug, {
-          includeDeleted: !state.scoutItems.includeDeleted,
-        });
-        return;
-      }
-
-      const scoutActionButton = event.target.closest("[data-scout-action]");
-      if (scoutActionButton) {
-        const repo = selectedRepoSummary();
-        const itemID = scoutActionButton.getAttribute("data-scout-id") || "";
-        const action = scoutActionButton.getAttribute("data-scout-action") || "";
-        if (repo && itemID && action) {
-          if (action === "open-run") {
-            const item = (state.scoutItems.items || []).find((entry) => entry.id === itemID);
-            if (item && item.run_id) {
-              openLogDrawer(item.run_id);
-            }
-            return;
-          }
-          mutateScoutItem(repo.repo_slug, itemID, action);
-        }
-        return;
-      }
-
-      const scoutSelectAllButton = event.target.closest("[data-scout-select-all]");
-      if (scoutSelectAllButton) {
-        selectAllScoutItems();
-        rerenderScoutSurface();
-        return;
-      }
-
-      const scoutClearButton = event.target.closest("[data-scout-clear-selection]");
-      if (scoutClearButton) {
-        clearScoutItemSelection();
-        rerenderScoutSurface();
-        return;
-      }
-
-      const scoutBulkActionButton = event.target.closest("[data-scout-bulk-action]");
-      if (scoutBulkActionButton) {
-        const repo = selectedRepoSummary();
-        const action = scoutBulkActionButton.getAttribute("data-scout-bulk-action") || "";
-        const itemIDs = scoutActionableSelection(action);
-        if (repo && action && itemIDs.length) {
-          mutateScoutItemsBulk(repo.repo_slug, itemIDs, action).then((payload) => {
-            const failures = payload.failure_count || 0;
-            const successes = payload.success_count || 0;
-            if (failures) {
-              toast("warning", "Bulk scout action completed", `${successes} updated, ${failures} failed.`);
-            } else {
-              toast("success", "Bulk scout action completed", `${successes} scout item${successes === 1 ? "" : "s"} updated.`);
-            }
-          });
-        }
-        return;
-      }
-
       const workItemShow = event.target.closest("[data-work-item-show]");
       if (workItemShow) {
         const itemID = workItemShow.getAttribute("data-work-item-show");
@@ -9267,6 +8053,11 @@
               } else {
                 load();
               }
+              state.approvals.items = (state.approvals.items || []).filter((item) => {
+                return item.kind !== "planned_item" || item.planned_item_id !== plannedItemID;
+              });
+              state.approvals.selectedID = "";
+              renderApprovalsPage();
               loadApprovals({ silent: true });
               toast("success", "Launch requested", payload.launch.result || "Planned item launched.");
             }).catch((error) => {
@@ -9316,31 +8107,6 @@
         return;
       }
 
-      if (event.target.id === "launch-planned-button") {
-        const select = document.getElementById("planned-select");
-        const plannedItemID = select ? select.value : "";
-        if (!plannedItemID) {
-          toast("warning", "No planned item", "Select a queued planned item first.");
-          return;
-        }
-        requestConfirmation({
-          title: "Launch planned item now?",
-          message: "This moves the selected planned item into execution immediately.",
-          confirmLabel: "Launch Now",
-          onConfirm() {
-            api(`/api/v1/planned-items/${plannedItemID}/launch-now`, {
-              method: "POST",
-            }).then((payload) => {
-              mergeRepoState(payload.state);
-              toast("success", "Launch requested", payload.launch.result || "Planned item launched.");
-            }).catch((error) => {
-              toast("danger", "Launch failed", error.message);
-            });
-          },
-        });
-        return;
-      }
-
       if (event.target.closest("[data-config-reset]")) {
         const repo = selectedRepoSummary();
         if (repo) {
@@ -9351,12 +8117,6 @@
 
     document.getElementById("page-body").addEventListener("change", (event) => {
       captureDraftField(event.target);
-      const scoutToggle = event.target.getAttribute("data-scout-toggle");
-      if (scoutToggle) {
-        toggleScoutItemSelection(scoutToggle, Boolean(event.target.checked));
-        rerenderScoutSurface();
-        return;
-      }
       if (event.target.id === "task-composer-repo") {
         const nextRepoSlug = String(event.target.value || "");
         clearDraftsForRouteTransition({
@@ -9365,7 +8125,6 @@
           repoTab: state.repoTab,
         });
         state.taskComposer.repoSlug = nextRepoSlug;
-        state.scoutItems = defaultScoutItemsState();
         state.investigations.templatesLoaded = false;
         state.investigations.templatesRepoSlug = "";
         loadTaskTemplates({ silent: true });
@@ -9411,13 +8170,14 @@
         state.taskComposer.scoutSessionLimit = String(event.target.value || "");
         return;
       }
-      if (event.target.id === "issue-select") {
-        const nextIssue = String(event.target.value || "");
-        if (state.selectedIssue !== nextIssue) {
-          clearDraftScope(repoControlsIssueDraftScope());
-        }
-        state.selectedIssue = nextIssue;
-        renderIssueForm(selectedIssueRecord());
+      if (event.target.id === "task-detail-work-item-work-type") {
+        state.investigations.detailWorkType = String(event.target.value || "");
+        renderTaskQueueItemDetail();
+        return;
+      }
+      if (event.target.id === "task-detail-planned-item-work-type") {
+        state.investigations.detailWorkType = String(event.target.value || "");
+        renderTaskQueueItemDetail();
         return;
       }
       const filterView = event.target.getAttribute("data-view-filter");
@@ -9428,8 +8188,6 @@
           renderIssuesPage();
         } else if (filterView === "investigations") {
           renderInvestigationsPage();
-        } else if (filterView === "work") {
-          renderWorkPage();
         } else if (filterView === "feedback") {
           renderFeedbackPage();
         } else if (filterView === "approvals") {
@@ -9457,34 +8215,6 @@
         event.preventDefault();
         saveConfigDraft(selectedRepoSummary());
         return;
-      }
-      if (event.target.id === "repo-scheduler-search-form") {
-        event.preventDefault();
-        const repo = selectedRepoSummary();
-        const queryInput = document.getElementById("repo-scheduler-search-query");
-        const query = queryInput ? String(queryInput.value || "").trim() : "";
-        if (!repo) return;
-        state.repoScheduler.query = query;
-        state.repoScheduler.searching = true;
-        state.repoScheduler.error = "";
-        renderRepoControlsPage(repo);
-        api(`/api/v1/repos/${repo.repo_slug}/issue-search`, {
-          method: "POST",
-          body: JSON.stringify({ query }),
-        }).then((payload) => {
-          clearDraftScope(repoSchedulerSearchDraftScope(repo));
-          state.repoScheduler.searching = false;
-          state.repoScheduler.error = "";
-          state.repoScheduler.query = payload.query || query;
-          state.repoScheduler.effectiveQuery = payload.effective_query || "";
-          state.repoScheduler.results = payload.items || [];
-          reconcileRepoScheduler(selectedRepoSummary());
-          renderRepoControlsPage(selectedRepoSummary());
-        }).catch((error) => {
-          state.repoScheduler.searching = false;
-          state.repoScheduler.error = error.message;
-          renderRepoControlsPage(selectedRepoSummary());
-        });
       }
     });
 
@@ -9525,8 +8255,6 @@
         renderIssuesPage();
       } else if (filterView === "investigations") {
         renderInvestigationsPage();
-      } else if (filterView === "work") {
-        renderWorkPage();
       } else if (filterView === "feedback") {
         renderFeedbackPage();
       } else if (filterView === "approvals") {
@@ -9561,8 +8289,6 @@
         renderIssuesPage();
       } else if (view === "investigations") {
         renderInvestigationsPage();
-      } else if (view === "work") {
-        renderWorkPage();
       } else if (view === "feedback") {
         renderFeedbackPage();
       } else if (view === "approvals") {
@@ -9738,12 +8464,12 @@
       }
       if (event.target.id === "task-detail-work-item-work-type") {
         state.investigations.detailWorkType = String(event.target.value || "");
-        renderTaskDetailModal();
+        renderTaskDetailSurfaces();
         return;
       }
       if (event.target.id === "task-detail-planned-item-work-type") {
         state.investigations.detailWorkType = String(event.target.value || "");
-        renderTaskDetailModal();
+        renderTaskDetailSurfaces();
         return;
       }
       if (event.target.id === "log-file-select") {
