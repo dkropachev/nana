@@ -107,6 +107,91 @@ func TestWorkItemDropSilencesAndRestoreRequeues(t *testing.T) {
 	}
 }
 
+func TestRestoreDeletedWorkItemReturnsToPreviousSuppressedState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cases := []struct {
+		name                 string
+		status               string
+		hidden               bool
+		hiddenReason         string
+		expectedStatus       string
+		expectedHidden       bool
+		expectedHiddenReason string
+	}{
+		{
+			name:                 "dropped",
+			status:               workItemStatusDropped,
+			hidden:               false,
+			hiddenReason:         "",
+			expectedStatus:       workItemStatusDropped,
+			expectedHidden:       false,
+			expectedHiddenReason: "",
+		},
+		{
+			name:                 "silenced",
+			status:               workItemStatusSilenced,
+			hidden:               true,
+			hiddenReason:         "ai_ignore_high_confidence",
+			expectedStatus:       workItemStatusSilenced,
+			expectedHidden:       true,
+			expectedHiddenReason: "ai_ignore_high_confidence",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			item, created, err := enqueueWorkItem(workItemInput{
+				Source:     "github",
+				SourceKind: "review_request",
+				ExternalID: "deleted-restore-" + tc.name,
+				Subject:    "Restore deleted " + tc.name,
+			}, "test")
+			if err != nil {
+				t.Fatalf("enqueueWorkItem: %v", err)
+			}
+			if !created {
+				t.Fatalf("expected created item")
+			}
+
+			deletedAt := "2026-04-24T12:00:00Z"
+			if err := withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+				item, err := store.readWorkItem(item.ID)
+				if err != nil {
+					return err
+				}
+				item.Status = tc.status
+				item.Hidden = tc.hidden
+				item.HiddenReason = tc.hiddenReason
+				item.Metadata = setWorkItemDeletedRestoreMetadata(item.Metadata, item, deletedAt)
+				item.Status = workItemStatusDeleted
+				item.Hidden = true
+				item.HiddenReason = "deleted_retention"
+				item.UpdatedAt = deletedAt
+				item.LatestActionAt = deletedAt
+				return store.updateWorkItem(item)
+			}); err != nil {
+				t.Fatalf("seed deleted work item: %v", err)
+			}
+
+			if err := restoreWorkItemByID(item.ID, "test"); err != nil {
+				t.Fatalf("restoreWorkItemByID: %v", err)
+			}
+			detail, err := readWorkItemDetail(item.ID)
+			if err != nil {
+				t.Fatalf("readWorkItemDetail after restore: %v", err)
+			}
+			if detail.Item.Status != tc.expectedStatus || detail.Item.Hidden != tc.expectedHidden || detail.Item.HiddenReason != tc.expectedHiddenReason {
+				t.Fatalf("expected restored deleted item to return to previous suppressed state, got %+v", detail.Item)
+			}
+			if _, ok := readWorkItemDeletedRestoreMetadata(detail.Item.Metadata); ok {
+				t.Fatalf("expected deleted restore metadata to be cleared, got %+v", detail.Item.Metadata)
+			}
+		})
+	}
+}
+
 func TestSyncGithubWorkItemsQueuesReviewRequestAndComment(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -2137,7 +2137,7 @@ func TestStartUIAPISettingsPatchHydratesMissingSourceCheckoutForScouts(t *testin
 	server := httptest.NewServer((&startUIAPI{cwd: cwd, allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
 	defer server.Close()
 
-	settingsBody := strings.NewReader(`{"repo_mode":"repo","issue_pick_mode":"label","pr_forward_mode":"approve","fork_issues_mode":"labeled","implement_mode":"labeled","publish_target":"repo","scouts":{"improvement":{"enabled":true,"mode":"auto","schedule":"when_resolved","issue_destination":"local","fork_repo":"","labels":["ux"]}}}`)
+	settingsBody := strings.NewReader(`{"repo_mode":"repo","issue_pick_mode":"label","pr_forward_mode":"approve","fork_issues_mode":"labeled","implement_mode":"labeled","publish_target":"repo","dismissed_item_retention_days":14,"deleted_item_retention_days":0,"scouts":{"improvement":{"enabled":true,"mode":"auto","schedule":"when_resolved","issue_destination":"local","fork_repo":"","labels":["ux"]}}}`)
 	settingsRequest, err := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/repos/"+repoSlug+"/settings", settingsBody)
 	if err != nil {
 		t.Fatalf("new settings request: %v", err)
@@ -2159,6 +2159,12 @@ func TestStartUIAPISettingsPatchHydratesMissingSourceCheckoutForScouts(t *testin
 	}
 	if !payload.Repo.SourceCheckoutReady {
 		t.Fatalf("expected scout settings save to hydrate managed source checkout, got %+v", payload.Repo)
+	}
+	if payload.Repo.DismissedItemRetentionDays != 14 {
+		t.Fatalf("expected dismissed item retention to round-trip, got %+v", payload.Repo)
+	}
+	if payload.Repo.DeletedItemRetentionDays != 0 {
+		t.Fatalf("expected deleted item retention to round-trip, got %+v", payload.Repo)
 	}
 	if !payload.Repo.Scouts.Improvement.Enabled || payload.Repo.Scouts.Improvement.PolicyPath == "" {
 		t.Fatalf("expected hydrated scout config to include managed policy path, got %+v", payload.Repo.Scouts.Improvement)
@@ -2468,6 +2474,99 @@ func TestStartUIAPIWorkItems(t *testing.T) {
 	defer restoreResponse.Body.Close()
 	if restoreResponse.StatusCode != http.StatusOK {
 		t.Fatalf("unexpected restore status: %d", restoreResponse.StatusCode)
+	}
+}
+
+func TestStartUIFeedbackSuppressedModeKeepsRestoredDroppedItemReachable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "github",
+		SourceKind: "review_request",
+		ExternalID: "suppressed-review-restore",
+		RepoSlug:   "acme/widget",
+		TargetURL:  "https://github.com/acme/widget/pull/11",
+		Subject:    "Restore deleted review work item",
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+	if err := withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+		item, err := store.readWorkItem(item.ID)
+		if err != nil {
+			return err
+		}
+		item.LatestDraft = &workItemDraft{
+			Kind:       "review",
+			Body:       "Review body",
+			Summary:    "Dropped review",
+			Confidence: 0.9,
+		}
+		item.Status = workItemStatusDropped
+		item.Hidden = false
+		item.HiddenReason = ""
+		item.Metadata = setWorkItemDeletedRestoreMetadata(item.Metadata, item, "2026-04-24T09:00:00Z")
+		item.Status = workItemStatusDeleted
+		item.Hidden = true
+		item.HiddenReason = "deleted_retention"
+		item.UpdatedAt = "2026-04-24T09:00:00Z"
+		item.LatestActionAt = item.UpdatedAt
+		return store.updateWorkItem(item)
+	}); err != nil {
+		t.Fatalf("seed deleted review work item: %v", err)
+	}
+
+	server := httptest.NewServer((&startUIAPI{cwd: cwd, allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
+	defer server.Close()
+
+	activeResponse, err := http.Get(server.URL + "/api/v1/reviews")
+	if err != nil {
+		t.Fatalf("GET active reviews: %v", err)
+	}
+	defer activeResponse.Body.Close()
+	var activePayload startUIFeedbackQueueResponse
+	if err := json.NewDecoder(activeResponse.Body).Decode(&activePayload); err != nil {
+		t.Fatalf("decode active reviews: %v", err)
+	}
+	if len(activePayload.Items) != 0 {
+		t.Fatalf("expected deleted review work item to stay out of active feedback, got %+v", activePayload.Items)
+	}
+
+	suppressedResponse, err := http.Get(server.URL + "/api/v1/reviews?suppressed=1")
+	if err != nil {
+		t.Fatalf("GET suppressed reviews: %v", err)
+	}
+	defer suppressedResponse.Body.Close()
+	var suppressedPayload startUIFeedbackQueueResponse
+	if err := json.NewDecoder(suppressedResponse.Body).Decode(&suppressedPayload); err != nil {
+		t.Fatalf("decode suppressed reviews: %v", err)
+	}
+	if len(suppressedPayload.Items) != 1 || suppressedPayload.Items[0].Status != workItemStatusDeleted {
+		t.Fatalf("expected deleted review work item in suppressed feedback view, got %+v", suppressedPayload.Items)
+	}
+
+	restoreResponse, err := http.Post(server.URL+"/api/v1/work-items/"+item.ID+"/restore", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST restore work item: %v", err)
+	}
+	defer restoreResponse.Body.Close()
+	if restoreResponse.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected restore status: %d", restoreResponse.StatusCode)
+	}
+
+	restoredSuppressedResponse, err := http.Get(server.URL + "/api/v1/reviews?suppressed=1")
+	if err != nil {
+		t.Fatalf("GET suppressed reviews after restore: %v", err)
+	}
+	defer restoredSuppressedResponse.Body.Close()
+	var restoredSuppressedPayload startUIFeedbackQueueResponse
+	if err := json.NewDecoder(restoredSuppressedResponse.Body).Decode(&restoredSuppressedPayload); err != nil {
+		t.Fatalf("decode suppressed reviews after restore: %v", err)
+	}
+	if len(restoredSuppressedPayload.Items) != 1 || restoredSuppressedPayload.Items[0].Status != workItemStatusDropped {
+		t.Fatalf("expected restored dropped item to remain reachable in suppressed feedback view, got %+v", restoredSuppressedPayload.Items)
 	}
 }
 
@@ -5088,6 +5187,168 @@ func TestStartUIAPIScoutReviewItemsSupportPromoteAndDismiss(t *testing.T) {
 	}
 }
 
+func TestStartUIAPIScoutItemsHideDeletedByDefaultAndShowWithDeletedQuery(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	repo := createLocalWorkRepoAt(t, sourcePath)
+	now := "2026-04-21T22:15:00Z"
+	itemID := startUITestWriteScoutArtifact(t, repo, enhancementScoutRole, "review-deleted", scoutFinding{
+		Title:             "Deleted review finding",
+		WorkType:          workTypeFeature,
+		Summary:           "This finding should stay hidden by default.",
+		SuggestedNextStep: "Inspect it only when deleted items are shown.",
+	}, scoutPolicy{
+		Version:          1,
+		Mode:             "manual",
+		IssueDestination: improvementDestinationReview,
+	}, uiScoutPreflight{}, now)
+	if err := updateLocalScoutPickupState(repo, func(current *localScoutPickupState) error {
+		current.Items[itemID] = localScoutPickupItem{
+			Status:     startScoutJobDeleted,
+			Title:      "Deleted review finding",
+			Artifact:   filepath.ToSlash(filepath.Join(".nana", scoutArtifactRoot(enhancementScoutRole), "review-deleted")),
+			UpdatedAt:  now,
+			ProposalID: itemID,
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed deleted pickup state: %v", err)
+	}
+
+	server := httptest.NewServer((&startUIAPI{cwd: cwd, allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
+	defer server.Close()
+
+	loadResponse, err := http.Get(server.URL + "/api/v1/repos/" + repoSlug + "/scout-items")
+	if err != nil {
+		t.Fatalf("GET scout items: %v", err)
+	}
+	defer loadResponse.Body.Close()
+	var loadPayload startUIScoutItemsResponse
+	if err := json.NewDecoder(loadResponse.Body).Decode(&loadPayload); err != nil {
+		t.Fatalf("decode scout items: %v", err)
+	}
+	if len(loadPayload.Items) != 0 {
+		t.Fatalf("expected deleted scout items to stay hidden by default, got %+v", loadPayload.Items)
+	}
+
+	deletedResponse, err := http.Get(server.URL + "/api/v1/repos/" + repoSlug + "/scout-items?deleted=1")
+	if err != nil {
+		t.Fatalf("GET scout items with deleted=1: %v", err)
+	}
+	defer deletedResponse.Body.Close()
+	var deletedPayload startUIScoutItemsResponse
+	if err := json.NewDecoder(deletedResponse.Body).Decode(&deletedPayload); err != nil {
+		t.Fatalf("decode deleted scout payload: %v", err)
+	}
+	if len(deletedPayload.Items) != 1 || deletedPayload.Items[0].Status != startScoutJobDeleted {
+		t.Fatalf("expected deleted scout item with opt-in query, got %+v", deletedPayload.Items)
+	}
+	if !slices.Equal(deletedPayload.Items[0].AvailableActions, []string{"restore"}) {
+		t.Fatalf("expected deleted scout item to expose only restore, got %+v", deletedPayload.Items[0].AvailableActions)
+	}
+
+	restoreResponse, err := http.Post(server.URL+"/api/v1/repos/"+repoSlug+"/scout-items/"+itemID+"/restore", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST restore scout item: %v", err)
+	}
+	defer restoreResponse.Body.Close()
+	if restoreResponse.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected restore status: %d", restoreResponse.StatusCode)
+	}
+
+	pickupState, _, err := readLocalScoutPickupState(repo)
+	if err != nil {
+		t.Fatalf("readLocalScoutPickupState: %v", err)
+	}
+	record, ok := pickupState.Items[itemID]
+	if !ok {
+		t.Fatalf("expected restored pickup state record")
+	}
+	if record.Status != startScoutJobDismissed || strings.TrimSpace(record.DeletedFromStatus) != "" || strings.TrimSpace(record.DeletedAt) != "" {
+		t.Fatalf("expected deleted scout pickup item to restore to dismissed, got %+v", record)
+	}
+}
+
+func TestStartUIAPIScoutItemsRestoreDeletedRepoStateJob(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	repoSlug := "acme/widget"
+	repo := createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+	itemID := startUITestWriteScoutArtifact(t, repo, improvementScoutRole, "restore-repo-state", scoutFinding{
+		Title:             "Deleted local scout job",
+		WorkType:          workTypeFeature,
+		Summary:           "Restore should return this to dismissed.",
+		SuggestedNextStep: "Restore it from the deleted view.",
+	}, scoutPolicy{
+		Version:          1,
+		Mode:             "manual",
+		IssueDestination: improvementDestinationLocal,
+	}, uiScoutPreflight{}, "2026-04-23T12:00:00Z")
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  "2026-04-24T12:00:00Z",
+		Issues:     map[string]startWorkIssueState{},
+		ScoutJobs: map[string]startWorkScoutJob{
+			itemID: {
+				ID:                itemID,
+				Role:              improvementScoutRole,
+				Title:             "Deleted local scout job",
+				Summary:           "Restore should return this to dismissed.",
+				Destination:       improvementDestinationLocal,
+				TaskBody:          "Implement deleted scout job",
+				Status:            startScoutJobDeleted,
+				DeletedFromStatus: startScoutJobDismissed,
+				DeletedAt:         "2026-04-23T12:00:00Z",
+				CreatedAt:         "2026-04-22T12:00:00Z",
+				UpdatedAt:         "2026-04-23T12:00:00Z",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("writeStartWorkState: %v", err)
+	}
+
+	server := httptest.NewServer((&startUIAPI{cwd: cwd, allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/api/v1/repos/" + repoSlug + "/scout-items?deleted=1")
+	if err != nil {
+		t.Fatalf("GET scout items with deleted=1: %v", err)
+	}
+	defer response.Body.Close()
+	var payload startUIScoutItemsResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode deleted scout items: %v", err)
+	}
+	if len(payload.Items) != 1 || !slices.Equal(payload.Items[0].AvailableActions, []string{"restore"}) {
+		t.Fatalf("expected deleted repo-state scout job to expose restore, got %+v", payload.Items)
+	}
+
+	restoreResponse, err := http.Post(server.URL+"/api/v1/repos/"+repoSlug+"/scout-items/"+itemID+"/restore", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST restore scout job: %v", err)
+	}
+	defer restoreResponse.Body.Close()
+	if restoreResponse.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected restore status: %d", restoreResponse.StatusCode)
+	}
+
+	state, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("readStartWorkState: %v", err)
+	}
+	job := state.ScoutJobs[itemID]
+	if job.Status != startScoutJobDismissed || job.DeletedFromStatus != "" || job.DeletedAt != "" {
+		t.Fatalf("expected deleted repo-state scout job to restore to dismissed, got %+v", job)
+	}
+}
+
 func TestStartUIAPIScoutItemsBatchAction(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -6354,6 +6615,9 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `function defaultFeedbackState()`) || !strings.Contains(string(appBody), `feedback: defaultFeedbackState()`) {
 		t.Fatalf("expected feedback state wiring in app.js, got %s", string(appBody))
 	}
+	if !strings.Contains(string(appBody), `visibilityMode: "active"`) || !strings.Contains(string(appBody), `data-feedback-toggle-visibility="true"`) || !strings.Contains(string(appBody), `?suppressed=1`) {
+		t.Fatalf("expected feedback suppressed-mode wiring in app.js, got %s", string(appBody))
+	}
 	if !strings.Contains(string(appBody), `data-repo-drop="`) {
 		t.Fatalf("expected repo drop control in app.js, got %s", string(appBody))
 	}
@@ -6380,6 +6644,9 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	}
 	if !strings.Contains(string(appBody), `data-scout-action="promote"`) {
 		t.Fatalf("expected manual scout promote control wiring in app.js, got %s", string(appBody))
+	}
+	if !strings.Contains(string(appBody), `data-scout-action="restore"`) {
+		t.Fatalf("expected scout restore control wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `data-work-item-submit="`) {
 		t.Fatalf("expected work-item submit control wiring in app.js, got %s", string(appBody))

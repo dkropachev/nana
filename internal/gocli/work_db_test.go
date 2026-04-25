@@ -198,6 +198,171 @@ func TestWorkDBMaintainArchivesStaleUsageData(t *testing.T) {
 	}
 }
 
+func TestWorkDBMaintainAdvancesStateOnlyDeletedLifecycleWithoutDB(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+	oldStamp := time.Now().UTC().AddDate(0, 0, -10).Format(time.RFC3339)
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{
+		Version:                    6,
+		RepoMode:                   "repo",
+		IssuePickMode:              "auto",
+		PRForwardMode:              "approve",
+		DismissedItemRetentionDays: intPtr(7),
+		DeletedItemRetentionDays:   intPtr(30),
+	}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	if err := writeGithubJSON(startWorkStatePath(repoSlug), startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  oldStamp,
+		Issues:     map[string]startWorkIssueState{},
+		ScoutJobs: map[string]startWorkScoutJob{
+			"scout-1": {
+				ID:          "scout-1",
+				Role:        improvementScoutRole,
+				Title:       "Dismissed scout",
+				Summary:     "State-only lifecycle coverage",
+				Destination: improvementDestinationLocal,
+				TaskBody:    "Implement local scout proposal: Dismissed scout",
+				Status:      startScoutJobDismissed,
+				CreatedAt:   oldStamp,
+				UpdatedAt:   oldStamp,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	report, err := maintainLocalWorkDB(localWorkDBMaintainOptions{})
+	if err != nil {
+		t.Fatalf("maintainLocalWorkDB: %v", err)
+	}
+	if report.DismissedItems.ScoutItemsMarkedDeleted != 1 {
+		t.Fatalf("expected state-only deleted lifecycle report, got %+v", report.DismissedItems)
+	}
+
+	state, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("readStartWorkState: %v", err)
+	}
+	if state.ScoutJobs["scout-1"].Status != startScoutJobDeleted {
+		t.Fatalf("expected dismissed scout job to advance to deleted, got %+v", state.ScoutJobs["scout-1"])
+	}
+}
+
+func TestWorkDBMaintainAdvancesDeletedLifecycleForRepoAndRepoLessWorkItems(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{
+		Version:                    6,
+		RepoMode:                   "repo",
+		IssuePickMode:              "auto",
+		PRForwardMode:              "approve",
+		DismissedItemRetentionDays: intPtr(7),
+		DeletedItemRetentionDays:   intPtr(30),
+	}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	oldDropped, _, err := enqueueWorkItem(workItemInput{
+		Source:     "github",
+		SourceKind: "review_request",
+		ExternalID: "maintain-old-dropped",
+		RepoSlug:   repoSlug,
+		Subject:    "Repo-scoped dropped item",
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueue old dropped item: %v", err)
+	}
+	oldDeleted, _, err := enqueueWorkItem(workItemInput{
+		Source:     "github",
+		SourceKind: "thread_comment",
+		ExternalID: "maintain-old-deleted",
+		RepoSlug:   repoSlug,
+		Subject:    "Repo-scoped deleted item",
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueue old deleted item: %v", err)
+	}
+	repoLessDropped, _, err := enqueueWorkItem(workItemInput{
+		Source:     "slack",
+		SourceKind: "task",
+		ExternalID: "maintain-repoless-dropped",
+		Subject:    "Repo-less dropped item",
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueue repo-less dropped item: %v", err)
+	}
+
+	oldStamp := time.Now().UTC().AddDate(0, 0, -8).Format(time.RFC3339)
+	purgeStamp := time.Now().UTC().AddDate(0, 0, -31).Format(time.RFC3339)
+	if err := withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+		item, err := store.readWorkItem(oldDropped.ID)
+		if err != nil {
+			return err
+		}
+		item.Status = workItemStatusDropped
+		item.Hidden = false
+		item.UpdatedAt = oldStamp
+		item.LatestActionAt = oldStamp
+		if err := store.updateWorkItem(item); err != nil {
+			return err
+		}
+
+		item, err = store.readWorkItem(oldDeleted.ID)
+		if err != nil {
+			return err
+		}
+		item.Status = workItemStatusDeleted
+		item.Hidden = true
+		item.HiddenReason = "deleted-retention-test"
+		item.UpdatedAt = purgeStamp
+		item.LatestActionAt = purgeStamp
+		if err := store.updateWorkItem(item); err != nil {
+			return err
+		}
+
+		item, err = store.readWorkItem(repoLessDropped.ID)
+		if err != nil {
+			return err
+		}
+		item.Status = workItemStatusDropped
+		item.Hidden = false
+		item.UpdatedAt = purgeStamp
+		item.LatestActionAt = purgeStamp
+		return store.updateWorkItem(item)
+	}); err != nil {
+		t.Fatalf("seed lifecycle work items: %v", err)
+	}
+
+	report, err := maintainLocalWorkDB(localWorkDBMaintainOptions{})
+	if err != nil {
+		t.Fatalf("maintainLocalWorkDB: %v", err)
+	}
+	if report.DismissedItems.WorkItemsMarkedDeleted != 1 || report.DismissedItems.WorkItemsPurged != 1 || report.DismissedItems.RepoLessWorkItemsMarkedDeleted != 1 {
+		t.Fatalf("unexpected dismissed lifecycle report: %+v", report.DismissedItems)
+	}
+
+	detail, err := readWorkItemDetail(oldDropped.ID)
+	if err != nil || detail.Item.Status != workItemStatusDeleted {
+		t.Fatalf("expected repo-scoped dropped item to advance to deleted, got detail=%+v err=%v", detail, err)
+	}
+	if _, err := readWorkItemDetail(oldDeleted.ID); err == nil || !strings.Contains(err.Error(), "was not found") {
+		t.Fatalf("expected stale deleted item to be purged, got err=%v", err)
+	}
+	detail, err = readWorkItemDetail(repoLessDropped.ID)
+	if err != nil || detail.Item.Status != workItemStatusDeleted {
+		t.Fatalf("expected repo-less dropped item to advance to deleted, got detail=%+v err=%v", detail, err)
+	}
+}
+
 func TestShowWorkItemCommandSurfacesRepairAction(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

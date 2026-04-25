@@ -38,19 +38,21 @@ type githubGlobalReviewRulesConfig struct {
 }
 
 type githubRepoSettings struct {
-	Version                   int                   `json:"version"`
-	DefaultConsiderations     []string              `json:"default_considerations,omitempty"`
-	DefaultRoleLayout         string                `json:"default_role_layout,omitempty"`
-	ReviewRulesMode           string                `json:"review_rules_mode,omitempty"`
-	ReviewRulesReviewerPolicy *githubReviewerPolicy `json:"review_rules_reviewer_policy,omitempty"`
-	RepoMode                  string                `json:"repo_mode,omitempty"`
-	IssuePickMode             string                `json:"issue_pick_mode,omitempty"`
-	PRForwardMode             string                `json:"pr_forward_mode,omitempty"`
-	ForkIssuesMode            string                `json:"fork_issues_mode,omitempty"`
-	ImplementMode             string                `json:"implement_mode,omitempty"`
-	PublishTarget             string                `json:"publish_target,omitempty"`
-	HotPathAPIProfile         *githubHotPathProfile `json:"hot_path_api_profile,omitempty"`
-	UpdatedAt                 string                `json:"updated_at"`
+	Version                    int                   `json:"version"`
+	DefaultConsiderations      []string              `json:"default_considerations,omitempty"`
+	DefaultRoleLayout          string                `json:"default_role_layout,omitempty"`
+	ReviewRulesMode            string                `json:"review_rules_mode,omitempty"`
+	ReviewRulesReviewerPolicy  *githubReviewerPolicy `json:"review_rules_reviewer_policy,omitempty"`
+	RepoMode                   string                `json:"repo_mode,omitempty"`
+	IssuePickMode              string                `json:"issue_pick_mode,omitempty"`
+	PRForwardMode              string                `json:"pr_forward_mode,omitempty"`
+	ForkIssuesMode             string                `json:"fork_issues_mode,omitempty"`
+	ImplementMode              string                `json:"implement_mode,omitempty"`
+	PublishTarget              string                `json:"publish_target,omitempty"`
+	DismissedItemRetentionDays *int                  `json:"dismissed_item_retention_days,omitempty"`
+	DeletedItemRetentionDays   *int                  `json:"deleted_item_retention_days,omitempty"`
+	HotPathAPIProfile          *githubHotPathProfile `json:"hot_path_api_profile,omitempty"`
+	UpdatedAt                  string                `json:"updated_at"`
 }
 
 type githubHotPathProfile struct {

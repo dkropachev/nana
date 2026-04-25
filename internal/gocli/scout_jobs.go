@@ -70,7 +70,7 @@ func startWorkScoutJobTaskBody(item localScoutDiscoveredItem) string {
 
 func startWorkScoutJobIsResolved(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case startScoutJobCompleted, startScoutJobDismissed:
+	case startScoutJobCompleted, startScoutJobDismissed, startScoutJobDeleted:
 		return true
 	default:
 		return false
@@ -241,6 +241,8 @@ func localScoutPickupStatusToScoutJobStatus(status string) string {
 		return startScoutJobCompleted
 	case "dismissed":
 		return startScoutJobDismissed
+	case "deleted":
+		return startScoutJobDeleted
 	case "failed":
 		return startScoutJobFailed
 	case "running", "in_progress":
@@ -464,6 +466,8 @@ func findLegacyScoutPlannedItem(state *startWorkState, existing startWorkScoutJo
 func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJob, hasExisting bool, record localScoutPickupItem, recordOK bool, planned startWorkPlannedItem, plannedOK bool) {
 	if hasExisting {
 		job.Status = defaultString(strings.TrimSpace(existing.Status), job.Status)
+		job.DeletedFromStatus = strings.TrimSpace(existing.DeletedFromStatus)
+		job.DeletedAt = strings.TrimSpace(existing.DeletedAt)
 		job.RunID = strings.TrimSpace(existing.RunID)
 		job.Attempts = existing.Attempts
 		job.LastError = strings.TrimSpace(existing.LastError)
@@ -480,19 +484,33 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 	boundRunID, boundRunLastError, hasBoundRun := boundRunningScoutJobRun(existing, hasExisting, record, recordOK)
 	preserveExistingRun := hasExisting && strings.TrimSpace(existing.Status) == startScoutJobRunning && strings.TrimSpace(existing.RunID) != ""
 	preserveExistingFailure := hasExisting && strings.TrimSpace(existing.Status) == startScoutJobFailed
+	preserveExistingDeleted := hasExisting && strings.TrimSpace(existing.Status) == startScoutJobDeleted
 	if plannedOK {
 		job.LegacyPlannedItemID = planned.ID
+		if preserveExistingDeleted {
+			job.Status = existing.Status
+			job.RunID = existing.RunID
+			job.LastError = existing.LastError
+			job.UpdatedAt = defaultString(strings.TrimSpace(existing.UpdatedAt), job.UpdatedAt)
+			return
+		}
 		switch strings.TrimSpace(planned.State) {
 		case startPlannedItemLaunching:
 			if strings.TrimSpace(planned.LaunchRunID) != "" {
 				job.Status = startScoutJobRunning
+				job.DeletedFromStatus = ""
+				job.DeletedAt = ""
 				job.LastError = ""
 			} else if hasBoundRun {
 				job.Status = startScoutJobRunning
 				job.RunID = boundRunID
+				job.DeletedFromStatus = ""
+				job.DeletedAt = ""
 				job.LastError = boundRunLastError
 			} else if !hasExisting || !startWorkScoutJobIsResolved(existing.Status) {
 				job.Status = startScoutJobQueued
+				job.DeletedFromStatus = ""
+				job.DeletedAt = ""
 				job.LastError = ""
 				job.RunID = ""
 			}
@@ -500,9 +518,13 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 			if hasBoundRun {
 				job.Status = startScoutJobRunning
 				job.RunID = boundRunID
+				job.DeletedFromStatus = ""
+				job.DeletedAt = ""
 				job.LastError = boundRunLastError
 			} else if !hasExisting || !startWorkScoutJobIsResolved(existing.Status) {
 				job.Status = startScoutJobQueued
+				job.DeletedFromStatus = ""
+				job.DeletedAt = ""
 				job.LastError = ""
 				job.RunID = ""
 			}
@@ -510,9 +532,13 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 			fallthrough
 		case "done":
 			job.Status = startScoutJobCompleted
+			job.DeletedFromStatus = ""
+			job.DeletedAt = ""
 			job.LastError = ""
 		case startPlannedItemFailed:
 			job.Status = startScoutJobFailed
+			job.DeletedFromStatus = ""
+			job.DeletedAt = ""
 			job.LastError = strings.TrimSpace(planned.LastError)
 		}
 		if strings.TrimSpace(planned.LaunchRunID) != "" {
@@ -539,6 +565,13 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 		job.UpdatedAt = defaultString(strings.TrimSpace(existing.UpdatedAt), job.UpdatedAt)
 		return
 	}
+	if preserveExistingDeleted {
+		job.Status = existing.Status
+		job.RunID = existing.RunID
+		job.LastError = existing.LastError
+		job.UpdatedAt = defaultString(strings.TrimSpace(existing.UpdatedAt), job.UpdatedAt)
+		return
+	}
 	if preserveExistingRun && strings.TrimSpace(record.RunID) == "" {
 		job.Status = existing.Status
 		job.RunID = existing.RunID
@@ -548,8 +581,12 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 	}
 	mappedStatus := localScoutPickupStatusToScoutJobStatus(record.Status)
 	switch mappedStatus {
-	case startScoutJobCompleted, startScoutJobDismissed, startScoutJobFailed:
+	case startScoutJobCompleted, startScoutJobDismissed, startScoutJobDeleted, startScoutJobFailed:
 		job.Status = mappedStatus
+		if mappedStatus == startScoutJobDeleted {
+			job.DeletedFromStatus = strings.TrimSpace(record.DeletedFromStatus)
+			job.DeletedAt = strings.TrimSpace(record.DeletedAt)
+		}
 	case startScoutJobRunning:
 		if strings.TrimSpace(record.RunID) == "" {
 			if hasExisting && strings.TrimSpace(existing.RunID) != "" && strings.TrimSpace(existing.Status) == startScoutJobRunning {
@@ -566,6 +603,10 @@ func deriveScoutJobLegacyState(job *startWorkScoutJob, existing startWorkScoutJo
 		if !hasExisting || !startWorkScoutJobIsResolved(existing.Status) {
 			job.Status = startScoutJobQueued
 		}
+	}
+	if mappedStatus != startScoutJobDeleted {
+		job.DeletedFromStatus = ""
+		job.DeletedAt = ""
 	}
 	if strings.TrimSpace(record.RunID) != "" {
 		job.RunID = strings.TrimSpace(record.RunID)
@@ -612,6 +653,32 @@ func startWorkScoutJobHasRecoveryMetadata(job startWorkScoutJob) bool {
 		strings.TrimSpace(job.LastRecoveryReason) != "" ||
 		strings.TrimSpace(job.LastRecoveryAt) != "" ||
 		strings.TrimSpace(job.LastRecoveredRunID) != ""
+}
+
+func restoreStartWorkScoutJobStatus(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case startScoutJobQueued:
+		return startScoutJobQueued
+	case startScoutJobFailed:
+		return startScoutJobFailed
+	case startScoutJobDismissed:
+		return startScoutJobDismissed
+	case startScoutJobCompleted:
+		return startScoutJobCompleted
+	default:
+		return startScoutJobDismissed
+	}
+}
+
+func restoreLocalScoutPickupStatus(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "pending", "external", "failed", "completed", "dismissed":
+		return strings.ToLower(strings.TrimSpace(value))
+	case "planned":
+		return "planned"
+	default:
+		return "dismissed"
+	}
 }
 
 func startWorkScoutJobInRecoveryCooldown(job startWorkScoutJob) bool {
@@ -1117,6 +1184,8 @@ func mutateStartWorkScoutJob(repoSlug string, jobID string, action string) (*sta
 		switch job.Status {
 		case startScoutJobQueued, startScoutJobFailed:
 			job.Status = startScoutJobDismissed
+			job.DeletedFromStatus = ""
+			job.DeletedAt = ""
 			job.LastError = ""
 			job.PauseReason = ""
 			job.PauseUntil = ""
@@ -1129,6 +1198,8 @@ func mutateStartWorkScoutJob(repoSlug string, jobID string, action string) (*sta
 		switch job.Status {
 		case startScoutJobFailed, startScoutJobDismissed:
 			job.Status = startScoutJobQueued
+			job.DeletedFromStatus = ""
+			job.DeletedAt = ""
 			job.RunID = ""
 			job.LastError = ""
 			job.PauseReason = ""
@@ -1138,6 +1209,14 @@ func mutateStartWorkScoutJob(repoSlug string, jobID string, action string) (*sta
 		default:
 			return nil, startWorkScoutJob{}, fmt.Errorf("scout job %s cannot be retried from status %s", jobID, job.Status)
 		}
+	case "restore":
+		if job.Status != startScoutJobDeleted {
+			return nil, startWorkScoutJob{}, fmt.Errorf("scout job %s is not deleted", jobID)
+		}
+		job.Status = restoreStartWorkScoutJobStatus(job.DeletedFromStatus)
+		job.DeletedFromStatus = ""
+		job.DeletedAt = ""
+		job.UpdatedAt = now
 	default:
 		return nil, startWorkScoutJob{}, fmt.Errorf("unsupported scout job action %q", action)
 	}

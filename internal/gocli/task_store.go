@@ -50,6 +50,11 @@ func syncCanonicalRepoTasksFromState(repoSlug string, state *startWorkState) err
 }
 
 func syncCanonicalWorkItemTask(item workItem) error {
+	if strings.TrimSpace(item.Status) == workItemStatusDeleted {
+		return withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+			return store.deleteCanonicalTaskRecord("work-item:" + item.ID)
+		})
+	}
 	record := canonicalTaskRecordForWorkItem(item)
 	return withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
 		return store.upsertCanonicalTaskRecord(record)
@@ -299,6 +304,9 @@ func collectCanonicalTaskRecordsForRepoState(repoSlug string, state *startWorkSt
 		})
 	}
 	for _, job := range state.ScoutJobs {
+		if strings.TrimSpace(job.Status) == startScoutJobDeleted {
+			continue
+		}
 		summary := startUITaskSummaryFromScoutJob(repoSlug, job)
 		records = append(records, canonicalTaskRecord{
 			Summary:      summary,
@@ -450,6 +458,11 @@ func (s *localWorkDBStore) upsertCanonicalTaskRecord(record canonicalTaskRecord)
 		defaultString(record.Summary.CreatedAt, ISOTimeNow()),
 		defaultString(record.Summary.UpdatedAt, defaultString(record.Summary.CreatedAt, ISOTimeNow())),
 	)
+	return err
+}
+
+func (s *localWorkDBStore) deleteCanonicalTaskRecord(taskID string) error {
+	_, err := s.db.Exec(`DELETE FROM tasks WHERE id = ?`, strings.TrimSpace(taskID))
 	return err
 }
 

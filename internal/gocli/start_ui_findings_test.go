@@ -167,6 +167,144 @@ func TestStartUIAPIFindingsRoutesPatchAndDismissPersistedFinding(t *testing.T) {
 	}
 }
 
+func TestStartUIAPIFindingsHideDeletedByDefaultAndShowWithDeletedQuery(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  "2026-04-22T10:00:00Z",
+		Issues:     map[string]startWorkIssueState{},
+		Findings: map[string]startWorkFinding{
+			"finding-open": {
+				ID:         "finding-open",
+				RepoSlug:   repoSlug,
+				SourceKind: startWorkFindingSourceKindManualImport,
+				SourceID:   "import-open",
+				Title:      "Visible finding",
+				Status:     startWorkFindingStatusOpen,
+				CreatedAt:  "2026-04-22T10:00:00Z",
+				UpdatedAt:  "2026-04-22T10:00:00Z",
+			},
+			"finding-deleted": {
+				ID:         "finding-deleted",
+				RepoSlug:   repoSlug,
+				SourceKind: startWorkFindingSourceKindManualImport,
+				SourceID:   "import-deleted",
+				Title:      "Deleted finding",
+				Status:     startWorkFindingStatusDeleted,
+				CreatedAt:  "2026-04-20T10:00:00Z",
+				UpdatedAt:  "2026-04-20T10:00:00Z",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	server := httptest.NewServer((&startUIAPI{cwd: t.TempDir(), allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/api/v1/repos/" + repoSlug + "/findings")
+	if err != nil {
+		t.Fatalf("GET findings: %v", err)
+	}
+	defer response.Body.Close()
+	var listPayload startUIFindingsResponse
+	if err := json.NewDecoder(response.Body).Decode(&listPayload); err != nil {
+		t.Fatalf("decode findings payload: %v", err)
+	}
+	if len(listPayload.Items) != 1 || listPayload.Items[0].ID != "finding-open" {
+		t.Fatalf("expected deleted findings to stay hidden by default, got %+v", listPayload.Items)
+	}
+
+	deletedResponse, err := http.Get(server.URL + "/api/v1/repos/" + repoSlug + "/findings?deleted=1")
+	if err != nil {
+		t.Fatalf("GET findings with deleted=1: %v", err)
+	}
+	defer deletedResponse.Body.Close()
+	var deletedPayload startUIFindingsResponse
+	if err := json.NewDecoder(deletedResponse.Body).Decode(&deletedPayload); err != nil {
+		t.Fatalf("decode deleted findings payload: %v", err)
+	}
+	if len(deletedPayload.Items) != 2 {
+		t.Fatalf("expected deleted findings to appear with opt-in query, got %+v", deletedPayload.Items)
+	}
+}
+
+func TestStartUIAPIFindingsRestoreDeletedFindingAndRejectMutationsWhileDeleted(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	createLocalWorkRepoAt(t, githubManagedPaths(repoSlug).SourcePath)
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  "2026-04-24T10:00:00Z",
+		Issues:     map[string]startWorkIssueState{},
+		Findings: map[string]startWorkFinding{
+			"finding-deleted": {
+				ID:                "finding-deleted",
+				RepoSlug:          repoSlug,
+				SourceKind:        startWorkFindingSourceKindManualImport,
+				SourceID:          "import-restore",
+				SourceItemID:      "cand-restore",
+				Title:             "Deleted finding",
+				Status:            startWorkFindingStatusDeleted,
+				DeletedFromStatus: startWorkFindingStatusDismissed,
+				DeletedAt:         "2026-04-23T10:00:00Z",
+				DismissReason:     "operator_hidden",
+				CreatedAt:         "2026-04-22T10:00:00Z",
+				UpdatedAt:         "2026-04-23T10:00:00Z",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("write start state: %v", err)
+	}
+
+	server := httptest.NewServer((&startUIAPI{cwd: t.TempDir(), allowedWebOrigin: "http://127.0.0.1:17654"}).routes())
+	defer server.Close()
+
+	patchResponse, err := http.DefaultClient.Do(mustJSONRequest(t, http.MethodPatch, server.URL+"/api/v1/repos/"+repoSlug+"/findings/finding-deleted", `{"title":"Nope"}`))
+	if err != nil {
+		t.Fatalf("PATCH deleted finding: %v", err)
+	}
+	defer patchResponse.Body.Close()
+	if patchResponse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected deleted finding patch to fail, got %d", patchResponse.StatusCode)
+	}
+
+	promoteResponse, err := http.Post(server.URL+"/api/v1/repos/"+repoSlug+"/findings/finding-deleted/promote", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST promote deleted finding: %v", err)
+	}
+	defer promoteResponse.Body.Close()
+	if promoteResponse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected deleted finding promote to fail, got %d", promoteResponse.StatusCode)
+	}
+
+	restoreResponse, err := http.Post(server.URL+"/api/v1/repos/"+repoSlug+"/findings/finding-deleted/restore", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST restore deleted finding: %v", err)
+	}
+	defer restoreResponse.Body.Close()
+	if restoreResponse.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected restore status: %d", restoreResponse.StatusCode)
+	}
+
+	state, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("readStartWorkState: %v", err)
+	}
+	finding := state.Findings["finding-deleted"]
+	if finding.Status != startWorkFindingStatusDismissed || finding.DeletedFromStatus != "" || finding.DeletedAt != "" {
+		t.Fatalf("expected deleted finding to restore to dismissed, got %+v", finding)
+	}
+}
+
 func TestStartUIAPIFindingImportSessionRoutesListDetailPatchPromoteDrop(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -300,6 +438,8 @@ func TestStartUIAppTasksPageReferencesFindingsInboxAndMarkdownImport(t *testing.
 		"/api/v1/repos/${repoSlug}/finding-import-sessions",
 		"Markdown import failed",
 		"data-task-finding-save",
+		"data-task-finding-restore",
+		"data-task-findings-toggle-deleted",
 		"data-task-import-candidate-save",
 	} {
 		if !strings.Contains(content, needle) {

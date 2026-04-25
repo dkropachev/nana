@@ -175,7 +175,7 @@ func scoutOutstandingCount(repoPath string, repoSlug string, role string, policy
 
 func localScoutPickupStatusIsResolved(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "completed", "dismissed":
+	case "completed", "dismissed", "deleted":
 		return true
 	default:
 		return false

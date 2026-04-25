@@ -22,6 +22,7 @@ const (
 	workItemStatusSubmitted    = "submitted"
 	workItemStatusDropped      = "dropped"
 	workItemStatusSilenced     = "silenced"
+	workItemStatusDeleted      = "deleted"
 	workItemStatusFailed       = "failed"
 	workItemStatusPaused       = "paused"
 	workItemStatusNeedsRouting = "needs_routing"
@@ -136,6 +137,13 @@ type workItemDraftInlineComment struct {
 	Path string `json:"path"`
 	Line int    `json:"line,omitempty"`
 	Body string `json:"body"`
+}
+
+type workItemDeletedRestoreMetadata struct {
+	Status       string `json:"status"`
+	Hidden       bool   `json:"hidden"`
+	HiddenReason string `json:"hidden_reason,omitempty"`
+	DeletedAt    string `json:"deleted_at,omitempty"`
 }
 
 type workItemEvent struct {
@@ -842,6 +850,75 @@ func normalizeWorkItemRecord(item *workItem) {
 	workItemPauseFields(item)
 }
 
+func clearWorkItemDeletedRestoreMetadata(metadata map[string]any) map[string]any {
+	if len(metadata) == 0 {
+		return nil
+	}
+	cloned := cloneWorkItemMetadata(metadata)
+	delete(cloned, "deleted_restore")
+	if len(cloned) == 0 {
+		return nil
+	}
+	return cloned
+}
+
+func setWorkItemDeletedRestoreMetadata(metadata map[string]any, item workItem, deletedAt string) map[string]any {
+	cloned := clearWorkItemDeletedRestoreMetadata(metadata)
+	if cloned == nil {
+		cloned = map[string]any{}
+	}
+	cloned["deleted_restore"] = workItemDeletedRestoreMetadata{
+		Status:       strings.TrimSpace(item.Status),
+		Hidden:       item.Hidden,
+		HiddenReason: strings.TrimSpace(item.HiddenReason),
+		DeletedAt:    strings.TrimSpace(deletedAt),
+	}
+	return cloned
+}
+
+func readWorkItemDeletedRestoreMetadata(metadata map[string]any) (workItemDeletedRestoreMetadata, bool) {
+	if len(metadata) == 0 {
+		return workItemDeletedRestoreMetadata{}, false
+	}
+	raw, ok := metadata["deleted_restore"]
+	if !ok {
+		return workItemDeletedRestoreMetadata{}, false
+	}
+	content, err := json.Marshal(raw)
+	if err != nil {
+		return workItemDeletedRestoreMetadata{}, false
+	}
+	var value workItemDeletedRestoreMetadata
+	if err := json.Unmarshal(content, &value); err != nil {
+		return workItemDeletedRestoreMetadata{}, false
+	}
+	value.Status = strings.TrimSpace(value.Status)
+	value.HiddenReason = strings.TrimSpace(value.HiddenReason)
+	value.DeletedAt = strings.TrimSpace(value.DeletedAt)
+	if value.Status == "" {
+		return workItemDeletedRestoreMetadata{}, false
+	}
+	return value, true
+}
+
+func restoreDeletedWorkItemStatus(value string) string {
+	switch strings.TrimSpace(value) {
+	case workItemStatusDropped:
+		return workItemStatusDropped
+	case workItemStatusSilenced:
+		return workItemStatusSilenced
+	default:
+		return ""
+	}
+}
+
+func ensureWorkItemNotDeleted(item workItem, action string) error {
+	if strings.TrimSpace(item.Status) != workItemStatusDeleted {
+		return nil
+	}
+	return fmt.Errorf("work item %s is deleted and cannot be %s", item.ID, action)
+}
+
 func workItemPauseFields(item *workItem) {
 	if item == nil {
 		return
@@ -948,6 +1025,9 @@ func runWorkItemByIDWithOptions(cwd string, options workItemRunCommandOptions, b
 		return store.readWorkItem(itemID)
 	})
 	if err != nil {
+		return workItemExecutionResult{}, err
+	}
+	if err := ensureWorkItemNotDeleted(item, "run"); err != nil {
 		return workItemExecutionResult{}, err
 	}
 	attemptDir := strings.TrimSpace(options.AttemptDir)
@@ -1533,6 +1613,9 @@ func submitWorkItemByID(itemID string, actor string) (workItem, error) {
 	if err != nil {
 		return workItem{}, err
 	}
+	if err := ensureWorkItemNotDeleted(item, "submitted"); err != nil {
+		return workItem{}, err
+	}
 	if item.LatestDraft == nil {
 		return workItem{}, fmt.Errorf("work item %s does not have a draft to submit", itemID)
 	}
@@ -1631,6 +1714,9 @@ func recoverWorkItemByID(cwd string, itemID string) (workItem, error) {
 	if err != nil {
 		return workItem{}, err
 	}
+	if err := ensureWorkItemNotDeleted(item, "recovered"); err != nil {
+		return workItem{}, err
+	}
 	recovery := resolveWorkItemRecoveryPlan(item)
 	if !recovery.Allowed {
 		if strings.TrimSpace(recovery.Summary) != "" {
@@ -1711,6 +1797,9 @@ func fixWorkItemByID(cwd string, options workItemFixCommandOptions) (workItem, e
 		return store.readWorkItem(options.ItemID)
 	})
 	if err != nil {
+		return workItem{}, err
+	}
+	if err := ensureWorkItemNotDeleted(item, "fixed"); err != nil {
 		return workItem{}, err
 	}
 	if item.LatestDraft == nil {
@@ -1795,6 +1884,9 @@ func dropWorkItemByID(itemID string, actor string) error {
 		if err != nil {
 			return err
 		}
+		if err := ensureWorkItemNotDeleted(item, "dropped"); err != nil {
+			return err
+		}
 		item.UpdatedAt = ISOTimeNow()
 		item.LatestActionAt = item.UpdatedAt
 		if shouldSilenceWorkItem(item) {
@@ -1836,6 +1928,26 @@ func restoreWorkItemByID(itemID string, actor string) error {
 		item, err := store.readWorkItem(itemID)
 		if err != nil {
 			return err
+		}
+		if item.Status == workItemStatusDeleted {
+			snapshot, ok := readWorkItemDeletedRestoreMetadata(item.Metadata)
+			if !ok {
+				return fmt.Errorf("work item %s is deleted and cannot be restored without deleted provenance", itemID)
+			}
+			restoredStatus := restoreDeletedWorkItemStatus(snapshot.Status)
+			if restoredStatus == "" {
+				return fmt.Errorf("work item %s has unsupported deleted restore status %q", itemID, snapshot.Status)
+			}
+			item.Status = restoredStatus
+			item.Hidden = snapshot.Hidden
+			item.HiddenReason = snapshot.HiddenReason
+			item.Metadata = clearWorkItemDeletedRestoreMetadata(item.Metadata)
+			item.UpdatedAt = ISOTimeNow()
+			item.LatestActionAt = item.UpdatedAt
+			return store.updateWorkItemWithEvent(item, "restored", actor, map[string]any{
+				"status":     item.Status,
+				"deleted_at": snapshot.DeletedAt,
+			})
 		}
 		item.Hidden = false
 		item.HiddenReason = ""
@@ -2226,6 +2338,9 @@ func (s *localWorkDBStore) startWorkItemAttempt(itemID string, attemptDir string
 	if err != nil {
 		return workItem{}, err
 	}
+	if err := ensureWorkItemNotDeleted(item, "run"); err != nil {
+		return workItem{}, err
+	}
 	item.Status = workItemStatusRunning
 	item.Hidden = false
 	item.HiddenReason = ""
@@ -2254,6 +2369,9 @@ func (s *localWorkDBStore) resumeWorkItemAttempt(itemID string, attemptDir strin
 	defer tx.Rollback()
 	item, err := readWorkItemTx(tx, itemID)
 	if err != nil {
+		return workItem{}, err
+	}
+	if err := ensureWorkItemNotDeleted(item, "run"); err != nil {
 		return workItem{}, err
 	}
 	item.Status = workItemStatusRunning

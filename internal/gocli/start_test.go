@@ -192,6 +192,33 @@ func TestStartPrintsScoutModeBannerBeforeRun(t *testing.T) {
 	}
 }
 
+func TestResolvedGithubDismissedItemRetentionDaysDefaultsTo30(t *testing.T) {
+	if got := resolvedGithubDismissedItemRetentionDays(nil); got != 30 {
+		t.Fatalf("expected nil settings to default to 30 days, got %d", got)
+	}
+	if got := resolvedGithubDismissedItemRetentionDays(&githubRepoSettings{}); got != 30 {
+		t.Fatalf("expected empty settings to default to 30 days, got %d", got)
+	}
+	if got := resolvedGithubDismissedItemRetentionDays(&githubRepoSettings{DismissedItemRetentionDays: intPtr(0)}); got != 0 {
+		t.Fatalf("expected explicit 0 retention to be preserved, got %d", got)
+	}
+	if got := resolvedGithubDismissedItemRetentionDays(&githubRepoSettings{DismissedItemRetentionDays: intPtr(12)}); got != 12 {
+		t.Fatalf("expected explicit retention to be preserved, got %d", got)
+	}
+	if got := resolvedGithubDeletedItemRetentionDays(nil); got != 30 {
+		t.Fatalf("expected nil deleted retention to default to 30 days, got %d", got)
+	}
+	if got := resolvedGithubDeletedItemRetentionDays(&githubRepoSettings{}); got != 30 {
+		t.Fatalf("expected empty deleted retention to default to 30 days, got %d", got)
+	}
+	if got := resolvedGithubDeletedItemRetentionDays(&githubRepoSettings{DeletedItemRetentionDays: intPtr(0)}); got != 0 {
+		t.Fatalf("expected explicit deleted retention 0 to be preserved, got %d", got)
+	}
+	if got := resolvedGithubDeletedItemRetentionDays(&githubRepoSettings{DeletedItemRetentionDays: intPtr(9)}); got != 9 {
+		t.Fatalf("expected explicit deleted retention to be preserved, got %d", got)
+	}
+}
+
 func TestStartLaunchesAndCleansLocalWorkDBProxySupervisor(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix sockets are not available on windows")

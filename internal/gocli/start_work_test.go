@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1402,6 +1403,281 @@ func TestPrepareStartRepoCycleKeepsRecoveredStaleScoutRunOutOfApprovals(t *testi
 		if item.ScoutJobID == "proposal-1" {
 			t.Fatalf("expected recovered stale scout run to stay out of approvals, got %+v", item)
 		}
+	}
+}
+
+func TestPrepareStartRepoCycleAdvancesDismissedItemsToDeletedAndPurgesExpiredDeletedItems(t *testing.T) {
+	home := setLocalWorkDBProxyTestHome(t)
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+
+	now := time.Now().UTC()
+	oldStamp := now.AddDate(0, 0, -8).Format(time.RFC3339)
+	freshStamp := now.AddDate(0, 0, -2).Format(time.RFC3339)
+	purgeStamp := now.AddDate(0, 0, -31).Format(time.RFC3339)
+
+	if err := writeGithubJSON(githubRepoSettingsPath(repoSlug), githubRepoSettings{
+		Version:                    6,
+		RepoMode:                   "repo",
+		IssuePickMode:              "auto",
+		PRForwardMode:              "approve",
+		DismissedItemRetentionDays: intPtr(7),
+		DeletedItemRetentionDays:   intPtr(30),
+	}); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	if err := writeStartWorkState(startWorkState{
+		Version:    startWorkStateVersion,
+		SourceRepo: repoSlug,
+		UpdatedAt:  now.Format(time.RFC3339),
+		Issues:     map[string]startWorkIssueState{},
+		ScoutJobs: map[string]startWorkScoutJob{
+			"scout-old": {
+				ID:          "scout-old",
+				Role:        improvementScoutRole,
+				Title:       "Old dismissed scout",
+				Summary:     "Expired dismissed scout",
+				Destination: improvementDestinationLocal,
+				TaskBody:    "Implement local scout proposal: Old dismissed scout",
+				Status:      startScoutJobDismissed,
+				CreatedAt:   oldStamp,
+				UpdatedAt:   oldStamp,
+			},
+			"scout-stale-deleted": {
+				ID:          "scout-stale-deleted",
+				Role:        improvementScoutRole,
+				Title:       "Stale deleted scout",
+				Summary:     "Expired deleted scout",
+				Destination: improvementDestinationLocal,
+				TaskBody:    "Implement local scout proposal: Stale deleted scout",
+				Status:      startScoutJobDeleted,
+				CreatedAt:   purgeStamp,
+				UpdatedAt:   purgeStamp,
+			},
+			"scout-fresh": {
+				ID:          "scout-fresh",
+				Role:        improvementScoutRole,
+				Title:       "Fresh dismissed scout",
+				Summary:     "Recent dismissed scout",
+				Destination: improvementDestinationLocal,
+				TaskBody:    "Implement local scout proposal: Fresh dismissed scout",
+				Status:      startScoutJobDismissed,
+				CreatedAt:   freshStamp,
+				UpdatedAt:   freshStamp,
+			},
+		},
+		Findings: map[string]startWorkFinding{
+			"finding-old": {
+				ID:         "finding-old",
+				RepoSlug:   repoSlug,
+				SourceKind: startWorkFindingSourceKindManualScout,
+				SourceID:   "scout-old",
+				Title:      "Old dismissed finding",
+				Status:     startWorkFindingStatusDismissed,
+				CreatedAt:  oldStamp,
+				UpdatedAt:  oldStamp,
+			},
+			"finding-stale-deleted": {
+				ID:         "finding-stale-deleted",
+				RepoSlug:   repoSlug,
+				SourceKind: startWorkFindingSourceKindManualScout,
+				SourceID:   "scout-stale-deleted",
+				Title:      "Stale deleted finding",
+				Status:     startWorkFindingStatusDeleted,
+				CreatedAt:  purgeStamp,
+				UpdatedAt:  purgeStamp,
+			},
+			"finding-fresh": {
+				ID:         "finding-fresh",
+				RepoSlug:   repoSlug,
+				SourceKind: startWorkFindingSourceKindManualScout,
+				SourceID:   "scout-fresh",
+				Title:      "Fresh dismissed finding",
+				Status:     startWorkFindingStatusDismissed,
+				CreatedAt:  freshStamp,
+				UpdatedAt:  freshStamp,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("writeStartWorkState: %v", err)
+	}
+
+	oldDropped, _, err := enqueueWorkItem(workItemInput{
+		Source:     "github",
+		SourceKind: "review_request",
+		ExternalID: "old-dismissed",
+		RepoSlug:   repoSlug,
+		Subject:    "Old dropped item",
+		Body:       "old",
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueue old dropped work item: %v", err)
+	}
+	oldSilenced, _, err := enqueueWorkItem(workItemInput{
+		Source:     "github",
+		SourceKind: "thread_comment",
+		ExternalID: "old-silenced",
+		RepoSlug:   repoSlug,
+		Subject:    "Old silenced item",
+		Body:       "old",
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueue old silenced work item: %v", err)
+	}
+	freshDropped, _, err := enqueueWorkItem(workItemInput{
+		Source:     "github",
+		SourceKind: "review_request",
+		ExternalID: "fresh-dismissed",
+		RepoSlug:   repoSlug,
+		Subject:    "Fresh dropped item",
+		Body:       "fresh",
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueue fresh dropped work item: %v", err)
+	}
+	oldDeleted, _, err := enqueueWorkItem(workItemInput{
+		Source:     "github",
+		SourceKind: "thread_comment",
+		ExternalID: "stale-deleted",
+		RepoSlug:   repoSlug,
+		Subject:    "Stale deleted item",
+		Body:       "deleted",
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueue stale deleted work item: %v", err)
+	}
+
+	if err := withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+		item, err := store.readWorkItem(oldDropped.ID)
+		if err != nil {
+			return err
+		}
+		item.Status = workItemStatusDropped
+		item.Hidden = false
+		item.HiddenReason = ""
+		item.UpdatedAt = oldStamp
+		item.LatestActionAt = oldStamp
+		if err := store.updateWorkItem(item); err != nil {
+			return err
+		}
+
+		item, err = store.readWorkItem(oldSilenced.ID)
+		if err != nil {
+			return err
+		}
+		item.Status = workItemStatusSilenced
+		item.Hidden = true
+		item.HiddenReason = "retention-test"
+		item.UpdatedAt = oldStamp
+		item.LatestActionAt = oldStamp
+		if err := store.updateWorkItem(item); err != nil {
+			return err
+		}
+
+		item, err = store.readWorkItem(freshDropped.ID)
+		if err != nil {
+			return err
+		}
+		item.Status = workItemStatusDropped
+		item.Hidden = false
+		item.HiddenReason = ""
+		item.UpdatedAt = freshStamp
+		item.LatestActionAt = freshStamp
+		if err := store.updateWorkItem(item); err != nil {
+			return err
+		}
+
+		item, err = store.readWorkItem(oldDeleted.ID)
+		if err != nil {
+			return err
+		}
+		item.Status = workItemStatusDeleted
+		item.Hidden = true
+		item.HiddenReason = "deleted-retention-test"
+		item.UpdatedAt = purgeStamp
+		item.LatestActionAt = purgeStamp
+		return store.updateWorkItem(item)
+	}); err != nil {
+		t.Fatalf("seed dismissed work items: %v", err)
+	}
+
+	oldPreflight := githubAutomationRepoPreflight
+	githubAutomationRepoPreflight = func(repo string, repairOrigin bool) error { return nil }
+	defer func() { githubAutomationRepoPreflight = oldPreflight }()
+
+	prepared, err := prepareStartRepoCycle(repoSlug, startOptions{})
+	if err != nil {
+		t.Fatalf("prepareStartRepoCycle: %v", err)
+	}
+	if prepared == nil {
+		t.Fatalf("expected prepared repo cycle")
+	}
+
+	state, err := readStartWorkState(repoSlug)
+	if err != nil {
+		t.Fatalf("readStartWorkState: %v", err)
+	}
+	if job, ok := state.ScoutJobs["scout-old"]; !ok || job.Status != startScoutJobDeleted {
+		t.Fatalf("expected expired dismissed scout job to transition to deleted, got %+v", state.ScoutJobs["scout-old"])
+	} else if job.DeletedFromStatus != startScoutJobDismissed || strings.TrimSpace(job.DeletedAt) == "" {
+		t.Fatalf("expected deleted scout job provenance, got %+v", job)
+	}
+	if _, ok := state.ScoutJobs["scout-stale-deleted"]; ok {
+		t.Fatalf("expected stale deleted scout job to be purged, got %+v", state.ScoutJobs)
+	}
+	if finding, ok := state.Findings["finding-old"]; !ok || finding.Status != startWorkFindingStatusDeleted {
+		t.Fatalf("expected expired dismissed finding to transition to deleted, got %+v", state.Findings["finding-old"])
+	} else if finding.DeletedFromStatus != startWorkFindingStatusDismissed || strings.TrimSpace(finding.DeletedAt) == "" {
+		t.Fatalf("expected deleted finding provenance, got %+v", finding)
+	}
+	if _, ok := state.Findings["finding-stale-deleted"]; ok {
+		t.Fatalf("expected stale deleted finding to be purged, got %+v", state.Findings)
+	}
+	if _, ok := state.ScoutJobs["scout-fresh"]; !ok {
+		t.Fatalf("expected fresh dismissed scout job to remain, got %+v", state.ScoutJobs)
+	}
+	if finding, ok := state.Findings["finding-fresh"]; !ok || finding.Status != startWorkFindingStatusDismissed {
+		t.Fatalf("expected fresh dismissed finding to remain, got %+v", state.Findings)
+	}
+
+	if detail, err := readWorkItemDetail(oldDropped.ID); err != nil || detail.Item.Status != workItemStatusDeleted {
+		t.Fatalf("expected old dropped work item to transition to deleted, got detail=%+v err=%v", detail, err)
+	} else if snapshot, ok := readWorkItemDeletedRestoreMetadata(detail.Item.Metadata); !ok || snapshot.Status != workItemStatusDropped || snapshot.Hidden {
+		t.Fatalf("expected deleted dropped work item provenance, got metadata=%+v snapshot=%+v", detail.Item.Metadata, snapshot)
+	}
+	if detail, err := readWorkItemDetail(oldSilenced.ID); err != nil || detail.Item.Status != workItemStatusDeleted {
+		t.Fatalf("expected old silenced work item to transition to deleted, got detail=%+v err=%v", detail, err)
+	} else if snapshot, ok := readWorkItemDeletedRestoreMetadata(detail.Item.Metadata); !ok || snapshot.Status != workItemStatusSilenced || !snapshot.Hidden {
+		t.Fatalf("expected deleted silenced work item provenance, got metadata=%+v snapshot=%+v", detail.Item.Metadata, snapshot)
+	}
+	if _, err := readWorkItemDetail(freshDropped.ID); err != nil {
+		t.Fatalf("expected fresh dropped work item to remain, got err=%v", err)
+	}
+	if _, err := readWorkItemDetail(oldDeleted.ID); err == nil || !strings.Contains(err.Error(), "was not found") {
+		t.Fatalf("expected stale deleted work item to be purged, got err=%v", err)
+	}
+
+	items, err := withLocalWorkReadStore(func(store *localWorkDBStore) ([]startUITaskSummary, error) {
+		return store.listCanonicalTasksForRepo(repoSlug)
+	})
+	if err != nil {
+		t.Fatalf("listCanonicalTasksForRepo: %v", err)
+	}
+	ids := []string{}
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	if slices.Contains(ids, "scout-job:"+repoSlug+":scout-old") || slices.Contains(ids, "scout-job:"+repoSlug+":scout-stale-deleted") {
+		t.Fatalf("expected deleted scout tasks to stay out of canonical tasks, got %+v", ids)
+	}
+	if slices.Contains(ids, "work-item:"+oldDropped.ID) || slices.Contains(ids, "work-item:"+oldSilenced.ID) || slices.Contains(ids, "work-item:"+oldDeleted.ID) {
+		t.Fatalf("expected deleted work item tasks to stay out of canonical tasks, got %+v", ids)
+	}
+	if !slices.Contains(ids, "scout-job:"+repoSlug+":scout-fresh") || !slices.Contains(ids, "work-item:"+freshDropped.ID) {
+		t.Fatalf("expected fresh dismissed items to remain visible, got %+v", ids)
 	}
 }
 

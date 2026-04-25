@@ -234,6 +234,13 @@ func prepareStartRepoCycle(repoSlug string, options startOptions) (*preparedStar
 		}
 		fmt.Fprintf(os.Stdout, "[start] %s: cleaned stale local work runs=%d\n", repoSlug, cleaned)
 	}
+	if lifecycle, err := maintainDismissedItemLifecycleForRepo(repoSlug, settings, time.Now().UTC()); err != nil {
+		fmt.Fprintf(os.Stdout, "[start] %s: dismissed-item retention skipped: %v\n", repoSlug, err)
+	} else if lifecycle.total() > 0 {
+		for _, action := range lifecycle.actionMessages() {
+			fmt.Fprintf(os.Stdout, "[start] %s: %s\n", repoSlug, action)
+		}
+	}
 	forkMode := "manual"
 	implementMode := "manual"
 	repoMode := resolvedGithubRepoMode(settings)

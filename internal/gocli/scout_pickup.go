@@ -15,14 +15,16 @@ type localScoutPickupState struct {
 }
 
 type localScoutPickupItem struct {
-	Status        string `json:"status"`
-	Title         string `json:"title"`
-	Artifact      string `json:"artifact"`
-	RunID         string `json:"run_id,omitempty"`
-	PlannedItemID string `json:"planned_item_id,omitempty"`
-	Error         string `json:"error,omitempty"`
-	UpdatedAt     string `json:"updated_at"`
-	ProposalID    string `json:"proposal_id"`
+	Status            string `json:"status"`
+	DeletedFromStatus string `json:"deleted_from_status,omitempty"`
+	DeletedAt         string `json:"deleted_at,omitempty"`
+	Title             string `json:"title"`
+	Artifact          string `json:"artifact"`
+	RunID             string `json:"run_id,omitempty"`
+	PlannedItemID     string `json:"planned_item_id,omitempty"`
+	Error             string `json:"error,omitempty"`
+	UpdatedAt         string `json:"updated_at"`
+	ProposalID        string `json:"proposal_id"`
 }
 
 type localScoutDiscoveredItem struct {
@@ -391,6 +393,19 @@ func readLocalScoutPickupState(repoPath string) (localScoutPickupState, string, 
 	}
 	if state.Items == nil {
 		state.Items = map[string]localScoutPickupItem{}
+	}
+	for key, item := range state.Items {
+		item.Status = strings.TrimSpace(item.Status)
+		item.DeletedFromStatus = strings.TrimSpace(item.DeletedFromStatus)
+		item.DeletedAt = strings.TrimSpace(item.DeletedAt)
+		item.Title = strings.TrimSpace(item.Title)
+		item.Artifact = strings.TrimSpace(item.Artifact)
+		item.RunID = strings.TrimSpace(item.RunID)
+		item.PlannedItemID = strings.TrimSpace(item.PlannedItemID)
+		item.Error = strings.TrimSpace(item.Error)
+		item.UpdatedAt = strings.TrimSpace(item.UpdatedAt)
+		item.ProposalID = strings.TrimSpace(item.ProposalID)
+		state.Items[key] = item
 	}
 	state.Version = 1
 	return state, path, nil

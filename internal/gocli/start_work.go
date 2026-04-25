@@ -53,6 +53,7 @@ const (
 	startScoutJobCompleted        = "completed"
 	startScoutJobFailed           = "failed"
 	startScoutJobDismissed        = "dismissed"
+	startScoutJobDeleted          = "deleted"
 )
 
 type startWorkOptions struct {
@@ -265,6 +266,8 @@ type startWorkScoutJob struct {
 	ForkRepo            string   `json:"fork_repo,omitempty"`
 	TaskBody            string   `json:"task_body"`
 	Status              string   `json:"status"`
+	DeletedFromStatus   string   `json:"deleted_from_status,omitempty"`
+	DeletedAt           string   `json:"deleted_at,omitempty"`
 	RunID               string   `json:"run_id,omitempty"`
 	Attempts            int      `json:"attempts,omitempty"`
 	LastError           string   `json:"last_error,omitempty"`
@@ -1840,6 +1843,8 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 	for key, job := range state.ScoutJobs {
 		job.ID = defaultString(strings.TrimSpace(job.ID), key)
 		job.Status = defaultString(strings.TrimSpace(job.Status), startScoutJobQueued)
+		job.DeletedFromStatus = strings.TrimSpace(job.DeletedFromStatus)
+		job.DeletedAt = strings.TrimSpace(job.DeletedAt)
 		job.Destination = defaultString(strings.TrimSpace(job.Destination), improvementDestinationLocal)
 		job.LastRecoveryReason = strings.TrimSpace(job.LastRecoveryReason)
 		job.LastRecoveryAt = strings.TrimSpace(job.LastRecoveryAt)
@@ -1861,6 +1866,8 @@ func readStartWorkStateUnlocked(repoSlug string) (*startWorkState, error) {
 		finding.WorkType = defaultString(normalizeWorkType(finding.WorkType), workTypeFeature)
 		finding.Severity = normalizeGithubSeverity(finding.Severity)
 		finding.Status = normalizeStartWorkFindingStatus(finding.Status)
+		finding.DeletedFromStatus = strings.TrimSpace(finding.DeletedFromStatus)
+		finding.DeletedAt = strings.TrimSpace(finding.DeletedAt)
 		state.Findings[key] = finding
 	}
 	for key, session := range state.ImportSessions {

@@ -217,31 +217,33 @@ type startUITotals struct {
 }
 
 type startUIRepoSummary struct {
-	RepoSlug            string                            `json:"repo_slug"`
-	SettingsPath        string                            `json:"settings_path,omitempty"`
-	RepoMode            string                            `json:"repo_mode,omitempty"`
-	IssuePickMode       string                            `json:"issue_pick_mode,omitempty"`
-	PRForwardMode       string                            `json:"pr_forward_mode,omitempty"`
-	ForkIssuesMode      string                            `json:"fork_issues_mode,omitempty"`
-	ImplementMode       string                            `json:"implement_mode,omitempty"`
-	PublishTarget       string                            `json:"publish_target,omitempty"`
-	StartParticipation  bool                              `json:"start_participation"`
-	UpdatedAt           string                            `json:"updated_at,omitempty"`
-	StatePath           string                            `json:"state_path,omitempty"`
-	SourcePath          string                            `json:"source_path,omitempty"`
-	SourceCheckoutReady bool                              `json:"source_checkout_ready"`
-	ScoutCatalog        []startUIScoutCatalogEntry        `json:"scout_catalog,omitempty"`
-	ScoutsByRole        map[string]startUIRepoScoutConfig `json:"scouts_by_role,omitempty"`
-	Scouts              startUIRepoScouts                 `json:"scouts"`
-	IssueCounts         map[string]int                    `json:"issue_counts"`
-	ServiceTaskCounts   map[string]int                    `json:"service_task_counts"`
-	ScoutJobCounts      map[string]int                    `json:"scout_job_counts"`
-	PlannedItemCounts   map[string]int                    `json:"planned_item_counts"`
-	LastRun             *startWorkLastRun                 `json:"last_run,omitempty"`
-	DefaultBranch       string                            `json:"default_branch,omitempty"`
-	LockState           *repoAccessLockStateSnapshot      `json:"lock_state,omitempty"`
-	Settings            *githubRepoSettings               `json:"settings,omitempty"`
-	State               *startWorkState                   `json:"state,omitempty"`
+	RepoSlug                   string                            `json:"repo_slug"`
+	SettingsPath               string                            `json:"settings_path,omitempty"`
+	RepoMode                   string                            `json:"repo_mode,omitempty"`
+	IssuePickMode              string                            `json:"issue_pick_mode,omitempty"`
+	PRForwardMode              string                            `json:"pr_forward_mode,omitempty"`
+	ForkIssuesMode             string                            `json:"fork_issues_mode,omitempty"`
+	ImplementMode              string                            `json:"implement_mode,omitempty"`
+	PublishTarget              string                            `json:"publish_target,omitempty"`
+	DismissedItemRetentionDays int                               `json:"dismissed_item_retention_days,omitempty"`
+	DeletedItemRetentionDays   int                               `json:"deleted_item_retention_days,omitempty"`
+	StartParticipation         bool                              `json:"start_participation"`
+	UpdatedAt                  string                            `json:"updated_at,omitempty"`
+	StatePath                  string                            `json:"state_path,omitempty"`
+	SourcePath                 string                            `json:"source_path,omitempty"`
+	SourceCheckoutReady        bool                              `json:"source_checkout_ready"`
+	ScoutCatalog               []startUIScoutCatalogEntry        `json:"scout_catalog,omitempty"`
+	ScoutsByRole               map[string]startUIRepoScoutConfig `json:"scouts_by_role,omitempty"`
+	Scouts                     startUIRepoScouts                 `json:"scouts"`
+	IssueCounts                map[string]int                    `json:"issue_counts"`
+	ServiceTaskCounts          map[string]int                    `json:"service_task_counts"`
+	ScoutJobCounts             map[string]int                    `json:"scout_job_counts"`
+	PlannedItemCounts          map[string]int                    `json:"planned_item_counts"`
+	LastRun                    *startWorkLastRun                 `json:"last_run,omitempty"`
+	DefaultBranch              string                            `json:"default_branch,omitempty"`
+	LockState                  *repoAccessLockStateSnapshot      `json:"lock_state,omitempty"`
+	Settings                   *githubRepoSettings               `json:"settings,omitempty"`
+	State                      *startWorkState                   `json:"state,omitempty"`
 }
 
 type startUIOverview struct {
@@ -611,33 +613,39 @@ func startUIGetRepoScoutPatch(patch *startUIRepoScoutsPatchRequest, role string)
 }
 
 type startUIRepoSettingsPatchRequest struct {
-	RepoMode       string                         `json:"repo_mode"`
-	IssuePickMode  string                         `json:"issue_pick_mode"`
-	PRForwardMode  string                         `json:"pr_forward_mode"`
-	ForkIssuesMode string                         `json:"fork_issues_mode"`
-	ImplementMode  string                         `json:"implement_mode"`
-	PublishTarget  string                         `json:"publish_target"`
-	Scouts         *startUIRepoScoutsPatchRequest `json:"scouts,omitempty"`
+	RepoMode                   string                         `json:"repo_mode"`
+	IssuePickMode              string                         `json:"issue_pick_mode"`
+	PRForwardMode              string                         `json:"pr_forward_mode"`
+	ForkIssuesMode             string                         `json:"fork_issues_mode"`
+	ImplementMode              string                         `json:"implement_mode"`
+	PublishTarget              string                         `json:"publish_target"`
+	DismissedItemRetentionDays *int                           `json:"dismissed_item_retention_days,omitempty"`
+	DeletedItemRetentionDays   *int                           `json:"deleted_item_retention_days,omitempty"`
+	Scouts                     *startUIRepoScoutsPatchRequest `json:"scouts,omitempty"`
 }
 
 type startUIRepoCreateRequest struct {
-	RepoSlug       string `json:"repo_slug"`
-	RepoMode       string `json:"repo_mode"`
-	IssuePickMode  string `json:"issue_pick_mode"`
-	PRForwardMode  string `json:"pr_forward_mode"`
-	ForkIssuesMode string `json:"fork_issues_mode"`
-	ImplementMode  string `json:"implement_mode"`
-	PublishTarget  string `json:"publish_target"`
+	RepoSlug                   string `json:"repo_slug"`
+	RepoMode                   string `json:"repo_mode"`
+	IssuePickMode              string `json:"issue_pick_mode"`
+	PRForwardMode              string `json:"pr_forward_mode"`
+	ForkIssuesMode             string `json:"fork_issues_mode"`
+	ImplementMode              string `json:"implement_mode"`
+	PublishTarget              string `json:"publish_target"`
+	DismissedItemRetentionDays *int   `json:"dismissed_item_retention_days,omitempty"`
+	DeletedItemRetentionDays   *int   `json:"deleted_item_retention_days,omitempty"`
 }
 
 func (request startUIRepoCreateRequest) settingsPatch() startUIRepoSettingsPatchRequest {
 	return startUIRepoSettingsPatchRequest{
-		RepoMode:       request.RepoMode,
-		IssuePickMode:  request.IssuePickMode,
-		PRForwardMode:  request.PRForwardMode,
-		ForkIssuesMode: request.ForkIssuesMode,
-		ImplementMode:  request.ImplementMode,
-		PublishTarget:  request.PublishTarget,
+		RepoMode:                   request.RepoMode,
+		IssuePickMode:              request.IssuePickMode,
+		PRForwardMode:              request.PRForwardMode,
+		ForkIssuesMode:             request.ForkIssuesMode,
+		ImplementMode:              request.ImplementMode,
+		PublishTarget:              request.PublishTarget,
+		DismissedItemRetentionDays: request.DismissedItemRetentionDays,
+		DeletedItemRetentionDays:   request.DeletedItemRetentionDays,
 	}
 }
 
@@ -1278,7 +1286,7 @@ func (h *startUIAPI) handleReviews(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	items, err := loadStartUIFeedbackQueue("review")
+	items, err := loadStartUIFeedbackQueue("review", startUIFeedbackVisibilityMode(r))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1291,12 +1299,25 @@ func (h *startUIAPI) handleReplies(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	items, err := loadStartUIFeedbackQueue("reply")
+	items, err := loadStartUIFeedbackQueue("reply", startUIFeedbackVisibilityMode(r))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSONResponse(w, startUIFeedbackQueueResponse{Items: items})
+}
+
+func startUIFeedbackVisibilityMode(r *http.Request) string {
+	if r != nil && r.URL != nil {
+		switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("visibility"))) {
+		case "suppressed":
+			return "suppressed"
+		}
+		if r.URL.Query().Get("suppressed") == "1" {
+			return "suppressed"
+		}
+	}
+	return "active"
 }
 
 func (h *startUIAPI) handleFeedbackSync(w http.ResponseWriter, r *http.Request) {
@@ -1330,12 +1351,12 @@ func (h *startUIAPI) handleFeedbackSync(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	reviews, err := loadStartUIFeedbackQueue("review")
+	reviews, err := loadStartUIFeedbackQueue("review", "active")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	replies, err := loadStartUIFeedbackQueue("reply")
+	replies, err := loadStartUIFeedbackQueue("reply", "active")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1498,14 +1519,14 @@ func (h *startUIAPI) handleRepoRoute(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSONResponse(w, map[string]any{"repo": summary})
 	case r.Method == http.MethodGet && tail == "scout-items":
-		payload, err := loadStartUIScoutItems(repoSlug)
+		payload, err := loadStartUIScoutItemsWithDeleted(repoSlug, r.URL.Query().Get("deleted") == "1")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		writeJSONResponse(w, payload)
 	case r.Method == http.MethodGet && tail == "findings":
-		payload, err := loadStartUIFindings(repoSlug)
+		payload, err := loadStartUIFindingsWithDeleted(repoSlug, r.URL.Query().Get("deleted") == "1")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -1570,6 +1591,14 @@ func (h *startUIAPI) handleRepoRoute(w http.ResponseWriter, r *http.Request) {
 			writeJSONResponse(w, map[string]any{"state": state, "finding": finding, "planned_item": item})
 		case "dismiss":
 			state, finding, err := dismissStartUIFinding(repoSlug, findingID, "")
+			h.invalidateOverviewCache()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSONResponse(w, map[string]any{"state": state, "finding": finding})
+		case "restore":
+			state, finding, err := restoreStartUIFinding(repoSlug, findingID)
 			h.invalidateOverviewCache()
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1799,7 +1828,11 @@ func (h *startUIAPI) handleWorkItems(w http.ResponseWriter, r *http.Request) {
 	}
 	includeHidden := r.URL.Query().Get("all") == "1"
 	onlyHidden := r.URL.Query().Get("hidden") == "1"
-	items, err := loadStartUIWorkItems(20, includeHidden, onlyHidden)
+	includeDeleted := r.URL.Query().Get("deleted") == "1"
+	if includeDeleted {
+		includeHidden = true
+	}
+	items, err := loadStartUIWorkItemsWithDeleted(20, includeHidden, onlyHidden, includeDeleted)
 	if err != nil {
 		writeStartUIError(w, err, http.StatusInternalServerError)
 		return
@@ -4167,14 +4200,25 @@ func startUIInvestigationAttentionState(status string, lastError string) string 
 	}
 }
 
-func loadStartUIFeedbackQueue(kind string) ([]startUIFeedbackQueueItem, error) {
-	items, err := listWorkItems(workItemListOptions{Limit: 200, IncludeHidden: false})
+func loadStartUIFeedbackQueue(kind string, visibilityMode string) ([]startUIFeedbackQueueItem, error) {
+	mode := strings.ToLower(strings.TrimSpace(visibilityMode))
+	if mode == "" {
+		mode = "active"
+	}
+	items, err := listWorkItems(workItemListOptions{Limit: 200, IncludeHidden: mode == "suppressed"})
 	if err != nil {
 		return nil, err
 	}
 	out := []startUIFeedbackQueueItem{}
 	for _, item := range items {
 		if !startUIFeedbackItemMatches(kind, item) {
+			continue
+		}
+		suppressed := startUIFeedbackItemSuppressed(item)
+		if mode == "suppressed" && !suppressed {
+			continue
+		}
+		if mode != "suppressed" && suppressed {
 			continue
 		}
 		out = append(out, startUIFeedbackQueueItemFromItem(item, kind))
@@ -4191,6 +4235,18 @@ func loadStartUIFeedbackQueue(kind string) ([]startUIFeedbackQueueItem, error) {
 		return out[i].ID > out[j].ID
 	})
 	return out, nil
+}
+
+func startUIFeedbackItemSuppressed(item workItem) bool {
+	if item.Hidden {
+		return true
+	}
+	switch strings.TrimSpace(item.Status) {
+	case workItemStatusDropped, workItemStatusSilenced, workItemStatusDeleted:
+		return true
+	default:
+		return false
+	}
 }
 
 func startUIFeedbackItemMatches(kind string, item workItem) bool {
@@ -4799,6 +4855,8 @@ func applyStartUIRepoSettings(summary *startUIRepoSummary, settings *githubRepoS
 	summary.RepoMode = resolvedGithubRepoMode(settings)
 	summary.IssuePickMode = resolvedGithubIssuePickMode(settings)
 	summary.PRForwardMode = resolvedGithubPRForwardMode(settings)
+	summary.DismissedItemRetentionDays = resolvedGithubDismissedItemRetentionDays(settings)
+	summary.DeletedItemRetentionDays = resolvedGithubDeletedItemRetentionDays(settings)
 	summary.StartParticipation = githubRepoAutomationEnabled(settings)
 	summary.ForkIssuesMode = issuePickModeToAutomationMode(summary.IssuePickMode)
 	summary.ImplementMode = issuePickModeToAutomationMode(summary.IssuePickMode)
@@ -4979,12 +5037,17 @@ func loadStartUIWorkRunsFromStore(store *localWorkDBStore, limit int, sourcePath
 }
 
 func loadStartUIWorkItems(limit int, includeHidden bool, onlyHidden bool) ([]startUIWorkItem, error) {
-	items, _, err := loadStartUIWorkItemsInternal(limit, includeHidden, onlyHidden)
+	items, _, err := loadStartUIWorkItemsInternal(limit, includeHidden, onlyHidden, false)
+	return items, err
+}
+
+func loadStartUIWorkItemsWithDeleted(limit int, includeHidden bool, onlyHidden bool, includeDeleted bool) ([]startUIWorkItem, error) {
+	items, _, err := loadStartUIWorkItemsInternal(limit, includeHidden, onlyHidden, includeDeleted)
 	return items, err
 }
 
 func loadStartUIWorkItemsWithHiddenCount(limit int) ([]startUIWorkItem, int, int, error) {
-	items, hiddenCount, err := loadStartUIWorkItemsInternal(limit, false, false)
+	items, hiddenCount, err := loadStartUIWorkItemsInternal(limit, false, false, false)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -5005,7 +5068,7 @@ func loadStartUIWorkItemsWithHiddenCount(limit int) ([]startUIWorkItem, int, int
 	return items, hiddenCount, pendingCount, nil
 }
 
-func loadStartUIWorkItemsInternal(limit int, includeHidden bool, onlyHidden bool) ([]startUIWorkItem, int, error) {
+func loadStartUIWorkItemsInternal(limit int, includeHidden bool, onlyHidden bool, includeDeleted bool) ([]startUIWorkItem, int, error) {
 	type workItemsResult struct {
 		items       []startUIWorkItem
 		hiddenCount int
@@ -5026,6 +5089,9 @@ func loadStartUIWorkItemsInternal(limit int, includeHidden bool, onlyHidden bool
 		}
 		out := make([]startUIWorkItem, 0, len(items))
 		for _, item := range items {
+			if !includeDeleted && strings.TrimSpace(item.Status) == workItemStatusDeleted {
+				continue
+			}
 			out = append(out, startUIWorkItemFromItem(item))
 		}
 		return workItemsResult{items: out, hiddenCount: hiddenCount}, nil
@@ -5081,7 +5147,7 @@ func startUIWorkItemAttentionState(item workItem) string {
 		return "blocked"
 	case workItemStatusQueued, workItemStatusRunning, workItemStatusDraftReady:
 		return "active"
-	case workItemStatusSilenced, workItemStatusDropped, workItemStatusSubmitted:
+	case workItemStatusSilenced, workItemStatusDropped, workItemStatusDeleted, workItemStatusSubmitted:
 		return "completed"
 	default:
 		return "queued"
@@ -5366,6 +5432,20 @@ func patchStartUIRepoSettings(repoSlug string, payload startUIRepoSettingsPatchR
 	if existing == nil {
 		existing = &githubRepoSettings{}
 	}
+	retentionDays := resolvedGithubDismissedItemRetentionDays(existing)
+	if payload.DismissedItemRetentionDays != nil {
+		retentionDays, err = normalizeGithubDismissedItemRetentionDays(*payload.DismissedItemRetentionDays)
+		if err != nil {
+			return startUIRepoSummary{}, err
+		}
+	}
+	deletedRetentionDays := resolvedGithubDeletedItemRetentionDays(existing)
+	if payload.DeletedItemRetentionDays != nil {
+		deletedRetentionDays, err = normalizeGithubDeletedItemRetentionDays(*payload.DeletedItemRetentionDays)
+		if err != nil {
+			return startUIRepoSummary{}, err
+		}
+	}
 	updated := *existing
 	updated.Version = 6
 	updated.RepoMode = repoMode
@@ -5374,6 +5454,8 @@ func patchStartUIRepoSettings(repoSlug string, payload startUIRepoSettingsPatchR
 	updated.ForkIssuesMode = forkIssuesMode
 	updated.ImplementMode = implementMode
 	updated.PublishTarget = normalizeGithubPublishTarget(publishTarget)
+	updated.DismissedItemRetentionDays = &retentionDays
+	updated.DeletedItemRetentionDays = &deletedRetentionDays
 	updated.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	if repoMode == "disabled" {
 		updated.PublishTarget = ""
@@ -5590,11 +5672,15 @@ func applyStartUIRepoScoutWritePlans(plans []startUIRepoScoutWritePlan) error {
 }
 
 func loadStartUIScoutItems(repoSlug string) (startUIScoutItemsResponse, error) {
+	return loadStartUIScoutItemsWithDeleted(repoSlug, false)
+}
+
+func loadStartUIScoutItemsWithDeleted(repoSlug string, includeDeleted bool) (startUIScoutItemsResponse, error) {
 	summary, err := loadStartUIRepoSummary(repoSlug, true)
 	if err != nil {
 		return startUIScoutItemsResponse{}, err
 	}
-	items, err := listStartUIScoutItems(repoSlug)
+	items, err := listStartUIScoutItemsWithDeleted(repoSlug, includeDeleted)
 	if err != nil {
 		return startUIScoutItemsResponse{}, err
 	}
@@ -5602,6 +5688,10 @@ func loadStartUIScoutItems(repoSlug string) (startUIScoutItemsResponse, error) {
 }
 
 func listStartUIScoutItems(repoSlug string) ([]startUIScoutItem, error) {
+	return listStartUIScoutItemsWithDeleted(repoSlug, false)
+}
+
+func listStartUIScoutItemsWithDeleted(repoSlug string, includeDeleted bool) ([]startUIScoutItem, error) {
 	repoPath := strings.TrimSpace(githubManagedPaths(repoSlug).SourcePath)
 	if repoPath == "" {
 		return nil, nil
@@ -5707,6 +5797,8 @@ func listStartUIScoutItems(repoSlug string) ([]startUIScoutItem, error) {
 						switch strings.TrimSpace(record.Status) {
 						case "dismissed":
 							scoutItem.Status = "dismissed"
+						case "deleted":
+							scoutItem.Status = startScoutJobDeleted
 						case "failed":
 							scoutItem.Status = "failed"
 							scoutItem.Error = strings.TrimSpace(record.Error)
@@ -5725,6 +5817,9 @@ func listStartUIScoutItems(repoSlug string) ([]startUIScoutItem, error) {
 						if job, ok := workState.ScoutJobs[itemID]; ok {
 							scoutItem = startWorkScoutJobFromItem(job)
 						}
+					}
+					if !includeDeleted && strings.TrimSpace(scoutItem.Status) == startScoutJobDeleted {
+						continue
 					}
 					scoutItem.AvailableActions = startUIScoutAvailableActions(scoutItem)
 					items = append(items, scoutItem)
@@ -5831,7 +5926,7 @@ func mutateStartUIScoutItem(repoSlug string, itemID string, action string) (star
 	if repoPath == "" {
 		return startUIScoutItemsResponse{}, fmt.Errorf("repo %s does not have a managed source checkout", repoSlug)
 	}
-	items, err := listStartUIScoutItems(repoSlug)
+	items, err := listStartUIScoutItemsWithDeleted(repoSlug, action == "restore")
 	if err != nil {
 		return startUIScoutItemsResponse{}, err
 	}
@@ -5847,7 +5942,7 @@ func mutateStartUIScoutItem(repoSlug string, itemID string, action string) (star
 	}
 	if selected.Destination == improvementDestinationLocal {
 		switch action {
-		case "dismiss", "retry", "reset":
+		case "dismiss", "retry", "reset", "restore":
 			if _, _, err := mutateStartWorkScoutJob(repoSlug, itemID, action); err != nil {
 				return startUIScoutItemsResponse{}, err
 			}
@@ -5872,11 +5967,13 @@ func mutateStartUIScoutItem(repoSlug string, itemID string, action string) (star
 		}
 		if err := updateLocalScoutPickupState(repoPath, func(current *localScoutPickupState) error {
 			current.Items[itemID] = localScoutPickupItem{
-				Status:     "dismissed",
-				Title:      selected.Title,
-				Artifact:   selected.ArtifactPath,
-				UpdatedAt:  ISOTimeNow(),
-				ProposalID: selected.ID,
+				Status:            "dismissed",
+				DeletedFromStatus: "",
+				DeletedAt:         "",
+				Title:             selected.Title,
+				Artifact:          selected.ArtifactPath,
+				UpdatedAt:         ISOTimeNow(),
+				ProposalID:        selected.ID,
 			}
 			return nil
 		}); err != nil {
@@ -5924,6 +6021,24 @@ func mutateStartUIScoutItem(repoSlug string, itemID string, action string) (star
 				UpdatedAt:     ISOTimeNow(),
 				ProposalID:    selected.ID,
 			}
+			return nil
+		}); err != nil {
+			return startUIScoutItemsResponse{}, err
+		}
+	case "restore":
+		if err := updateLocalScoutPickupState(repoPath, func(current *localScoutPickupState) error {
+			record, ok := current.Items[itemID]
+			if !ok {
+				return fmt.Errorf("scout item %s was not found", itemID)
+			}
+			if strings.TrimSpace(record.Status) != startScoutJobDeleted {
+				return fmt.Errorf("scout item %s is not deleted", itemID)
+			}
+			record.Status = restoreLocalScoutPickupStatus(record.DeletedFromStatus)
+			record.DeletedFromStatus = ""
+			record.DeletedAt = ""
+			record.UpdatedAt = ISOTimeNow()
+			current.Items[itemID] = record
 			return nil
 		}); err != nil {
 			return startUIScoutItemsResponse{}, err
@@ -7211,18 +7326,23 @@ func startUIScoutStatusRank(status string) int {
 		return 2
 	case startScoutJobDismissed:
 		return 3
-	case startScoutJobCompleted:
+	case startScoutJobDeleted:
 		return 4
-	case "external":
+	case startScoutJobCompleted:
 		return 5
-	default:
+	case "external":
 		return 6
+	default:
+		return 7
 	}
 }
 
 func startUIScoutAvailableActions(item startUIScoutItem) []string {
-	actions := []string{}
 	status := strings.ToLower(strings.TrimSpace(item.Status))
+	if status == startScoutJobDeleted {
+		return []string{"restore"}
+	}
+	actions := []string{}
 	if strings.TrimSpace(item.RunID) != "" {
 		actions = append(actions, "open-run")
 	}

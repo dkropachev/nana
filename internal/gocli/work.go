@@ -38,6 +38,7 @@ Behavior:
   - shared source and sandbox checkouts use heartbeat-backed repo locks: multiple readers are allowed, one writer excludes readers, and stale lock holders are recovered automatically
   - work status --json surfaces current repo lock holders under lock_state when present
   - work items queue inbound GitHub, email, and Slack-style requests into a shared draft/submit workflow
+  - db-maintain advances dismissed items into deleted and purges expired deleted items by default
   - authoritative runtime state lives under ~/.nana/work/
   - legacy work-local and work-on entrypoints have been replaced by nana work
 `

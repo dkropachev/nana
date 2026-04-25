@@ -179,15 +179,16 @@ type localWorkDBUsageArchiveReport struct {
 }
 
 type localWorkDBMaintainReport struct {
-	DatabasePath string                        `json:"database_path"`
-	Exists       bool                          `json:"exists"`
-	Analyzed     bool                          `json:"analyzed"`
-	Optimized    bool                          `json:"optimized"`
-	Vacuumed     bool                          `json:"vacuumed,omitempty"`
-	Actions      []string                      `json:"actions,omitempty"`
-	Archive      localWorkDBUsageArchiveReport `json:"archive,omitempty"`
-	Inspect      localWorkDBInspectReport      `json:"inspect"`
-	Check        localWorkDBCheckReport        `json:"check"`
+	DatabasePath   string                        `json:"database_path"`
+	Exists         bool                          `json:"exists"`
+	Analyzed       bool                          `json:"analyzed"`
+	Optimized      bool                          `json:"optimized"`
+	Vacuumed       bool                          `json:"vacuumed,omitempty"`
+	Actions        []string                      `json:"actions,omitempty"`
+	Archive        localWorkDBUsageArchiveReport `json:"archive,omitempty"`
+	DismissedItems dismissedItemLifecycleReport  `json:"dismissed_items,omitempty"`
+	Inspect        localWorkDBInspectReport      `json:"inspect"`
+	Check          localWorkDBCheckReport        `json:"check"`
 }
 
 type localWorkDBSchemaError struct {
@@ -1704,6 +1705,12 @@ func inspectLocalWorkDBDetailed() (localWorkDBInspectReport, error) {
 
 func maintainLocalWorkDB(options localWorkDBMaintainOptions) (localWorkDBMaintainReport, error) {
 	report := localWorkDBMaintainReport{DatabasePath: localWorkDBPath()}
+	lifecycleReport, err := maintainDismissedItemLifecycleForAllRepos(time.Now().UTC())
+	if err != nil {
+		return report, err
+	}
+	report.DismissedItems = lifecycleReport
+	report.Actions = append(report.Actions, lifecycleReport.actionMessages()...)
 	if _, err := os.Stat(report.DatabasePath); err != nil {
 		if os.IsNotExist(err) {
 			report.Inspect, _ = inspectLocalWorkDBDetailed()

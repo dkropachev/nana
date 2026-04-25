@@ -18,6 +18,7 @@ const (
 	startWorkFindingStatusOpen      = "open"
 	startWorkFindingStatusPromoted  = "promoted"
 	startWorkFindingStatusDismissed = "dismissed"
+	startWorkFindingStatusDeleted   = "deleted"
 	startWorkFindingStatusResolved  = "resolved"
 
 	startWorkFindingImportParsePending = "pending"
@@ -42,30 +43,32 @@ const (
 )
 
 type startWorkFinding struct {
-	ID             string   `json:"id"`
-	RepoSlug       string   `json:"repo_slug"`
-	SourceKind     string   `json:"source_kind"`
-	SourceID       string   `json:"source_id"`
-	SourceItemID   string   `json:"source_item_id"`
-	ParentTaskKind string   `json:"parent_task_kind,omitempty"`
-	ParentTaskID   string   `json:"parent_task_id,omitempty"`
-	Title          string   `json:"title"`
-	Summary        string   `json:"summary,omitempty"`
-	Detail         string   `json:"detail,omitempty"`
-	Evidence       string   `json:"evidence,omitempty"`
-	Severity       string   `json:"severity,omitempty"`
-	WorkType       string   `json:"work_type,omitempty"`
-	Files          []string `json:"files,omitempty"`
-	Path           string   `json:"path,omitempty"`
-	Line           int      `json:"line,omitempty"`
-	Route          string   `json:"route,omitempty"`
-	Page           string   `json:"page,omitempty"`
-	Status         string   `json:"status"`
-	PromotedTaskID string   `json:"promoted_task_id,omitempty"`
-	DismissReason  string   `json:"dismiss_reason,omitempty"`
-	ResolvedAt     string   `json:"resolved_at,omitempty"`
-	CreatedAt      string   `json:"created_at"`
-	UpdatedAt      string   `json:"updated_at"`
+	ID                string   `json:"id"`
+	RepoSlug          string   `json:"repo_slug"`
+	SourceKind        string   `json:"source_kind"`
+	SourceID          string   `json:"source_id"`
+	SourceItemID      string   `json:"source_item_id"`
+	ParentTaskKind    string   `json:"parent_task_kind,omitempty"`
+	ParentTaskID      string   `json:"parent_task_id,omitempty"`
+	Title             string   `json:"title"`
+	Summary           string   `json:"summary,omitempty"`
+	Detail            string   `json:"detail,omitempty"`
+	Evidence          string   `json:"evidence,omitempty"`
+	Severity          string   `json:"severity,omitempty"`
+	WorkType          string   `json:"work_type,omitempty"`
+	Files             []string `json:"files,omitempty"`
+	Path              string   `json:"path,omitempty"`
+	Line              int      `json:"line,omitempty"`
+	Route             string   `json:"route,omitempty"`
+	Page              string   `json:"page,omitempty"`
+	Status            string   `json:"status"`
+	DeletedFromStatus string   `json:"deleted_from_status,omitempty"`
+	DeletedAt         string   `json:"deleted_at,omitempty"`
+	PromotedTaskID    string   `json:"promoted_task_id,omitempty"`
+	DismissReason     string   `json:"dismiss_reason,omitempty"`
+	ResolvedAt        string   `json:"resolved_at,omitempty"`
+	CreatedAt         string   `json:"created_at"`
+	UpdatedAt         string   `json:"updated_at"`
 }
 
 type startWorkFindingImportCandidate struct {
@@ -153,6 +156,8 @@ func normalizeStartWorkFindingStatus(value string) string {
 		return startWorkFindingStatusPromoted
 	case startWorkFindingStatusDismissed:
 		return startWorkFindingStatusDismissed
+	case startWorkFindingStatusDeleted:
+		return startWorkFindingStatusDeleted
 	case startWorkFindingStatusResolved:
 		return startWorkFindingStatusResolved
 	default:
@@ -329,6 +334,9 @@ func upsertStartWorkFindingUnlocked(state *startWorkState, input startWorkFindin
 		next.Status = startWorkFindingStatusOpen
 		next.ResolvedAt = ""
 	}
+	if next.Status == startWorkFindingStatusDeleted {
+		next.UpdatedAt = existing.UpdatedAt
+	}
 	if next.Status == "" {
 		next.Status = startWorkFindingStatusOpen
 	}
@@ -358,6 +366,8 @@ func startWorkFindingEqual(left startWorkFinding, right startWorkFinding) bool {
 		left.Route == right.Route &&
 		left.Page == right.Page &&
 		left.Status == right.Status &&
+		left.DeletedFromStatus == right.DeletedFromStatus &&
+		left.DeletedAt == right.DeletedAt &&
 		left.PromotedTaskID == right.PromotedTaskID &&
 		left.DismissReason == right.DismissReason &&
 		left.ResolvedAt == right.ResolvedAt &&
@@ -392,7 +402,7 @@ func markMissingStartWorkFindingsResolvedUnlocked(state *startWorkState, sourceK
 		if seen[strings.TrimSpace(finding.SourceItemID)] {
 			continue
 		}
-		if finding.Status == startWorkFindingStatusDismissed || finding.Status == startWorkFindingStatusResolved {
+		if finding.Status == startWorkFindingStatusDismissed || finding.Status == startWorkFindingStatusDeleted || finding.Status == startWorkFindingStatusResolved {
 			continue
 		}
 		finding.Status = startWorkFindingStatusResolved
@@ -698,7 +708,7 @@ func autoPromoteStartWorkFindingIfNeededUnlocked(state *startWorkState, item sta
 		return false, nil
 	}
 	finding := state.Findings[findingID]
-	if strings.TrimSpace(finding.PromotedTaskID) != "" || finding.Status == startWorkFindingStatusDismissed {
+	if strings.TrimSpace(finding.PromotedTaskID) != "" || finding.Status == startWorkFindingStatusDismissed || finding.Status == startWorkFindingStatusDeleted {
 		return false, nil
 	}
 	_, _, err := promoteStartWorkFindingUnlocked(state, findingID)
@@ -713,6 +723,9 @@ func promoteStartWorkFindingUnlocked(state *startWorkState, findingID string) (s
 	finding, ok := state.Findings[findingID]
 	if !ok {
 		return startWorkFinding{}, startWorkPlannedItem{}, fmt.Errorf("finding %s was not found", findingID)
+	}
+	if finding.Status == startWorkFindingStatusDeleted {
+		return startWorkFinding{}, startWorkPlannedItem{}, fmt.Errorf("finding %s is deleted", findingID)
 	}
 	if strings.TrimSpace(finding.PromotedTaskID) != "" {
 		if item, ok := state.PlannedItems[finding.PromotedTaskID]; ok {
@@ -740,6 +753,8 @@ func promoteStartWorkFindingUnlocked(state *startWorkState, findingID string) (s
 	state.PlannedItems[item.ID] = item
 	finding.PromotedTaskID = item.ID
 	finding.Status = startWorkFindingStatusPromoted
+	finding.DeletedFromStatus = ""
+	finding.DeletedAt = ""
 	finding.UpdatedAt = now
 	finding.ResolvedAt = ""
 	state.Findings[findingID] = finding
@@ -752,8 +767,43 @@ func dismissStartWorkFindingUnlocked(state *startWorkState, findingID string, re
 	if !ok {
 		return startWorkFinding{}, fmt.Errorf("finding %s was not found", findingID)
 	}
+	if finding.Status == startWorkFindingStatusDeleted {
+		return startWorkFinding{}, fmt.Errorf("finding %s is deleted", findingID)
+	}
 	finding.Status = startWorkFindingStatusDismissed
+	finding.DeletedFromStatus = ""
+	finding.DeletedAt = ""
 	finding.DismissReason = strings.TrimSpace(reason)
+	finding.UpdatedAt = ISOTimeNow()
+	state.Findings[findingID] = finding
+	return finding, nil
+}
+
+func restoreStartWorkFindingStatus(finding startWorkFinding) string {
+	switch normalizeStartWorkFindingStatus(finding.DeletedFromStatus) {
+	case startWorkFindingStatusOpen:
+		return startWorkFindingStatusOpen
+	case startWorkFindingStatusPromoted:
+		return startWorkFindingStatusPromoted
+	case startWorkFindingStatusDismissed:
+		return startWorkFindingStatusDismissed
+	default:
+		return startWorkFindingStatusDismissed
+	}
+}
+
+func restoreStartWorkFindingUnlocked(state *startWorkState, findingID string) (startWorkFinding, error) {
+	ensureStartWorkFindingsState(state)
+	finding, ok := state.Findings[findingID]
+	if !ok {
+		return startWorkFinding{}, fmt.Errorf("finding %s was not found", findingID)
+	}
+	if finding.Status != startWorkFindingStatusDeleted {
+		return startWorkFinding{}, fmt.Errorf("finding %s is not deleted", findingID)
+	}
+	finding.Status = restoreStartWorkFindingStatus(finding)
+	finding.DeletedFromStatus = ""
+	finding.DeletedAt = ""
 	finding.UpdatedAt = ISOTimeNow()
 	state.Findings[findingID] = finding
 	return finding, nil
@@ -1108,6 +1158,10 @@ func validateStartWorkFindingImportCandidates(candidates []startWorkFindingImpor
 }
 
 func listStartUIFindings(repoSlug string) ([]startWorkFinding, error) {
+	return listStartUIFindingsWithDeleted(repoSlug, false)
+}
+
+func listStartUIFindingsWithDeleted(repoSlug string, includeDeleted bool) ([]startWorkFinding, error) {
 	state, err := readStartWorkState(repoSlug)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1117,7 +1171,11 @@ func listStartUIFindings(repoSlug string) ([]startWorkFinding, error) {
 	}
 	items := make([]startWorkFinding, 0, len(state.Findings))
 	for _, findingID := range startWorkFindingIDsSorted(state) {
-		items = append(items, state.Findings[findingID])
+		finding := state.Findings[findingID]
+		if !includeDeleted && finding.Status == startWorkFindingStatusDeleted {
+			continue
+		}
+		items = append(items, finding)
 	}
 	sort.SliceStable(items, func(i, j int) bool {
 		leftRank := startUIFindingStatusRank(items[i].Status)
@@ -1141,19 +1199,25 @@ func startUIFindingStatusRank(status string) int {
 		return 1
 	case startWorkFindingStatusDismissed:
 		return 2
-	case startWorkFindingStatusResolved:
+	case startWorkFindingStatusDeleted:
 		return 3
-	default:
+	case startWorkFindingStatusResolved:
 		return 4
+	default:
+		return 5
 	}
 }
 
 func loadStartUIFindings(repoSlug string) (startUIFindingsResponse, error) {
+	return loadStartUIFindingsWithDeleted(repoSlug, false)
+}
+
+func loadStartUIFindingsWithDeleted(repoSlug string, includeDeleted bool) (startUIFindingsResponse, error) {
 	summary, err := loadStartUIRepoSummary(repoSlug, true)
 	if err != nil {
 		return startUIFindingsResponse{}, err
 	}
-	items, err := listStartUIFindings(repoSlug)
+	items, err := listStartUIFindingsWithDeleted(repoSlug, includeDeleted)
 	if err != nil {
 		return startUIFindingsResponse{}, err
 	}
@@ -1182,6 +1246,9 @@ func patchStartUIFinding(repoSlug string, findingID string, payload startUIFindi
 	finding, ok := state.Findings[strings.TrimSpace(findingID)]
 	if !ok {
 		return nil, startWorkFinding{}, fmt.Errorf("finding %s was not found", findingID)
+	}
+	if finding.Status == startWorkFindingStatusDeleted {
+		return nil, startWorkFinding{}, fmt.Errorf("finding %s is deleted", findingID)
 	}
 	if payload.Title != nil {
 		title := strings.TrimSpace(*payload.Title)
@@ -1262,6 +1329,24 @@ func dismissStartUIFinding(repoSlug string, findingID string, reason string) (*s
 		return nil, startWorkFinding{}, err
 	}
 	finding, err := dismissStartWorkFindingUnlocked(state, findingID, reason)
+	if err != nil {
+		return nil, startWorkFinding{}, err
+	}
+	state.UpdatedAt = ISOTimeNow()
+	if err := writeStartWorkStateUnlocked(*state); err != nil {
+		return nil, startWorkFinding{}, err
+	}
+	return state, finding, nil
+}
+
+func restoreStartUIFinding(repoSlug string, findingID string) (*startWorkState, startWorkFinding, error) {
+	startWorkStateFileMu.Lock()
+	defer startWorkStateFileMu.Unlock()
+	state, err := ensureStartUIStateUnlocked(repoSlug)
+	if err != nil {
+		return nil, startWorkFinding{}, err
+	}
+	finding, err := restoreStartWorkFindingUnlocked(state, findingID)
 	if err != nil {
 		return nil, startWorkFinding{}, err
 	}

@@ -1223,6 +1223,8 @@ func startUITaskSummaryFromWorkItem(item startUIWorkItem) startUITaskSummary {
 		status = startUITaskStatusPaused
 	case workItemStatusDropped, workItemStatusSilenced:
 		status = startUITaskStatusDismissed
+	case workItemStatusDeleted:
+		status = startUITaskStatusCompleted
 	case workItemStatusSubmitted:
 		status = startUITaskStatusCompleted
 	case workItemStatusFailed, workItemStatusNeedsRouting:
@@ -1256,6 +1258,8 @@ func startUITaskSummaryFromWorkItemState(item workItem) startUITaskSummary {
 		status = startUITaskStatusPaused
 	case workItemStatusDropped, workItemStatusSilenced:
 		status = startUITaskStatusDismissed
+	case workItemStatusDeleted:
+		status = startUITaskStatusCompleted
 	case workItemStatusSubmitted:
 		status = startUITaskStatusCompleted
 	case workItemStatusFailed, workItemStatusNeedsRouting:
