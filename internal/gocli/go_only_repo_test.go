@@ -83,7 +83,7 @@ func TestCIScheduledBenchmarksStayNonBlockingSnapshots(t *testing.T) {
 	}
 }
 
-func TestPushAndPRCIStatusDoesNotWaitOnBenchmarks(t *testing.T) {
+func TestPushAndPRCIStatusDoesNotWaitOnBenchmarksAndKeepsLiveGithubSmokeGate(t *testing.T) {
 	root := repoRootFromCaller(t)
 	workflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
 	if err != nil {
@@ -97,12 +97,34 @@ func TestPushAndPRCIStatusDoesNotWaitOnBenchmarks(t *testing.T) {
 	assertWorkflowStringSetEqual(
 		t,
 		ciStatusNeeds,
-		[]string{"fmt", "vet", "test", "docs", "build"},
-		"push/PR CI status must wait only for the required blocking jobs",
+		[]string{"fmt", "vet", "test", "docs", "build", "live-github-smoke"},
+		"push/PR CI status must wait for the blocking jobs plus the main-branch live GitHub smoke gate",
 	)
 	ciStatusJob := workflowJobBlock(t, content, "ci-status")
 	if strings.Contains(ciStatusJob, "needs.benchmarks.result") {
 		t.Fatalf("push/PR CI status must not check benchmark results; job was:\n%s", ciStatusJob)
+	}
+	if !strings.Contains(ciStatusJob, "needs.live-github-smoke.result") || !strings.Contains(ciStatusJob, `!= "skipped"`) {
+		t.Fatalf("ci status must allow skipped live GitHub smoke results for non-main events while still surfacing failures on main pushes; job was:\n%s", ciStatusJob)
+	}
+}
+
+func TestLiveGithubSmokeWorkflowKeepsIdempotenceAndFailureCleanupCoverage(t *testing.T) {
+	root := repoRootFromCaller(t)
+	workflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatalf("read ci workflow: %v", err)
+	}
+	liveGithubSmokeJob := workflowJobBlock(t, string(workflow), "live-github-smoke")
+	for _, testName := range []string{
+		"TestLiveGithubWorkRepoModeDirect",
+		"TestLiveGithubStartAutomationRouting",
+		"TestLiveGithubStartAutomationIdempotence",
+		"TestLiveGithubFailureCleanup",
+	} {
+		if !strings.Contains(liveGithubSmokeJob, testName) {
+			t.Fatalf("live GitHub smoke workflow must include %s in the targeted allowlist; job was:\n%s", testName, liveGithubSmokeJob)
+		}
 	}
 }
 

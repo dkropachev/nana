@@ -20,6 +20,9 @@ func TestStartRunsEnabledOnboardedReposAndSkipsManual(t *testing.T) {
 	if err := writeGithubJSON(githubRepoSettingsPath("acme/enabled"), githubRepoSettings{Version: 6, RepoMode: "fork", IssuePickMode: "label", PRForwardMode: "auto", ForkIssuesMode: "labeled", ImplementMode: "labeled", PublishTarget: "fork"}); err != nil {
 		t.Fatalf("write enabled settings: %v", err)
 	}
+	if err := writeGithubJSON(githubRepoSettingsPath("acme/local-auto"), githubRepoSettings{Version: 6, RepoMode: "local", IssuePickMode: "label", PRForwardMode: "approve", ForkIssuesMode: "labeled", ImplementMode: "labeled", PublishTarget: "local-branch"}); err != nil {
+		t.Fatalf("write local automation settings: %v", err)
+	}
 	if err := writeGithubJSON(githubRepoSettingsPath("acme/manual"), githubRepoSettings{Version: 6, RepoMode: "local", IssuePickMode: "manual", PRForwardMode: "approve"}); err != nil {
 		t.Fatalf("write manual settings: %v", err)
 	}
@@ -43,7 +46,7 @@ func TestStartRunsEnabledOnboardedReposAndSkipsManual(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v\n%s", err, output)
 	}
-	if len(runs) != 1 || !reflect.DeepEqual(runs[0].repos, []string{"acme/enabled"}) {
+	if len(runs) != 1 || !reflect.DeepEqual(runs[0].repos, []string{"acme/enabled", "acme/local-auto"}) {
 		t.Fatalf("expected one enabled run, got %#v", runs)
 	}
 	if runs[0].options.Parallel != 2 || runs[0].options.PerRepoWorkers != 2 || runs[0].options.MaxOpenPR != 7 || !reflect.DeepEqual(runs[0].options.CodexArgs, []string{"--model", "gpt-5.4"}) {

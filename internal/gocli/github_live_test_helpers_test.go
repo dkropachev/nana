@@ -214,12 +214,21 @@ func liveGithubSetupIsolatedHome(t *testing.T, env liveGithubTestEnv) string {
 	t.Helper()
 	home := t.TempDir()
 	codexHome := filepath.Join(home, ".nana", "codex-home")
-	if err := os.MkdirAll(codexHome, 0o755); err != nil {
-		t.Fatalf("mkdir codex home: %v", err)
+	xdgConfigHome := filepath.Join(home, ".config")
+	xdgCacheHome := filepath.Join(home, ".cache")
+	xdgStateHome := filepath.Join(home, ".local", "state")
+	for _, dir := range []string{codexHome, xdgConfigHome, xdgCacheHome, xdgStateHome} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir isolated home dir %s: %v", dir, err)
+		}
 	}
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+	t.Setenv("XDG_CACHE_HOME", xdgCacheHome)
+	t.Setenv("XDG_STATE_HOME", xdgStateHome)
 	t.Setenv("GH_TOKEN", env.Token)
 	t.Setenv("GITHUB_TOKEN", env.Token)
 	if env.APIBaseURL != "" {
@@ -233,19 +242,50 @@ func liveGithubSetupIsolatedHome(t *testing.T, env liveGithubTestEnv) string {
 func liveGithubConfigureGitAuth(t *testing.T, env liveGithubTestEnv, home string) {
 	t.Helper()
 	host := liveGithubHostForAPIBase(env.APIBaseURL)
-	base := fmt.Sprintf("https://x-access-token:%s@%s/", env.Token, host)
+	liveGithubInstallGitAskPass(t, home)
+	base := fmt.Sprintf("https://%s/", host)
 	for _, source := range []string{
-		fmt.Sprintf("https://%s/", host),
 		fmt.Sprintf("git@%s:", host),
 		fmt.Sprintf("ssh://git@%s/", host),
 	} {
-		cmd := exec.Command("git", "config", "--global", fmt.Sprintf("url.%s.insteadOf", base), source)
+		cmd := exec.Command("git", "config", "--global", "--add", fmt.Sprintf("url.%s.insteadOf", base), source)
 		cmd.Env = append(os.Environ(), "HOME="+home, "USERPROFILE="+home)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("git config url rewrite %s: %v\n%s", source, err, output)
 		}
 	}
+}
+
+func liveGithubInstallGitAskPass(t *testing.T, home string) string {
+	t.Helper()
+	binDir := filepath.Join(home, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir git askpass bin: %v", err)
+	}
+	scriptPath := filepath.Join(binDir, "git-askpass-live-github")
+	writeExecutable(t, scriptPath, strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		`prompt="${1:-}"`,
+		`case "$prompt" in`,
+		`  *[Uu]sername*) printf '%s\n' 'x-access-token' ;;`,
+		`  *[Pp]assword*) printf '%s\n' "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ;;`,
+		`  *) printf '%s\n' "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ;;`,
+		`esac`,
+	}, "\n"))
+	t.Setenv("GIT_ASKPASS", scriptPath)
+	t.Setenv("SSH_ASKPASS", scriptPath)
+	t.Setenv("GIT_TERMINAL_PROMPT", "0")
+	t.Setenv("GCM_INTERACTIVE", "never")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_PARAMETERS", "")
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_0", "credential.helper")
+	t.Setenv("GIT_CONFIG_VALUE_0", "")
+	t.Setenv("GIT_CONFIG_KEY_1", "core.askPass")
+	t.Setenv("GIT_CONFIG_VALUE_1", scriptPath)
+	return scriptPath
 }
 
 func liveGithubHostForAPIBase(apiBaseURL string) string {

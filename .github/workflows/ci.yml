@@ -126,7 +126,7 @@ jobs:
     name: Live GitHub Smoke
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     needs: [fmt, vet, test, docs, build]
     env:
       NANA_LIVE_GITHUB: "1"
@@ -136,18 +136,18 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Run live GitHub smoke
+      - name: Run live GitHub smoke tests
         shell: bash
         run: |
-          mkdir -p live-github-results
+          mkdir -p test-results
           set -o pipefail
-          go test ./internal/gocli -run '^TestLiveGithub' -count=1 -v | tee live-github-results/go-test.txt
-      - name: Upload live GitHub log
+          go test ./internal/gocli -run 'TestLiveGithubWorkRepoModeDirect|TestLiveGithubStartAutomationRouting|TestLiveGithubStartAutomationIdempotence|TestLiveGithubFailureCleanup' -count=1 -v | tee test-results/live-github-smoke.log
+      - name: Upload live GitHub smoke log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: live-github-smoke-${{ github.run_id }}-${{ github.run_attempt }}
-          path: live-github-results/go-test.txt
+          path: test-results/live-github-smoke.log
           if-no-files-found: warn
 
   ci-status:

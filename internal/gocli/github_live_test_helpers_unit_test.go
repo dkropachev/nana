@@ -6,7 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -164,6 +167,71 @@ func TestLiveGithubHostForAPIBase(t *testing.T) {
 				t.Fatalf("liveGithubHostForAPIBase(%q)=%q want %q", tc.apiBaseURL, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestLiveGithubConfigureGitAuthRewritesSSHRemotesAndOverridesEnvCredentialHelpers(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GH_TOKEN", "live-test-token")
+	t.Setenv("GITHUB_TOKEN", "live-test-token")
+	badHelper := filepath.Join(home, "bad-credential-helper.sh")
+	writeExecutable(t, badHelper, strings.Join([]string{
+		"#!/bin/sh",
+		"printf '%s\\n' 'username=env-helper'",
+		"printf '%s\\n' 'password=env-helper-token'",
+	}, "\n"))
+	t.Setenv("GIT_CONFIG_PARAMETERS", fmt.Sprintf("'credential.helper=%s'", badHelper))
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "credential.helper")
+	t.Setenv("GIT_CONFIG_VALUE_0", badHelper)
+
+	liveGithubConfigureGitAuth(t, liveGithubTestEnv{
+		APIBaseURL: "https://api.github.com",
+		Token:      "live-test-token",
+	}, home)
+
+	if got := os.Getenv("GIT_TERMINAL_PROMPT"); got != "0" {
+		t.Fatalf("expected terminal prompts disabled, got %q", got)
+	}
+	askPass := strings.TrimSpace(os.Getenv("GIT_ASKPASS"))
+	if askPass == "" {
+		t.Fatal("expected GIT_ASKPASS to be configured")
+	}
+	if got := os.Getenv("GIT_CONFIG_NOSYSTEM"); got != "1" {
+		t.Fatalf("expected system git config disabled, got %q", got)
+	}
+	if got := os.Getenv("GIT_CONFIG_PARAMETERS"); got != "" {
+		t.Fatalf("expected git config parameters cleared, got %q", got)
+	}
+	if got := os.Getenv("GIT_CONFIG_COUNT"); got != "2" {
+		t.Fatalf("expected git config override count, got %q", got)
+	}
+
+	gotRewriteSources := strings.Fields(runLocalWorkTestGitOutput(t, "", "config", "--global", "--get-all", "url.https://github.com/.insteadOf"))
+	if !reflect.DeepEqual(gotRewriteSources, []string{"git@github.com:", "ssh://git@github.com/"}) {
+		t.Fatalf("expected SSH rewrite sources, got %v", gotRewriteSources)
+	}
+
+	credentialCmd := exec.Command("git", "credential", "fill")
+	credentialCmd.Env = os.Environ()
+	credentialCmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
+	credential, err := credentialCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git credential fill failed: %v\n%s", err, credential)
+	}
+	credentialText := string(credential)
+	if !strings.Contains(credentialText, "username=x-access-token\n") {
+		t.Fatalf("expected askpass username in credential fill, got %q", credentialText)
+	}
+	if !strings.Contains(credentialText, "password=live-test-token\n") {
+		t.Fatalf("expected askpass token in credential fill, got %q", credentialText)
+	}
+	if strings.Contains(credentialText, "env-helper") {
+		t.Fatalf("expected env helper to be ignored, got %q", credentialText)
 	}
 }
 

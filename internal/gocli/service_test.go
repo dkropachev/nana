@@ -11,6 +11,14 @@ import (
 	"testing"
 )
 
+func serviceTestSetIsolatedHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	return home
+}
+
 func TestRunNanaServiceClientFailsWhenServiceAbsent(t *testing.T) {
 	runtimeDir := t.TempDir()
 	t.Setenv(nanaServiceRuntimeDirOverrideEnv, runtimeDir)
@@ -150,6 +158,7 @@ func TestRunNanaServiceClientNextRunsInProcess(t *testing.T) {
 	}
 	runtimeDir := t.TempDir()
 	t.Setenv(nanaServiceRuntimeDirOverrideEnv, runtimeDir)
+	serviceTestSetIsolatedHome(t)
 
 	oldFactory := startManagedNanaCommandFactory
 	oldStart := startManagedNanaStart
@@ -193,6 +202,7 @@ func TestRunNanaServiceClientUsageRunsInProcess(t *testing.T) {
 	}
 	runtimeDir := t.TempDir()
 	t.Setenv(nanaServiceRuntimeDirOverrideEnv, runtimeDir)
+	serviceTestSetIsolatedHome(t)
 
 	oldFactory := startManagedNanaCommandFactory
 	oldStart := startManagedNanaStart
