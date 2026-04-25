@@ -171,7 +171,7 @@ func (h *startUIAPI) handleTask(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		response, err := patchStartUITask(taskID, payload)
+		response, err := patchStartUITask(h.cwd, taskID, payload)
 		h.invalidateOverviewCache()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -355,7 +355,7 @@ func parseStartUITaskRoute(path string) (string, string, bool) {
 
 func startUITaskActionName(value string) bool {
 	switch strings.TrimSpace(value) {
-	case "run-now", "dismiss", "retry":
+	case "run-now", "dismiss", "retry", "recover":
 		return true
 	default:
 		return false
@@ -404,6 +404,12 @@ func mutateStartUITask(cwd string, taskID string, action string) (map[string]any
 				return nil, err
 			}
 			return map[string]any{"item": result.Item}, nil
+		case "recover":
+			item, err := recoverWorkItemByID(cwd, detail.WorkItem.Item.ID)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"item": item}, nil
 		case "dismiss":
 			if err := dropWorkItemByID(detail.WorkItem.Item.ID, "ui"); err != nil {
 				return nil, err
@@ -419,16 +425,31 @@ func mutateStartUITask(cwd string, taskID string, action string) (map[string]any
 	return nil, fmt.Errorf("task %s does not support action %q", taskID, action)
 }
 
-func patchStartUITask(taskID string, payload startUIPlannedItemPatchRequest) (map[string]any, error) {
-	if !strings.HasPrefix(taskID, "planned-item:") {
+func patchStartUITask(cwd string, taskID string, payload startUIPlannedItemPatchRequest) (map[string]any, error) {
+	switch {
+	case strings.HasPrefix(taskID, "planned-item:"):
+		itemID := strings.TrimSpace(strings.TrimPrefix(taskID, "planned-item:"))
+		updatedState, updatedItem, err := patchStartUIPlannedItem(itemID, payload)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"state": updatedState, "planned_item": updatedItem}, nil
+	case strings.HasPrefix(taskID, "work-item:"):
+		if payload.WorkType == nil {
+			return nil, fmt.Errorf("task %s only supports patching work_type", taskID)
+		}
+		itemID := strings.TrimSpace(strings.TrimPrefix(taskID, "work-item:"))
+		if _, err := patchWorkItemByID(itemID, payload.WorkType, "ui"); err != nil {
+			return nil, err
+		}
+		detail, err := loadStartUITaskDetail(cwd, taskID)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"detail": detail}, nil
+	default:
 		return nil, fmt.Errorf("task %s is not patchable", taskID)
 	}
-	itemID := strings.TrimSpace(strings.TrimPrefix(taskID, "planned-item:"))
-	updatedState, updatedItem, err := patchStartUIPlannedItem(itemID, payload)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"state": updatedState, "planned_item": updatedItem}, nil
 }
 
 func listStartUITaskTemplates(repoSlug string) ([]startUITaskTemplate, error) {

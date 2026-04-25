@@ -3842,6 +3842,65 @@ func TestStartUIAPITasksListAndDetail(t *testing.T) {
 	}
 }
 
+func TestStartUIAPITaskPatchUpdatesWorkItemWorkType(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "adapter",
+		SourceKind: "task",
+		ExternalID: "task-patch-work-item",
+		RepoSlug:   "acme/widget",
+		Subject:    "Patch task work type",
+		Body:       "Update the work type from the investigations task modal.",
+		Metadata: map[string]any{
+			"repo_root": t.TempDir(),
+		},
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+
+	api := &startUIAPI{cwd: cwd}
+	startUITestPrimeOverviewCache(t, api)
+	server := httptest.NewServer(api.routes())
+	defer server.Close()
+
+	taskID := "work-item:" + item.ID
+	request, err := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/tasks/"+url.PathEscape(taskID), strings.NewReader(`{"work_type":"feature"}`))
+	if err != nil {
+		t.Fatalf("new PATCH task request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("PATCH task: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected task patch status 200, got %d", response.StatusCode)
+	}
+
+	var payload struct {
+		Detail startUITaskDetail `json:"detail"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode patched task payload: %v", err)
+	}
+	if payload.Detail.WorkItem == nil || payload.Detail.WorkItem.Item.WorkType != workTypeFeature {
+		t.Fatalf("expected patched task detail to include updated work type, got %+v", payload.Detail)
+	}
+
+	updated := startUITestReadWorkItem(t, item.ID)
+	if updated.WorkType != workTypeFeature {
+		t.Fatalf("expected patched work-item task to persist work type, got %+v", updated)
+	}
+	if startUITestOverviewCacheValid(api) {
+		t.Fatalf("expected task patch to invalidate overview cache")
+	}
+}
+
 func TestStartUIInvestigationDetailRouteSupportsLegacyTaskAlias(t *testing.T) {
 	fixture := startUITestSetupBrowserFixture(t)
 	defer fixture.Server.Close()
@@ -4082,6 +4141,26 @@ func TestStartUIAppTaskDetailFormatsPlannedItemContent(t *testing.T) {
 	} {
 		if !strings.Contains(cssContent, needle) {
 			t.Fatalf("expected app stylesheet to contain %q", needle)
+		}
+	}
+}
+
+func TestStartUIAppTaskDetailSupportsWorkItemExecutionControls(t *testing.T) {
+	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
+	if err != nil {
+		t.Fatalf("read app asset: %v", err)
+	}
+	content := string(appBody)
+	for _, needle := range []string{
+		`function selectedTaskDetailWorkType(detail) {`,
+		`function persistTaskDetailWorkTypeIfNeeded(taskID) {`,
+		`id="task-detail-work-item-work-type"`,
+		`data-task-work-item-save="${escapeHTML(summary.id)}"`,
+		`data-task-action="recover"`,
+		`Run and Recover Work save the selected work type before acting.`,
+	} {
+		if !strings.Contains(content, needle) {
+			t.Fatalf("expected app asset to contain %q", needle)
 		}
 	}
 }
