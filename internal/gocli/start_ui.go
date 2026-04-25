@@ -331,6 +331,7 @@ type startUIWorkItem struct {
 	Status         string `json:"status"`
 	RepoSlug       string `json:"repo_slug,omitempty"`
 	Subject        string `json:"subject"`
+	WorkType       string `json:"work_type,omitempty"`
 	TargetURL      string `json:"target_url,omitempty"`
 	LinkedRunID    string `json:"linked_run_id,omitempty"`
 	DraftKind      string `json:"draft_kind,omitempty"`
@@ -711,6 +712,10 @@ type startUIWorkItemFixRequest struct {
 	Instruction string `json:"instruction"`
 }
 
+type startUIWorkItemPatchRequest struct {
+	WorkType *string `json:"work_type,omitempty"`
+}
+
 type startUIFeedbackSyncRequest struct {
 	RepoSlug string `json:"repo_slug,omitempty"`
 }
@@ -873,6 +878,10 @@ var startUISpawnInvestigateQuery = func(workspaceRoot string, query string) (sta
 
 var startUILaunchTrackedIssueWork = func(repoSlug string, issue startWorkIssueState) (startUIBackgroundLaunch, error) {
 	return launchStartUITrackedIssueWork(repoSlug, issue)
+}
+
+var startUIRecoverWorkItem = func(cwd string, itemID string) (workItem, error) {
+	return recoverWorkItemByID(cwd, itemID)
 }
 
 var startUISyncGithubRun = func(options githubWorkSyncOptions) error {
@@ -1812,6 +1821,24 @@ func (h *startUIAPI) handleWorkItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSONResponse(w, detail)
+	case r.Method == http.MethodPatch && tail == "":
+		var payload startUIWorkItemPatchRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if _, err := patchWorkItemByID(itemID, payload.WorkType, "ui"); err != nil {
+			h.invalidateOverviewCache()
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		h.invalidateOverviewCache()
+		detail, err := readWorkItemDetail(itemID)
+		if err != nil {
+			writeStartUIError(w, err, http.StatusInternalServerError)
+			return
+		}
+		writeJSONResponse(w, detail)
 	case r.Method == http.MethodPost && tail == "run":
 		result, err := runWorkItemByID(h.cwd, itemID, nil, false)
 		h.invalidateOverviewCache()
@@ -1820,6 +1847,19 @@ func (h *startUIAPI) handleWorkItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSONResponse(w, map[string]any{"item": result.Item})
+	case r.Method == http.MethodPost && tail == "recover":
+		if _, err := startUIRecoverWorkItem(h.cwd, itemID); err != nil {
+			h.invalidateOverviewCache()
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		h.invalidateOverviewCache()
+		detail, err := readWorkItemDetail(itemID)
+		if err != nil {
+			writeStartUIError(w, err, http.StatusInternalServerError)
+			return
+		}
+		writeJSONResponse(w, detail)
 	case r.Method == http.MethodPost && tail == "submit":
 		item, err := submitWorkItemByID(itemID, "ui")
 		h.invalidateOverviewCache()
@@ -5004,6 +5044,7 @@ func startUIWorkItemFromItem(item workItem) startUIWorkItem {
 		Status:         item.Status,
 		RepoSlug:       item.RepoSlug,
 		Subject:        item.Subject,
+		WorkType:       item.WorkType,
 		TargetURL:      item.TargetURL,
 		LinkedRunID:    item.LinkedRunID,
 		DraftKind:      valueOrEmptyDraftKind(item.LatestDraft),

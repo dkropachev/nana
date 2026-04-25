@@ -181,6 +181,7 @@ func canonicalTaskRecordForWorkItem(item workItem) canonicalTaskRecord {
 		Payload: map[string]any{
 			"status":      item.Status,
 			"source_kind": item.SourceKind,
+			"work_type":   item.WorkType,
 		},
 	}
 }

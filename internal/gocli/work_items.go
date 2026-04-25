@@ -27,6 +27,8 @@ const (
 	workItemStatusNeedsRouting = "needs_routing"
 )
 
+const workItemMetadataWorkType = "work_type"
+
 const WorkItemsHelp = `nana work items - Cross-source work-item queue and draft workflow
 
 Usage:
@@ -68,6 +70,7 @@ type workItem struct {
 	ReceivedAt         string                 `json:"received_at,omitempty"`
 	Status             string                 `json:"status"`
 	Priority           int                    `json:"priority,omitempty"`
+	WorkType           string                 `json:"work_type,omitempty"`
 	AutoRun            bool                   `json:"auto_run,omitempty"`
 	AutoSubmit         bool                   `json:"auto_submit,omitempty"`
 	Hidden             bool                   `json:"hidden,omitempty"`
@@ -105,6 +108,7 @@ type workItemInput struct {
 	Author        string                 `json:"author,omitempty"`
 	ReceivedAt    string                 `json:"received_at,omitempty"`
 	Priority      int                    `json:"priority,omitempty"`
+	WorkType      string                 `json:"work_type,omitempty"`
 	AutoRun       bool                   `json:"auto_run,omitempty"`
 	AutoSubmit    bool                   `json:"auto_submit,omitempty"`
 	SubmitProfile *workItemSubmitProfile `json:"submit_profile,omitempty"`
@@ -151,10 +155,15 @@ type workItemLink struct {
 }
 
 type workItemDetail struct {
-	Item      workItem           `json:"item"`
-	Events    []workItemEvent    `json:"events,omitempty"`
-	Links     []workItemLink     `json:"links,omitempty"`
-	LinkedRun *workRunIndexEntry `json:"linked_run,omitempty"`
+	Item             workItem           `json:"item"`
+	Events           []workItemEvent    `json:"events,omitempty"`
+	Links            []workItemLink     `json:"links,omitempty"`
+	LinkedRun        *workRunIndexEntry `json:"linked_run,omitempty"`
+	ExecutionAllowed bool               `json:"execution_allowed,omitempty"`
+	RecoverAllowed   bool               `json:"recover_allowed,omitempty"`
+	RecoverBackend   string             `json:"recover_backend,omitempty"`
+	RecoverMode      string             `json:"recover_mode,omitempty"`
+	RecoverSummary   string             `json:"recover_summary,omitempty"`
 }
 
 type workItemListOptions struct {
@@ -196,6 +205,21 @@ type workItemExecutionResult struct {
 	Item  workItem
 	Draft *workItemDraft
 	Links []workItemLink
+}
+
+const (
+	workItemRecoveryModeLinkedLocalRerun = "linked_local_rerun"
+	workItemRecoveryModeLocalRestart     = "local_restart"
+	workItemRecoveryModeGithubResume     = "github_resume"
+	workItemRecoveryModeGithubSync       = "github_sync"
+	workItemRecoveryModeGithubRestart    = "github_restart"
+)
+
+type workItemRecoveryPlan struct {
+	Allowed bool
+	Backend string
+	Mode    string
+	Summary string
 }
 
 func workItemsCommand(cwd string, args []string) error {
@@ -543,6 +567,9 @@ func showWorkItemCommand(itemID string, jsonOutput bool) error {
 	fmt.Fprintf(os.Stdout, "[work-item] Id: %s\n", item.ID)
 	fmt.Fprintf(os.Stdout, "[work-item] Source: %s/%s\n", defaultString(item.Source, "-"), defaultString(item.SourceKind, "-"))
 	fmt.Fprintf(os.Stdout, "[work-item] Status: %s\n", defaultString(item.Status, "-"))
+	if strings.TrimSpace(item.WorkType) != "" {
+		fmt.Fprintf(os.Stdout, "[work-item] Work type: %s\n", workTypeDisplayName(item.WorkType))
+	}
 	if strings.TrimSpace(item.PauseUntil) != "" {
 		fmt.Fprintf(os.Stdout, "[work-item] Pause until: %s", item.PauseUntil)
 		if strings.TrimSpace(item.PauseReason) != "" {
@@ -606,7 +633,7 @@ func listWorkItems(options workItemListOptions) ([]workItem, error) {
 }
 
 func readWorkItemDetail(itemID string) (workItemDetail, error) {
-	return withLocalWorkReadStore(func(store *localWorkDBStore) (workItemDetail, error) {
+	detail, err := withLocalWorkReadStore(func(store *localWorkDBStore) (workItemDetail, error) {
 		item, err := store.readWorkItem(itemID)
 		if err != nil {
 			return workItemDetail{}, err
@@ -633,6 +660,16 @@ func readWorkItemDetail(itemID string) (workItemDetail, error) {
 			LinkedRun: linkedRun,
 		}, nil
 	})
+	if err != nil {
+		return workItemDetail{}, err
+	}
+	recovery := resolveWorkItemRecoveryPlan(detail.Item)
+	detail.ExecutionAllowed = workItemHasExecutionTarget(detail.Item)
+	detail.RecoverAllowed = recovery.Allowed
+	detail.RecoverBackend = recovery.Backend
+	detail.RecoverMode = recovery.Mode
+	detail.RecoverSummary = recovery.Summary
+	return detail, nil
 }
 
 func enqueueWorkItem(input workItemInput, actor string) (workItem, bool, error) {
@@ -675,6 +712,7 @@ func buildWorkItemFromInput(input workItemInput) (workItem, error) {
 		ReceivedAt:    defaultString(strings.TrimSpace(input.ReceivedAt), now),
 		Status:        workItemStatusQueued,
 		Priority:      input.Priority,
+		WorkType:      strings.TrimSpace(input.WorkType),
 		AutoRun:       input.AutoRun,
 		AutoSubmit:    input.AutoSubmit,
 		SubmitProfile: input.SubmitProfile,
@@ -688,6 +726,7 @@ func buildWorkItemFromInput(input workItemInput) (workItem, error) {
 	if item.Priority < 0 || item.Priority > 5 {
 		item.Priority = 3
 	}
+	normalizeWorkItemRecord(&item)
 	item.DedupeKey = computeWorkItemDedupeKey(item)
 	item.LinkedRunID = resolveWorkItemLinkedRunID(item)
 	if item.SourceKind == "task" && metadataString(item.Metadata, "task_mode") != "reply" && item.LinkedRunID == "" && strings.TrimSpace(item.TargetURL) == "" && strings.TrimSpace(metadataString(item.Metadata, "repo_root")) == "" {
@@ -778,6 +817,31 @@ func clearWorkItemPauseMetadata(metadata map[string]any) map[string]any {
 	return cloned
 }
 
+func normalizeWorkItemRecord(item *workItem) {
+	if item == nil {
+		return
+	}
+	item.WorkType = normalizeWorkType(item.WorkType)
+	if item.WorkType == "" {
+		item.WorkType = normalizeWorkType(metadataString(item.Metadata, workItemMetadataWorkType))
+	}
+	metadata := cloneWorkItemMetadata(item.Metadata)
+	if item.WorkType != "" {
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+		metadata[workItemMetadataWorkType] = item.WorkType
+	} else if len(metadata) > 0 {
+		delete(metadata, workItemMetadataWorkType)
+	}
+	if len(metadata) == 0 {
+		item.Metadata = nil
+	} else {
+		item.Metadata = metadata
+	}
+	workItemPauseFields(item)
+}
+
 func workItemPauseFields(item *workItem) {
 	if item == nil {
 		return
@@ -847,6 +911,22 @@ func writeWorkItemDraftArtifacts(item workItem, attemptDir string, rawOutput str
 }
 
 var workItemWriteDraftArtifacts = writeWorkItemDraftArtifacts
+var workItemStartGithubExecution = startGithubWork
+var workItemRunLocalExecution = func(cwd string, args []string, policy codexRateLimitPolicy) (string, error) {
+	return runLocalWorkCommandWithOptions(cwd, args, policy)
+}
+var workItemResolveGithubRun = func(selection localWorkRunSelection) (githubWorkManifest, string, error) {
+	return resolveGithubWorkRun(selection)
+}
+var workItemResolveLocalRun = func(cwd string, selection localWorkRunSelection) (localWorkManifest, string, error) {
+	return resolveLocalWorkRun(cwd, selection)
+}
+var workItemRerunLocalExecution = func(cwd string, manifest localWorkManifest, workType string) (string, error) {
+	return rerunLocalWorkManifestWithOptions(cwd, manifest, localWorkRerunOptions{WorkType: workType})
+}
+var workItemSyncGithubExecution = func(options githubWorkSyncOptions) error {
+	return syncGithubWork(options)
+}
 
 func writeOptionalWorkItemArtifact(path string, content []byte) {
 	if strings.TrimSpace(path) == "" {
@@ -984,6 +1064,204 @@ func runWorkItemByIDWithOptions(cwd string, options workItemRunCommandOptions, b
 	return workItemExecutionResult{Item: item, Draft: item.LatestDraft, Links: result.Links}, nil
 }
 
+func workItemHasExecutionTarget(item workItem) bool {
+	if strings.EqualFold(metadataString(item.Metadata, "task_mode"), "reply") {
+		return false
+	}
+	if item.Source == "github" && (item.SourceKind == "review_request" || item.SourceKind == "thread_comment") {
+		return false
+	}
+	if strings.TrimSpace(item.TargetURL) != "" {
+		return true
+	}
+	if strings.TrimSpace(metadataString(item.Metadata, "repo_root")) != "" {
+		return true
+	}
+	return strings.TrimSpace(item.LinkedRunID) != ""
+}
+
+func workItemSupportsExecutionRecovery(item workItem) bool {
+	return resolveWorkItemRecoveryPlan(item).Allowed
+}
+
+func resolveWorkItemRecoveryPlan(item workItem) workItemRecoveryPlan {
+	if !workItemHasExecutionTarget(item) {
+		return workItemRecoveryPlan{}
+	}
+	repoRoot := strings.TrimSpace(metadataString(item.Metadata, "repo_root"))
+	targetURL := strings.TrimSpace(item.TargetURL)
+	linkedRunID := strings.TrimSpace(item.LinkedRunID)
+	if linkedRunID == "" {
+		switch {
+		case targetURL != "":
+			return workItemRecoveryPlan{
+				Allowed: true,
+				Backend: "github",
+				Mode:    workItemRecoveryModeGithubRestart,
+				Summary: "Recover Work starts a fresh GitHub run using the selected work type and relinks the item.",
+			}
+		case repoRoot != "":
+			return workItemRecoveryPlan{
+				Allowed: true,
+				Backend: "local",
+				Mode:    workItemRecoveryModeLocalRestart,
+				Summary: "Recover Work starts a fresh local work run using the selected work type.",
+			}
+		default:
+			return workItemRecoveryPlan{}
+		}
+	}
+
+	backend := ""
+	if entry, err := readWorkRunIndex(linkedRunID); err == nil {
+		backend = strings.TrimSpace(entry.Backend)
+	}
+	if backend == "" {
+		switch {
+		case strings.HasPrefix(linkedRunID, "lw-"):
+			backend = "local"
+		case strings.HasPrefix(linkedRunID, "gh-"):
+			backend = "github"
+		}
+	}
+	switch backend {
+	case "local":
+		manifest, _, err := workItemResolveLocalRun("", localWorkRunSelection{RunID: linkedRunID})
+		if err != nil {
+			return workItemRecoveryPlan{
+				Backend: "local",
+				Mode:    workItemRecoveryModeLinkedLocalRerun,
+				Summary: fmt.Sprintf("Recover Work is unavailable because linked local run %s could not be loaded.", linkedRunID),
+			}
+		}
+		if !localWorkRerunAllowed(manifest) {
+			return workItemRecoveryPlan{
+				Backend: "local",
+				Mode:    workItemRecoveryModeLinkedLocalRerun,
+				Summary: fmt.Sprintf("Recover Work is unavailable because linked local run %s is not eligible for rerun.", linkedRunID),
+			}
+		}
+		return workItemRecoveryPlan{
+			Allowed: true,
+			Backend: "local",
+			Mode:    workItemRecoveryModeLinkedLocalRerun,
+			Summary: "Recover Work reruns the linked local work as a fresh run using the selected work type.",
+		}
+	case "github":
+		manifest, runDir, err := workItemResolveGithubRun(localWorkRunSelection{RunID: linkedRunID})
+		if err == nil {
+			switch {
+			case workItemGithubResumeLastAllowed(manifest, runDir):
+				return workItemRecoveryPlan{
+					Allowed: true,
+					Backend: "github",
+					Mode:    workItemRecoveryModeGithubResume,
+					Summary: "Recover Work resumes the linked GitHub feedback run and keeps the same run linked.",
+				}
+			case workItemGithubSyncAllowed(manifest):
+				return workItemRecoveryPlan{
+					Allowed: true,
+					Backend: "github",
+					Mode:    workItemRecoveryModeGithubSync,
+					Summary: "Recover Work syncs the linked GitHub feedback or review state and keeps the same run linked.",
+				}
+			}
+		}
+		if targetURL != "" {
+			return workItemRecoveryPlan{
+				Allowed: true,
+				Backend: "github",
+				Mode:    workItemRecoveryModeGithubRestart,
+				Summary: "Recover Work starts a fresh GitHub run using the selected work type and relinks the item.",
+			}
+		}
+		summary := fmt.Sprintf("Recover Work is unavailable because linked GitHub run %s is not resumable and the item has no target URL.", linkedRunID)
+		if err != nil {
+			summary = fmt.Sprintf("Recover Work is unavailable because linked GitHub run %s could not be loaded and the item has no target URL.", linkedRunID)
+		}
+		return workItemRecoveryPlan{
+			Backend: "github",
+			Mode:    workItemRecoveryModeGithubRestart,
+			Summary: summary,
+		}
+	default:
+		switch {
+		case targetURL != "":
+			return workItemRecoveryPlan{
+				Allowed: true,
+				Backend: "github",
+				Mode:    workItemRecoveryModeGithubRestart,
+				Summary: "Recover Work starts a fresh GitHub run using the selected work type and relinks the item.",
+			}
+		case repoRoot != "":
+			return workItemRecoveryPlan{
+				Allowed: true,
+				Backend: "local",
+				Mode:    workItemRecoveryModeLocalRestart,
+				Summary: "Recover Work starts a fresh local work run using the selected work type.",
+			}
+		default:
+			return workItemRecoveryPlan{
+				Summary: "Recover Work is unavailable because this item is not linked to a supported execution target.",
+			}
+		}
+	}
+}
+
+func workItemGithubResumeLastAllowed(manifest githubWorkManifest, runDir string) bool {
+	state, err := readGithubFeedbackResumeState(githubFeedbackResumeStatePath(runDir))
+	if err != nil {
+		return false
+	}
+	_, err = validateGithubFeedbackResumeState(manifest, runDir, state, "", nil)
+	return err == nil
+}
+
+func workItemGithubSyncAllowed(manifest githubWorkManifest) bool {
+	switch strings.TrimSpace(manifest.NextAction) {
+	case "wait_for_github_feedback", "continue_after_feedback":
+		return true
+	}
+	switch strings.TrimSpace(manifest.ReviewRequestState) {
+	case "requested", "already_requested":
+		return true
+	}
+	return false
+}
+
+func workItemRecoveryEventPayload(backend string, mode string, result string, previousRunID string, nextRunID string, workType string) map[string]any {
+	return map[string]any{
+		"backend":         strings.TrimSpace(backend),
+		"recovery_mode":   strings.TrimSpace(mode),
+		"recovery_result": strings.TrimSpace(result),
+		"previous_run_id": strings.TrimSpace(previousRunID),
+		"run_id":          strings.TrimSpace(nextRunID),
+		"work_type":       normalizeWorkType(workType),
+	}
+}
+
+func resolveWorkItemLocalExecutionWorkType(cwd string, item workItem) (string, error) {
+	if normalized := normalizeWorkType(item.WorkType); normalized != "" {
+		return normalized, nil
+	}
+	if strings.HasPrefix(strings.TrimSpace(item.LinkedRunID), "lw-") {
+		manifest, _, err := workItemResolveLocalRun(cwd, localWorkRunSelection{RunID: item.LinkedRunID})
+		if err == nil {
+			if normalized := normalizeWorkType(manifest.WorkType); normalized != "" {
+				return normalized, nil
+			}
+		}
+	}
+	inferred := inferWorkTypeFromText(item.Subject, item.Body)
+	if inferred.WorkType != "" {
+		return inferred.WorkType, nil
+	}
+	if len(inferred.Ambiguous) > 0 {
+		return "", fmt.Errorf("work item %s requires an explicit work type; inference was ambiguous (%s)", item.ID, strings.Join(inferred.Ambiguous, ", "))
+	}
+	return "", fmt.Errorf("work item %s requires a work type before local execution; set it in the Start UI or intake payload", item.ID)
+}
+
 func executeWorkItem(cwd string, item workItem, attemptDir string, codexArgs []string) (workItemExecutionResult, string, error) {
 	switch {
 	case item.Source == "github" && item.SourceKind == "review_request":
@@ -1009,8 +1287,9 @@ func executeGenericTaskWorkItem(cwd string, item workItem, attemptDir string, co
 		if err != nil {
 			return workItemExecutionResult{}, "", err
 		}
-		run, err := startGithubWork(githubWorkStartOptions{
+		run, err := workItemStartGithubExecution(githubWorkStartOptions{
 			Target:           target,
+			WorkType:         normalizeWorkType(item.WorkType),
 			CreatePR:         true,
 			CreatePRExplicit: true,
 			RateLimitPolicy:  codexRateLimitPolicyReturnPause,
@@ -1035,13 +1314,17 @@ func executeGenericTaskWorkItem(cwd string, item workItem, attemptDir string, co
 		if strings.TrimSpace(item.Body) != "" {
 			task += "\n\n" + strings.TrimSpace(item.Body)
 		}
-		if _, err := runLocalWorkCommandWithOptions(cwd, []string{"start", "--repo", repoRoot, "--task", task}, codexRateLimitPolicyReturnPause); err != nil {
+		workType, err := resolveWorkItemLocalExecutionWorkType(cwd, item)
+		if err != nil {
+			return workItemExecutionResult{}, "", err
+		}
+		if _, err := workItemRunLocalExecution(cwd, []string{"start", "--repo", repoRoot, "--task", task, "--work-type", workType}, codexRateLimitPolicyReturnPause); err != nil {
 			return workItemExecutionResult{}, "", err
 		}
 		item.LatestDraft = &workItemDraft{
 			Kind:                 "execution",
-			Body:                 fmt.Sprintf("Started Nana local work for %s.", defaultString(repoRoot, "the requested repo")),
-			Summary:              "Started local work run",
+			Body:                 fmt.Sprintf("Started Nana local work for %s with %s scope.", defaultString(repoRoot, "the requested repo"), workTypeDisplayName(workType)),
+			Summary:              fmt.Sprintf("Started local work run (%s)", workTypeDisplayName(workType)),
 			SuggestedDisposition: "needs_review",
 			Confidence:           0.95,
 		}
@@ -1283,6 +1566,144 @@ func submitWorkItemByID(itemID string, actor string) (workItem, error) {
 		return workItem{}, err
 	}
 	return item, nil
+}
+
+func patchWorkItemByID(itemID string, workType *string, actor string) (workItem, error) {
+	item, err := withLocalWorkReadStore(func(store *localWorkDBStore) (workItem, error) {
+		return store.readWorkItem(itemID)
+	})
+	if err != nil {
+		return workItem{}, err
+	}
+
+	payload := map[string]any{}
+	changed := false
+	if workType != nil {
+		normalized, err := parseRequiredWorkType(*workType, "work_type")
+		if err != nil {
+			return workItem{}, err
+		}
+		if normalized != normalizeWorkType(item.WorkType) {
+			payload["previous_work_type"] = normalizeWorkType(item.WorkType)
+			payload["work_type"] = normalized
+			item.WorkType = normalized
+			changed = true
+		}
+	}
+	if !changed {
+		return item, nil
+	}
+
+	item.UpdatedAt = ISOTimeNow()
+	if _, err := withLocalWorkWriteStore(func(store *localWorkDBStore) (workItem, error) {
+		if err := store.updateWorkItemWithEvent(item, "work_type_updated", actor, payload); err != nil {
+			return workItem{}, err
+		}
+		return item, nil
+	}); err != nil {
+		return workItem{}, err
+	}
+	return item, nil
+}
+
+func persistRecoveredWorkItem(item workItem, actor string, payload map[string]any) (workItem, error) {
+	item.Hidden = false
+	item.HiddenReason = ""
+	item.PauseReason = ""
+	item.PauseUntil = ""
+	item.LatestActionAt = ISOTimeNow()
+	item.UpdatedAt = item.LatestActionAt
+	if _, err := withLocalWorkWriteStore(func(store *localWorkDBStore) (workItem, error) {
+		if err := store.updateWorkItemWithLinksAndEvent(item, buildDefaultWorkItemLinks(item), "recovered", actor, payload); err != nil {
+			return workItem{}, err
+		}
+		return item, nil
+	}); err != nil {
+		return workItem{}, err
+	}
+	return item, nil
+}
+
+func recoverWorkItemByID(cwd string, itemID string) (workItem, error) {
+	item, err := withLocalWorkReadStore(func(store *localWorkDBStore) (workItem, error) {
+		return store.readWorkItem(itemID)
+	})
+	if err != nil {
+		return workItem{}, err
+	}
+	recovery := resolveWorkItemRecoveryPlan(item)
+	if !recovery.Allowed {
+		if strings.TrimSpace(recovery.Summary) != "" {
+			return workItem{}, fmt.Errorf("%s", recovery.Summary)
+		}
+		return workItem{}, fmt.Errorf("work item %s does not support execution recovery", itemID)
+	}
+
+	linkedRunID := strings.TrimSpace(item.LinkedRunID)
+	switch recovery.Mode {
+	case workItemRecoveryModeLinkedLocalRerun:
+		manifest, _, err := workItemResolveLocalRun(cwd, localWorkRunSelection{RunID: linkedRunID})
+		if err != nil {
+			return workItem{}, err
+		}
+		if !localWorkRerunAllowed(manifest) {
+			return workItem{}, fmt.Errorf("linked local run %s cannot be rerun from its current state", manifest.RunID)
+		}
+		workType, err := resolveWorkItemLocalExecutionWorkType(cwd, item)
+		if err != nil {
+			return workItem{}, err
+		}
+		nextRunID, err := workItemRerunLocalExecution(cwd, manifest, workType)
+		if err != nil {
+			return workItem{}, err
+		}
+		item.WorkType = workType
+		item.LinkedRunID = strings.TrimSpace(nextRunID)
+		item.Status = workItemStatusDraftReady
+		item.LatestDraft = &workItemDraft{
+			Kind:                 "execution",
+			Body:                 fmt.Sprintf("Started recovered Nana local work run %s using %s scope.", nextRunID, workTypeDisplayName(workType)),
+			Summary:              fmt.Sprintf("Recovered local work as %s", nextRunID),
+			SuggestedDisposition: "needs_review",
+			Confidence:           0.96,
+			RunID:                nextRunID,
+		}
+		return persistRecoveredWorkItem(item, "ui", workItemRecoveryEventPayload("local", recovery.Mode, "restarted", manifest.RunID, nextRunID, workType))
+	case workItemRecoveryModeGithubResume, workItemRecoveryModeGithubSync:
+		syncOptions := githubWorkSyncOptions{RunID: linkedRunID}
+		if recovery.Mode == workItemRecoveryModeGithubResume {
+			syncOptions.ResumeLast = true
+		}
+		if err := workItemSyncGithubExecution(syncOptions); err != nil {
+			return workItem{}, err
+		}
+		item.Status = workItemStatusDraftReady
+		item.LatestDraft = &workItemDraft{
+			Kind:                 "execution",
+			Body:                 fmt.Sprintf("Continued Nana GitHub work run %s.", linkedRunID),
+			Summary:              fmt.Sprintf("Recovered GitHub work run %s", linkedRunID),
+			SuggestedDisposition: "needs_review",
+			Confidence:           0.96,
+			RunID:                linkedRunID,
+		}
+		return persistRecoveredWorkItem(item, "ui", workItemRecoveryEventPayload("github", recovery.Mode, "resumed", linkedRunID, linkedRunID, item.WorkType))
+	case workItemRecoveryModeGithubRestart, workItemRecoveryModeLocalRestart:
+		result, err := runWorkItemByID(cwd, item.ID, nil, false)
+		if err != nil {
+			return workItem{}, err
+		}
+		backend := recovery.Backend
+		if strings.TrimSpace(backend) == "" {
+			if strings.TrimSpace(result.Item.TargetURL) != "" {
+				backend = "github"
+			} else {
+				backend = "local"
+			}
+		}
+		return persistRecoveredWorkItem(result.Item, "ui", workItemRecoveryEventPayload(backend, recovery.Mode, "restarted", linkedRunID, result.Item.LinkedRunID, result.Item.WorkType))
+	default:
+		return workItem{}, fmt.Errorf("work item %s recovery mode %q is unsupported", itemID, recovery.Mode)
+	}
 }
 
 func fixWorkItemByID(cwd string, options workItemFixCommandOptions) (workItem, error) {
@@ -1878,7 +2299,7 @@ func (s *localWorkDBStore) readWorkItemLinks(itemID string) ([]workItemLink, err
 }
 
 func writeWorkItemTx(tx *sql.Tx, item workItem) error {
-	workItemPauseFields(&item)
+	normalizeWorkItemRecord(&item)
 	item.Metadata = clearWorkItemPauseMetadata(item.Metadata)
 	submitProfileJSON, err := marshalNullableJSON(item.SubmitProfile)
 	if err != nil {
@@ -2081,7 +2502,7 @@ func scanWorkItem(row workItemScanner) (workItem, error) {
 			item.LatestDraft = &draft
 		}
 	}
-	workItemPauseFields(&item)
+	normalizeWorkItemRecord(&item)
 	return item, nil
 }
 

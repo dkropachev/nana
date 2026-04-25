@@ -1214,6 +1214,7 @@ func startUITaskSummaryFromWorkItem(item startUIWorkItem) startUITaskSummary {
 		AttentionState: item.AttentionState,
 		UpdatedAt:      item.UpdatedAt,
 		ExternalURL:    item.TargetURL,
+		WorkType:       item.WorkType,
 		RunID:          item.LinkedRunID,
 		CanOpenJob:     strings.TrimSpace(item.LinkedRunID) != "",
 	}
@@ -1250,6 +1251,7 @@ func startUITaskSummaryFromWorkItemState(item workItem) startUITaskSummary {
 		CreatedAt:      item.CreatedAt,
 		UpdatedAt:      item.UpdatedAt,
 		ExternalURL:    item.TargetURL,
+		WorkType:       item.WorkType,
 		RunID:          item.LinkedRunID,
 		CanOpenJob:     strings.TrimSpace(item.LinkedRunID) != "",
 	}

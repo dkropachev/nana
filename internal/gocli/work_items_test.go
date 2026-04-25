@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -347,6 +348,487 @@ func TestParseWorkItemRunArgsAcceptsHiddenAttemptDir(t *testing.T) {
 	}
 	if got := strings.Join(options.CodexArgs, " "); got != "--model gpt-5.4" {
 		t.Fatalf("unexpected codex args: %q", got)
+	}
+}
+
+func TestPatchWorkItemByIDPersistsWorkType(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "email",
+		SourceKind: "task",
+		ExternalID: "work-type-patch",
+		Subject:    "Recover this execution",
+		Metadata: map[string]any{
+			"repo_root": t.TempDir(),
+		},
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+
+	workType := workTypeFeature
+	updated, err := patchWorkItemByID(item.ID, &workType, "test")
+	if err != nil {
+		t.Fatalf("patchWorkItemByID: %v", err)
+	}
+	if updated.WorkType != workTypeFeature {
+		t.Fatalf("expected patched work type, got %+v", updated)
+	}
+
+	detail, err := readWorkItemDetail(item.ID)
+	if err != nil {
+		t.Fatalf("readWorkItemDetail: %v", err)
+	}
+	if detail.Item.WorkType != workTypeFeature {
+		t.Fatalf("expected persisted work type, got %+v", detail.Item)
+	}
+	if metadataString(detail.Item.Metadata, workItemMetadataWorkType) != workTypeFeature {
+		t.Fatalf("expected metadata work type, got %+v", detail.Item.Metadata)
+	}
+	foundEvent := false
+	for _, event := range detail.Events {
+		if event.EventType == "work_type_updated" {
+			foundEvent = true
+			break
+		}
+	}
+	if !foundEvent {
+		t.Fatalf("expected work_type_updated event, got %+v", detail.Events)
+	}
+}
+
+func TestRunWorkItemByIDUsesExplicitWorkTypeForGithubExecution(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("HOME", home)
+
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "adapter",
+		SourceKind: "task",
+		ExternalID: "github-execution-work-type",
+		RepoSlug:   "acme/widget",
+		TargetURL:  "https://github.com/acme/widget/issues/1",
+		Subject:    "Run live smoke task",
+		WorkType:   workTypeTestOnly,
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+
+	oldStart := workItemStartGithubExecution
+	defer func() { workItemStartGithubExecution = oldStart }()
+
+	captured := ""
+	workItemStartGithubExecution = func(options githubWorkStartOptions) (githubWorkManifest, error) {
+		captured = options.WorkType
+		if err := writeWorkRunIndex(workRunIndexEntry{
+			RunID:     "gh-exec-1",
+			Backend:   "github",
+			RepoKey:   "acme/widget",
+			RepoSlug:  "acme/widget",
+			UpdatedAt: ISOTimeNow(),
+		}); err != nil {
+			t.Fatalf("writeWorkRunIndex: %v", err)
+		}
+		return githubWorkManifest{RunID: "gh-exec-1"}, nil
+	}
+
+	result, err := runWorkItemByID(cwd, item.ID, nil, false)
+	if err != nil {
+		t.Fatalf("runWorkItemByID: %v", err)
+	}
+	if captured != workTypeTestOnly {
+		t.Fatalf("expected github execution to use work type %q, got %q", workTypeTestOnly, captured)
+	}
+	if result.Item.LinkedRunID != "gh-exec-1" {
+		t.Fatalf("expected linked GitHub run, got %+v", result.Item)
+	}
+}
+
+func TestRunWorkItemByIDUsesExplicitWorkTypeForLocalExecution(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot := t.TempDir()
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "adapter",
+		SourceKind: "task",
+		ExternalID: "local-execution-work-type",
+		Subject:    "Refine runtime plumbing",
+		WorkType:   workTypeRefactor,
+		Metadata: map[string]any{
+			"repo_root": repoRoot,
+		},
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+
+	oldRunLocal := workItemRunLocalExecution
+	defer func() { workItemRunLocalExecution = oldRunLocal }()
+
+	var captured []string
+	workItemRunLocalExecution = func(callCwd string, args []string, policy codexRateLimitPolicy) (string, error) {
+		captured = append([]string{callCwd}, args...)
+		return "lw-local-started", nil
+	}
+
+	result, err := runWorkItemByID(cwd, item.ID, nil, false)
+	if err != nil {
+		t.Fatalf("runWorkItemByID: %v", err)
+	}
+	if !slices.Contains(captured, "--work-type") || !slices.Contains(captured, workTypeRefactor) {
+		t.Fatalf("expected local execution args to include explicit work type, got %+v", captured)
+	}
+	if result.Item.LatestDraft == nil || !strings.Contains(result.Item.LatestDraft.Summary, "Refactor") {
+		t.Fatalf("expected local execution draft summary to mention work type, got %+v", result.Item.LatestDraft)
+	}
+}
+
+func TestRecoverWorkItemByIDRerunsLinkedLocalRunWithWorkTypeOverride(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot := t.TempDir()
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "adapter",
+		SourceKind: "task",
+		ExternalID: "recover-linked-local",
+		Subject:    "Recover the failed run",
+		WorkType:   workTypeFeature,
+		Metadata: map[string]any{
+			"repo_root": repoRoot,
+		},
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+	item.LinkedRunID = "lw-old"
+	item.Status = workItemStatusFailed
+	if err := writeWorkRunIndex(workRunIndexEntry{
+		RunID:     "lw-old",
+		Backend:   "local",
+		RepoRoot:  repoRoot,
+		RepoSlug:  "acme/widget",
+		UpdatedAt: ISOTimeNow(),
+	}); err != nil {
+		t.Fatalf("writeWorkRunIndex old run: %v", err)
+	}
+	if err := withLocalWorkWriteStoreErr(func(store *localWorkDBStore) error {
+		return store.updateWorkItem(item)
+	}); err != nil {
+		t.Fatalf("updateWorkItem: %v", err)
+	}
+
+	inputPath := filepath.Join(t.TempDir(), "input-plan.md")
+	if err := os.WriteFile(inputPath, []byte("Recover this task\n"), 0o644); err != nil {
+		t.Fatalf("write input plan: %v", err)
+	}
+
+	oldResolve := workItemResolveLocalRun
+	oldRerun := workItemRerunLocalExecution
+	defer func() {
+		workItemResolveLocalRun = oldResolve
+		workItemRerunLocalExecution = oldRerun
+	}()
+
+	workItemResolveLocalRun = func(cwd string, selection localWorkRunSelection) (localWorkManifest, string, error) {
+		return localWorkManifest{
+			RunID:     "lw-old",
+			RepoRoot:  repoRoot,
+			InputPath: inputPath,
+			WorkType:  workTypeTestOnly,
+		}, repoRoot, nil
+	}
+	capturedWorkType := ""
+	workItemRerunLocalExecution = func(cwd string, manifest localWorkManifest, workType string) (string, error) {
+		capturedWorkType = workType
+		if err := writeWorkRunIndex(workRunIndexEntry{
+			RunID:     "lw-new",
+			Backend:   "local",
+			RepoRoot:  repoRoot,
+			RepoSlug:  "acme/widget",
+			UpdatedAt: ISOTimeNow(),
+		}); err != nil {
+			t.Fatalf("writeWorkRunIndex new run: %v", err)
+		}
+		return "lw-new", nil
+	}
+
+	updated, err := recoverWorkItemByID("", item.ID)
+	if err != nil {
+		t.Fatalf("recoverWorkItemByID: %v", err)
+	}
+	if capturedWorkType != workTypeFeature {
+		t.Fatalf("expected recovery rerun to use patched work type, got %q", capturedWorkType)
+	}
+	if updated.LinkedRunID != "lw-new" || updated.WorkType != workTypeFeature {
+		t.Fatalf("expected updated linked run and work type, got %+v", updated)
+	}
+	if updated.LatestDraft == nil || updated.LatestDraft.RunID != "lw-new" {
+		t.Fatalf("expected recovery draft to point at new run, got %+v", updated.LatestDraft)
+	}
+
+	detail, err := readWorkItemDetail(item.ID)
+	if err != nil {
+		t.Fatalf("readWorkItemDetail: %v", err)
+	}
+	foundRecovered := false
+	for _, event := range detail.Events {
+		if event.EventType == "recovered" {
+			foundRecovered = true
+			if event.Payload["recovery_result"] != "restarted" || event.Payload["recovery_mode"] != workItemRecoveryModeLinkedLocalRerun {
+				t.Fatalf("expected local recovery payload metadata, got %+v", event.Payload)
+			}
+			break
+		}
+	}
+	if !foundRecovered {
+		t.Fatalf("expected recovered event, got %+v", detail.Events)
+	}
+}
+
+func TestRecoverWorkItemByIDResumesLinkedGithubRunWhenFeedbackResumeStateIsAvailable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+
+	runID := "gh-recover-resume"
+	runDir := filepath.Join(githubWorkRepoRoot(repoSlug), "runs", runID)
+	sandboxPath := filepath.Join(githubWorkRepoRoot(repoSlug), "sandboxes", "issue-42-"+runID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	createLocalWorkRepoAt(t, sandboxRepoPath)
+
+	manifest := githubWorkManifest{
+		RunID:              runID,
+		RepoSlug:           repoSlug,
+		RepoOwner:          "acme",
+		RepoName:           "widget",
+		ManagedRepoRoot:    githubWorkRepoRoot(repoSlug),
+		SourcePath:         sourcePath,
+		TargetURL:          "https://github.com/acme/widget/issues/42",
+		TargetKind:         "issue",
+		TargetNumber:       42,
+		WorkType:           workTypeBugFix,
+		UpdatedAt:          ISOTimeNow(),
+		ExecutionStatus:    "failed",
+		NextAction:         "continue_after_feedback",
+		SandboxPath:        sandboxPath,
+		SandboxRepoPath:    sandboxRepoPath,
+		ReviewRequestState: "requested",
+	}
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	if err := writeGithubJSON(manifestPath, manifest); err != nil {
+		t.Fatalf("writeGithubJSON manifest: %v", err)
+	}
+	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+		t.Fatalf("indexGithubWorkRunManifest: %v", err)
+	}
+
+	newFeedback := githubFeedbackSnapshot{
+		Actors: []string{"reviewer-a"},
+		IssueComments: []githubIssueCommentPayload{{
+			ID:        101,
+			HTMLURL:   "https://github.com/acme/widget/issues/42#issuecomment-101",
+			Body:      "Please keep going.",
+			UpdatedAt: ISOTimeNow(),
+			User:      githubActor{Login: "reviewer-a"},
+		}},
+	}
+	prompt := buildGithubFeedbackContinuationPrompt(manifest, buildGithubFeedbackInstructions(manifest, newFeedback.Actors, newFeedback))
+	if err := writeGithubJSON(githubFeedbackResumeStatePath(runDir), githubFeedbackResumeState{
+		Version:           1,
+		Actors:            append([]string{}, newFeedback.Actors...),
+		NewFeedback:       newFeedback,
+		PromptFingerprint: githubFeedbackResumeFingerprint(prompt, nil),
+		UpdatedAt:         manifest.UpdatedAt,
+	}); err != nil {
+		t.Fatalf("writeGithubJSON resume state: %v", err)
+	}
+	if err := writeGithubJSON(filepath.Join(runDir, "leader-checkpoint.json"), codexStepCheckpoint{
+		SessionID:         "leader-session-gh-recover",
+		ResumeEligible:    true,
+		PromptFingerprint: githubFeedbackResumeFingerprint(prompt, nil),
+	}); err != nil {
+		t.Fatalf("writeGithubJSON leader checkpoint: %v", err)
+	}
+
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "adapter",
+		SourceKind: "task",
+		ExternalID: "recover-linked-github-resume",
+		RepoSlug:   repoSlug,
+		TargetURL:  manifest.TargetURL,
+		Subject:    "Recover linked GitHub work",
+		WorkType:   workTypeFeature,
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+	item.LinkedRunID = runID
+	item.Status = workItemStatusFailed
+	startUITestUpdateWorkItem(t, item)
+
+	oldSync := workItemSyncGithubExecution
+	defer func() { workItemSyncGithubExecution = oldSync }()
+
+	var syncOptions githubWorkSyncOptions
+	workItemSyncGithubExecution = func(options githubWorkSyncOptions) error {
+		syncOptions = options
+		return nil
+	}
+
+	updated, err := recoverWorkItemByID("", item.ID)
+	if err != nil {
+		t.Fatalf("recoverWorkItemByID: %v", err)
+	}
+	if syncOptions.RunID != runID {
+		t.Fatalf("expected GitHub recovery to keep the linked run, got %+v", syncOptions)
+	}
+	if updated.LinkedRunID != runID || updated.WorkType != workTypeFeature {
+		t.Fatalf("expected GitHub recovery to keep linked run and work type, got %+v", updated)
+	}
+	if updated.LatestDraft == nil || updated.LatestDraft.RunID != runID {
+		t.Fatalf("expected GitHub recovery draft to point at the linked run, got %+v", updated.LatestDraft)
+	}
+
+	detail, err := readWorkItemDetail(item.ID)
+	if err != nil {
+		t.Fatalf("readWorkItemDetail: %v", err)
+	}
+	foundRecovered := false
+	for _, event := range detail.Events {
+		if event.EventType != "recovered" {
+			continue
+		}
+		foundRecovered = true
+		if event.Payload["recovery_result"] != "resumed" {
+			t.Fatalf("expected resumed GitHub recovery payload, got %+v", event.Payload)
+		}
+		mode := event.Payload["recovery_mode"]
+		if mode != workItemRecoveryModeGithubResume && mode != workItemRecoveryModeGithubSync {
+			t.Fatalf("expected resumed GitHub recovery payload, got %+v", event.Payload)
+		}
+	}
+	if !foundRecovered {
+		t.Fatalf("expected recovered event, got %+v", detail.Events)
+	}
+}
+
+func TestRecoverWorkItemByIDRestartsLinkedGithubRunWhenResumeIsUnavailable(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoSlug := "acme/widget"
+	sourcePath := githubManagedPaths(repoSlug).SourcePath
+	createLocalWorkRepoAt(t, sourcePath)
+
+	oldRunID := "gh-recover-old"
+	runDir := filepath.Join(githubWorkRepoRoot(repoSlug), "runs", oldRunID)
+	sandboxPath := filepath.Join(githubWorkRepoRoot(repoSlug), "sandboxes", "issue-7-"+oldRunID)
+	sandboxRepoPath := filepath.Join(sandboxPath, "repo")
+	createLocalWorkRepoAt(t, sandboxRepoPath)
+
+	manifest := githubWorkManifest{
+		RunID:           oldRunID,
+		RepoSlug:        repoSlug,
+		RepoOwner:       "acme",
+		RepoName:        "widget",
+		ManagedRepoRoot: githubWorkRepoRoot(repoSlug),
+		SourcePath:      sourcePath,
+		TargetURL:       "https://github.com/acme/widget/issues/7",
+		TargetKind:      "issue",
+		TargetNumber:    7,
+		WorkType:        workTypeTestOnly,
+		UpdatedAt:       ISOTimeNow(),
+		ExecutionStatus: "failed",
+		NextAction:      "waiting for approval",
+		SandboxPath:     sandboxPath,
+		SandboxRepoPath: sandboxRepoPath,
+	}
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	if err := writeGithubJSON(manifestPath, manifest); err != nil {
+		t.Fatalf("writeGithubJSON manifest: %v", err)
+	}
+	if err := indexGithubWorkRunManifest(manifestPath, manifest); err != nil {
+		t.Fatalf("indexGithubWorkRunManifest: %v", err)
+	}
+
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "adapter",
+		SourceKind: "task",
+		ExternalID: "recover-linked-github-restart",
+		RepoSlug:   repoSlug,
+		TargetURL:  manifest.TargetURL,
+		Subject:    "Restart linked GitHub work",
+		WorkType:   workTypeFeature,
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+	item.LinkedRunID = oldRunID
+	item.Status = workItemStatusFailed
+	startUITestUpdateWorkItem(t, item)
+
+	oldStart := workItemStartGithubExecution
+	defer func() { workItemStartGithubExecution = oldStart }()
+
+	capturedWorkType := ""
+	workItemStartGithubExecution = func(options githubWorkStartOptions) (githubWorkManifest, error) {
+		capturedWorkType = options.WorkType
+		if err := writeWorkRunIndex(workRunIndexEntry{
+			RunID:        "gh-recover-new",
+			Backend:      "github",
+			RepoKey:      repoSlug,
+			RepoSlug:     repoSlug,
+			ManifestPath: filepath.Join(githubWorkRepoRoot(repoSlug), "runs", "gh-recover-new", "manifest.json"),
+			UpdatedAt:    ISOTimeNow(),
+		}); err != nil {
+			t.Fatalf("writeWorkRunIndex: %v", err)
+		}
+		return githubWorkManifest{RunID: "gh-recover-new"}, nil
+	}
+
+	updated, err := recoverWorkItemByID(cwd, item.ID)
+	if err != nil {
+		t.Fatalf("recoverWorkItemByID: %v", err)
+	}
+	if capturedWorkType != workTypeFeature {
+		t.Fatalf("expected restarted GitHub recovery to use selected work type, got %q", capturedWorkType)
+	}
+	if updated.LinkedRunID != "gh-recover-new" || updated.WorkType != workTypeFeature {
+		t.Fatalf("expected restarted GitHub recovery to relink the item, got %+v", updated)
+	}
+	if updated.LatestDraft == nil || updated.LatestDraft.RunID != "gh-recover-new" {
+		t.Fatalf("expected restarted GitHub recovery draft to point at the new run, got %+v", updated.LatestDraft)
+	}
+
+	detail, err := readWorkItemDetail(item.ID)
+	if err != nil {
+		t.Fatalf("readWorkItemDetail: %v", err)
+	}
+	foundRecovered := false
+	for _, event := range detail.Events {
+		if event.EventType != "recovered" {
+			continue
+		}
+		foundRecovered = true
+		if event.Payload["recovery_result"] != "restarted" || event.Payload["recovery_mode"] != workItemRecoveryModeGithubRestart {
+			t.Fatalf("expected restarted GitHub recovery payload, got %+v", event.Payload)
+		}
+		if event.Payload["previous_run_id"] != oldRunID || event.Payload["run_id"] != "gh-recover-new" {
+			t.Fatalf("expected GitHub recovery payload to relink runs, got %+v", event.Payload)
+		}
+	}
+	if !foundRecovered {
+		t.Fatalf("expected recovered event, got %+v", detail.Events)
 	}
 }
 

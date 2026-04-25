@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -860,6 +861,7 @@ func TestStartUIBrowserInteractionsWorkItemRevisionDraftSurvivesRefresh(t *testi
 	defer cancelTab()
 
 	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home", "#global-repo-grid")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Review feature PR")
 	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-work-item-show="%s"]`, fixture.ReviewItemID))
 	startUITestChromedpWaitVisible(t, tabCtx, "#work-item-fix-instruction")
 	startUITestChromedpSetValue(t, tabCtx, "#work-item-fix-instruction", "Keep this revision instruction")
@@ -867,6 +869,216 @@ func TestStartUIBrowserInteractionsWorkItemRevisionDraftSurvivesRefresh(t *testi
 	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-work-item-refresh="%s"]`, fixture.ReviewItemID))
 	startUITestChromedpWaitValue(t, tabCtx, "#work-item-fix-instruction", "Keep this revision instruction")
 	startUITestChromedpWaitFocusSelection(t, tabCtx, "#work-item-fix-instruction", 5, 12)
+}
+
+func TestStartUIBrowserInteractionsWorkItemWorkTypeDraftSurvivesRefresh(t *testing.T) {
+	chromePath := startUITestChromePath(t)
+	if chromePath == "" {
+		t.Skip("google-chrome is required for chromedp browser interaction coverage")
+	}
+
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	item := startUITestReadWorkItem(t, fixture.ReviewItemID)
+
+	browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
+	defer cancelBrowser()
+
+	tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
+	defer cancelTab()
+
+	startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home", "#global-repo-grid")
+	startUITestChromedpWaitBodyTextContains(t, tabCtx, "Review feature PR")
+	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-work-item-show="%s"]`, fixture.ReviewItemID))
+	startUITestChromedpWaitVisible(t, tabCtx, "#work-item-fix-instruction")
+
+	item.Source = "adapter"
+	item.SourceKind = "task"
+	item.Subject = "Refresh dirty work type"
+	item.Body = "Keep the selected work type draft until it is saved."
+	item.WorkType = workTypeTestOnly
+	item.TargetURL = ""
+	item.LinkedRunID = ""
+	item.LatestDraft = nil
+	item.Metadata = map[string]any{
+		"repo_root": githubManagedPaths(fixture.RepoSlug).SourcePath,
+	}
+	item.Status = workItemStatusFailed
+	startUITestUpdateWorkItem(t, item)
+	fixture.API.invalidateOverviewCache()
+	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-work-item-refresh="%s"]`, item.ID))
+	startUITestChromedpWaitVisible(t, tabCtx, "#work-item-work-type")
+	startUITestChromedpSetValue(t, tabCtx, "#work-item-work-type", "feature")
+	startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-work-item-refresh="%s"]`, item.ID))
+	startUITestChromedpWaitValue(t, tabCtx, "#work-item-work-type", "feature")
+
+	updated := startUITestReadWorkItem(t, item.ID)
+	if updated.WorkType != workTypeTestOnly {
+		t.Fatalf("expected dirty work type to remain unsaved after refresh, got %+v", updated)
+	}
+}
+
+func TestStartUIBrowserInteractionsWorkItemExecutionActionsAutoSaveWorkType(t *testing.T) {
+	chromePath := startUITestChromePath(t)
+	if chromePath == "" {
+		t.Skip("google-chrome is required for chromedp browser interaction coverage")
+	}
+
+	t.Run("run", func(t *testing.T) {
+		fixture := startUITestSetupBrowserFixture(t)
+		defer fixture.Server.Close()
+
+		item := startUITestReadWorkItem(t, fixture.ReviewItemID)
+
+		oldRunLocal := workItemRunLocalExecution
+		defer func() { workItemRunLocalExecution = oldRunLocal }()
+
+		var captured []string
+		workItemRunLocalExecution = func(callCwd string, args []string, policy codexRateLimitPolicy) (string, error) {
+			captured = append([]string{callCwd}, args...)
+			return "lw-browser-started", nil
+		}
+
+		browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
+		defer cancelBrowser()
+
+		tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
+		defer cancelTab()
+
+		startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home", "#global-repo-grid")
+		startUITestChromedpWaitBodyTextContains(t, tabCtx, "Review feature PR")
+		startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-work-item-show="%s"]`, fixture.ReviewItemID))
+		startUITestChromedpWaitVisible(t, tabCtx, "#work-item-fix-instruction")
+
+		item.Source = "adapter"
+		item.SourceKind = "task"
+		item.Subject = "Run with auto-saved work type"
+		item.Body = "Start local work after persisting the selected work type."
+		item.WorkType = workTypeTestOnly
+		item.TargetURL = ""
+		item.LinkedRunID = ""
+		item.LatestDraft = nil
+		item.Metadata = map[string]any{
+			"repo_root": githubManagedPaths(fixture.RepoSlug).SourcePath,
+		}
+		item.Status = workItemStatusQueued
+		startUITestUpdateWorkItem(t, item)
+		fixture.API.invalidateOverviewCache()
+		startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-work-item-refresh="%s"]`, item.ID))
+		startUITestChromedpWaitVisible(t, tabCtx, "#work-item-work-type")
+		startUITestChromedpSetValue(t, tabCtx, "#work-item-work-type", "feature")
+		startUITestChromedpWaitVisible(t, tabCtx, fmt.Sprintf(`[data-work-item-run="%s"]`, item.ID))
+		startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-work-item-run="%s"]`, item.ID))
+		startUITestWaitFor(t, 10*time.Second, "run action to persist work type", func() bool {
+			updated := startUITestReadWorkItem(t, item.ID)
+			return updated.WorkType == workTypeFeature && updated.Status == workItemStatusDraftReady
+		})
+
+		updated := startUITestReadWorkItem(t, item.ID)
+		if updated.WorkType != workTypeFeature {
+			t.Fatalf("expected run action to auto-save work type, got %+v", updated)
+		}
+		if !slices.Contains(captured, "--work-type") || !slices.Contains(captured, workTypeFeature) {
+			t.Fatalf("expected run action to execute with updated work type, got %+v", captured)
+		}
+	})
+
+	t.Run("recover", func(t *testing.T) {
+		fixture := startUITestSetupBrowserFixture(t)
+		defer fixture.Server.Close()
+
+		repoRoot := githubManagedPaths(fixture.RepoSlug).SourcePath
+		item := startUITestReadWorkItem(t, fixture.ReviewItemID)
+		if err := writeWorkRunIndex(workRunIndexEntry{
+			RunID:     "lw-browser-old",
+			Backend:   "local",
+			RepoRoot:  repoRoot,
+			RepoSlug:  fixture.RepoSlug,
+			UpdatedAt: ISOTimeNow(),
+		}); err != nil {
+			t.Fatalf("writeWorkRunIndex: %v", err)
+		}
+		fixture.API.invalidateOverviewCache()
+
+		inputPath := filepath.Join(t.TempDir(), "browser-recover-input.md")
+		if err := os.WriteFile(inputPath, []byte("Recover this browser task\n"), 0o644); err != nil {
+			t.Fatalf("write input plan: %v", err)
+		}
+
+		oldResolve := workItemResolveLocalRun
+		oldRerun := workItemRerunLocalExecution
+		defer func() {
+			workItemResolveLocalRun = oldResolve
+			workItemRerunLocalExecution = oldRerun
+		}()
+
+		workItemResolveLocalRun = func(cwd string, selection localWorkRunSelection) (localWorkManifest, string, error) {
+			return localWorkManifest{
+				RunID:     "lw-browser-old",
+				RepoRoot:  repoRoot,
+				InputPath: inputPath,
+				WorkType:  workTypeTestOnly,
+			}, repoRoot, nil
+		}
+		capturedWorkType := ""
+		workItemRerunLocalExecution = func(cwd string, manifest localWorkManifest, workType string) (string, error) {
+			capturedWorkType = workType
+			if err := writeWorkRunIndex(workRunIndexEntry{
+				RunID:     "lw-browser-new",
+				Backend:   "local",
+				RepoRoot:  repoRoot,
+				RepoSlug:  fixture.RepoSlug,
+				UpdatedAt: ISOTimeNow(),
+			}); err != nil {
+				t.Fatalf("writeWorkRunIndex new run: %v", err)
+			}
+			return "lw-browser-new", nil
+		}
+
+		browserCtx, cancelBrowser := startUITestNewChromedpBrowser(t, chromePath)
+		defer cancelBrowser()
+
+		tabCtx, cancelTab := startUITestNewChromedpTab(t, browserCtx)
+		defer cancelTab()
+
+		startUITestChromedpOpen(t, tabCtx, fixture.Server.URL+"/#view=home", "#global-repo-grid")
+		startUITestChromedpWaitBodyTextContains(t, tabCtx, "Review feature PR")
+		startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-work-item-show="%s"]`, fixture.ReviewItemID))
+		startUITestChromedpWaitVisible(t, tabCtx, "#work-item-fix-instruction")
+
+		item.Source = "adapter"
+		item.SourceKind = "task"
+		item.Subject = "Recover with auto-saved work type"
+		item.Body = "Recover linked local work after persisting the selected work type."
+		item.WorkType = workTypeTestOnly
+		item.TargetURL = ""
+		item.LinkedRunID = "lw-browser-old"
+		item.LatestDraft = nil
+		item.Metadata = map[string]any{
+			"repo_root": repoRoot,
+		}
+		item.Status = workItemStatusFailed
+		startUITestUpdateWorkItem(t, item)
+		fixture.API.invalidateOverviewCache()
+		startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-work-item-refresh="%s"]`, item.ID))
+		startUITestChromedpWaitVisible(t, tabCtx, "#work-item-work-type")
+		startUITestChromedpSetValue(t, tabCtx, "#work-item-work-type", "feature")
+		startUITestChromedpWaitVisible(t, tabCtx, fmt.Sprintf(`[data-work-item-recover="%s"]`, item.ID))
+		startUITestChromedpClick(t, tabCtx, fmt.Sprintf(`[data-work-item-recover="%s"]`, item.ID))
+		startUITestWaitFor(t, 10*time.Second, "recover action to persist work type", func() bool {
+			updated := startUITestReadWorkItem(t, item.ID)
+			return updated.WorkType == workTypeFeature && updated.LinkedRunID == "lw-browser-new"
+		})
+
+		updated := startUITestReadWorkItem(t, item.ID)
+		if updated.WorkType != workTypeFeature || updated.LinkedRunID != "lw-browser-new" {
+			t.Fatalf("expected recover action to auto-save work type and relink run, got %+v", updated)
+		}
+		if capturedWorkType != workTypeFeature {
+			t.Fatalf("expected recover action to rerun with updated work type, got %q", capturedWorkType)
+		}
+	})
 }
 
 func TestStartUIBrowserInteractionsWorkRunSync(t *testing.T) {

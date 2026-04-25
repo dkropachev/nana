@@ -6414,6 +6414,136 @@ func TestStartUIWorkItemRunFailureInvalidatesOverviewCache(t *testing.T) {
 	}
 }
 
+func TestStartUIWorkItemPatchUpdatesWorkTypeAndInvalidatesOverviewCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	item := startUITestCreateQueuedWorkItem(t, "patch-work-type")
+	api := &startUIAPI{cwd: cwd}
+	startUITestPrimeOverviewCache(t, api)
+
+	server := httptest.NewServer(api.routes())
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/work-items/"+item.ID, strings.NewReader(`{"work_type":"feature"}`))
+	if err != nil {
+		t.Fatalf("new PATCH work item request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("PATCH work item: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected patch status 200, got %d", response.StatusCode)
+	}
+
+	var detail workItemDetail
+	if err := json.NewDecoder(response.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode patched work item detail: %v", err)
+	}
+	if detail.Item.WorkType != workTypeFeature {
+		t.Fatalf("expected patched work type in response, got %+v", detail.Item)
+	}
+
+	updated := startUITestReadWorkItem(t, item.ID)
+	if updated.WorkType != workTypeFeature {
+		t.Fatalf("expected persisted patched work type, got %+v", updated)
+	}
+	if startUITestOverviewCacheValid(api) {
+		t.Fatalf("expected work-item patch to invalidate overview cache")
+	}
+}
+
+func TestStartUIWorkItemRecoverUsesUpdatedWorkTypeAndInvalidatesOverviewCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	item := startUITestCreateQueuedWorkItem(t, "recover-work-type")
+	item.LinkedRunID = "lw-old"
+	item.Status = workItemStatusFailed
+	item.WorkType = workTypeTestOnly
+	if err := writeWorkRunIndex(workRunIndexEntry{
+		RunID:     "lw-old",
+		Backend:   "local",
+		RepoRoot:  cwd,
+		RepoSlug:  "acme/widget",
+		UpdatedAt: ISOTimeNow(),
+	}); err != nil {
+		t.Fatalf("write old run index: %v", err)
+	}
+	startUITestUpdateWorkItem(t, item)
+
+	oldRecover := startUIRecoverWorkItem
+	defer func() { startUIRecoverWorkItem = oldRecover }()
+
+	startUIRecoverWorkItem = func(callCwd string, itemID string) (workItem, error) {
+		updated := startUITestReadWorkItem(t, itemID)
+		if updated.WorkType != workTypeFeature {
+			t.Fatalf("expected recover path to observe updated work type, got %+v", updated)
+		}
+		if err := writeWorkRunIndex(workRunIndexEntry{
+			RunID:     "lw-new",
+			Backend:   "local",
+			RepoRoot:  cwd,
+			RepoSlug:  "acme/widget",
+			UpdatedAt: ISOTimeNow(),
+		}); err != nil {
+			t.Fatalf("write new run index: %v", err)
+		}
+		updated.LinkedRunID = "lw-new"
+		updated.Status = workItemStatusDraftReady
+		updated.LatestDraft = &workItemDraft{
+			Kind:    "execution",
+			Summary: "Recovered local work",
+			RunID:   "lw-new",
+		}
+		startUITestUpdateWorkItem(t, updated)
+		return updated, nil
+	}
+
+	api := &startUIAPI{cwd: cwd}
+	startUITestPrimeOverviewCache(t, api)
+
+	server := httptest.NewServer(api.routes())
+	defer server.Close()
+
+	patchRequest, err := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/work-items/"+item.ID, strings.NewReader(`{"work_type":"feature"}`))
+	if err != nil {
+		t.Fatalf("new PATCH work item request: %v", err)
+	}
+	patchRequest.Header.Set("Content-Type", "application/json")
+	patchResponse, err := http.DefaultClient.Do(patchRequest)
+	if err != nil {
+		t.Fatalf("PATCH work item before recover: %v", err)
+	}
+	patchResponse.Body.Close()
+	if patchResponse.StatusCode != http.StatusOK {
+		t.Fatalf("expected patch status 200 before recover, got %d", patchResponse.StatusCode)
+	}
+
+	startUITestPrimeOverviewCache(t, api)
+	recoverResponse, err := http.Post(server.URL+"/api/v1/work-items/"+item.ID+"/recover", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST work item recover: %v", err)
+	}
+	defer recoverResponse.Body.Close()
+	if recoverResponse.StatusCode != http.StatusOK {
+		t.Fatalf("expected recover status 200, got %d", recoverResponse.StatusCode)
+	}
+
+	updated := startUITestReadWorkItem(t, item.ID)
+	if updated.LinkedRunID != "lw-new" || updated.WorkType != workTypeFeature {
+		t.Fatalf("expected recovered work item to keep updated work type and new run, got %+v", updated)
+	}
+	if startUITestOverviewCacheValid(api) {
+		t.Fatalf("expected work-item recover to invalidate overview cache")
+	}
+}
+
 func TestStartUIWorkItemFixFailureInvalidatesOverviewCache(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -159,6 +159,7 @@
       itemID: "",
       detail: null,
       fixInstruction: "",
+      workType: "",
       loading: false,
       error: "",
     };
@@ -3437,6 +3438,7 @@
       const row = {
         id: item.id,
         source: `${defaultString(item.source, "-")}/${defaultString(item.source_kind, "-")}`,
+        work_type: workTypeLabel(item.work_type),
         status: defaultString(item.status, "-"),
         attention_state: defaultString(item.attention_state, "active"),
         pause_reason: defaultString(item.pause_reason, ""),
@@ -4066,6 +4068,7 @@
         { field: "source", label: "Source" },
         { field: "repo_slug", label: "Repo" },
         { field: "subject", label: "Subject" },
+        { field: "work_type", label: "Work Type" },
         { field: "status", label: "Status", render: (row) => renderStatePillWithPause(row.attention_state, row.status, row.pause_until, row.pause_reason) },
         { field: "draft_kind", label: "Kind" },
         { field: "updated_at", label: "Updated" },
@@ -6406,6 +6409,7 @@
       renderGrid("repo-work-item-grid", [
         { field: "source", label: "Source" },
         { field: "subject", label: "Subject" },
+        { field: "work_type", label: "Work Type" },
         { field: "status", label: "Status", render: (row) => renderStatePillWithPause(row.attention_state, row.status, row.pause_until, row.pause_reason) },
         { field: "draft_kind", label: "Kind" },
         { field: "updated_at", label: "Updated" },
@@ -7804,6 +7808,10 @@
       const draft = item.latest_draft || null;
       const workItemPauseSummary = pauseStateSummary(item.pause_until, item.pause_reason);
       const showRestoreButton = Boolean(item.hidden || item.status === "dropped");
+      const workTypeValue = defaultString(state.workItemSelection.workType, defaultString(item.work_type, ""));
+      const workTypeDirty = workTypeValue && workTypeValue !== defaultString(item.work_type, "");
+      const showExecutionControls = Boolean(detail.execution_allowed);
+      const recoverSummary = defaultString(detail.recover_summary, "Recover Work tries to continue linked work when possible and otherwise starts a fresh run using the selected work type.");
       const events = (detail.events || []).map((event) => {
         return `
         <li>
@@ -7834,15 +7842,16 @@
             <span class="drawer-label">Linked Run</span>
             <span class="drawer-value">${escapeHTML(defaultString(item.linked_run_id, "-"))}</span>
           </div>
-          <div class="drawer-summary-card">
-            <span class="drawer-label">Updated</span>
-            <span class="drawer-value">${escapeHTML(formatDateTime(item.updated_at))}</span>
-          </div>
-          ${workItemPauseSummary ? `<div class="drawer-summary-card"><span class="drawer-label">Retry</span><span class="drawer-value">${escapeHTML(workItemPauseSummary)}</span></div>` : ""}
-        </div>
-      </div>
-      <div class="drawer-toolbar">
-        ${item.status === "paused" ? `<button class="tx-btn tx-btn-secondary" type="button" data-work-item-requeue="${escapeHTML(item.id)}">Return to Queue</button>` : ""}
+	          <div class="drawer-summary-card">
+	            <span class="drawer-label">Updated</span>
+	            <span class="drawer-value">${escapeHTML(formatDateTime(item.updated_at))}</span>
+	          </div>
+	          ${showExecutionControls ? `<div class="drawer-summary-card"><span class="drawer-label">Work Type</span><span class="drawer-value">${escapeHTML(workTypeValue ? workTypeLabel(workTypeValue) : "(unset)")}</span></div>` : ""}
+	          ${workItemPauseSummary ? `<div class="drawer-summary-card"><span class="drawer-label">Retry</span><span class="drawer-value">${escapeHTML(workItemPauseSummary)}</span></div>` : ""}
+	        </div>
+	      </div>
+	      <div class="drawer-toolbar">
+	        ${item.status === "paused" ? `<button class="tx-btn tx-btn-secondary" type="button" data-work-item-requeue="${escapeHTML(item.id)}">Return to Queue</button>` : ""}
         <button class="tx-btn tx-btn-secondary" type="button" data-work-item-run="${escapeHTML(item.id)}">Run</button>
         <button class="tx-btn tx-btn-secondary" type="button" data-work-item-fix="${escapeHTML(item.id)}">Fix</button>
         <button class="tx-btn tx-btn-primary" type="button" data-work-item-submit="${escapeHTML(item.id)}">Submit</button>
@@ -7857,16 +7866,37 @@
             <p>${escapeHTML(defaultString(item.body, "No source body captured."))}</p>
           </div>
         </div>
-        ${(item.pause_until || item.pause_reason) ? `
-          <div class="queue-summary">
-            ${item.pause_until ? `<article class="queue-item"><span class="queue-label">Pause Until</span><p class="queue-copy">${escapeHTML(formatDateTime(item.pause_until))}</p></article>` : ""}
-            ${item.pause_reason ? `<article class="queue-item"><span class="queue-label">Pause Reason</span><p class="queue-copy">${escapeHTML(item.pause_reason)}</p></article>` : ""}
-          </div>
-        ` : ""}
-      </div>
-      <div class="surface">
-        <div class="surface-head">
-          <div>
+	        ${(item.pause_until || item.pause_reason) ? `
+	          <div class="queue-summary">
+	            ${item.pause_until ? `<article class="queue-item"><span class="queue-label">Pause Until</span><p class="queue-copy">${escapeHTML(formatDateTime(item.pause_until))}</p></article>` : ""}
+	            ${item.pause_reason ? `<article class="queue-item"><span class="queue-label">Pause Reason</span><p class="queue-copy">${escapeHTML(item.pause_reason)}</p></article>` : ""}
+	          </div>
+	        ` : ""}
+	      </div>
+	      ${showExecutionControls ? `
+	      <div class="surface">
+	        <div class="surface-head">
+	          <div>
+	            <h3>Execution Controls</h3>
+	            <p>Run starts work from this item now. ${escapeHTML(recoverSummary)} Run and Recover Work save the selected work type before acting.</p>
+	          </div>
+	        </div>
+	        <label class="selector config-selector">
+	          <span>Work Type</span>
+	          <select id="work-item-work-type">
+	            <option value="" ${workTypeValue ? "" : "selected"}>${escapeHTML(item.work_type ? "Keep current work type" : "Select a work type")}</option>
+	            ${["bug_fix", "refactor", "feature", "test_only"].map((value) => `<option value="${value}" ${workTypeValue === value ? "selected" : ""}>${escapeHTML(workTypeLabel(value))}</option>`).join("")}
+	          </select>
+	        </label>
+	        <div class="config-actions">
+	          <button class="tx-btn tx-btn-secondary" type="button" data-work-item-save="${escapeHTML(item.id)}" ${workTypeDirty ? "" : "disabled"}>Save Work Type</button>
+	          <button class="tx-btn tx-btn-primary" type="button" data-work-item-recover="${escapeHTML(item.id)}" ${detail.recover_allowed ? "" : "disabled"}>Recover Work</button>
+	        </div>
+	      </div>
+	      ` : ""}
+	      <div class="surface">
+	        <div class="surface-head">
+	          <div>
             <h3>Draft</h3>
             <p>${escapeHTML(defaultString(draft ? draft.summary : "", draft ? "Review the current draft before submission." : "No draft is ready yet."))}</p>
           </div>
@@ -7913,12 +7943,43 @@
     loadWorkItemDetail(itemID);
   }
 
+  function workItemRequestedWorkType(detail) {
+    if (!detail || !detail.item) return "";
+    return String(state.workItemSelection.workType || detail.item.work_type || "").trim();
+  }
+
+  function persistWorkItemWorkTypeIfNeeded(itemID) {
+    const detail = state.workItemSelection.detail;
+    if (!detail || !detail.item || detail.item.id !== itemID) {
+      return Promise.resolve(detail);
+    }
+    const current = String(detail.item.work_type || "").trim();
+    const next = workItemRequestedWorkType(detail);
+    if (!next || next === current) {
+      return Promise.resolve(detail);
+    }
+    return api(`/api/v1/work-items/${encodeURIComponent(itemID)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ work_type: next }),
+    }).then((payload) => {
+      if (state.workItemSelection.itemID !== itemID) return payload;
+      state.workItemSelection.detail = payload;
+      state.workItemSelection.workType = "";
+      renderWorkItemDrawer();
+      load();
+      return payload;
+    });
+  }
+
   function loadWorkItemDetail(itemID, options = {}) {
     state.workItemSelection.itemID = itemID;
     state.workItemSelection.loading = true;
     state.workItemSelection.error = "";
     if (options.resetFixInstruction) {
       state.workItemSelection.fixInstruction = "";
+    }
+    if (options.resetWorkType) {
+      state.workItemSelection.workType = "";
     }
     renderWorkItemDrawer();
     return api(`/api/v1/work-items/${encodeURIComponent(itemID)}`).then((payload) => {
@@ -7927,6 +7988,9 @@
       state.workItemSelection.detail = payload;
       if (options.resetFixInstruction) {
         state.workItemSelection.fixInstruction = "";
+      }
+      if (options.resetWorkType) {
+        state.workItemSelection.workType = "";
       }
       renderWorkItemDrawer();
     }).catch((error) => {
@@ -9436,6 +9500,11 @@
         state.workItemSelection.fixInstruction = String(event.target.value || "");
         return;
       }
+      if (event.target.id === "work-item-work-type") {
+        state.workItemSelection.workType = String(event.target.value || "");
+        renderWorkItemDrawer();
+        return;
+      }
       if (event.target.id === "log-file-select") {
         const filePath = String(event.target.value || "");
         if (state.logSelection.runID && filePath) {
@@ -9472,17 +9541,48 @@
         return;
       }
 
+      const saveButton = event.target.closest("[data-work-item-save]");
+      if (saveButton) {
+        const itemID = saveButton.getAttribute("data-work-item-save");
+        persistWorkItemWorkTypeIfNeeded(itemID).then(() => {
+          toast("success", "Work type updated", itemID);
+          loadWorkItemDetail(itemID, { resetWorkType: true });
+        }).catch((error) => {
+          toast("danger", "Work type update failed", error.message);
+        });
+        return;
+      }
+
       const runButton = event.target.closest("[data-work-item-run]");
       if (runButton) {
         const itemID = runButton.getAttribute("data-work-item-run");
-        api(`/api/v1/work-items/${encodeURIComponent(itemID)}/run`, {
-          method: "POST",
+        persistWorkItemWorkTypeIfNeeded(itemID).then(() => {
+          return api(`/api/v1/work-items/${encodeURIComponent(itemID)}/run`, {
+            method: "POST",
+          });
         }).then(() => {
           toast("success", "Work item started", itemID);
           load();
-          loadWorkItemDetail(itemID);
+          loadWorkItemDetail(itemID, { resetWorkType: true });
         }).catch((error) => {
           toast("danger", "Run failed", error.message);
+        });
+        return;
+      }
+
+      const recoverButton = event.target.closest("[data-work-item-recover]");
+      if (recoverButton) {
+        const itemID = recoverButton.getAttribute("data-work-item-recover");
+        persistWorkItemWorkTypeIfNeeded(itemID).then(() => {
+          return api(`/api/v1/work-items/${encodeURIComponent(itemID)}/recover`, {
+            method: "POST",
+          });
+        }).then(() => {
+          toast("success", "Recovery started", itemID);
+          load();
+          loadWorkItemDetail(itemID, { resetWorkType: true });
+        }).catch((error) => {
+          toast("danger", "Recovery failed", error.message);
         });
         return;
       }

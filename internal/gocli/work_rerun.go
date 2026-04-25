@@ -6,6 +6,10 @@ import (
 	"strings"
 )
 
+type localWorkRerunOptions struct {
+	WorkType string
+}
+
 func rerunLocalWork(cwd string, selection localWorkRunSelection) (string, error) {
 	manifest, _, err := resolveLocalWorkRun(cwd, selection)
 	if err != nil {
@@ -40,6 +44,10 @@ func localWorkRerunAllowed(manifest localWorkManifest) bool {
 }
 
 func rerunLocalWorkManifest(cwd string, manifest localWorkManifest) (string, error) {
+	return rerunLocalWorkManifestWithOptions(cwd, manifest, localWorkRerunOptions{})
+}
+
+func rerunLocalWorkManifestWithOptions(cwd string, manifest localWorkManifest, options localWorkRerunOptions) (string, error) {
 	if localWorkStopAllowed(manifest) {
 		return "", fmt.Errorf("work run %s is still active; stop it before rerunning", manifest.RunID)
 	}
@@ -56,24 +64,32 @@ func rerunLocalWorkManifest(cwd string, manifest localWorkManifest) (string, err
 		return "", fmt.Errorf("work run %s input plan is empty", manifest.RunID)
 	}
 
-	options := localWorkStartOptions{
+	workType := normalizeWorkType(options.WorkType)
+	if workType == "" {
+		workType = normalizeWorkType(manifest.WorkType)
+	}
+	if workType == "" {
+		return "", fmt.Errorf("work run %s is missing a valid work type for rerun", manifest.RunID)
+	}
+
+	startOptions := localWorkStartOptions{
 		Detach:                true,
 		RepoPath:              manifest.RepoRoot,
 		Task:                  task,
-		WorkType:              normalizeWorkType(manifest.WorkType),
+		WorkType:              workType,
 		MaxIterations:         manifest.MaxIterations,
 		IntegrationPolicy:     defaultString(strings.TrimSpace(manifest.IntegrationPolicy), "final"),
 		GroupingPolicy:        defaultString(strings.TrimSpace(manifest.GroupingPolicy), localWorkDefaultGroupingPolicy),
 		ValidationParallelism: manifest.ValidationParallelism,
 	}
-	if options.MaxIterations <= 0 {
-		options.MaxIterations = localWorkDefaultMaxIterations
+	if startOptions.MaxIterations <= 0 {
+		startOptions.MaxIterations = localWorkDefaultMaxIterations
 	}
-	if options.ValidationParallelism <= 0 {
-		options.ValidationParallelism = localWorkValidationParallelism
+	if startOptions.ValidationParallelism <= 0 {
+		startOptions.ValidationParallelism = localWorkValidationParallelism
 	}
 	if strings.TrimSpace(cwd) == "" {
 		cwd = manifest.RepoRoot
 	}
-	return startLocalWorkWithRunID(cwd, options)
+	return startLocalWorkWithRunID(cwd, startOptions)
 }
