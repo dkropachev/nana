@@ -454,7 +454,7 @@ func TestPatchWorkItemByIDPersistsWorkType(t *testing.T) {
 	}
 
 	workType := workTypeFeature
-	updated, err := patchWorkItemByID(item.ID, &workType, "test")
+	updated, err := patchWorkItemByID(item.ID, startUIWorkItemPatchRequest{WorkType: &workType}, "test")
 	if err != nil {
 		t.Fatalf("patchWorkItemByID: %v", err)
 	}
@@ -481,6 +481,38 @@ func TestPatchWorkItemByIDPersistsWorkType(t *testing.T) {
 	}
 	if !foundEvent {
 		t.Fatalf("expected work_type_updated event, got %+v", detail.Events)
+	}
+}
+
+func TestPatchWorkItemByIDRejectsCompletedAndDeletedItems(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	item, _, err := enqueueWorkItem(workItemInput{
+		Source:     "email",
+		SourceKind: "task",
+		ExternalID: "work-type-patch-readonly",
+		Subject:    "Do not edit this",
+		Metadata: map[string]any{
+			"repo_root": t.TempDir(),
+		},
+	}, "test")
+	if err != nil {
+		t.Fatalf("enqueueWorkItem: %v", err)
+	}
+
+	item.Status = workItemStatusDropped
+	startUITestUpdateWorkItem(t, item)
+
+	workType := workTypeFeature
+	if _, err := patchWorkItemByID(item.ID, startUIWorkItemPatchRequest{WorkType: &workType}, "test"); err == nil || !strings.Contains(err.Error(), "not editable") {
+		t.Fatalf("expected dropped work item patch to be rejected, got %v", err)
+	}
+
+	item.Status = workItemStatusDeleted
+	startUITestUpdateWorkItem(t, item)
+	if _, err := patchWorkItemByID(item.ID, startUIWorkItemPatchRequest{WorkType: &workType}, "test"); err == nil || !strings.Contains(err.Error(), "not editable") {
+		t.Fatalf("expected deleted work item patch to be rejected, got %v", err)
 	}
 }
 

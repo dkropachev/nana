@@ -439,11 +439,14 @@ func patchStartUITask(cwd string, taskID string, payload startUIPlannedItemPatch
 		}
 		return map[string]any{"state": updatedState, "planned_item": updatedItem, "detail": detail}, nil
 	case strings.HasPrefix(taskID, "work-item:"):
-		if payload.WorkType == nil {
-			return nil, fmt.Errorf("task %s only supports patching work_type", taskID)
-		}
 		itemID := strings.TrimSpace(strings.TrimPrefix(taskID, "work-item:"))
-		if _, err := patchWorkItemByID(itemID, payload.WorkType, "ui"); err != nil {
+		if _, err := patchWorkItemByID(itemID, startUIWorkItemPatchRequest{
+			Title:       payload.Title,
+			Description: payload.Description,
+			TargetURL:   payload.TargetURL,
+			Priority:    payload.Priority,
+			WorkType:    payload.WorkType,
+		}, "ui"); err != nil {
 			return nil, err
 		}
 		detail, err := loadStartUITaskDetail(cwd, taskID)

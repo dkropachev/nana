@@ -1651,18 +1651,70 @@ func submitWorkItemByID(itemID string, actor string) (workItem, error) {
 	return item, nil
 }
 
-func patchWorkItemByID(itemID string, workType *string, actor string) (workItem, error) {
+func workItemEditableStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case workItemStatusSubmitted, workItemStatusDropped, workItemStatusSilenced, workItemStatusDeleted:
+		return false
+	default:
+		return true
+	}
+}
+
+func patchWorkItemByID(itemID string, patch startUIWorkItemPatchRequest, actor string) (workItem, error) {
 	item, err := withLocalWorkReadStore(func(store *localWorkDBStore) (workItem, error) {
 		return store.readWorkItem(itemID)
 	})
 	if err != nil {
 		return workItem{}, err
 	}
+	if !workItemEditableStatus(item.Status) {
+		return workItem{}, fmt.Errorf("work item %s is not editable from status %s", item.ID, item.Status)
+	}
 
 	payload := map[string]any{}
-	changed := false
-	if workType != nil {
-		normalized, err := parseRequiredWorkType(*workType, "work_type")
+	changedFields := make([]string, 0, 5)
+	if patch.Title != nil {
+		title := strings.TrimSpace(*patch.Title)
+		if title == "" {
+			return workItem{}, fmt.Errorf("title is required")
+		}
+		if title != item.Subject {
+			payload["previous_title"] = item.Subject
+			payload["title"] = title
+			item.Subject = title
+			changedFields = append(changedFields, "title")
+		}
+	}
+	if patch.Description != nil {
+		description := strings.TrimSpace(*patch.Description)
+		if description != item.Body {
+			payload["description_updated"] = true
+			item.Body = description
+			changedFields = append(changedFields, "description")
+		}
+	}
+	if patch.TargetURL != nil {
+		targetURL := strings.TrimSpace(*patch.TargetURL)
+		if targetURL != item.TargetURL {
+			payload["previous_target_url"] = item.TargetURL
+			payload["target_url"] = targetURL
+			item.TargetURL = targetURL
+			changedFields = append(changedFields, "target_url")
+		}
+	}
+	if patch.Priority != nil {
+		if *patch.Priority < 0 || *patch.Priority > 5 {
+			return workItem{}, fmt.Errorf("priority must be between P0 and P5")
+		}
+		if *patch.Priority != item.Priority {
+			payload["previous_priority"] = item.Priority
+			payload["priority"] = *patch.Priority
+			item.Priority = *patch.Priority
+			changedFields = append(changedFields, "priority")
+		}
+	}
+	if patch.WorkType != nil {
+		normalized, err := parseRequiredWorkType(*patch.WorkType, "work_type")
 		if err != nil {
 			return workItem{}, err
 		}
@@ -1670,16 +1722,21 @@ func patchWorkItemByID(itemID string, workType *string, actor string) (workItem,
 			payload["previous_work_type"] = normalizeWorkType(item.WorkType)
 			payload["work_type"] = normalized
 			item.WorkType = normalized
-			changed = true
+			changedFields = append(changedFields, "work_type")
 		}
 	}
-	if !changed {
+	if len(changedFields) == 0 {
 		return item, nil
 	}
 
+	payload["fields"] = changedFields
 	item.UpdatedAt = ISOTimeNow()
+	eventType := "edited"
+	if len(changedFields) == 1 && changedFields[0] == "work_type" {
+		eventType = "work_type_updated"
+	}
 	if _, err := withLocalWorkWriteStore(func(store *localWorkDBStore) (workItem, error) {
-		if err := store.updateWorkItemWithEvent(item, "work_type_updated", actor, payload); err != nil {
+		if err := store.updateWorkItemWithEvent(item, eventType, actor, payload); err != nil {
 			return workItem{}, err
 		}
 		return item, nil

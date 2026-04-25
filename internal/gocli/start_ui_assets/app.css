@@ -1067,6 +1067,56 @@ textarea {
   word-break: break-word;
 }
 
+.task-detail-host {
+  display: grid;
+}
+
+.task-detail-page {
+  display: grid;
+  gap: 16px;
+}
+
+.task-detail-page-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-detail-page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.task-detail-shell {
+  display: grid;
+  gap: 16px;
+}
+
+.task-detail-shell-muted {
+  opacity: 0.68;
+  filter: grayscale(0.28);
+}
+
+.task-detail-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.task-detail-field {
+  display: grid;
+  gap: 8px;
+}
+
+.task-detail-field textarea {
+  min-height: 220px;
+  resize: vertical;
+}
+
 .task-detail-markdown {
   display: grid;
   gap: 12px;
@@ -1092,14 +1142,40 @@ textarea {
 }
 
 .task-detail-markdown p,
-.task-detail-markdown ul {
+.task-detail-markdown ul,
+.task-detail-markdown ol,
+.task-detail-markdown blockquote,
+.task-detail-markdown pre {
   margin: 0;
   color: #21324a;
   line-height: 1.6;
 }
 
-.task-detail-markdown ul {
+.task-detail-markdown ul,
+.task-detail-markdown ol {
   padding-left: 20px;
+}
+
+.task-detail-markdown blockquote {
+  padding: 12px 14px;
+  border-left: 4px solid #9cb0c9;
+  border-radius: 8px;
+  background: #f6f8fc;
+}
+
+.task-detail-markdown pre {
+  overflow-x: auto;
+  padding: 14px;
+  border-radius: 10px;
+  background: #142033;
+  color: #f5f7fb;
+}
+
+.task-detail-markdown pre code {
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
 }
 
 .task-detail-markdown code {
@@ -1108,6 +1184,19 @@ textarea {
   background: #eef2f8;
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
   font-size: 12px;
+}
+
+@media (max-width: 840px) {
+  .task-detail-page-toolbar,
+  .task-detail-page-actions,
+  .task-detail-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .task-detail-page-toolbar,
+  .task-detail-page-actions {
+    display: grid;
+  }
 }
 
 .drawer-toolbar {

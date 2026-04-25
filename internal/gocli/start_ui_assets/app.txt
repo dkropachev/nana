@@ -30,7 +30,6 @@
     configEditor: defaultConfigEditor(),
     taskFindings: defaultTaskFindingsState(),
     findingImports: defaultFindingImportsState(),
-    taskDetailModal: null,
     taskScheduleModal: null,
     workItemDrawer: null,
     workItemSelection: defaultWorkItemSelection(),
@@ -177,6 +176,8 @@
       selectedRunID: "",
       detail: null,
       detailWorkType: "",
+      detailEditMode: false,
+      detailEditDraft: null,
       loading: false,
       detailLoading: false,
       loaded: false,
@@ -1877,19 +1878,25 @@
       state.investigations.loading = false;
       state.investigations.loaded = true;
       state.investigations.error = "";
-      if (!state.investigations.selectedRunID || !state.investigations.items.some((item) => item.id === state.investigations.selectedRunID)) {
-        const explicitSelection = investigationSelectionFromHash();
-        if (explicitSelection) {
-          state.investigations.selectedRunID = explicitSelection;
-        } else {
-          state.investigations.selectedRunID = state.investigations.items[0] ? defaultString(state.investigations.items[0].id, "") : "";
-        }
+      const explicitSelection = investigationSelectionFromHash();
+      if (explicitSelection) {
+        state.investigations.selectedRunID = explicitSelection;
+      } else if (state.investigations.selectedRunID && !state.investigations.items.some((item) => item.id === state.investigations.selectedRunID)) {
+        state.investigations.selectedRunID = "";
+        state.investigations.detail = null;
+        state.investigations.detailLoading = false;
+        state.investigations.detailWorkType = "";
+        state.investigations.detailEditMode = false;
+        state.investigations.detailEditDraft = null;
       }
       if (state.investigations.selectedRunID) {
         return loadInvestigationDetail(state.investigations.selectedRunID, { silent: true });
       }
       state.investigations.detail = null;
       state.investigations.detailLoading = false;
+      state.investigations.detailWorkType = "";
+      state.investigations.detailEditMode = false;
+      state.investigations.detailEditDraft = null;
       if (state.currentView === "investigations") {
         renderInvestigationsPage();
       }
@@ -1922,6 +1929,8 @@
     if (currentDetailID !== taskID) {
       state.investigations.detail = null;
       state.investigations.detailWorkType = "";
+      state.investigations.detailEditMode = false;
+      state.investigations.detailEditDraft = null;
     }
     syncHashState();
     state.investigations.detailLoading = true;
@@ -1938,7 +1947,6 @@
       if (options.resetWorkType) {
         state.investigations.detailWorkType = "";
       }
-      renderTaskDetailSurfaces();
       if (state.currentView === "investigations") {
         renderInvestigationsPage();
       }
@@ -1950,7 +1958,6 @@
         state.investigations.detailWorkType = "";
       }
       state.investigations.error = error.message;
-      renderTaskDetailSurfaces();
       if (state.currentView === "investigations") {
         renderInvestigationsPage();
       }
@@ -2508,6 +2515,9 @@
       state.taskComposer.repoSlug = nextRepo;
     }
     syncWorkspaceRepoFilters(nextRepo);
+    if (state.investigations.selectedRunID && state.currentView === "investigations") {
+      clearTaskDetailSelection({ syncHash: false });
+    }
     state.currentView = nextView;
     state.repoTab = nextRepoTab;
     renderApp();
@@ -2545,6 +2555,18 @@
     state.selectedRepo = route.repoSlug;
     renderApp();
     refreshCurrentView({ silent: true }).catch(() => {});
+  }
+
+  function clearTaskDetailSelection(options = {}) {
+    state.investigations.selectedRunID = "";
+    state.investigations.detail = null;
+    state.investigations.detailLoading = false;
+    state.investigations.detailWorkType = "";
+    state.investigations.detailEditMode = false;
+    state.investigations.detailEditDraft = null;
+    if (options.syncHash !== false) {
+      syncHashState();
+    }
   }
 
   function destroyWidgets() {
@@ -4824,7 +4846,7 @@
           <article class="queue-item"><span class="queue-label">Source</span><p class="queue-copy">${escapeHTML(defaultString(item.source, "-"))}/${escapeHTML(defaultString(item.source_kind, "-"))}</p></article>
           <article class="queue-item"><span class="queue-label">Target</span><p class="queue-copy">${escapeHTML(defaultString(item.target_url, "(none)"))}</p></article>
           <article class="queue-item"><span class="queue-label">Draft</span><p class="queue-copy">${escapeHTML(defaultString(item.latest_draft && item.latest_draft.summary, "(none)"))}</p></article>
-          <article class="queue-item"><span class="queue-label">Body</span><p class="queue-copy">${escapeHTML(defaultString(item.body, "(none)"))}</p></article>
+          <article class="queue-item"><span class="queue-label">Priority</span><p class="queue-copy">${escapeHTML(`P${defaultString(item.priority, 3)}`)}</p></article>
         </div>
       `;
     }
@@ -4887,14 +4909,17 @@
   }
 
   function selectedTaskDetailWorkType(detail) {
-    if (!detail) return "";
-    if (detail.work_item && detail.work_item.item) {
-      return String(state.investigations.detailWorkType || detail.work_item.item.work_type || "").trim();
+    const draft = state.investigations.detailEditDraft;
+    if (draft && typeof draft.work_type === "string") {
+      return String(draft.work_type || "").trim();
     }
-    if (detail.planned_item) {
-      return String(state.investigations.detailWorkType || detail.planned_item.work_type || "").trim();
+    if (detail && detail.work_item && detail.work_item.item) {
+      return String(detail.work_item.item.work_type || "").trim();
     }
-    return "";
+    if (detail && detail.planned_item) {
+      return String(detail.planned_item.work_type || "").trim();
+    }
+    return String(state.investigations.detailWorkType || "").trim();
   }
 
   function persistTaskDetailWorkTypeIfNeeded(taskID) {
@@ -4902,41 +4927,19 @@
     if (!detail || !detail.summary || detail.summary.id !== taskID) {
       return Promise.resolve(detail);
     }
-    let current = "";
-    if (detail.work_item && detail.work_item.item) {
-      current = String(detail.work_item.item.work_type || "").trim();
-    } else if (detail.planned_item) {
-      current = String(detail.planned_item.work_type || "").trim();
-    } else {
+    if (!state.investigations.detailEditMode) {
       return Promise.resolve(detail);
     }
-    const next = selectedTaskDetailWorkType(detail);
-    if (!next || next === current) {
-      return Promise.resolve(detail);
-    }
-    return api(`/api/v1/tasks/${encodeURIComponent(taskID)}`, {
-      method: "PATCH",
-      body: JSON.stringify({ work_type: next }),
-    }).then((payload) => {
-      const nextDetail = payload && payload.detail ? payload.detail : payload;
-      if (state.investigations.selectedRunID !== taskID) return nextDetail;
-      if (nextDetail && nextDetail.summary) {
-        state.investigations.detail = nextDetail;
-      }
-      state.investigations.detailWorkType = "";
-      renderTaskDetailSurfaces();
-      loadInvestigations({ silent: true });
-      return nextDetail && nextDetail.summary
-        ? nextDetail
-        : loadInvestigationDetail(taskID, { silent: true, resetWorkType: true });
-    });
+    return persistTaskDetailEdits(taskID);
   }
 
   function renderMarkdownInline(text) {
-    let rendered = escapeHTML(defaultString(text, ""));
-    rendered = rendered.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-    rendered = rendered.replace(/\*(.+?)\*/g, "<em>$1</em>");
-    rendered = rendered.replace(/`([^`]+)`/g, "<code>$1</code>");
+    const codeSegments = [];
+    const source = defaultString(text, "").replace(/`([^`]+)`/g, (_, value) => `@@CODE${codeSegments.push(value) - 1}@@`);
+    let rendered = escapeHTML(source);
+    rendered = rendered.replace(/\*\*([^*]+?)\*\*/g, "<strong>$1</strong>");
+    rendered = rendered.replace(/\*([^*]+?)\*/g, "<em>$1</em>");
+    rendered = rendered.replace(/@@CODE(\d+)@@/g, (_, index) => `<code>${escapeHTML(codeSegments[Number(index)] || "")}</code>`);
     return rendered;
   }
 
@@ -4947,36 +4950,74 @@
     const lines = source.split("\n");
     const blocks = [];
     let paragraph = [];
-    let listItems = [];
+    let listState = null;
+    let quoteLines = [];
+    let codeLines = null;
 
     const flushParagraph = () => {
       if (!paragraph.length) return;
-      const text = paragraph.join(" ").trim();
+      const text = paragraph.join("\n").trim();
       if (text) {
-        blocks.push(`<p>${renderMarkdownInline(text)}</p>`);
+        blocks.push(`<p>${text.split("\n").map((line) => renderMarkdownInline(line.trim())).join("<br>")}</p>`);
       }
       paragraph = [];
     };
 
     const flushList = () => {
-      if (!listItems.length) return;
-      blocks.push(`<ul>${listItems.map((item) => `<li>${renderMarkdownInline(item)}</li>`).join("")}</ul>`);
-      listItems = [];
+      if (!listState || !listState.items.length) return;
+      const tag = listState.kind === "ordered" ? "ol" : "ul";
+      blocks.push(`<${tag}>${listState.items.map((item) => `<li>${renderMarkdownInline(item)}</li>`).join("")}</${tag}>`);
+      listState = null;
+    };
+
+    const flushQuotes = () => {
+      if (!quoteLines.length) return;
+      blocks.push(`<blockquote>${quoteLines.map((line) => `<p>${renderMarkdownInline(line)}</p>`).join("")}</blockquote>`);
+      quoteLines = [];
+    };
+
+    const flushCode = () => {
+      if (!codeLines) return;
+      blocks.push(`<pre><code>${escapeHTML(codeLines.join("\n"))}</code></pre>`);
+      codeLines = null;
+    };
+
+    const flushAll = () => {
+      flushParagraph();
+      flushList();
+      flushQuotes();
+      flushCode();
     };
 
     for (const rawLine of lines) {
       const line = rawLine.trimEnd();
       const trimmed = line.trim();
+      if (codeLines) {
+        if (/^```/.test(trimmed)) {
+          flushCode();
+        } else {
+          codeLines.push(rawLine);
+        }
+        continue;
+      }
       if (!trimmed) {
         flushParagraph();
         flushList();
+        flushQuotes();
+        continue;
+      }
+
+      if (/^```/.test(trimmed)) {
+        flushParagraph();
+        flushList();
+        flushQuotes();
+        codeLines = [];
         continue;
       }
 
       const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
       if (heading) {
-        flushParagraph();
-        flushList();
+        flushAll();
         const level = heading[1].length;
         blocks.push(`<h${level}>${renderMarkdownInline(heading[2].trim())}</h${level}>`);
         continue;
@@ -4985,33 +5026,375 @@
       const bullet = trimmed.match(/^[-*]\s+(.*)$/);
       if (bullet) {
         flushParagraph();
-        listItems.push(bullet[1].trim());
+        flushQuotes();
+        if (!listState || listState.kind !== "unordered") {
+          flushList();
+          listState = { kind: "unordered", items: [] };
+        }
+        listState.items.push(bullet[1].trim());
+        continue;
+      }
+
+      const ordered = trimmed.match(/^\d+\.\s+(.*)$/);
+      if (ordered) {
+        flushParagraph();
+        flushQuotes();
+        if (!listState || listState.kind !== "ordered") {
+          flushList();
+          listState = { kind: "ordered", items: [] };
+        }
+        listState.items.push(ordered[1].trim());
+        continue;
+      }
+
+      const quote = trimmed.match(/^>\s?(.*)$/);
+      if (quote) {
+        flushParagraph();
+        flushList();
+        quoteLines.push(quote[1].trim());
         continue;
       }
 
       flushList();
+      flushQuotes();
       paragraph.push(trimmed);
     }
 
-    flushParagraph();
-    flushList();
+    flushAll();
     return blocks.join("");
+  }
+
+  function taskDetailSupportsEditing(detail) {
+    if (!detail || !detail.summary) return false;
+    if (detail.planned_item) {
+      return ["queued", "failed"].includes(defaultString(detail.planned_item.state, ""));
+    }
+    return Boolean(detail.work_item && detail.work_item.item);
+  }
+
+  function taskDetailIsCompletedOrDeleted(detail) {
+    if (!detail || !detail.summary) return false;
+    const summary = detail.summary;
+    return defaultString(summary.attention_state, "") === "completed"
+      || defaultString(summary.raw_status, summary.status) === "deleted"
+      || defaultString(summary.status, "") === "completed";
+  }
+
+  function taskDetailCanEdit(detail) {
+    return taskDetailSupportsEditing(detail) && !taskDetailIsCompletedOrDeleted(detail);
+  }
+
+  function taskDetailReadOnlyReason(detail) {
+    if (!detail || !detail.summary) return "";
+    if (taskDetailIsCompletedOrDeleted(detail)) {
+      return "Completed and deleted tasks stay read-only.";
+    }
+    if (!taskDetailSupportsEditing(detail)) {
+      return "This task type is view-only.";
+    }
+    return "";
+  }
+
+  function buildTaskDetailEditDraft(detail) {
+    if (!detail || !detail.summary) return null;
+    const summary = detail.summary;
+    if (detail.work_item && detail.work_item.item) {
+      const item = detail.work_item.item;
+      return {
+        title: defaultString(item.subject, summary.title),
+        description: defaultString(item.body, ""),
+        target_url: defaultString(item.target_url, ""),
+        priority: String(typeof item.priority === "number" ? item.priority : (typeof summary.priority === "number" ? summary.priority : 3)),
+        work_type: defaultString(item.work_type, ""),
+      };
+    }
+    if (detail.planned_item) {
+      const item = detail.planned_item;
+      return {
+        title: defaultString(item.title, summary.title),
+        description: defaultString(item.description, ""),
+        priority: String(typeof item.priority === "number" ? item.priority : (typeof summary.priority === "number" ? summary.priority : 3)),
+        work_type: defaultString(item.work_type, "feature"),
+        schedule_at: toDateTimeLocal(item.schedule_at),
+      };
+    }
+    return null;
+  }
+
+  function taskDetailDraftValue(field) {
+    const draft = state.investigations.detailEditDraft || {};
+    return defaultString(draft[field], "");
+  }
+
+  function taskDetailEditDraftDirty(detail) {
+    const original = buildTaskDetailEditDraft(detail);
+    const draft = state.investigations.detailEditDraft;
+    if (!original || !draft) return false;
+    return JSON.stringify(original) !== JSON.stringify(draft);
+  }
+
+  function enterTaskDetailEditMode() {
+    const detail = state.investigations.detail;
+    if (!taskDetailCanEdit(detail)) return;
+    state.investigations.detailEditDraft = buildTaskDetailEditDraft(detail);
+    state.investigations.detailEditMode = true;
+    renderInvestigationsPage();
+  }
+
+  function cancelTaskDetailEditMode() {
+    state.investigations.detailEditMode = false;
+    state.investigations.detailEditDraft = null;
+    renderInvestigationsPage();
+  }
+
+  function taskDetailPatchPayload(detail) {
+    const draft = state.investigations.detailEditDraft;
+    const original = buildTaskDetailEditDraft(detail);
+    if (!draft || !original) return {};
+    const payload = {};
+    if (draft.title !== original.title) {
+      payload.title = String(draft.title || "").trim();
+    }
+    if (draft.description !== original.description) {
+      payload.description = String(draft.description || "").trim();
+    }
+    if (draft.work_type !== original.work_type && draft.work_type) {
+      payload.work_type = draft.work_type;
+    }
+    const nextPriority = Number.parseInt(String(draft.priority || ""), 10);
+    const previousPriority = Number.parseInt(String(original.priority || ""), 10);
+    if (!Number.isNaN(nextPriority) && nextPriority !== previousPriority) {
+      payload.priority = nextPriority;
+    }
+    if (detail && detail.work_item && detail.work_item.item) {
+      if (draft.target_url !== original.target_url) {
+        payload.target_url = String(draft.target_url || "").trim();
+      }
+    }
+    if (detail && detail.planned_item) {
+      const nextSchedule = fromDateTimeLocal(String(draft.schedule_at || ""));
+      const previousSchedule = defaultString(detail.planned_item.schedule_at, "");
+      if (!draft.schedule_at && previousSchedule) {
+        payload.clear_schedule = true;
+      } else if (nextSchedule && nextSchedule !== previousSchedule) {
+        payload.schedule_at = nextSchedule;
+      }
+    }
+    return payload;
+  }
+
+  function persistTaskDetailEdits(taskID) {
+    const detail = state.investigations.detail;
+    if (!detail || !detail.summary || detail.summary.id !== taskID) {
+      return Promise.resolve(detail);
+    }
+    const payload = taskDetailPatchPayload(detail);
+    if (!Object.keys(payload).length) {
+      state.investigations.detailEditMode = false;
+      state.investigations.detailEditDraft = null;
+      renderInvestigationsPage();
+      return Promise.resolve(detail);
+    }
+    return api(`/api/v1/tasks/${encodeURIComponent(taskID)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }).then((response) => {
+      const nextDetail = response && response.detail ? response.detail : response;
+      if (state.investigations.selectedRunID === taskID && nextDetail && nextDetail.summary) {
+        state.investigations.detail = nextDetail;
+      }
+      state.investigations.detailEditMode = false;
+      state.investigations.detailEditDraft = null;
+      state.investigations.detailWorkType = "";
+      loadInvestigations({ silent: true });
+      if (state.currentView === "investigations") {
+        renderInvestigationsPage();
+      }
+      return nextDetail && nextDetail.summary
+        ? nextDetail
+        : loadInvestigationDetail(taskID, { silent: true, resetWorkType: true });
+    });
+  }
+
+  function taskDetailEditButtonMarkup(detail) {
+    if (!taskDetailSupportsEditing(detail)) return "";
+    const disabled = taskDetailIsCompletedOrDeleted(detail);
+    if (state.investigations.detailEditMode) {
+      return `
+        <button class="tx-btn tx-btn-secondary" type="button" data-task-detail-cancel="true">Cancel</button>
+        <button class="tx-btn tx-btn-primary" type="button" data-task-detail-save="${escapeHTML(detail.summary.id)}">Save</button>
+      `;
+    }
+    return `<button class="tx-btn tx-btn-secondary" type="button" data-task-detail-edit="true" ${disabled ? "disabled" : ""}>Edit</button>`;
+  }
+
+  function taskDetailWorkTypeOptions(selectedValue, allowEmpty) {
+    const current = defaultString(selectedValue, "");
+    const options = [];
+    if (allowEmpty) {
+      options.push(`<option value="" ${current ? "" : "selected"}>Select a work type</option>`);
+    }
+    return options.concat(["bug_fix", "refactor", "feature", "test_only"].map((value) => `<option value="${value}" ${current === value ? "selected" : ""}>${escapeHTML(workTypeLabel(value))}</option>`)).join("");
+  }
+
+  function taskDetailEditFormMarkup(detail) {
+    if (!detail || !detail.summary || !state.investigations.detailEditMode) return "";
+    const summary = detail.summary;
+    const draft = state.investigations.detailEditDraft || buildTaskDetailEditDraft(detail) || {};
+    const descriptionMarkup = renderMarkdownDocument(defaultString(draft.description, ""));
+    if (detail.work_item && detail.work_item.item) {
+      return `
+        <section class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Task Detail</h3>
+              <p>Edit the work item fields before running, recovering, or handing off the draft.</p>
+            </div>
+          </div>
+          <div class="task-detail-form-grid">
+            <label class="config-field task-detail-field">
+              <span class="config-label">Title</span>
+              <input type="text" value="${escapeHTML(defaultString(draft.title, ""))}" data-task-detail-field="title" />
+            </label>
+            <label class="config-field task-detail-field">
+              <span class="config-label">Target URL</span>
+              <input type="text" value="${escapeHTML(defaultString(draft.target_url, ""))}" data-task-detail-field="target_url" />
+            </label>
+            <label class="config-field task-detail-field">
+              <span class="config-label">Priority</span>
+              <select data-task-detail-field="priority">
+                ${[0, 1, 2, 3, 4, 5].map((priority) => `<option value="${priority}" ${String(draft.priority) === String(priority) ? "selected" : ""}>${escapeHTML(`P${priority}`)}</option>`).join("")}
+              </select>
+            </label>
+            <label class="config-field task-detail-field">
+              <span class="config-label">Work Type</span>
+              <select id="task-detail-work-item-work-type" data-task-detail-field="work_type">
+                ${taskDetailWorkTypeOptions(selectedTaskDetailWorkType(detail), !detail.work_item.item.work_type)}
+              </select>
+            </label>
+            <label class="config-field config-field-wide task-detail-field">
+              <span class="config-label">Description</span>
+              <textarea rows="10" data-task-detail-field="description">${escapeHTML(defaultString(draft.description, ""))}</textarea>
+            </label>
+          </div>
+        </section>
+        <section class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Markdown Preview</h3>
+              <p>Rendered from the current work-item description.</p>
+            </div>
+          </div>
+          <div class="task-detail-markdown">${descriptionMarkup}</div>
+        </section>
+      `;
+    }
+    if (detail.planned_item) {
+      return `
+        <section class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Task Detail</h3>
+              <p>Edit the planned task fields before launching or rescheduling it.</p>
+            </div>
+          </div>
+          <div class="task-detail-form-grid">
+            <label class="config-field task-detail-field">
+              <span class="config-label">Title</span>
+              <input type="text" value="${escapeHTML(defaultString(draft.title, ""))}" data-task-detail-field="title" />
+            </label>
+            <label class="config-field task-detail-field">
+              <span class="config-label">Schedule At</span>
+              <input type="datetime-local" value="${escapeHTML(defaultString(draft.schedule_at, ""))}" data-task-detail-field="schedule_at" />
+            </label>
+            <label class="config-field task-detail-field">
+              <span class="config-label">Priority</span>
+              <select data-task-detail-field="priority">
+                ${[0, 1, 2, 3, 4, 5].map((priority) => `<option value="${priority}" ${String(draft.priority) === String(priority) ? "selected" : ""}>${escapeHTML(`P${priority}`)}</option>`).join("")}
+              </select>
+            </label>
+            <label class="config-field task-detail-field">
+              <span class="config-label">Work Type</span>
+              <select id="task-detail-planned-item-work-type" data-task-detail-field="work_type">
+                ${taskDetailWorkTypeOptions(selectedTaskDetailWorkType(detail), false)}
+              </select>
+            </label>
+            <label class="config-field config-field-wide task-detail-field">
+              <span class="config-label">Description</span>
+              <textarea rows="12" data-task-detail-field="description">${escapeHTML(defaultString(draft.description, ""))}</textarea>
+            </label>
+          </div>
+        </section>
+        <section class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Markdown Preview</h3>
+              <p>Rendered from the current task description.</p>
+            </div>
+          </div>
+          <div class="task-detail-markdown">${descriptionMarkup}</div>
+        </section>
+      `;
+    }
+    return "";
+  }
+
+  function taskDetailControlPanel(detail) {
+    if (!detail || !detail.summary || state.investigations.detailEditMode || taskDetailIsCompletedOrDeleted(detail)) {
+      return "";
+    }
+    const summary = detail.summary;
+    if (detail.work_item && detail.work_item.item) {
+      const executionAllowed = Boolean(detail.work_item.execution_allowed);
+      const recoverAllowed = Boolean(detail.work_item.recover_allowed);
+      if (!executionAllowed && !recoverAllowed) return "";
+      return `
+        <section class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Execution</h3>
+              <p>Edit the task first if you need to change work type or draft metadata.</p>
+            </div>
+          </div>
+          <p class="queue-copy">${escapeHTML(defaultString(detail.work_item.recover_summary, "Recover Work tries to continue linked work when possible and otherwise starts a fresh run using the selected work type."))}</p>
+          <div class="config-actions">
+            ${executionAllowed ? `<button class="tx-btn tx-btn-secondary" type="button" data-task-action="run-now" data-task-id="${escapeHTML(summary.id)}">Run</button>` : ""}
+            ${recoverAllowed ? `<button class="tx-btn tx-btn-primary" type="button" data-task-action="recover" data-task-id="${escapeHTML(summary.id)}">Recover Work</button>` : ""}
+          </div>
+        </section>
+      `;
+    }
+    if (detail.planned_item && ["queued", "failed"].includes(defaultString(detail.planned_item.state, ""))) {
+      return `
+        <section class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Launch</h3>
+              <p>Launch uses the saved task fields shown above.</p>
+            </div>
+          </div>
+          <div class="config-actions">
+            <button class="tx-btn tx-btn-primary" type="button" data-task-action="run-now" data-task-id="${escapeHTML(summary.id)}">Run Now</button>
+          </div>
+        </section>
+      `;
+    }
+    return "";
   }
 
   function taskDetailContentMarkup(detail) {
     if (!detail || !detail.summary) {
       return '<div class="status-pill">Task detail is unavailable.</div>';
     }
+    if (state.investigations.detailEditMode) {
+      return taskDetailEditFormMarkup(detail);
+    }
+
     const summary = detail.summary;
     if (summary.kind === "work_item" && detail.work_item && detail.work_item.item) {
       const item = detail.work_item.item;
-      const workTypeValue = selectedTaskDetailWorkType(detail);
-      const workTypeDirty = Boolean(workTypeValue && workTypeValue !== defaultString(item.work_type, ""));
-      const executionAllowed = Boolean(detail.work_item.execution_allowed);
-      const recoverAllowed = Boolean(detail.work_item.recover_allowed);
-      const recoverSummary = defaultString(detail.work_item.recover_summary, "Recover Work tries to continue linked work when possible and otherwise starts a fresh run using the selected work type.");
       return `
-        <div class="surface">
+        <section class="surface">
           <div class="surface-head">
             <div>
               <h3>Task Detail</h3>
@@ -5019,62 +5402,45 @@
             </div>
           </div>
           ${taskDetailSourceMarkup(detail)}
-          ${executionAllowed ? `
-            <div class="section-divider"></div>
-            <label class="selector config-selector">
-              <span>Work Type</span>
-              <select id="task-detail-work-item-work-type">
-                <option value="" ${workTypeValue ? "" : "selected"}>${escapeHTML(item.work_type ? "Keep current work type" : "Select a work type")}</option>
-                ${["bug_fix", "refactor", "feature", "test_only"].map((value) => `<option value="${value}" ${workTypeValue === value ? "selected" : ""}>${escapeHTML(workTypeLabel(value))}</option>`).join("")}
-              </select>
-            </label>
-            <p class="queue-copy">Run and Recover Work save the selected work type before acting. ${escapeHTML(recoverSummary)}</p>
-            <div class="config-actions">
-              <button class="tx-btn tx-btn-secondary" type="button" data-task-work-item-save="${escapeHTML(summary.id)}" ${workTypeDirty ? "" : "disabled"}>Save Work Type</button>
-              <button class="tx-btn tx-btn-secondary" type="button" data-task-action="run-now" data-task-id="${escapeHTML(summary.id)}">Run</button>
-              <button class="tx-btn tx-btn-primary" type="button" data-task-action="recover" data-task-id="${escapeHTML(summary.id)}" ${recoverAllowed ? "" : "disabled"}>Recover Work</button>
+        </section>
+        ${taskDetailControlPanel(detail)}
+        <section class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Detailed Explanation</h3>
+              <p>${escapeHTML(defaultString(item.target_url, "No target URL recorded."))}</p>
             </div>
-          ` : ""}
-        </div>
+          </div>
+          <div class="task-detail-markdown">${renderMarkdownDocument(defaultString(item.body, ""))}</div>
+        </section>
       `;
     }
     if (summary.kind === "planned_item" && detail.planned_item) {
       const item = detail.planned_item;
-      const sourceMarkup = taskDetailSourceMarkup(detail);
-      const descriptionMarkup = renderMarkdownDocument(defaultString(item.description, ""));
-      const workTypeValue = selectedTaskDetailWorkType(detail);
-      const workTypeDirty = Boolean(workTypeValue && workTypeValue !== defaultString(item.work_type, ""));
-      const editable = ["queued", "failed"].includes(defaultString(item.state, ""));
       return `
-        <div class="surface">
+        <section class="surface">
           <div class="surface-head">
             <div>
               <h3>Task Detail</h3>
               <p>${escapeHTML(defaultString(summary.summary, summary.description || "No task summary recorded."))}</p>
             </div>
           </div>
-          ${sourceMarkup}
-          ${editable ? `
-            <div class="section-divider"></div>
-            <label class="selector config-selector">
-              <span>Work Type</span>
-              <select id="task-detail-planned-item-work-type">
-                ${["bug_fix", "refactor", "feature", "test_only"].map((value) => `<option value="${value}" ${defaultString(workTypeValue || item.work_type, "feature") === value ? "selected" : ""}>${escapeHTML(workTypeLabel(value))}</option>`).join("")}
-              </select>
-            </label>
-            <p class="queue-copy">Run Now saves the selected work type before launching.</p>
-            <div class="config-actions">
-              <button class="tx-btn tx-btn-secondary" type="button" data-task-work-item-save="${escapeHTML(summary.id)}" ${workTypeDirty ? "" : "disabled"}>Save Work Type</button>
-              <button class="tx-btn tx-btn-primary" type="button" data-task-action="run-now" data-task-id="${escapeHTML(summary.id)}">Run Now</button>
+          ${taskDetailSourceMarkup(detail)}
+        </section>
+        ${taskDetailControlPanel(detail)}
+        <section class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Detailed Explanation</h3>
+              <p>${escapeHTML(defaultString(item.schedule_at ? formatDateTime(item.schedule_at) : "", "No schedule is set."))}</p>
             </div>
-          ` : ""}
-          <div class="section-divider"></div>
-          <div class="task-detail-markdown">${descriptionMarkup}</div>
-        </div>
+          </div>
+          <div class="task-detail-markdown">${renderMarkdownDocument(defaultString(item.description, ""))}</div>
+        </section>
       `;
     }
     return `
-      <div class="surface">
+      <section class="surface">
         <div class="surface-head">
           <div>
             <h3>Task Detail</h3>
@@ -5082,7 +5448,7 @@
           </div>
         </div>
         ${taskDetailSourceMarkup(detail)}
-      </div>
+      </section>
     `;
   }
 
@@ -5116,26 +5482,6 @@
       };
     }
     return null;
-  }
-
-  function syncTaskDetailModalState() {
-    const taskID = defaultString(state.investigations.selectedRunID, "");
-    if (state.currentView !== "investigations" || !taskID) {
-      if (state.taskDetailModal && state.taskDetailModal.isOpen()) {
-        state.taskDetailModal.close();
-      }
-      renderTaskQueueItemDetail();
-      return;
-    }
-    renderTaskDetailSurfaces();
-    const currentDetailID = defaultString(state.investigations.detail && state.investigations.detail.summary && state.investigations.detail.summary.id, "");
-    if (currentDetailID === taskID || state.investigations.detailLoading) {
-      return;
-    }
-    state.investigations.detail = null;
-    state.investigations.detailLoading = true;
-    renderTaskDetailSurfaces();
-    loadInvestigationDetail(taskID, { silent: true });
   }
 
   function taskDetailOpenButtons(detail, summary) {
@@ -5176,7 +5522,7 @@
       if (status === "paused") {
         actions.push(`<button class="tx-btn tx-btn-secondary" type="button" data-task-action="retry" data-task-id="${escapeHTML(summary.id)}">Return to Queue</button>`);
       }
-      if (!item.hidden && !["submitted", "dropped", "silenced"].includes(status)) {
+      if (!item.hidden && !["submitted", "dropped", "silenced", "deleted"].includes(status)) {
         actions.push(`<button class="tx-btn tx-btn-secondary" type="button" data-task-action="dismiss" data-task-id="${escapeHTML(summary.id)}">Dismiss</button>`);
       }
       return actions;
@@ -5206,19 +5552,19 @@
     `;
   }
 
-  function taskQueueItemDetailMarkup() {
+  function renderTaskDetailPage() {
     const detail = state.investigations.detail;
     if (!state.investigations.selectedRunID) {
-      return '<div class="log-empty">Choose a task to inspect it.</div>';
+      return "";
     }
     if (state.investigations.detailLoading && !detail) {
-      return '<div class="log-empty">Loading task detail...</div>';
+      return '<section class="surface task-detail-page"><div class="log-empty">Loading task detail...</div></section>';
     }
     if (state.investigations.error && !detail) {
-      return `<div class="log-empty">${escapeHTML(state.investigations.error)}</div>`;
+      return `<section class="surface task-detail-page"><div class="log-empty">${escapeHTML(state.investigations.error)}</div></section>`;
     }
     if (!detail || !detail.summary) {
-      return '<div class="log-empty">Task detail is unavailable.</div>';
+      return '<section class="surface task-detail-page"><div class="log-empty">Task detail is unavailable.</div></section>';
     }
     const summary = detail.summary;
     const startedAt = taskDetailStartedAt(detail);
@@ -5228,9 +5574,22 @@
       ? `${formatTokenCompact(tokenUsage.total)}${tokenUsage.sessions > 0 ? ` · ${tokenUsage.sessions} session${tokenUsage.sessions === 1 ? "" : "s"}` : ""}`
       : "Not available";
     const actionButtons = taskDetailOpenButtons(detail, summary);
-    const actionMenuMarkup = renderTaskDetailActionMenu(detail, summary);
+    const actionMenuMarkup = state.investigations.detailEditMode ? "" : renderTaskDetailActionMenu(detail, summary);
     const plannedItem = summary.kind === "planned_item" ? detail.planned_item : null;
+    const readOnlyReason = taskDetailReadOnlyReason(detail);
+    const muted = taskDetailIsCompletedOrDeleted(detail);
     return `
+      <section class="task-detail-page">
+        <div class="task-detail-page-toolbar">
+          <button class="tx-btn tx-btn-secondary" type="button" data-task-detail-back="true">Back to Task Feed</button>
+          <div class="task-detail-page-actions">
+            ${actionButtons.join("")}
+            ${taskDetailEditButtonMarkup(detail)}
+            ${actionMenuMarkup}
+          </div>
+        </div>
+        ${readOnlyReason ? `<div class="status-pill ${muted ? "status-pill-completed" : ""}">${escapeHTML(readOnlyReason)}</div>` : ""}
+        <div class="task-detail-shell ${muted ? "task-detail-shell-muted" : ""}">
       <div class="drawer-summary">
         <div>
           <span class="drawer-label">${escapeHTML(defaultString(summary.kind, "task").replace(/_/g, " "))}</span>
@@ -5280,63 +5639,25 @@
           ` : ""}
         </div>
       </div>
-      ${actionButtons.length || actionMenuMarkup ? `<div class="drawer-toolbar">${actionButtons.join("")}${actionMenuMarkup}</div>` : ""}
       ${taskDetailContentMarkup(detail)}
+        </div>
+      </section>
     `;
   }
 
-  function renderTaskDetailModal() {
-    const host = document.getElementById("task-detail-modal-content");
-    if (!host) return;
-    host.innerHTML = taskQueueItemDetailMarkup();
-  }
-
-  function renderTaskQueueItemDetail() {
-    const host = document.getElementById("task-detail-panel") || document.getElementById("investigation-detail");
-    if (!host) return;
-    host.innerHTML = taskQueueItemDetailMarkup();
-  }
-
-  function renderTaskDetailSurfaces() {
-    renderTaskQueueItemDetail();
-    renderTaskDetailModal();
-  }
-
-  function initTaskDetailModal() {
-    if (state.taskDetailModal) return;
-    state.taskDetailModal = Teryx.modal({
-      title: "Task Detail",
-      size: "xl",
-      maximizable: true,
-      width: "min(1120px, 92vw)",
-      content: '<div id="task-detail-modal-content" class="drawer-shell"></div>',
-      onClose() {
-        state.investigations.selectedRunID = "";
-        state.investigations.detail = null;
-        state.investigations.detailWorkType = "";
-        state.investigations.detailLoading = false;
-        syncHashState();
-        if (state.currentView === "investigations") {
-          renderInvestigationsPage();
-        } else {
-          renderAppPreservingDraftFocus();
-        }
-        renderTaskDetailSurfaces();
-      },
-    });
-  }
-
-  function openTaskQueueItemDetail(taskID) {
+  function openTaskDetailPage(taskID) {
     state.investigations.selectedRunID = taskID;
+    state.investigations.detailEditMode = false;
+    state.investigations.detailEditDraft = null;
     syncHashState();
     if (state.currentView === "investigations") {
       renderInvestigationsPage();
     }
-    syncTaskDetailModalState();
+    loadInvestigationDetail(taskID, { silent: true });
   }
 
   function openTaskDetailModal(taskID) {
-    openTaskQueueItemDetail(taskID);
+    openTaskDetailPage(taskID);
   }
 
   function renderTaskScheduleModal() {
@@ -5513,18 +5834,13 @@
       loadTaskTemplates({ silent: true });
     }
     const workbenchRepo = selectedTaskScopeRepoSummary();
-    ensureBodyStructure(`investigations:${defaultString(state.selectedRepo, "all")}:${sortedRepos().length}`, `
-      ${renderQueuePageMarkup({
-      className: "mission-control-shell",
-      detailID: "task-detail-panel",
-      detailLabel: "Task detail",
-      chromeHTML: `
+    const showingDetail = Boolean(state.investigations.selectedRunID);
+    ensureBodyStructure(`investigations:${defaultString(state.selectedRepo, "all")}:${sortedRepos().length}:${defaultString(state.investigations.selectedRunID, "feed")}:${state.investigations.detailEditMode ? "edit" : "view"}`, `
+      <section class="mission-control-shell">
         <div id="mission-toolbar-host"></div>
-        <div id="mission-status-strip" class="mission-status-strip queue-status-strip"></div>
-      `,
-      listClassName: "mission-feed-surface",
-      listHTML: '<section id="mission-feed" class="mission-feed queue-list"></section>',
-      })}
+        <div id="mission-status-strip" class="mission-status-strip"></div>
+        <section id="mission-feed" class="${showingDetail ? "task-detail-host" : "mission-feed"}"></section>
+      </section>
       ${renderTaskWorkbenchShell(workbenchRepo)}
     `);
     const toolbarHost = document.getElementById("mission-toolbar-host");
@@ -5532,8 +5848,7 @@
     const statusHost = document.getElementById("mission-status-strip");
     if (statusHost) statusHost.innerHTML = taskStatusStrip(state.investigations.items || []);
     const feedHost = document.getElementById("mission-feed");
-    if (feedHost) feedHost.innerHTML = renderTaskFeed(items);
-    renderTaskQueueItemDetail();
+    if (feedHost) feedHost.innerHTML = showingDetail ? renderTaskDetailPage() : renderTaskFeed(items);
     renderTaskWorkbench(workbenchRepo);
     renderTaskScheduleModal();
   }
@@ -7146,7 +7461,6 @@
     syncUsageAutoRefresh();
     refreshOpenLogDrawerIfNeeded();
     refreshOpenWorkItemDrawerIfNeeded();
-    syncTaskDetailModalState();
   }
 
   function attachHandlers() {
@@ -7205,6 +7519,9 @@
       if (nextView && nextView !== "repo") {
         const nextRepo = (nextView === "home" || nextView === "repos") ? "" : state.selectedRepo;
         clearDraftsForRouteTransition({ view: nextView, repoSlug: nextRepo, repoTab: state.repoTab });
+        if (nextView === "investigations") {
+          clearTaskDetailSelection({ syncHash: false });
+        }
         state.currentView = nextView;
         state.selectedRepo = nextRepo;
         syncWorkspaceRepoFilters(nextRepo);
@@ -7467,8 +7784,39 @@
       if (taskOpenButton) {
         const taskID = taskOpenButton.getAttribute("data-task-open") || "";
         if (taskID) {
-          openTaskQueueItemDetail(taskID);
+          openTaskDetailPage(taskID);
         }
+        return;
+      }
+
+      const taskDetailBackButton = event.target.closest("[data-task-detail-back]");
+      if (taskDetailBackButton) {
+        clearTaskDetailSelection();
+        renderInvestigationsPage();
+        return;
+      }
+
+      const taskDetailEditButton = event.target.closest("[data-task-detail-edit]");
+      if (taskDetailEditButton) {
+        enterTaskDetailEditMode();
+        return;
+      }
+
+      const taskDetailCancelButton = event.target.closest("[data-task-detail-cancel]");
+      if (taskDetailCancelButton) {
+        cancelTaskDetailEditMode();
+        return;
+      }
+
+      const taskDetailSaveButton = event.target.closest("[data-task-detail-save]");
+      if (taskDetailSaveButton) {
+        const taskID = taskDetailSaveButton.getAttribute("data-task-detail-save") || "";
+        if (!taskID) return;
+        persistTaskDetailEdits(taskID).then(() => {
+          toast("success", "Task updated", taskID);
+        }).catch((error) => {
+          toast("danger", "Task update failed", error.message);
+        });
         return;
       }
 
@@ -7484,20 +7832,6 @@
         if (runID) {
           openLogDrawer(runID);
         }
-        return;
-      }
-
-      const taskWorkItemSaveButton = event.target.closest("[data-task-work-item-save]");
-      if (taskWorkItemSaveButton) {
-        const taskID = taskWorkItemSaveButton.getAttribute("data-task-work-item-save") || "";
-        if (!taskID) return;
-        persistTaskDetailWorkTypeIfNeeded(taskID).then(() => {
-          toast("success", "Work type updated", taskID);
-          loadInvestigations({ silent: true });
-          loadInvestigationDetail(taskID, { silent: true, resetWorkType: true });
-        }).catch((error) => {
-          toast("danger", "Work type update failed", error.message);
-        });
         return;
       }
 
@@ -7523,9 +7857,6 @@
           load();
           loadApprovals({ silent: true });
           loadInvestigations({ silent: true });
-          if (state.taskDetailModal && state.taskDetailModal.isOpen()) {
-            state.taskDetailModal.close();
-          }
           toast("success", "Task updated", taskID);
         }).catch((error) => {
           toast("danger", "Task action failed", error.message);
@@ -8172,12 +8503,24 @@
       }
       if (event.target.id === "task-detail-work-item-work-type") {
         state.investigations.detailWorkType = String(event.target.value || "");
-        renderTaskQueueItemDetail();
+        if (state.investigations.detailEditMode) {
+          state.investigations.detailEditDraft = {
+            ...(state.investigations.detailEditDraft || {}),
+            work_type: String(event.target.value || ""),
+          };
+        }
+        renderInvestigationsPage();
         return;
       }
       if (event.target.id === "task-detail-planned-item-work-type") {
         state.investigations.detailWorkType = String(event.target.value || "");
-        renderTaskQueueItemDetail();
+        if (state.investigations.detailEditMode) {
+          state.investigations.detailEditDraft = {
+            ...(state.investigations.detailEditDraft || {}),
+            work_type: String(event.target.value || ""),
+          };
+        }
+        renderInvestigationsPage();
         return;
       }
       const filterView = event.target.getAttribute("data-view-filter");
@@ -8392,9 +8735,6 @@
           load();
           loadApprovals({ silent: true });
           loadInvestigations({ silent: true });
-          if (state.taskDetailModal && state.taskDetailModal.isOpen()) {
-            state.taskDetailModal.close();
-          }
           toast("success", "Task updated", taskID);
         }).catch((error) => {
           toast("danger", "Task action failed", error.message);
@@ -8462,14 +8802,13 @@
         renderWorkItemDrawer();
         return;
       }
-      if (event.target.id === "task-detail-work-item-work-type") {
-        state.investigations.detailWorkType = String(event.target.value || "");
-        renderTaskDetailSurfaces();
-        return;
-      }
-      if (event.target.id === "task-detail-planned-item-work-type") {
-        state.investigations.detailWorkType = String(event.target.value || "");
-        renderTaskDetailSurfaces();
+      const taskDetailField = event.target.getAttribute && event.target.getAttribute("data-task-detail-field");
+      if (taskDetailField && state.investigations.detailEditMode) {
+        state.investigations.detailEditDraft = {
+          ...(state.investigations.detailEditDraft || {}),
+          [taskDetailField]: String(event.target.value || ""),
+        };
+        renderInvestigationsPage();
         return;
       }
       if (event.target.id === "log-file-select") {
@@ -8483,6 +8822,15 @@
     document.body.addEventListener("input", (event) => {
       if (event.target.id !== "work-item-fix-instruction") return;
       state.workItemSelection.fixInstruction = String(event.target.value || "");
+    });
+
+    document.body.addEventListener("input", (event) => {
+      const taskDetailField = event.target.getAttribute && event.target.getAttribute("data-task-detail-field");
+      if (!taskDetailField || !state.investigations.detailEditMode) return;
+      state.investigations.detailEditDraft = {
+        ...(state.investigations.detailEditDraft || {}),
+        [taskDetailField]: String(event.target.value || ""),
+      };
     });
 
     document.body.addEventListener("click", (event) => {

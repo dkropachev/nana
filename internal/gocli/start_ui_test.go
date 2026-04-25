@@ -3941,7 +3941,7 @@ func TestStartUIAPITasksListAndDetail(t *testing.T) {
 	}
 }
 
-func TestStartUIAPITaskPatchUpdatesWorkItemWorkType(t *testing.T) {
+func TestStartUIAPITaskPatchUpdatesWorkItemFields(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	cwd := t.TempDir()
@@ -3952,7 +3952,7 @@ func TestStartUIAPITaskPatchUpdatesWorkItemWorkType(t *testing.T) {
 		ExternalID: "task-patch-work-item",
 		RepoSlug:   "acme/widget",
 		Subject:    "Patch task work type",
-		Body:       "Update the work type from the investigations task modal.",
+		Body:       "Update the task fields from the investigations detail page.",
 		Metadata: map[string]any{
 			"repo_root": t.TempDir(),
 		},
@@ -3967,7 +3967,7 @@ func TestStartUIAPITaskPatchUpdatesWorkItemWorkType(t *testing.T) {
 	defer server.Close()
 
 	taskID := "work-item:" + item.ID
-	request, err := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/tasks/"+url.PathEscape(taskID), strings.NewReader(`{"work_type":"feature"}`))
+	request, err := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/tasks/"+url.PathEscape(taskID), strings.NewReader(`{"title":"Patch task detail page","description":"# Updated\n\n- full field edit","target_url":"https://example.com/tasks/123","priority":1,"work_type":"feature"}`))
 	if err != nil {
 		t.Fatalf("new PATCH task request: %v", err)
 	}
@@ -3987,13 +3987,16 @@ func TestStartUIAPITaskPatchUpdatesWorkItemWorkType(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode patched task payload: %v", err)
 	}
-	if payload.Detail.WorkItem == nil || payload.Detail.WorkItem.Item.WorkType != workTypeFeature {
-		t.Fatalf("expected patched task detail to include updated work type, got %+v", payload.Detail)
+	if payload.Detail.WorkItem == nil {
+		t.Fatalf("expected patched task detail to include a work item, got %+v", payload.Detail)
+	}
+	if payload.Detail.WorkItem.Item.Subject != "Patch task detail page" || payload.Detail.WorkItem.Item.Body != "# Updated\n\n- full field edit" || payload.Detail.WorkItem.Item.TargetURL != "https://example.com/tasks/123" || payload.Detail.WorkItem.Item.Priority != 1 || payload.Detail.WorkItem.Item.WorkType != workTypeFeature {
+		t.Fatalf("expected patched task detail to include updated fields, got %+v", payload.Detail.WorkItem.Item)
 	}
 
 	updated := startUITestReadWorkItem(t, item.ID)
-	if updated.WorkType != workTypeFeature {
-		t.Fatalf("expected patched work-item task to persist work type, got %+v", updated)
+	if updated.Subject != "Patch task detail page" || updated.Body != "# Updated\n\n- full field edit" || updated.TargetURL != "https://example.com/tasks/123" || updated.Priority != 1 || updated.WorkType != workTypeFeature {
+		t.Fatalf("expected patched work-item task to persist updated fields, got %+v", updated)
 	}
 	if startUITestOverviewCacheValid(api) {
 		t.Fatalf("expected task patch to invalidate overview cache")
@@ -4182,24 +4185,28 @@ func TestStartUIAppHeaderIncludesSubtitleAndGuardsMissingNodes(t *testing.T) {
 	}
 }
 
-func TestStartUIAppInvestigationsWorkspaceUsesQueueItemDetail(t *testing.T) {
+func TestStartUIAppInvestigationsWorkspaceUsesMissionControlPages(t *testing.T) {
 	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
 	if err != nil {
 		t.Fatalf("read app asset: %v", err)
 	}
 	content := string(appBody)
 	for _, needle := range []string{
-		`function renderQueuePageMarkup(options = {}) {`,
-		`className: "mission-control-shell"`,
-		`class="queue-item-detail"`,
+		`<section class="mission-control-shell">`,
 		`id="open-task-schedule-button"`,
-		`function renderTaskQueueItemDetail() {`,
+		`function renderTaskDetailPage() {`,
+		`function openTaskDetailPage(taskID) {`,
+		`function renderTaskWorkbenchShell(repo) {`,
 		`function renderTaskScheduleModal() {`,
+		`data-task-detail-back="true"`,
 		`content: '<div id="task-schedule-modal-content" class="drawer-shell"></div>'`,
 	} {
 		if !strings.Contains(content, needle) {
 			t.Fatalf("expected app asset to contain %q", needle)
 		}
+	}
+	if strings.Contains(content, `detailID: "task-detail-panel"`) || strings.Contains(content, `<aside id="task-detail-panel"`) {
+		t.Fatalf("expected investigations route to stop rendering task-detail-panel, got %s", content)
 	}
 	cssBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.css")
 	if err != nil {
@@ -4207,12 +4214,12 @@ func TestStartUIAppInvestigationsWorkspaceUsesQueueItemDetail(t *testing.T) {
 	}
 	cssContent := string(cssBody)
 	for _, needle := range []string{
-		`.queue-page {`,
-		`.queue-page-main {`,
-		`.queue-item-detail {`,
 		`.mission-control-shell {`,
 		`.mission-task-group {`,
 		`.mission-task-row {`,
+		`.task-detail-host {`,
+		`.task-detail-page {`,
+		`.task-workbench-chip {`,
 		`.mission-schedule-modal-body {`,
 	} {
 		if !strings.Contains(cssContent, needle) {
@@ -4251,6 +4258,7 @@ func TestStartUIAppTaskDetailFormatsPlannedItemContent(t *testing.T) {
 	for _, needle := range []string{
 		`function renderMarkdownDocument(markdown) {`,
 		`<div class="task-detail-markdown">${descriptionMarkup}</div>`,
+		`<h3>Markdown Preview</h3>`,
 		`<span class="drawer-label">Launch Kind</span>`,
 		`<span class="drawer-label">Work Type</span>`,
 	} {
@@ -4270,6 +4278,8 @@ func TestStartUIAppTaskDetailFormatsPlannedItemContent(t *testing.T) {
 	for _, needle := range []string{
 		`.task-detail-markdown {`,
 		`.task-detail-markdown h1,`,
+		`.task-detail-markdown blockquote {`,
+		`.task-detail-markdown pre {`,
 		`.task-detail-markdown code {`,
 	} {
 		if !strings.Contains(cssContent, needle) {
@@ -4286,11 +4296,12 @@ func TestStartUIAppTaskDetailSupportsWorkItemExecutionControls(t *testing.T) {
 	content := string(appBody)
 	for _, needle := range []string{
 		`function selectedTaskDetailWorkType(detail) {`,
-		`function persistTaskDetailWorkTypeIfNeeded(taskID) {`,
+		`function persistTaskDetailEdits(taskID) {`,
 		`id="task-detail-work-item-work-type"`,
-		`data-task-work-item-save="${escapeHTML(summary.id)}"`,
+		`data-task-detail-edit="true"`,
+		`data-task-detail-save="${escapeHTML(detail.summary.id)}"`,
 		`data-task-action="recover"`,
-		`Run and Recover Work save the selected work type before acting.`,
+		`Edit the work item fields before running, recovering, or handing off the draft.`,
 	} {
 		if !strings.Contains(content, needle) {
 			t.Fatalf("expected app asset to contain %q", needle)
@@ -4306,12 +4317,38 @@ func TestStartUIAppTaskDetailSupportsPlannedItemWorkTypeEditing(t *testing.T) {
 	content := string(appBody)
 	for _, needle := range []string{
 		`id="task-detail-planned-item-work-type"`,
-		`Run Now saves the selected work type before launching.`,
+		`data-task-detail-field="schedule_at"`,
+		`Launch uses the saved task fields shown above.`,
 		`detail.planned_item && action === "run-now"`,
 	} {
 		if !strings.Contains(content, needle) {
 			t.Fatalf("expected app asset to contain %q", needle)
 		}
+	}
+}
+
+func TestStartUIAppTaskDetailLocksCompletedAndDeletedItems(t *testing.T) {
+	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
+	if err != nil {
+		t.Fatalf("read app asset: %v", err)
+	}
+	content := string(appBody)
+	for _, needle := range []string{
+		`function taskDetailIsCompletedOrDeleted(detail) {`,
+		`Completed and deleted tasks stay read-only.`,
+		`data-task-detail-edit="true" ${disabled ? "disabled" : ""}`,
+	} {
+		if !strings.Contains(content, needle) {
+			t.Fatalf("expected app asset to contain %q", needle)
+		}
+	}
+
+	cssBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.css")
+	if err != nil {
+		t.Fatalf("read app stylesheet: %v", err)
+	}
+	if !strings.Contains(string(cssBody), `.task-detail-shell-muted {`) {
+		t.Fatalf("expected app stylesheet to contain muted task detail styling")
 	}
 }
 
@@ -6628,8 +6665,8 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `Idempotency-Key`) || !strings.Contains(string(appBody), `nextTaskComposerIdempotencyKey()`) {
 		t.Fatalf("expected task scheduling UI to send and rotate idempotency keys, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `function renderTaskQueueItemDetail() {`) || !strings.Contains(string(appBody), `function renderTaskScheduleModal() {`) || !strings.Contains(string(appBody), `task-composer-description-field`) || !strings.Contains(string(appBody), `data-task-open="${escapeHTML(item.id)}"`) || !strings.Contains(string(appBody), `class="queue-item-detail"`) {
-		t.Fatalf("expected queue-detail mission control task wiring in app.js, got %s", string(appBody))
+	if !strings.Contains(string(appBody), `function renderTaskDetailPage() {`) || !strings.Contains(string(appBody), `function renderTaskScheduleModal() {`) || !strings.Contains(string(appBody), `task-composer-description-field`) || !strings.Contains(string(appBody), `data-task-open="${escapeHTML(item.id)}"`) {
+		t.Fatalf("expected page-driven mission control task wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `data-task-status-filter`) || !strings.Contains(string(appBody), `data-task-filter-clear`) || !strings.Contains(string(appBody), `placeholder="Search tasks..."`) {
 		t.Fatalf("expected mission control feed filter wiring in app.js, got %s", string(appBody))
@@ -6802,7 +6839,7 @@ func TestStartUIWorkItemRunFailureInvalidatesOverviewCache(t *testing.T) {
 	}
 }
 
-func TestStartUIWorkItemPatchUpdatesWorkTypeAndInvalidatesOverviewCache(t *testing.T) {
+func TestStartUIWorkItemPatchUpdatesFieldsAndInvalidatesOverviewCache(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	cwd := t.TempDir()
@@ -6814,7 +6851,7 @@ func TestStartUIWorkItemPatchUpdatesWorkTypeAndInvalidatesOverviewCache(t *testi
 	server := httptest.NewServer(api.routes())
 	defer server.Close()
 
-	request, err := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/work-items/"+item.ID, strings.NewReader(`{"work_type":"feature"}`))
+	request, err := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/work-items/"+item.ID, strings.NewReader(`{"title":"Updated review title","description":"## Updated draft\n\n1. First\n2. Second","target_url":"https://example.com/review/1","priority":2,"work_type":"feature"}`))
 	if err != nil {
 		t.Fatalf("new PATCH work item request: %v", err)
 	}
@@ -6832,13 +6869,13 @@ func TestStartUIWorkItemPatchUpdatesWorkTypeAndInvalidatesOverviewCache(t *testi
 	if err := json.NewDecoder(response.Body).Decode(&detail); err != nil {
 		t.Fatalf("decode patched work item detail: %v", err)
 	}
-	if detail.Item.WorkType != workTypeFeature {
-		t.Fatalf("expected patched work type in response, got %+v", detail.Item)
+	if detail.Item.Subject != "Updated review title" || detail.Item.Body != "## Updated draft\n\n1. First\n2. Second" || detail.Item.TargetURL != "https://example.com/review/1" || detail.Item.Priority != 2 || detail.Item.WorkType != workTypeFeature {
+		t.Fatalf("expected patched work-item fields in response, got %+v", detail.Item)
 	}
 
 	updated := startUITestReadWorkItem(t, item.ID)
-	if updated.WorkType != workTypeFeature {
-		t.Fatalf("expected persisted patched work type, got %+v", updated)
+	if updated.Subject != "Updated review title" || updated.Body != "## Updated draft\n\n1. First\n2. Second" || updated.TargetURL != "https://example.com/review/1" || updated.Priority != 2 || updated.WorkType != workTypeFeature {
+		t.Fatalf("expected persisted patched work-item fields, got %+v", updated)
 	}
 	if startUITestOverviewCacheValid(api) {
 		t.Fatalf("expected work-item patch to invalidate overview cache")

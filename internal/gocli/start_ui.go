@@ -449,6 +449,7 @@ type startUIPlannedItemPatchRequest struct {
 	WorkType      *string `json:"work_type,omitempty"`
 	Priority      *int    `json:"priority,omitempty"`
 	ScheduleAt    *string `json:"schedule_at,omitempty"`
+	TargetURL     *string `json:"target_url,omitempty"`
 	ClearSchedule bool    `json:"clear_schedule,omitempty"`
 }
 
@@ -721,7 +722,11 @@ type startUIWorkItemFixRequest struct {
 }
 
 type startUIWorkItemPatchRequest struct {
-	WorkType *string `json:"work_type,omitempty"`
+	Title       *string `json:"title,omitempty"`
+	Description *string `json:"description,omitempty"`
+	TargetURL   *string `json:"target_url,omitempty"`
+	Priority    *int    `json:"priority,omitempty"`
+	WorkType    *string `json:"work_type,omitempty"`
 }
 
 type startUIFeedbackSyncRequest struct {
@@ -1860,7 +1865,7 @@ func (h *startUIAPI) handleWorkItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		if _, err := patchWorkItemByID(itemID, payload.WorkType, "ui"); err != nil {
+		if _, err := patchWorkItemByID(itemID, payload, "ui"); err != nil {
 			h.invalidateOverviewCache()
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
