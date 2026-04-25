@@ -674,11 +674,6 @@
       case "investigations":
         clearInvestigationsDrafts(context.repoSlug);
         break;
-      case "repo":
-        if (defaultString(context.repoTab, "overview") === "controls") {
-          clearRepoControlsDrafts(context.repoSlug);
-        }
-        break;
       default:
         break;
     }
@@ -1241,6 +1236,9 @@
     };
     if (normalized.view === "repo" && normalized.repoTab === "findings") {
       normalized.view = "investigations";
+      normalized.repoTab = "overview";
+    }
+    if (normalized.view === "repo" && (normalized.repoTab === "controls" || normalized.repoTab === "scouts")) {
       normalized.repoTab = "overview";
     }
     if (normalized.view !== "repo") {
@@ -2201,10 +2199,6 @@
   }
 
   function rerenderScoutSurface() {
-    if (state.currentView === "repo" && state.repoTab === "scouts") {
-      renderRepoScoutsPage(selectedRepoSummary());
-      return;
-    }
     if (state.currentView === "investigations") {
       renderInvestigationsPage();
     }
@@ -2898,16 +2892,17 @@
   }
 
   function openRepoView(repoSlug, tab = "overview") {
+    const route = normalizeRouteContext("repo", repoSlug || "", defaultString(tab, "overview"));
     syncWorkspaceRepoFilters(repoSlug);
     state.taskComposer.repoSlug = repoSlug || state.taskComposer.repoSlug;
     clearDraftsForRouteTransition({
-      view: "repo",
-      repoSlug: repoSlug || "",
-      repoTab: defaultString(tab, "overview"),
+      view: route.view,
+      repoSlug: route.repoSlug,
+      repoTab: route.repoTab,
     });
-    state.currentView = "repo";
-    state.repoTab = defaultString(tab, "overview");
-    state.selectedRepo = repoSlug || "";
+    state.currentView = route.view;
+    state.repoTab = route.repoTab;
+    state.selectedRepo = route.repoSlug;
     state.selectedIssue = "";
     renderApp();
     refreshCurrentView({ silent: true }).catch(() => {});
@@ -3025,9 +3020,7 @@
   function tabButtonMarkup(group, id, label, selected, index, total) {
     // Static identifiers retained for start_ui asset tests:
     // data-repo-tab="overview"
-    // data-repo-tab="scouts"
     // data-repo-tab="config"
-    // data-repo-tab="controls"
     // data-feedback-tab="reviews"
     // data-feedback-tab="replies"
     const legacyAttr = group === "repo"
@@ -3343,15 +3336,9 @@
     }
 
     setTitle(repo.repo_slug);
-    setSubtitle(state.repoTab === "controls"
-      ? "GitHub issue search, tracked issue scheduling, and planned launch controls."
-      : state.repoTab === "findings"
-        ? "Persisted findings, markdown imports, and promotion into executable work."
-      : state.repoTab === "scouts"
-        ? "Scout-discovered items, proposal details, and repo-local management actions."
-      : state.repoTab === "config"
-        ? "Start-facing repo configuration and participation controls."
-        : "Repo queue posture, pending jobs, and tracked work.");
+    setSubtitle(state.repoTab === "config"
+      ? "Start-facing repo configuration and participation controls."
+      : "Repo queue posture, pending jobs, and tracked work.");
   }
 
   function renderRepoPicker() {
@@ -3395,10 +3382,8 @@
     host.setAttribute("role", "tablist");
     host.setAttribute("aria-label", "Repo sections");
     host.innerHTML = [
-      tabButtonMarkup("repo", "overview", "Overview", state.repoTab === "overview", 0, 4),
-      tabButtonMarkup("repo", "scouts", "Scouts", state.repoTab === "scouts", 1, 4),
-      tabButtonMarkup("repo", "config", "Config", state.repoTab === "config", 2, 4),
-      tabButtonMarkup("repo", "controls", "Controls", state.repoTab === "controls", 3, 4),
+      tabButtonMarkup("repo", "overview", "Overview", state.repoTab === "overview", 0, 2),
+      tabButtonMarkup("repo", "config", "Config", state.repoTab === "config", 1, 2),
     ].join("");
   }
 
@@ -3968,7 +3953,6 @@
           </div>
           <div class="repo-card-actions">
             <button class="tx-btn tx-btn-secondary repo-card-button" type="button" data-open-repo="${escapeHTML(repo.repo_slug)}">Open Repo</button>
-            ${repoDismissedScoutCount(repo) > 0 ? `<button class="tx-btn tx-btn-secondary repo-card-button" type="button" data-open-repo="${escapeHTML(repo.repo_slug)}" data-open-repo-tab="scouts">Open Scouts</button>` : ""}
           </div>
         </article>
       `;
@@ -6430,8 +6414,7 @@
         <article class="queue-item">
           <span class="queue-label">Dismissed Scout Actions</span>
           <strong class="queue-value">${escapeHTML(String(repoDismissedScoutCount(repo)))}</strong>
-          <p class="queue-copy">Open Scouts to retry dismissed proposals and return them to the live queue.</p>
-          <button class="tx-btn tx-btn-secondary tx-btn-sm" type="button" data-open-repo="${escapeHTML(repo.repo_slug)}" data-open-repo-tab="scouts">Open Scouts</button>
+          <p class="queue-copy">Dismissed scout proposals are tracked in repo metrics, but the dedicated Scouts tab has been removed.</p>
         </article>
       `);
     }
@@ -7440,16 +7423,8 @@
       body.innerHTML = '<section class="surface empty-surface"><div class="status-pill">No repo is selected.</div></section>';
       return;
     }
-    if (state.repoTab === "scouts") {
-      renderRepoScoutsPage(repo);
-      return;
-    }
     if (state.repoTab === "config") {
       renderRepoConfigPage(repo);
-      return;
-    }
-    if (state.repoTab === "controls") {
-      renderRepoControlsPage(repo);
       return;
     }
     renderRepoOverviewPage(repo);
@@ -8112,7 +8087,7 @@
   function attachHandlers() {
     document.getElementById("refresh-button").addEventListener("click", () => {
       load();
-      if (((state.currentView === "repo" && state.repoTab === "scouts") || state.currentView === "investigations") && state.selectedRepo) {
+      if (state.currentView === "investigations" && state.selectedRepo) {
         loadScoutItems(state.selectedRepo, { silent: true });
       }
       if (state.logSelection.runID) {

@@ -6238,8 +6238,8 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `data-repo-tab="config"`) {
 		t.Fatalf("expected config tab wiring in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `data-repo-tab="scouts"`) {
-		t.Fatalf("expected scouts tab wiring in app.js, got %s", string(appBody))
+	if strings.Contains(string(appBody), `data-repo-tab="scouts"`) || strings.Contains(string(appBody), `data-repo-tab="controls"`) {
+		t.Fatalf("expected dropped repo tabs to be absent from app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `repoScoutCatalog(repo)`) {
 		t.Fatalf("expected scout config fields in app.js, got %s", string(appBody))
@@ -6301,17 +6301,11 @@ func TestStartUIWebHandlerInjectsAPIBase(t *testing.T) {
 	if !strings.Contains(string(appBody), `Dismissed Scouts`) {
 		t.Fatalf("expected dismissed scouts summary surfaces in app.js, got %s", string(appBody))
 	}
-	if !strings.Contains(string(appBody), `data-open-repo-tab="scouts"`) {
-		t.Fatalf("expected direct scouts navigation wiring in app.js, got %s", string(appBody))
+	if strings.Contains(string(appBody), `data-open-repo-tab="scouts"`) {
+		t.Fatalf("expected dropped scouts deep-link wiring to be absent from app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `repo-onboard-form`) || !strings.Contains(string(appBody), `submitRepoOnboarding()`) {
 		t.Fatalf("expected repo onboarding form wiring in app.js, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `id: "repo-controls-issue-form"`) || !strings.Contains(string(appBody), `submitLabel: "Save Issue"`) {
-		t.Fatalf("expected issue form save wiring in app.js, got %s", string(appBody))
-	}
-	if !strings.Contains(string(appBody), `data-scheduler-save="`) {
-		t.Fatalf("expected scheduler save control wiring in app.js, got %s", string(appBody))
 	}
 	if !strings.Contains(string(appBody), `Schedule Task`) {
 		t.Fatalf("expected unified task scheduling copy in app.js, got %s", string(appBody))
@@ -8204,15 +8198,13 @@ func TestStartUIBrowserViewsSmoke(t *testing.T) {
 				"investigate-100",
 			},
 		},
-		"repo-findings": {
+		"repo-overview-alias-controls": {
 			hash: "view=repo&repo=acme/widget&tab=controls",
 			expect: []string{
-				"Search GitHub Issues",
-				"Tracked Issue Schedule",
-				"Selected Scheduled Issue",
-				"Manage Existing Tracked Issue",
-				"Create Planned Launch",
-				"Launch Existing",
+				"Queue Snapshot",
+				"Pending Jobs",
+				"Work Items",
+				"Drop Repo",
 			},
 		},
 		"work": {
@@ -8324,13 +8316,13 @@ func TestStartUIBrowserRepoTabs(t *testing.T) {
 				"Dismissed Scout Actions",
 			},
 		},
-		"repo-scouts": {
+		"repo-overview-alias-scouts": {
 			hash: "view=repo&repo=acme/widget&tab=scouts",
 			expect: []string{
-				"Scout Items",
-				"Audit approvals drawer and stale retry copy",
-				"Severity",
-				"assistant-workspace",
+				"Queue Snapshot",
+				"Pending Jobs",
+				"Work Items",
+				"Drop Repo",
 			},
 		},
 		"repo-config": {
@@ -8343,22 +8335,6 @@ func TestStartUIBrowserRepoTabs(t *testing.T) {
 				"Scout Configs",
 				"UI Scout",
 				"Session Limit",
-			},
-		},
-		"repo-controls": {
-			hash: "view=repo&repo=acme/widget&tab=controls",
-			expect: []string{
-				"Search GitHub Issues",
-				"Tracked Issue Schedule",
-				"Selected Scheduled Issue",
-				"Manage Existing Tracked Issue",
-				"Create Planned Launch",
-				"Schedule Task",
-				"Scheduled Tasks",
-				"Findings Inbox",
-				"Import Sessions",
-				"Candidate Detail",
-				"Launch Existing",
 			},
 		},
 	})
@@ -8431,7 +8407,7 @@ func TestStartUIBrowserActions(t *testing.T) {
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("expected planned item patch status 200, got %d", response.StatusCode)
 		}
-		output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=repo&repo=acme/widget&tab=controls")
+		output := startUITestDumpDOM(t, chromePath, fixture.Server.URL+"/#view=repo&repo=acme/widget&tab=overview")
 		startUITestRequireText(t, output, updatedTitle, "planned-item-save-result")
 	})
 
