@@ -433,7 +433,11 @@ func patchStartUITask(cwd string, taskID string, payload startUIPlannedItemPatch
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"state": updatedState, "planned_item": updatedItem}, nil
+		detail, err := loadStartUITaskDetail(cwd, taskID)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"state": updatedState, "planned_item": updatedItem, "detail": detail}, nil
 	case strings.HasPrefix(taskID, "work-item:"):
 		if payload.WorkType == nil {
 			return nil, fmt.Errorf("task %s only supports patching work_type", taskID)

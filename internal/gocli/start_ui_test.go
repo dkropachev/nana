@@ -3901,6 +3901,48 @@ func TestStartUIAPITaskPatchUpdatesWorkItemWorkType(t *testing.T) {
 	}
 }
 
+func TestStartUIAPITaskPatchUpdatesPlannedItemWorkType(t *testing.T) {
+	fixture := startUITestSetupBrowserFixture(t)
+	defer fixture.Server.Close()
+
+	request, err := http.NewRequest(http.MethodPatch, fixture.Server.URL+"/api/v1/tasks/"+url.PathEscape("planned-item:planned-tracked"), strings.NewReader(`{"work_type":"refactor"}`))
+	if err != nil {
+		t.Fatalf("new PATCH planned task request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("PATCH planned task: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected planned task patch status 200, got %d", response.StatusCode)
+	}
+
+	var payload struct {
+		PlannedItem startWorkPlannedItem `json:"planned_item"`
+		Detail      startUITaskDetail    `json:"detail"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode patched planned task payload: %v", err)
+	}
+	if payload.PlannedItem.WorkType != workTypeRefactor {
+		t.Fatalf("expected patched planned task payload to include updated work type, got %+v", payload.PlannedItem)
+	}
+	if payload.Detail.PlannedItem == nil || payload.Detail.PlannedItem.WorkType != workTypeRefactor {
+		t.Fatalf("expected patched planned task detail to include updated work type, got %+v", payload.Detail)
+	}
+
+	state, err := readStartWorkState(fixture.RepoSlug)
+	if err != nil {
+		t.Fatalf("readStartWorkState: %v", err)
+	}
+	updated, ok := state.PlannedItems["planned-tracked"]
+	if !ok || updated.WorkType != workTypeRefactor {
+		t.Fatalf("expected planned task patch to persist work type, got %+v", state.PlannedItems)
+	}
+}
+
 func TestStartUIInvestigationDetailRouteSupportsLegacyTaskAlias(t *testing.T) {
 	fixture := startUITestSetupBrowserFixture(t)
 	defer fixture.Server.Close()
@@ -4158,6 +4200,23 @@ func TestStartUIAppTaskDetailSupportsWorkItemExecutionControls(t *testing.T) {
 		`data-task-work-item-save="${escapeHTML(summary.id)}"`,
 		`data-task-action="recover"`,
 		`Run and Recover Work save the selected work type before acting.`,
+	} {
+		if !strings.Contains(content, needle) {
+			t.Fatalf("expected app asset to contain %q", needle)
+		}
+	}
+}
+
+func TestStartUIAppTaskDetailSupportsPlannedItemWorkTypeEditing(t *testing.T) {
+	appBody, err := startUIAssetsFS.ReadFile("start_ui_assets/app.txt")
+	if err != nil {
+		t.Fatalf("read app asset: %v", err)
+	}
+	content := string(appBody)
+	for _, needle := range []string{
+		`id="task-detail-planned-item-work-type"`,
+		`Run Now saves the selected work type before launching.`,
+		`detail.planned_item && action === "run-now"`,
 	} {
 		if !strings.Contains(content, needle) {
 			t.Fatalf("expected app asset to contain %q", needle)

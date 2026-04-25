@@ -5136,16 +5136,29 @@
   }
 
   function selectedTaskDetailWorkType(detail) {
-    if (!detail || !detail.work_item || !detail.work_item.item) return "";
-    return String(state.investigations.detailWorkType || detail.work_item.item.work_type || "").trim();
+    if (!detail) return "";
+    if (detail.work_item && detail.work_item.item) {
+      return String(state.investigations.detailWorkType || detail.work_item.item.work_type || "").trim();
+    }
+    if (detail.planned_item) {
+      return String(state.investigations.detailWorkType || detail.planned_item.work_type || "").trim();
+    }
+    return "";
   }
 
   function persistTaskDetailWorkTypeIfNeeded(taskID) {
     const detail = state.investigations.detail;
-    if (!detail || !detail.summary || detail.summary.id !== taskID || !detail.work_item || !detail.work_item.item) {
+    if (!detail || !detail.summary || detail.summary.id !== taskID) {
       return Promise.resolve(detail);
     }
-    const current = String(detail.work_item.item.work_type || "").trim();
+    let current = "";
+    if (detail.work_item && detail.work_item.item) {
+      current = String(detail.work_item.item.work_type || "").trim();
+    } else if (detail.planned_item) {
+      current = String(detail.planned_item.work_type || "").trim();
+    } else {
+      return Promise.resolve(detail);
+    }
     const next = selectedTaskDetailWorkType(detail);
     if (!next || next === current) {
       return Promise.resolve(detail);
@@ -5156,11 +5169,15 @@
     }).then((payload) => {
       const nextDetail = payload && payload.detail ? payload.detail : payload;
       if (state.investigations.selectedRunID !== taskID) return nextDetail;
-      state.investigations.detail = nextDetail;
+      if (nextDetail && nextDetail.summary) {
+        state.investigations.detail = nextDetail;
+      }
       state.investigations.detailWorkType = "";
       renderTaskDetailModal();
       loadInvestigations({ silent: true });
-      return nextDetail;
+      return nextDetail && nextDetail.summary
+        ? nextDetail
+        : loadInvestigationDetail(taskID, { silent: true, resetWorkType: true });
     });
   }
 
@@ -5251,15 +5268,8 @@
             </div>
           </div>
           ${taskDetailSourceMarkup(detail)}
-        </div>
-        ${executionAllowed ? `
-          <div class="surface">
-            <div class="surface-head">
-              <div>
-                <h3>Execution Controls</h3>
-                <p>Change the work type for this task here. Run and Recover Work save the selected work type before acting. ${escapeHTML(recoverSummary)}</p>
-              </div>
-            </div>
+          ${executionAllowed ? `
+            <div class="section-divider"></div>
             <label class="selector config-selector">
               <span>Work Type</span>
               <select id="task-detail-work-item-work-type">
@@ -5267,22 +5277,47 @@
                 ${["bug_fix", "refactor", "feature", "test_only"].map((value) => `<option value="${value}" ${workTypeValue === value ? "selected" : ""}>${escapeHTML(workTypeLabel(value))}</option>`).join("")}
               </select>
             </label>
+            <p class="queue-copy">Run and Recover Work save the selected work type before acting. ${escapeHTML(recoverSummary)}</p>
             <div class="config-actions">
               <button class="tx-btn tx-btn-secondary" type="button" data-task-work-item-save="${escapeHTML(summary.id)}" ${workTypeDirty ? "" : "disabled"}>Save Work Type</button>
               <button class="tx-btn tx-btn-secondary" type="button" data-task-action="run-now" data-task-id="${escapeHTML(summary.id)}">Run</button>
               <button class="tx-btn tx-btn-primary" type="button" data-task-action="recover" data-task-id="${escapeHTML(summary.id)}" ${recoverAllowed ? "" : "disabled"}>Recover Work</button>
             </div>
-          </div>
-        ` : ""}
+          ` : ""}
+        </div>
       `;
     }
     if (summary.kind === "planned_item" && detail.planned_item) {
       const item = detail.planned_item;
       const sourceMarkup = taskDetailSourceMarkup(detail);
       const descriptionMarkup = renderMarkdownDocument(defaultString(item.description, ""));
+      const workTypeValue = selectedTaskDetailWorkType(detail);
+      const workTypeDirty = Boolean(workTypeValue && workTypeValue !== defaultString(item.work_type, ""));
+      const editable = ["queued", "failed"].includes(defaultString(item.state, ""));
       return `
-        ${sourceMarkup}
         <div class="surface">
+          <div class="surface-head">
+            <div>
+              <h3>Task Detail</h3>
+              <p>${escapeHTML(defaultString(summary.summary, summary.description || "No task summary recorded."))}</p>
+            </div>
+          </div>
+          ${sourceMarkup}
+          ${editable ? `
+            <div class="section-divider"></div>
+            <label class="selector config-selector">
+              <span>Work Type</span>
+              <select id="task-detail-planned-item-work-type">
+                ${["bug_fix", "refactor", "feature", "test_only"].map((value) => `<option value="${value}" ${defaultString(workTypeValue || item.work_type, "feature") === value ? "selected" : ""}>${escapeHTML(workTypeLabel(value))}</option>`).join("")}
+              </select>
+            </label>
+            <p class="queue-copy">Run Now saves the selected work type before launching.</p>
+            <div class="config-actions">
+              <button class="tx-btn tx-btn-secondary" type="button" data-task-work-item-save="${escapeHTML(summary.id)}" ${workTypeDirty ? "" : "disabled"}>Save Work Type</button>
+              <button class="tx-btn tx-btn-primary" type="button" data-task-action="run-now" data-task-id="${escapeHTML(summary.id)}">Run Now</button>
+            </div>
+          ` : ""}
+          <div class="section-divider"></div>
           <div class="task-detail-markdown">${descriptionMarkup}</div>
         </div>
       `;
@@ -5381,7 +5416,6 @@
       return actions;
     }
     if (summary.kind === "planned_item" && detail.planned_item && ["queued", "failed"].includes(defaultString(detail.planned_item.state, ""))) {
-      actions.push(`<button class="tx-btn tx-btn-primary" type="button" data-task-action="run-now" data-task-id="${escapeHTML(summary.id)}">Run Now</button>`);
       actions.push(`<button class="tx-btn tx-btn-secondary" type="button" data-task-action="dismiss" data-task-id="${escapeHTML(summary.id)}">Dismiss</button>`);
       return actions;
     }
@@ -8543,7 +8577,10 @@
           method: "POST",
         });
         const shouldPersistWorkType = Boolean(
-          detail && detail.summary && detail.summary.id === taskID && detail.work_item && detail.work_item.item && (action === "run-now" || action === "recover")
+          detail && detail.summary && detail.summary.id === taskID && (
+            ((detail.work_item && detail.work_item.item) && (action === "run-now" || action === "recover"))
+            || (detail.planned_item && action === "run-now")
+          )
         );
         const pending = shouldPersistWorkType
           ? persistTaskDetailWorkTypeIfNeeded(taskID).then(runAction)
@@ -9579,6 +9616,11 @@
         return;
       }
       if (event.target.id === "task-detail-work-item-work-type") {
+        state.investigations.detailWorkType = String(event.target.value || "");
+        renderTaskDetailModal();
+        return;
+      }
+      if (event.target.id === "task-detail-planned-item-work-type") {
         state.investigations.detailWorkType = String(event.target.value || "");
         renderTaskDetailModal();
         return;
