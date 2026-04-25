@@ -128,16 +128,31 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     needs: [fmt, vet, test, docs, build]
-    env:
-      NANA_LIVE_GITHUB: "1"
-      GH_TOKEN: ${{ secrets.NANA_LIVE_GH_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Run live GitHub smoke tests
+      - name: Check live GitHub smoke token
+        id: live-smoke-token
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.NANA_LIVE_GH_TOKEN }}
+        run: |
+          mkdir -p test-results
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Live GitHub smoke skipped: NANA_LIVE_GH_TOKEN secret is not configured." | tee test-results/live-github-smoke.log
+            exit 0
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+          echo "Live GitHub smoke token is configured." > test-results/live-github-smoke.log
+      - name: Run live GitHub smoke tests
+        if: steps.live-smoke-token.outputs.enabled == 'true'
+        shell: bash
+        env:
+          NANA_LIVE_GITHUB: "1"
+          GH_TOKEN: ${{ secrets.NANA_LIVE_GH_TOKEN }}
         run: |
           mkdir -p test-results
           set -o pipefail
